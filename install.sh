@@ -18,6 +18,11 @@ if [ -f gitmux.conf ]; then
     echo "Copied gitmux.conf to ~/.gitmux.conf"
 fi
 
+# Install shared agent workflow defaults for OpenCode, Claude Code, and Codex.
+if [ -x scripts/agent-workflow-install.sh ]; then
+    scripts/agent-workflow-install.sh
+fi
+
 # Copy nvim config
 if [ -d nvim ]; then
     mkdir -p ~/.config/nvim

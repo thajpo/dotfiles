@@ -4,7 +4,16 @@ return {
     "folke/snacks.nvim",
     opts = {
       input = {},
-      picker = {},
+      picker = {
+        sources = {
+          explorer = {
+            ignored = true,
+          },
+          files = {
+            ignored = true,
+          },
+        },
+      },
       terminal = {
         win = {
           style = "float",

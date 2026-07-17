@@ -1,141 +1,136 @@
 ---
 name: lean-flow
-description: "Chat-first planning workflow for Brainstormed -> Specd -> ready in current.md, with strict markdown approval evidence before execution. Inspired by OS best practices (vLLM, transformers, ray)."
+description: "Turn a discussed feature into a concise GitHub issue and, only when implementation is imminent, a temporary implementation plan that is absorbed into the PR and deleted before merge. Use when the user invokes $lean-flow, asks to make a feature ready to implement, or asks to convert planning notes into issues/specs without maintaining a planning tracker."
 ---
 
 # Lean Flow
 
-## Goal
-Keep planning explicit and minimal, then hand off to GitHub issue/PR execution without ambiguity.
+## Purpose
 
-## Design Philosophy: OS Best Practices
+Keep planning useful to a human reviewer without creating a second project
+management system in Markdown.
 
-Take inspiration from top open-source projects (vLLM, transformers, ray). Issues should be:
-- **Human-first**: Clear narrative over process jargon
-- **Actionable**: Checkboxes that serve as implementation todos
-- **Scoped**: Explicit problem statement before any solution details
-- **Minimal**: Remove ceremony that doesn't help implementation
+Use this lifecycle:
 
-## Canonical Planning File
-- Default: `current.md`.
-- Mode is repo-level and fixed.
-- Do not switch planning modes inside the same repo.
-
-## Required Sections
-- `Institutional Knowledge`
-- `Beliefs`
-- `Brainstormed`
-- `Specd`
-
-## Workflow
-1. Brainstormed
-- Capture ideas only; no implementation.
-- Keep items lightweight; full spec lives in GitHub issue once promoted.
-
-2. Specd (draft/in_progress)
-- Convert selected ideas to concrete contracts.
-- Promotion is move-not-copy: remove promoted item from `Brainstormed`.
-- Use GitHub issue as the detailed spec, not `current.md`.
-
-3. Ready
-- Requires problem statement, changes checklist, and testing plan in GitHub issue.
-- Markdown approval evidence in issue body (approver + date + scope).
-- Execution starts by invoking `$pr-iterate` on the ready issue.
-
-## Order of Operations (mandatory)
-1. Clarify in chat and draft/update spec in `current.md` while item is pre-issue.
-2. Promote to GitHub issue.
-3. Immediately compact `current.md` spec body to one issued tracker line.
-4. From that point on, all contract updates happen in the GitHub issue body first.
-5. Keep `current.md` as a minimal tracker only (`issued` status + issue link).
-
-When user says `$lean-flow` and an item already has a GitHub issue:
-- Treat the issue body as the active contract.
-- Update the issue body first.
-- Only mirror status/tracker changes in `current.md`.
-- Do not keep diverging duplicate spec text in `current.md`.
-
-## GitHub Issue Format (OS Best Practices)
-
-When creating issues, follow this format inspired by top OS projects:
-
-```markdown
-[Type] Brief descriptive title
-
-## Problem
-One-paragraph narrative: what we're solving and why now.
-
-## Changes
-- [ ] Specific actionable change 1
-- [ ] Specific actionable change 2
-
-## Type
-- [ ] Bug fix | Feature | Breaking change | Refactor | Documentation
-
-## Testing
-- [ ] Unit tests (where)
-- [ ] Integration tests (where)  
-- [ ] Manual verification
-
-## Notes
-- Scope: ~N LOC
-- Risk: low/medium/high
-- Breaking: yes/no + impact
-- Non-goals: what's out of scope
+```text
+chat -> GitHub issue -> optional temporary plan -> PR -> merged code and docs
 ```
 
-### Key Principles:
-1. **Narrative First**: Start with the problem, not implementation
-2. **Actionable Checkboxes**: Changes section IS the todo list
-3. **Minimal Ceremony**: No "touch points", "diff shape", or process jargon
-4. **Context at Bottom**: LOC, risk, non-goals don't obstruct reading
-5. **Type Explicit**: Know immediately if this breaks things
+Do not create or maintain `current.md`, brainstorm registries, status mirrors,
+or `Brainstormed`/`Specd` state machines.
 
-## Tracking in `current.md` (post-issue, minimal)
+## Core Rules
 
-**Only AFTER a spec has been approved and turned into a GitHub issue:**
+- Keep uncommitted ideas in chat unless they are worth remembering.
+- Create one issue for one independently reviewable feature.
+- Do not create a backlog of speculative issues without the user's request.
+- Treat the issue as the planning document by default.
+- Add a temporary repository plan only when imminent implementation needs more
+  detail than the issue can comfortably hold.
+- Delete a temporary plan before merge after its decisions and evidence are in
+  the PR description.
+- Keep durable documentation only for current behavior, architecture contracts,
+  operational guidance, and research evidence.
+- Prefer short prose and bullets. Avoid tables and process jargon.
 
-Track in current.md:
-- `title`
-- `status` (`draft|in_progress` → `ready` → `issued`)
-- `github_issue`: #N (added once issue is created)
-- `summary`: 1-2 sentence description
-- `blocking_decisions`: (if any)
+## Workflow
 
-Compact format after issue creation (preferred):
-- `<title> | status: issued | issue: #N`
+### 1. Discuss
 
-Before issue creation: Use natural conversation + full spec draft in GitHub issue format.
-After issue creation: Minimal tracking in current.md, full spec lives in GitHub issue.
+Clarify the problem, desired outcome, important tradeoffs, and what is out of
+scope in chat. Do not write planning files during exploration.
 
-## Authority Switch
-- Pre-issue: planning contract in `current.md` is source of truth.
-- Post-issue: GitHub issue body is implementation contract source of truth.
-- Post-PR: PR thread/review feedback is iteration source of truth.
-- If conflict exists, latest explicit user instruction in PR context wins.
+If the user is only exploring, stop here.
 
-Operational rule:
-- If `current.md` and issue conflict for an issued item, update/resolve in issue first, then sync tracker in `current.md`.
+### 2. Create A Short Issue
 
-## Routing
-- Use `$spec-gate` for interrogation/readiness checks.
-- User-facing execution handoff is `$pr-iterate`.
-- `$pr-iterate` handles issue creation/compaction, worktree lifecycle, scope guard, and PR feedback loop via internal helpers.
+Create an issue only when the idea should survive the conversation or is likely
+to be implemented.
 
-## Execution State Machine
-- `ready -> issued` via `$issue-handoff`.
-- `issued -> in_pr` via `$pr-iterate` (which must run `$worktree-manager` first).
-- `in_pr -> merge_ready` via `$pr-iterate` feedback/CI iteration loop.
+Use this small structure:
 
-## Guardrails
-- Never implement from `Brainstormed`.
-- Never mark `ready` without GitHub issue in OS format + approval evidence.
-- Never implement without a linked issue.
-- Never implement in `issued` state until issue-scoped branch/worktree setup is complete.
-- Never batch multiple ready items into one issue.
-- Never touch files outside scope without explicit user approval.
-- Never prune tracker lines before merge.
+```markdown
+## Problem
+Why this matters in one short paragraph.
 
-## References
-- `references/issue-template.md` (OS best practices format)
-- `references/tracker-lifecycle.md`
+## Outcome
+What should be true when the work is done.
+
+## Acceptance
+- [ ] Observable result one
+- [ ] Observable result two
+
+## Testing
+- [ ] Relevant automated or end-to-end proof
+
+## Out of scope
+- Explicit boundary, only when needed
+```
+
+Keep implementation guesses out unless they resolve a real architecture choice.
+
+### 3. Make It Ready To Implement
+
+When the user chooses the feature for implementation, expand the issue with the
+minimum decisions needed to code safely:
+
+- chosen behavior and architecture;
+- acceptance criteria;
+- testing and evidence;
+- meaningful risks, migration, or rollback concerns;
+- explicit non-goals when scope could drift.
+
+The expanded issue is normally the complete implementation plan.
+
+Create a temporary plan file on the feature branch only when the design is too
+large for a readable issue. Typical reasons are a cross-cutting architecture
+decision, a migration/rollout sequence, or repo-local diagrams and pseudocode
+needed during implementation. Keep it focused on decisions, not a narrated
+coding itinerary.
+
+Explicit user approval in chat is enough to begin unless repository policy
+requires stronger evidence. Do not invent an approval ceremony.
+
+### 4. Implement Through One PR
+
+Link the issue, isolate the branch/worktree, implement the accepted scope, and
+validate in proportion to risk.
+
+Once the PR exists, use its description and review thread as the active record.
+Do not synchronize the same plan across an issue, tracker, plan file, and PR.
+
+### 5. Finish And Delete Temporary Planning
+
+Before merge:
+
+- move the useful problem statement, decisions, tradeoffs, and validation into
+  the PR description;
+- delete any temporary plan file in the same PR;
+- update durable docs only where actual system truth changed;
+- leave research results and negative evidence intact.
+
+After merge, close the issue. The PR, code, tests, and durable docs are the
+record; no planning tombstone is required.
+
+## Authority
+
+- Before an issue exists: the latest explicit chat decision wins.
+- Before a PR exists: the issue is the implementation contract.
+- After a PR exists: the PR description and review thread are authoritative.
+- After merge: code, tests, and durable documentation are authoritative.
+
+When sources disagree, update the current authority instead of maintaining
+parallel copies.
+
+## Scope Judgment
+
+- Feature or risky refactor: issue first, then implement.
+- Small obvious fix: a direct focused PR is acceptable when the user asks for
+  the fix and no product decision is hidden.
+- Large feature: split only at independently testable and reviewable boundaries.
+- Related steps that cannot deliver value independently belong in one issue.
+
+When work may need splitting, tell the user how many issues and temporary specs
+you recommend and why. Skip that ceremony for an obviously single feature.
+Draft in chat unless the user explicitly asks to create or publish the issue;
+an explicit create/publish request is sufficient authority to proceed.

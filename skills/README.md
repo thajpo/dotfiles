@@ -8,7 +8,7 @@
 ## Active Workflow Skills (current)
 - User-facing:
   - `repo-init`: one-time repo bootstrap (planning + templates + baseline CI).
-  - `lean-flow`: planning workflow (`Brainstormed -> Specd -> ready`).
+  - `lean-flow`: chat -> issue -> optional temporary plan -> PR; no planning tracker.
   - `pr-status`: open-PR board (`function + turn owner + priority + current.md linkage`).
   - `pr-iterate`: execution workflow (`ready/issued -> issue/PR loop -> merge-ready`).
 - Internal helpers (auto-used by `pr-iterate`/`repo-init`):
@@ -19,21 +19,21 @@
   - `ci-baseline`
 
 ## Approval Policy
-- `Ready` requires explicit approval evidence in markdown (not chat-only approval).
-- Before `Ready`, items in `Brainstormed`/`Specd` can be merged/split/reorganized.
-- After `Ready`, each item maps to exactly one GitHub issue.
-- Implementation should not start without a linked GitHub issue.
+- Explicit chat approval is enough unless repository policy says otherwise.
+- Feature work maps to one independently reviewable GitHub issue.
+- Small obvious fixes may use a direct focused PR when no product decision is hidden.
 - Issue defines approved `file touch scope`; out-of-scope touches require explicit user approval.
 - After PR creation, PR thread/review feedback is the iteration source of truth.
 - `$pr-iterate` must fail closed if any feedback channel fetch fails (comments, mentions, reviews, inline comments, threads).
 
 ## Merge Logging Policy
-- Keep merged-item logging lightweight in planning files; prune merged `Specd` items after PR merge.
+- Delete temporary planning files before merge after their useful decisions and
+  evidence are captured in the PR description.
 
 ## Command Surface
 Use only these in normal flow:
 1. `Use $repo-init` (once per repo)
-2. `Use $lean-flow ...` (planning to `ready`)
+2. `Use $lean-flow ...` (turn selected work into an issue or implementation plan)
 3. `Use $pr-status` (open PR board with turn ownership + priorities)
 4. `Use $pr-iterate "<spec-id-or-pr#>"` (issue + PR + feedback loop)
    - `$pr-iterate` performs commit + push updates by default; you review and decide merge.

@@ -35,7 +35,8 @@ require("lazy").setup({
   },
   install = { colorscheme = { "tokyonight", "habamax" } },
   checker = {
-    enabled = true, -- check for plugin updates periodically
+    -- Keep update checks on by default; set NVIM_OFFLINE=1 to suppress remote checks.
+    enabled = vim.env.NVIM_OFFLINE ~= "1", -- check for plugin updates periodically
     notify = false, -- notify on update
   }, -- automatically check for plugin updates
   performance = {

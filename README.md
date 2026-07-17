@@ -133,6 +133,38 @@ launchctl load ~/Library/LaunchAgents/com.user.dotfiles-sync.plist
 
 Note: macOS may not have `flock` by default. If needed, install `flock` (`brew install flock`) or remove the lock block from the script.
 
+## Agent Engineering Workflow
+
+The default agent workflow is harness-agnostic and uses OpenCode when a harness
+choice is needed.
+
+Install or repair the shared memory/config symlinks:
+
+```bash
+~/dotfiles/scripts/agent-workflow-install.sh
+```
+
+Install the optional workflow tools and clone Firstmate:
+
+```bash
+~/dotfiles/scripts/agent-workflow-install.sh --all
+```
+
+Inspect the setup:
+
+```bash
+~/dotfiles/scripts/agent-workflow-doctor.sh
+```
+
+Core loop:
+
+- Run parallel agents in isolated worktrees with Treehouse.
+- Validate PR-bound work with No Mistakes: `git push no-mistakes`
+- Run bounded long tasks with GNHF using explicit token/iteration caps.
+- For multiple parallel tasks or multi-repo work, launch OpenCode from
+  `~/agent-workflows/firstmate` inside tmux and let Firstmate supervise the
+  worker agents.
+
 ## What's Included
 
 ### Tmux
