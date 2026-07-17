@@ -10,8 +10,21 @@ return {
   },
   dependencies = {
     "nvim-lua/plenary.nvim",
+    "folke/snacks.nvim",
   },
   keys = {
-    { "<leader>gg", "<cmd>LazyGit<cr>", desc = "LazyGit" },
+    {
+      "<leader>gg",
+      function()
+        vim.cmd.tabnew()
+        Snacks.terminal.open({ "lazygit" }, {
+          cwd = vim.fn.getcwd(),
+          win = {
+            position = "current",
+          },
+        })
+      end,
+      desc = "LazyGit (full screen)",
+    },
   },
 }
