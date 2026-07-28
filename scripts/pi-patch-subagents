@@ -40,12 +40,30 @@ apply_verified_patch \
   "$patch_dir/pi-subagents-0.35.1-artifacts.patch"
 
 apply_verified_patch \
+  pi-subagents-no-host-verify \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/runs/shared/acceptance.ts" \
+  0.35.1 \
+  54c36e21856d5791ed13f53ab4f4dc27cd386a42052c20a9bed1777322ca055f \
+  8e6d7db132585282f7e1693a42e37c5331d480ea70aa121ddbd1dc9123c17cd3 \
+  "$patch_dir/pi-subagents-0.35.1-no-host-verify.patch"
+
+apply_verified_patch \
+  pi-subagents-safe-output \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/runs/shared/single-output.ts" \
+  0.35.1 \
+  f2af95cd15e1fd021bff802812043704d5569c5eeed9a8f13741174654de4e08 \
+  9d368b64f64b004a57a2d297158206ae5a9a4d6b30b25e261a634efdd550ec25 \
+  "$patch_dir/pi-subagents-0.35.1-safe-output.patch"
+
+apply_verified_patch \
   pi-btw \
   "$agent_dir/npm/node_modules/pi-btw" \
   "$agent_dir/npm/node_modules/pi-btw/extensions/btw.ts" \
   0.4.1 \
   74f411f75b97af69bf8f6f5246dff8c7bfa3fa691d9a98004da7db83afa8f124 \
-  eac5b8508d051b4331eff7c7abe18385d437666a7e4b4430ab0b6be71cd703cc \
+  3057517dc086824faaa49cf2fd5889e9803dc1489475b0b943e8aee64065cc96 \
   "$patch_dir/pi-btw-0.4.1-sandbox-routing.patch"
 
 apply_verified_patch \

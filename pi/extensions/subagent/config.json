@@ -1,12 +1,12 @@
 {
   "toolDescriptionMode": "compact",
   "asyncByDefault": true,
-  "asyncWidget": false,
+  "asyncWidget": true,
   "defaultSessionDir": "~/.pi/agent/sessions/subagent/",
   "globalConcurrencyLimit": 3,
   "maxSubagentSpawnsPerSession": 30,
   "parallel": {
-    "maxTasks": 4,
+    "maxTasks": 3,
     "concurrency": 3
   },
   "maxSubagentDepth": 1,

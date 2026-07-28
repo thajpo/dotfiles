@@ -28,7 +28,7 @@
 +    ...tool,
 +    async execute(toolCallId, params, signal, onUpdate) {
 +      return await new Promise((resolve, reject) => {
-+        const timer = setTimeout(() => reject(new Error("Timed out waiting for the parent sandbox")), 1000);
++        const timer = setTimeout(() => reject(new Error("Timed out waiting for the parent sandbox")), 120_000);
 +        pi.events.emit("pi-sandbox:tool-request", {
 +          toolName: tool.name,
 +          toolCallId,

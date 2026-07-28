@@ -1,0 +1,36 @@
+--- a/src/runs/shared/single-output.ts
++++ b/src/runs/shared/single-output.ts
+@@ -61,19 +61,25 @@
+ 	return undefined;
+ }
+ 
++function isWithinDirectory(directory: string, candidate: string): boolean {
++	const relative = path.relative(path.resolve(directory), path.resolve(candidate));
++	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
++}
++
+ export function resolveSingleOutputPath(
+ 	output: string | boolean | undefined,
+-	runtimeCwd: string,
+-	requestedCwd?: string,
++	_runtimeCwd: string,
++	_requestedCwd?: string,
+ 	relativeBaseDir?: string,
+ ): string | undefined {
+ 	if (typeof output !== "string" || !output || output === "false" || output === "true") return undefined;
+-	if (path.isAbsolute(output)) return output;
+-	if (relativeBaseDir) return path.resolve(relativeBaseDir, output);
+-	const baseCwd = requestedCwd
+-		? (path.isAbsolute(requestedCwd) ? requestedCwd : path.resolve(runtimeCwd, requestedCwd))
+-		: runtimeCwd;
+-	return path.resolve(baseCwd, output);
++	// Runtime output is orchestration state, not a host filesystem capability.
++	// Only the executor-selected artifact directory is permitted; callers cannot
++	// redirect it to a project, home, or arbitrary absolute path.
++	if (!relativeBaseDir) return undefined;
++	const baseDir = path.resolve(relativeBaseDir);
++	const candidate = path.isAbsolute(output) ? output : path.resolve(baseDir, output);
++	return isWithinDirectory(baseDir, candidate) ? candidate : undefined;
+ }
+ 
+ interface OutputInstructionCapabilities {
