@@ -8,7 +8,22 @@
  
  	function routedTool<TParams extends TSchema, TDetails>(
  		localFactory: (cwd: string) => ToolDefinition<TParams, TDetails>,
-@@ -2665,6 +2666,43 @@
+@@ -2562,8 +2563,12 @@
+ 			...base,
+ 			async execute(id, params, signal, onUpdate, ctx) {
+ 				sandbox.workspace.configure(ctx);
+-				const tool = sandbox.workspace.isEnabled() ? sandboxFactory(ctx.cwd) : localFactory(ctx.cwd);
+-				return tool.execute(id, params, signal, onUpdate, ctx);
++				if (!sandbox.workspace.isEnabled()) throw new Error("Pi sandbox is disabled; host tool fallback is forbidden");
++				await sandbox.workspace.preflight(ctx);
++				const preflightError = sandbox.workspace.getPreflightError();
++				if (preflightError) throw new Error(`Sandbox unavailable: ${preflightError}`);
++				await sandbox.lifecycle.ensure(ctx);
++				return sandboxFactory(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
+ 			},
+ 		};
+ 	}
+@@ -2665,6 +2670,43 @@
  		};
  	}
  
@@ -52,7 +67,7 @@
  	function reviewResourceLoader(systemPrompt: string): ResourceLoader {
  		const runtime = createExtensionRuntime();
  		return {
-@@ -3007,6 +3045,7 @@
+@@ -3007,6 +3049,7 @@
  	});
  
  	pi.on("session_start", async (_event, ctx) => {
@@ -60,15 +75,18 @@
  		sandbox.workspace.configure(ctx);
  		sandbox.workspace.restoreGitRefState(ctx);
  		await sandbox.workspace.preflight(ctx);
-@@ -3032,6 +3071,7 @@
+@@ -3032,8 +3075,9 @@
  	});
  
  	pi.on("before_agent_start", async (event, ctx) => {
 +		activeContext = ctx;
  		sandbox.workspace.configure(ctx);
- 		if (!sandbox.workspace.isEnabled()) return;
+-		if (!sandbox.workspace.isEnabled()) return;
++		if (!sandbox.workspace.isEnabled()) throw new Error("Pi sandbox is disabled; host agent execution is forbidden");
  		await sandbox.workspace.preflight(ctx);
-@@ -3094,10 +3134,12 @@
+ 		if (sandbox.workspace.getPreflightError()) throw new Error(`Sandbox unavailable: ${sandbox.workspace.getPreflightError()}`);
+ 		const lockError = await sandbox.workspace.reserveTarget(ctx);
+@@ -3094,12 +3138,14 @@
  	});
  
  	pi.on("session_shutdown", async (_event, ctx) => {
@@ -79,5 +97,17 @@
  	pi.on("user_bash", async (_event, ctx) => {
 +		activeContext = ctx;
  		sandbox.workspace.configure(ctx);
- 		if (!sandbox.workspace.isEnabled()) return;
+-		if (!sandbox.workspace.isEnabled()) return;
++		if (!sandbox.workspace.isEnabled()) throw new Error("Pi sandbox is disabled; host bash fallback is forbidden");
  		await sandbox.workspace.preflight(ctx);
+ 		if (sandbox.workspace.getPreflightError()) throw new Error(`Sandbox unavailable: ${sandbox.workspace.getPreflightError()}`);
+ 		const lockError = await sandbox.workspace.reserveTarget(ctx);
+@@ -3161,7 +3207,7 @@
+ 		...localGrep,
+ 		async execute(id, params, signal, onUpdate, ctx) {
+ 			sandbox.workspace.configure(ctx);
+-			if (!sandbox.workspace.isEnabled()) return createGrepToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
++			if (!sandbox.workspace.isEnabled()) throw new Error("Pi sandbox is disabled; host grep fallback is forbidden");
+ 			const searchPath = resolveToolPath(ctx.cwd, params.path || ".");
+ 			const args = [
+ 				"rg",

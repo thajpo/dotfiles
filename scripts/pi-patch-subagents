@@ -81,5 +81,5 @@ apply_verified_patch \
   "$agent_dir/npm/node_modules/@kjrjay/pi-sandbox/index.ts" \
   0.2.0 \
   fcc5244d55fb2853175b52f0befdb30debb57048b56c7f5fda5614f7450109f4 \
-  69bd9eae028399558c6cfb106abe288b189b6a9b474832e565acb332798d5041 \
+  254271d29b7edacdb4612e0fbd91ed9a9b8fc0d256e211451b660154db2fe47c \
   "$patch_dir/pi-sandbox-0.2.0-btw-routing.patch"
