@@ -1,0 +1,13 @@
+--- a/src/runs/background/async-execution.ts
++++ b/src/runs/background/async-execution.ts
+@@ -1158,7 +1158,9 @@
+ 		...(agentConfig.memory ? { memory: { ...agentConfig.memory } } : {}),
+ 		...(outputPath ? { outputPath } : {}),
+ 		outputMode,
+-		...(resolvedAcceptance ? { acceptance: resolvedAcceptance } : {}),
++		// Persist the original public input. Resolved acceptance adds runtime-only
++		// fields (explicit/inferredReason) that the recovery schema rejects.
++		...(params.acceptance !== undefined ? { acceptance: params.acceptance } : {}),
+ 		...(controlConfig ? { controlConfig } : {}),
+ 		...(deadlineAt !== undefined ? { absoluteDeadlineAt: deadlineAt } : {}),
+ 		...(params.turnBudget ? { initialTurnBudget: params.turnBudget } : {}),

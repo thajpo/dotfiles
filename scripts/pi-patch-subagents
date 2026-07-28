@@ -58,6 +58,15 @@ apply_verified_patch \
   "$patch_dir/pi-subagents-0.35.1-safe-output.patch"
 
 apply_verified_patch \
+  pi-subagents-resume-acceptance \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/runs/background/async-execution.ts" \
+  0.35.1 \
+  8ebb9139b989e6776654ef49045ed37ed7edd4e6e0f1f19138e7552c46b3d60f \
+  f5804b2ddc61bd5a6f6d4930f70676a5a9c6db288e85eb2215c6dd24b36c5eb6 \
+  "$patch_dir/pi-subagents-0.35.1-resume-acceptance.patch"
+
+apply_verified_patch \
   pi-btw \
   "$agent_dir/npm/node_modules/pi-btw" \
   "$agent_dir/npm/node_modules/pi-btw/extensions/btw.ts" \
