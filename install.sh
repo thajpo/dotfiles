@@ -25,10 +25,11 @@ fi
 
 mkdir -p "$PI_CONFIG_DIR"
 backup_and_link "$SCRIPT_DIR/pi/settings.json" "$PI_CONFIG_DIR/settings.json"
-for config in pi-chrome-devtools.json pi-lsp.json pi-plan-mode.json pi-statusline.json pr-review.json workboard.json; do
+for config in pi-chrome-devtools.json pi-plan-mode.json pi-statusline.json pr-review.json; do
     backup_and_link "$SCRIPT_DIR/pi/$config" "$PI_CONFIG_DIR/$config"
 done
 backup_and_link "$SCRIPT_DIR/pi/extensions" "$PI_CONFIG_DIR/extensions"
+backup_and_link "$SCRIPT_DIR/pi/agents" "$PI_CONFIG_DIR/agents"
 backup_and_link "$SCRIPT_DIR/pi/prompts" "$PI_CONFIG_DIR/prompts"
 backup_and_link "$SCRIPT_DIR/pi/themes" "$PI_CONFIG_DIR/themes"
 mkdir -p "$PI_CONFIG_DIR/npm"

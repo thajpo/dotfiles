@@ -1,0 +1,15 @@
+{
+  "toolDescriptionMode": "compact",
+  "asyncByDefault": true,
+  "asyncWidget": false,
+  "globalConcurrencyLimit": 3,
+  "maxSubagentSpawnsPerSession": 30,
+  "parallel": {
+    "maxTasks": 4,
+    "concurrency": 3
+  },
+  "maxSubagentDepth": 1,
+  "intercomBridge": {
+    "mode": "always"
+  }
+}

@@ -28,9 +28,8 @@
   },
   "extensionStatusIcons": {
     "github-pr": "PR",
-    "lsp": "LSP",
     "plan-mode": "PLAN",
-    "side-agents": "AGENTS",
+    "subagent": "FLEET",
     "usage": "USE"
   }
 }

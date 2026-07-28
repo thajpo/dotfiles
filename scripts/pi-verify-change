@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: pi-verify-change --base REF [--candidate REF] [--allow GLOB]... [--accept COMMAND]... [--allow-dirty]
+USAGE
+}
+
+base=""
+candidate="HEAD"
+allow_dirty=0
+declare -a allowed=()
+declare -a acceptance=()
+while (($#)); do
+  case "$1" in
+    --base) [[ $# -ge 2 ]] || { usage; exit 2; }; base=$2; shift 2 ;;
+    --candidate) [[ $# -ge 2 ]] || { usage; exit 2; }; candidate=$2; shift 2 ;;
+    --allow) [[ $# -ge 2 ]] || { usage; exit 2; }; allowed+=("$2"); shift 2 ;;
+    --accept|--acceptance) [[ $# -ge 2 ]] || { usage; exit 2; }; acceptance+=("$2"); shift 2 ;;
+    --allow-dirty) allow_dirty=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'pi-verify-change: unknown argument: %s\n' "$1" >&2; usage; exit 2 ;;
+  esac
+done
+[[ -n "$base" ]] || { printf 'pi-verify-change: --base is required\n' >&2; usage; exit 2; }
+
+git rev-parse --verify "$base^{commit}" >/dev/null
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+paths="$tmp/paths"
+: > "$paths"
+add_paths() { git "$@" | sed '/^$/d' >> "$paths"; }
+add_paths diff --name-only --diff-filter=ACDMRTUXB "$base" "$candidate"
+if [[ "$candidate" == HEAD || "$candidate" == WORKTREE || "$candidate" == worktree ]]; then
+  add_paths diff --name-only --diff-filter=ACDMRTUXB
+  add_paths diff --cached --name-only --diff-filter=ACDMRTUXB
+  git ls-files --others --exclude-standard >> "$paths"
+fi
+sort -u "$paths" -o "$paths"
+count=$(wc -l < "$paths" | tr -d ' ')
+printf 'base=%s candidate=%s changed_paths=%s\n' "$base" "$candidate" "$count"
+
+if [[ "$candidate" == HEAD || "$candidate" == WORKTREE || "$candidate" == worktree ]]; then
+  status=$(git status --porcelain)
+  if [[ -n "$status" && $allow_dirty -eq 0 ]]; then
+    printf 'FAIL worktree is dirty (use --allow-dirty only when intentional):\n%s\n' "$status" >&2
+    exit 1
+  fi
+fi
+
+if ((${#allowed[@]})); then
+  bad=()
+  while IFS= read -r path; do
+    ok=0
+    for pattern in "${allowed[@]}"; do
+      if [[ "$path" == $pattern ]]; then ok=1; break; fi
+      # Also accept basename-style patterns such as *.md.
+      if [[ "$(basename "$path")" == $pattern ]]; then ok=1; break; fi
+    done
+    ((ok)) || bad+=("$path")
+  done < "$paths"
+  if ((${#bad[@]})); then
+    printf 'FAIL unexpected changed paths:\n' >&2
+    printf '  %s\n' "${bad[@]}" >&2
+    exit 1
+  fi
+fi
+
+check_output=$(git diff --check "$base" "$candidate" 2>&1 || true)
+if [[ -n "$check_output" ]]; then
+  printf 'FAIL diff --check:\n%s\n' "$check_output" >&2
+  exit 1
+fi
+if [[ "$candidate" == HEAD || "$candidate" == WORKTREE || "$candidate" == worktree ]]; then
+  check_output=$( { git diff --check; git diff --cached --check; } 2>&1 || true)
+  if [[ -n "$check_output" ]]; then
+    printf 'FAIL worktree diff --check:\n%s\n' "$check_output" >&2
+    exit 1
+  fi
+fi
+
+conflict=0
+while IFS= read -r path; do
+  [[ -f "$path" ]] || continue
+  if grep -Iq . -- "$path" 2>/dev/null && grep -nE '^(<<<<<<<|=======|>>>>>>>)( |$)' -- "$path" >/dev/null; then
+    printf 'FAIL conflict marker: %s\n' "$path" >&2
+    conflict=1
+  fi
+done < "$paths"
+((conflict == 0)) || exit 1
+
+for command in "${acceptance[@]}"; do
+  printf 'accept: %s\n' "$command"
+  if ! bash -o pipefail -c "$command"; then
+    printf 'FAIL acceptance command: %s\n' "$command" >&2
+    exit 1
+  fi
+done
+printf 'PASS pi-verify-change\n'

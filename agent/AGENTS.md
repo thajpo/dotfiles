@@ -1,84 +1,124 @@
-# Agent Instructions
+# Global Pi engineering workflow
 
-These are global defaults. Project-level `AGENTS.md` files override these when
-they are more specific.
+## Core principle
 
-## Personal Context
+Use agents to make understanding, implementation, and verification more thorough without turning the human into a reviewer of endless duplicated work.
 
-- Use git liberally.
-- The user has coding experience but is not yet a software engineer.
-- The user's goal is to become an ML reliability engineer.
-- The user enjoys theory, explanations, architecture design, and systems thinking.
-- The user's low-level computing background is weak; explain relevant OS,
-  networking, memory, process, shell, and Git details when they matter.
+> Diverge on understanding. Converge on the plan. Implement once. Diverge on verification.
 
-## Default Engineering Workflow
+> Durable intent, disposable attempts, severe evidence.
 
-- Prefer an agent-agnostic workflow. Use `AGENTS.md` as the canonical project
-  memory file. If a project needs Claude compatibility, make `CLAUDE.md` a
-  symlink to `AGENTS.md` instead of maintaining two divergent files.
-- If a harness-specific choice is needed, use OpenCode first.
-- Keep global memory short. Store durable project knowledge in the project's
-  `AGENTS.md`; move conditional or task-specific procedures into skills.
-- Do not install random skills or agent tools from the internet unless the user
-  explicitly approves the source and purpose. Popularity is not evidence of
-  quality or safety.
+Spend human attention on meaning, model tokens on search, and machine compute on rejection.
 
-## Planning
+## Models and roles
 
-- For complex product, architecture, UX, multi-file, or ambiguous work, plan
-  before coding.
-- A good plan should make decisions explicit, identify acceptance criteria, and
-  separate reversible implementation detail from product or architecture calls.
-- For small, obvious fixes, skip heavy planning and keep momentum.
+The main Pi session is the persistent Luna High parent and liaison.
 
-## Implementation
+- Parent and normal planner: `openai-codex/gpt-5.6-luna:high`
+- Fast scout, context gathering, test discovery, and bounded worker: `deepseek/deepseek-v4-flash:high`
+- Normal reviewer and integrator: `openai-codex/gpt-5.6-luna:high`
+- Oracle, architecture, difficult debugging, research uncertainty, numerical decisions, concurrency, compatibility, security, and high-risk review: `openai-codex/gpt-5.6-sol:high`
 
-- Before changing code, inspect the repository shape and existing conventions.
-- Use `rg`/`rg --files` for search.
-- Prefer structured APIs and project-local patterns over ad hoc parsing or new
-  abstractions.
-- For parallel work or long-running agent sessions, isolate each task in a git
-  worktree. If `treehouse` is available, use it instead of manually juggling
-  worktrees.
-- Never run two independent coding agents in the same dirty checkout.
+Use `pi-subagents` as the only coding-agent orchestrator. Sol Max is not routine. `/btw` remains an interactive side-question channel and does not own implementation or final decisions unless explicitly assigned.
 
-## Validation
+FirstMate, treehouse, pi-side-agents, and Workboard are dormant or removed. Do not install jj, swarm/team frameworks, vector memory, always-on autonomous review loops, or duplicate launcher families.
 
-- When fixing a bug, start by reproducing it as close as possible to how an end
-  user experiences it. Unit tests alone are often not enough.
-- After implementation, run the most relevant checks: end-to-end behavior,
-  focused tests, lint/typecheck, then broader tests as risk grows.
-- For PR-bound work, prefer the `no-mistakes` gate when it is available. The
-  default path is: commit the branch, then run `git push no-mistakes` or ask the
-  agent to use `/no-mistakes`.
-- Evidence matters. Record screenshots, logs, test output, or other proof that
-  the change satisfies the original intent.
+## Parallelism and workflow
 
-## Long-Running Work
+Parallel research across projects is allowed; unrelated active integration frontiers are not. Normally use at most two investigative/review agents, one implementation writer, and three children total. Use multiple implementations only when alternatives are genuinely uncertain and evaluation is cheap and objective.
 
-- Use bounded autonomous loops only for objectives with clear stop conditions,
-  measurable metrics, or trusted judgment domains.
-- If `gnhf` is available, use explicit caps such as `--max-iterations` and
-  `--max-tokens`.
-- Each successful iteration should leave a commit or clear report so the user
-  can inspect, cherry-pick, or revert work.
+For nontrivial work:
 
-## Multi-Agent Orchestration
+1. Clarify intended behavior and what must remain unchanged.
+2. Use fresh impact and minimum-change scouts when useful; add a test/risk mapper for risky work.
+3. Luna reconciles reports and records the task contract.
+4. Ask Sol about consequential architecture, security, compatibility, numerical, concurrency, or research decisions.
+5. Run a fresh plan critic.
+6. Normally use exactly one implementation worker.
+7. Independently execute acceptance commands and inspect changed paths.
+8. Use fresh reviewers for correctness, security, tests, scope, and unnecessary complexity.
+9. The human reviews the final surviving diff.
+10. Nothing pushes, publishes, deploys, merges a remote PR, or changes production without explicit user intent.
 
-- For one or two simple tasks, direct OpenCode sessions in isolated worktrees are
-  enough.
-- For multiple parallel tasks, multi-repo work, or PR babysitting, use Firstmate
-  when the repo exists locally. Launch OpenCode inside that repo, preferably from
-  within tmux.
-- The human should spend most attention at the beginning of work, where intent is
-  clarified, and at the end, where evidence and risk are reviewed.
+The contract covers intended behavior, unchanged behavior, interfaces and schemas, state and permissions, numerical and performance budgets, compatibility, allowed paths, failure behavior, acceptance commands, edge cases, unresolved decisions, and escalation conditions. If tests, traces, profilers, code, or candidate analyses disagree, investigate the disagreement and improve the contract or evidence rather than averaging it away.
 
-## Learning Loop
+## Agent autonomy
 
-- When an agent makes a mistake, turn the correction into durable memory:
-  project convention, test instruction, architecture note, or a skill.
-- Avoid bloating `AGENTS.md` with rarely used procedures. Keep always-on context
-  small and move conditional workflows into skills.
-- Explain tradeoffs in a way that teaches the underlying system, not just the
-  immediate command.
+Inside the assigned sandbox, agents have broad normal engineering capabilities: read, write, edit, bash, grep, find, ls, tests, builds, package installation, diagnostics, profilers, formatters, local servers, and ordinary local Git including branch, commit, amend, rebase, merge, cherry-pick, reset, clean, reflog, and conflict resolution. Do not ask for routine command approvals.
+
+Scouts may create reproducers, tests, instrumentation, and temporary diagnostic changes but must report every modification. Reviewers normally report findings before repairing them. Workers stop and contact the parent instead of guessing when a boundary, public interface, schema, migration, concurrency, security, numerical, compatibility, benchmark, or explicit non-goal decision is unresolved.
+
+Remote push/force-push, PR publication/comment/approval/merge, deployment, production mutation, and sending source or credentials to a new external service require explicit user intent.
+
+## Sandbox boundary
+
+All model-callable file and shell operations execute inside the configured Docker sandbox. Sandbox failure is a hard failure; never silently fall back to host tools. The sandbox must not expose the host home, unrelated repositories, SSH/GPG files or agents, cloud credentials, browser profiles, Pi authentication, Docker/LXD sockets, host process control, broad host environment variables, or production credentials. Do not rely on command-name blacklists as the secret boundary; secrets are absent from the execution environment.
+
+The active sandbox is `~/.pi/agent/extensions/pi-sandbox.json`, using the locally built pinned image and `target: sandbox`. It copies a local Git clone, keeps the trusted checked-out branch/worktree unchanged, publishes only to an isolated local sandbox branch, ignores host-untracked files, passes no host environment variables, and removes containers after checkpointing. Outbound network is allowed for ordinary dependency and documentation access. Docker is not a perfect hostile-code boundary. GPU access is not provided; do not silently run GPU work on the host.
+
+## Reports
+
+Use compact Markdown, not diaries or giant transcripts. Store full transcripts in session artifacts. Every difficult implementation produces a factual work log listing files, commands, tests, evidence, deviations, failed attempts, and remaining uncertainty.
+
+### Impact mapper
+
+- Current behavior
+- Files and services involved
+- Interfaces, state, and data flow
+- Existing tests
+- Risks, assumptions, remaining uncertainty
+
+### Minimum-change mapper
+
+- Current behavior
+- Necessary changes
+- Things that should not change
+- Existing code to reuse
+- Tests, assumptions, remaining uncertainty
+
+### Test/risk mapper
+
+- Success and failure cases
+- Integration and regression risks
+- Proposed tests
+- Claims difficult to verify
+- Remaining uncertainty
+
+### Plan critic
+
+- Verdict
+- Ambiguities and weak assumptions
+- Failure cases
+- Unnecessary complexity
+- Required corrections and missing tests
+- Remaining uncertainty
+
+### Worker work log
+
+- Initial hypothesis
+- Important files inspected and commands/tests run
+- Important discoveries and evidence
+- Files changed
+- Tests actually run with outcomes
+- Plan deviations and failed attempts
+- Remaining uncertainty
+
+### Final reviewer
+
+Use `ACCEPT`, `REPAIR`, or `ESCALATE`, and report correctness, contract/boundary changes, test adequacy, unnecessary complexity, plan deviations, required actions, and remaining uncertainty.
+
+## Context discipline
+
+Independent agents begin with fresh context unless prior conversation is genuinely necessary. Do not give every reviewer the entire accumulated history. The normal final-review packet is the original request, approved behavior and boundaries, approved plan, final diff, independent test results, and worker deviations. Inject only useful summaries from BTW.
+
+## Verification
+
+Do not trust a worker's claim that tests passed. Independently inspect committed, staged, unstaged, and untracked changes; changed paths relative to the agreed base; `git diff --check`; diagnostics; acceptance commands; benchmark methodology; and unexpected interfaces, schemas, state, permissions, dependencies, deployment, or compatibility changes. `scripts/pi-verify-change` is the mechanical final evidence gate and must reject out-of-scope files even when reviewer prose calls them harmless.
+
+## Git and recovery
+
+Use ordinary Git branches; do not introduce jj unless Git becomes a measured bottleneck. Agents may create candidate and integration branches. Do not automatically merge, push, publish, deploy, or modify the trusted checked-out branch. Preserve old side-agent branches, worktrees, reports, sessions, sandbox branches, recovery refs, and containers until their value is checked.
+
+## Completion
+
+Before reporting completion, inspect the actual final diff and package inventory, independently rerun important verification, report exact commands and outcomes, name changed boundaries and remaining uncertainty, confirm no remote or production action occurred, and provide rollback commands. Human-facing output is one compact synthesis rather than raw reports and transcripts.
