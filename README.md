@@ -158,12 +158,14 @@ Inspect the setup:
 
 Core loop:
 
-- Run parallel agents in isolated worktrees with Treehouse.
-- Validate PR-bound work with No Mistakes: `git push no-mistakes`
-- Run bounded long tasks with GNHF using explicit token/iteration caps.
-- For multiple parallel tasks or multi-repo work, launch OpenCode from
-  `~/agent-workflows/firstmate` inside tmux and let Firstmate supervise the
-  worker agents.
+- Use Luna as the persistent Pi parent and liaison.
+- Delegate bounded scouts and workers through `pi-subagents`.
+- Run child tools inside the disposable Docker sandbox and review isolated
+  `pi-sandbox/*` branches before local integration.
+- Use Sol for architecture, difficult debugging, and high-risk review.
+- Keep FirstMate and Treehouse dormant unless explicitly invoked for unrelated
+  legacy workflows.
+- Validate PR-bound work with No Mistakes only when explicitly requested.
 
 ## What's Included
 
@@ -196,9 +198,9 @@ threshold is `-55 dBFS`. Override calibration with
 
 ### Pi
 - Reproducible Pi CLI version and pinned extension package manifests
-- Local extensions, prompts, theme, statusline, LSP, plan-mode, review, and workboard configuration
+- Local prompts, theme, statusline, plan-mode, review, and sandboxed subagent configuration
 - Installs to `~/.pi/agent` without tracking credentials, sessions, or runtime state
-- Keeps completion desktop notifications but disables completion sounds by default
+- Keeps completion visual-only: no sound or desktop notification extension
 
 ### Tools installed
 - **gitmux** - git status in tmux
