@@ -1,0 +1,75 @@
+--- a/extensions/btw.ts
++++ b/extensions/btw.ts
+@@ -1,6 +1,10 @@
+ import {
+   buildSessionContext,
+   createAgentSession,
++  createBashToolDefinition,
++  createEditToolDefinition,
++  createReadToolDefinition,
++  createWriteToolDefinition,
+   createExtensionRuntime,
+   SessionManager,
+   type AgentSession,
+@@ -9,6 +13,7 @@
+   type ExtensionCommandContext,
+   type ExtensionContext,
+   type ResourceLoader,
++  type ToolDefinition,
+ } from "@earendil-works/pi-coding-agent";
+ import { type AssistantMessage, type Message, type ThinkingLevel as AiThinkingLevel, type UserMessage } from "@earendil-works/pi-ai";
+ import {
+@@ -189,6 +194,32 @@
+   };
+ }
+ 
++function createSandboxProxyTool(pi: ExtensionAPI, tool: ToolDefinition<any, any>): ToolDefinition<any, any> {
++  return {
++    ...tool,
++    async execute(toolCallId, params, signal, onUpdate) {
++      return await new Promise((resolve, reject) => {
++        const timer = setTimeout(() => reject(new Error("Timed out waiting for the parent sandbox")), 1000);
++        pi.events.emit("pi-sandbox:tool-request", {
++          toolName: tool.name,
++          toolCallId,
++          params,
++          signal,
++          onUpdate,
++          resolve: (result: unknown) => {
++            clearTimeout(timer);
++            resolve(result);
++          },
++          reject: (error: unknown) => {
++            clearTimeout(timer);
++            reject(error);
++          },
++        });
++      });
++    },
++  };
++}
++
+ function extractText(parts: AssistantMessage["content"], type: "text" | "thinking"): string {
+   const chunks: string[] = [];
+ 
+@@ -1598,12 +1629,19 @@
+     }
+ 
+     const { session } = await createAgentSession({
++      cwd: ctx.cwd,
+       sessionManager: SessionManager.inMemory(),
+       model: settings.model,
+       modelRegistry: ctx.modelRegistry as AgentSession["modelRegistry"],
+       thinkingLevel: settings.thinkingLevel,
+-      // Match pi's default coding-agent toolset (read/bash/edit/write).
++      // BTW tools are explicit proxies to the parent sandbox. There is no host fallback.
+       tools: ["read", "bash", "edit", "write"],
++      customTools: [
++        createSandboxProxyTool(pi, createReadToolDefinition(ctx.cwd)),
++        createSandboxProxyTool(pi, createWriteToolDefinition(ctx.cwd)),
++        createSandboxProxyTool(pi, createEditToolDefinition(ctx.cwd)),
++        createSandboxProxyTool(pi, createBashToolDefinition(ctx.cwd)),
++      ],
+       resourceLoader: createBtwResourceLoader(ctx),
+     });
+ 

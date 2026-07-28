@@ -1,0 +1,83 @@
+--- a/index.ts
++++ b/index.ts
+@@ -2549,6 +2549,7 @@
+ 	pi.registerFlag("sandbox-env", { description: "Comma-separated host env vars to pass into sandbox commands", type: "string" });
+ 
+ 	const sandbox = new ContainerSandbox(pi);
++	let activeContext: ExtensionContext | undefined;
+ 
+ 	function routedTool<TParams extends TSchema, TDetails>(
+ 		localFactory: (cwd: string) => ToolDefinition<TParams, TDetails>,
+@@ -2662,6 +2663,43 @@
+ 		};
+ 	}
+ 
++	pi.events.on("pi-sandbox:tool-request", (raw) => {
++		const request = raw as {
++			toolName?: string;
++			toolCallId?: string;
++			params?: Record<string, unknown>;
++			signal?: AbortSignal;
++			onUpdate?: (update: unknown) => void;
++			resolve?: (result: unknown) => void;
++			reject?: (error: unknown) => void;
++		};
++		if (!request || typeof request.toolName !== "string" || typeof request.resolve !== "function" || typeof request.reject !== "function") return;
++		void (async () => {
++			try {
++				const ctx = activeContext;
++				if (!ctx) throw new Error("Pi sandbox is not initialized for BTW tool execution");
++				sandbox.workspace.configure(ctx);
++				if (!sandbox.workspace.isEnabled()) throw new Error("Pi sandbox is disabled; BTW refuses host tool fallback");
++				await sandbox.workspace.preflight(ctx);
++				if (sandbox.workspace.getPreflightError()) throw new Error(`Sandbox unavailable: ${sandbox.workspace.getPreflightError()}`);
++				await sandbox.lifecycle.ensure(ctx);
++				const factories: Record<string, (cwd: string) => ToolDefinition<any, any>> = {
++					read: (cwd) => createReadToolDefinition(cwd, { operations: readOps() }),
++					write: (cwd) => createWriteToolDefinition(cwd, { operations: writeOps() }),
++					edit: (cwd) => createEditToolDefinition(cwd, { operations: editOps() }),
++					bash: (cwd) => createBashToolDefinition(cwd, { operations: bashOps() }),
++				};
++				const factory = factories[request.toolName];
++				if (!factory) throw new Error(`BTW tool is not permitted in the sandbox: ${request.toolName}`);
++				const tool = factory(ctx.cwd);
++				const result = await tool.execute(request.toolCallId ?? "btw", request.params ?? {}, request.signal, request.onUpdate, ctx);
++				request.resolve(result);
++			} catch (error) {
++				request.reject?.(error);
++			}
++		})();
++	});
++
+ 	function reviewResourceLoader(systemPrompt: string): ResourceLoader {
+ 		const runtime = createExtensionRuntime();
+ 		return {
+@@ -3004,6 +3042,7 @@
+ 	});
+ 
+ 	pi.on("session_start", async (_event, ctx) => {
++		activeContext = ctx;
+ 		sandbox.workspace.configure(ctx);
+ 		sandbox.workspace.restoreGitRefState(ctx);
+ 		await sandbox.workspace.preflight(ctx);
+@@ -3029,6 +3068,7 @@
+ 	});
+ 
+ 	pi.on("before_agent_start", async (event, ctx) => {
++		activeContext = ctx;
+ 		sandbox.workspace.configure(ctx);
+ 		if (!sandbox.workspace.isEnabled()) return;
+ 		await sandbox.workspace.preflight(ctx);
+@@ -3091,10 +3131,12 @@
+ 	});
+ 
+ 	pi.on("session_shutdown", async (_event, ctx) => {
++		activeContext = undefined;
+ 		await sandbox.lifecycle.shutdown(ctx);
+ 	});
+ 
+ 	pi.on("user_bash", async (_event, ctx) => {
++		activeContext = ctx;
+ 		sandbox.workspace.configure(ctx);
+ 		if (!sandbox.workspace.isEnabled()) return;
+ 		await sandbox.workspace.preflight(ctx);

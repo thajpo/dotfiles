@@ -35,6 +35,7 @@ backup_and_link "$SCRIPT_DIR/pi/themes" "$PI_CONFIG_DIR/themes"
 mkdir -p "$PI_CONFIG_DIR/npm"
 cp "$SCRIPT_DIR/pi/npm/package.json" "$SCRIPT_DIR/pi/npm/package-lock.json" "$PI_CONFIG_DIR/npm/"
 npm ci --prefix "$PI_CONFIG_DIR/npm" --legacy-peer-deps --no-audit --no-fund
+PI_CODING_AGENT_DIR="$PI_CONFIG_DIR" "$SCRIPT_DIR/scripts/pi-patch-subagents"
 
 mkdir -p "$HOME/.local/bin"
 backup_and_link "$SCRIPT_DIR/bin/pi" "$HOME/.local/bin/pi"

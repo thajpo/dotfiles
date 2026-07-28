@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+agent_dir=${PI_CODING_AGENT_DIR:-"$HOME/.pi/agent"}
+patch_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../pi/patches" && pwd)"
+
+apply_verified_patch() {
+  local label=$1 package_dir=$2 source_file=$3 package_version=$4 expected_before=$5 expected_after=$6 patch_file=$7
+  [[ -f "$package_dir/package.json" ]] || { printf '%s: package not installed: %s\n' "$label" "$package_dir" >&2; exit 1; }
+  local version actual
+  version=$(node -p 'require(process.argv[1]).version' "$package_dir/package.json")
+  [[ "$version" == "$package_version" ]] || { printf '%s: unsupported version: %s\n' "$label" "$version" >&2; exit 1; }
+  [[ -f "$source_file" ]] || { printf '%s: source missing: %s\n' "$label" "$source_file" >&2; exit 1; }
+  actual=$(sha256sum "$source_file" | awk '{print $1}')
+  if [[ "$actual" == "$expected_after" ]]; then
+    printf '%s: already patched %s\n' "$label" "$actual"
+    return
+  fi
+  [[ "$actual" == "$expected_before" ]] || {
+    printf '%s: unexpected source hash: %s\n' "$label" "$actual" >&2
+    printf '%s: expected upstream %s or patched %s\n' "$label" "$expected_before" "$expected_after" >&2
+    exit 1
+  }
+  ( cd "$package_dir" && patch --batch --forward -p1 < "$patch_file" )
+  actual=$(sha256sum "$source_file" | awk '{print $1}')
+  [[ "$actual" == "$expected_after" ]] || {
+    printf '%s: patched source hash mismatch: %s\n' "$label" "$actual" >&2
+    exit 1
+  }
+  printf '%s: applied verified patch %s\n' "$label" "$actual"
+}
+
+apply_verified_patch \
+  pi-subagents \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/shared/artifacts.ts" \
+  0.35.1 \
+  6924209731fff2919b7854cdda547a69e25cb4f22f4b928e761685056aaecc9e \
+  d78b45cf31f47282e9369df4d90b3e53c7056f56161f1ffe4501b1a9729b7e6c \
+  "$patch_dir/pi-subagents-0.35.1-artifacts.patch"
+
+apply_verified_patch \
+  pi-btw \
+  "$agent_dir/npm/node_modules/pi-btw" \
+  "$agent_dir/npm/node_modules/pi-btw/extensions/btw.ts" \
+  0.4.1 \
+  74f411f75b97af69bf8f6f5246dff8c7bfa3fa691d9a98004da7db83afa8f124 \
+  eac5b8508d051b4331eff7c7abe18385d437666a7e4b4430ab0b6be71cd703cc \
+  "$patch_dir/pi-btw-0.4.1-sandbox-routing.patch"
+
+apply_verified_patch \
+  pi-sandbox \
+  "$agent_dir/npm/node_modules/@kjrjay/pi-sandbox" \
+  "$agent_dir/npm/node_modules/@kjrjay/pi-sandbox/index.ts" \
+  0.2.0 \
+  fcc5244d55fb2853175b52f0befdb30debb57048b56c7f5fda5614f7450109f4 \
+  0e398a42457b7b7496eef99a81d96ccaab8f73d49b4231a0164d77b217148f0d \
+  "$patch_dir/pi-sandbox-0.2.0-btw-routing.patch"
