@@ -1,0 +1,12 @@
+[Unit]
+Description=Warn when Voxtype records without a microphone signal
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/dotfiles/scripts/voxtype_mic_watchdog.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

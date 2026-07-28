@@ -1,0 +1,36 @@
+{
+  "palettePreset": "tokyo-night",
+  "density": "cozy",
+  "separator": "bar",
+  "segments": [
+    "provider",
+    "model",
+    "thinking",
+    "cwd",
+    "branch",
+    "context",
+    "cost",
+    "time"
+  ],
+  "segmentText": {
+    "brand": { "prefix": "pi ", "suffix": "" },
+    "provider": { "prefix": "provider ", "suffix": "" },
+    "model": { "prefix": "model ", "suffix": "" },
+    "thinking": { "prefix": "reasoning ", "suffix": "" },
+    "cwd": { "prefix": "dir ", "suffix": "" },
+    "branch": { "prefix": "git ", "suffix": "" },
+    "tools": { "prefix": "", "suffix": "" },
+    "context": { "prefix": "context ", "suffix": "" },
+    "tokens": { "prefix": "tokens ", "suffix": "" },
+    "cost": { "prefix": "cost $", "suffix": "" },
+    "time": { "prefix": "time ", "suffix": "" },
+    "turn": { "prefix": "turn ", "suffix": "" }
+  },
+  "extensionStatusIcons": {
+    "github-pr": "PR",
+    "lsp": "LSP",
+    "plan-mode": "PLAN",
+    "side-agents": "AGENTS",
+    "usage": "USE"
+  }
+}

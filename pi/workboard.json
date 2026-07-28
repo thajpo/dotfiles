@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "artifactRoot": ".agent/tasks",
+  "scoutModel": "deepseek/deepseek-v4-flash:high",
+  "implementModel": "deepseek/deepseek-v4-flash:high",
+  "maxContractBytes": 65536
+}

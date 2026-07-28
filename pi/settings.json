@@ -1,0 +1,58 @@
+{
+  "lastChangelogVersion": "0.82.1",
+  "theme": "tokyo-night-pi",
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.6-luna",
+  "defaultThinkingLevel": "high",
+  "enabledModels": [
+    "openai-codex/gpt-5.6-luna:high",
+    "openai-codex/gpt-5.6-sol:high",
+    "openai-codex/gpt-5.6-sol:max",
+    "deepseek/deepseek-v4-flash:high"
+  ],
+  "defaultProjectTrust": "ask",
+  "enableInstallTelemetry": false,
+  "enableAnalytics": false,
+  "steeringMode": "one-at-a-time",
+  "followUpMode": "one-at-a-time",
+  "packages": [
+    "npm:pi-side-agents@1.1.3",
+    "npm:pi-btw@0.4.1",
+    "npm:@aliou/pi-processes@0.9.4",
+    "npm:@narumitw/pi-plan-mode@0.31.0",
+    "npm:@narumitw/pi-lsp@0.32.0",
+    "npm:pi-vim@0.14.1",
+    "npm:pisesh@0.1.12",
+    "npm:@aliou/pi-guardrails@0.16.0",
+    "npm:@narumitw/pi-statusline@0.31.0",
+    "npm:@narumitw/pi-usage@0.31.0",
+    "npm:@narumitw/pi-github-pr@0.31.0",
+    "npm:pi-notify-agent@0.1.2",
+    "npm:pi-nvim@0.2.4",
+    "npm:@tifan/pi-fixed-editor@0.2.5"
+  ],
+  "extensions": [],
+  "skills": [],
+  "prompts": [],
+  "themes": [],
+  "hideThinkingBlock": true,
+  "piVim": {
+    "clipboardMirror": "yank",
+    "exCommand": {
+      "piDispatch": true,
+      "copyInputToClipboard": false
+    },
+    "borderSync": {
+      "insert": "host",
+      "normal": "thinking",
+      "visual": "mode",
+      "ex": "mode"
+    },
+    "labelSync": {
+      "insert": "mode",
+      "normal": "mode",
+      "visual": "mode",
+      "ex": "mode"
+    }
+  }
+}

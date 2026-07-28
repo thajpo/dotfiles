@@ -168,6 +168,22 @@ Core loop:
 ## What's Included
 
 ### Tmux
+
+The tmux status line includes Voxtype recording and microphone health:
+
+- `🎤 CHECK` means a recording started and the watchdog is waiting for signal.
+- `🎤 REC` means a real microphone signal was detected.
+- `⚠ MIC` means no usable signal arrived within three seconds. The warning
+  persists after recording stops, and a critical desktop notification and
+  error sound are also emitted.
+
+The watchdog reads Voxtype's local audio-level socket; it does not save audio.
+It ignores the first second (so the startup beep cannot produce a false pass),
+then requires sustained signal before the three-second deadline. Its default
+threshold is `-55 dBFS`. Override calibration with
+`VOXTYPE_MIC_GRACE_SECONDS`, `VOXTYPE_MIC_IGNORE_SECONDS`,
+`VOXTYPE_MIC_REQUIRED_SIGNAL_FRAMES`, and `VOXTYPE_MIC_MIN_DBFS`.
+
 - **Ctrl-a** prefix
 - Vim-style navigation
 - Session persistence (survives reboot)
@@ -177,6 +193,12 @@ Core loop:
 ### Neovim
 - LazyVim base config
 - Syncs to `~/.config/nvim`
+
+### Pi
+- Reproducible Pi CLI version and pinned extension package manifests
+- Local extensions, prompts, theme, statusline, LSP, plan-mode, review, and workboard configuration
+- Installs to `~/.pi/agent` without tracking credentials, sessions, or runtime state
+- Keeps completion desktop notifications but disables completion sounds by default
 
 ### Tools installed
 - **gitmux** - git status in tmux

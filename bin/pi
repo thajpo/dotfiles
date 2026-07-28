@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Keep pi-notify-agent desktop notifications while suppressing completion sounds.
+# An explicit --notify-sound value still wins for one-off tests or debugging.
+for arg in "$@"; do
+  if [[ "$arg" == "--notify-sound" || "$arg" == --notify-sound=* ]]; then
+    break
+  fi
+done
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+self_path=$(realpath "$self_dir/$(basename -- "${BASH_SOURCE[0]}")")
+old_ifs=$IFS
+IFS=:
+for entry in $PATH; do
+  [[ -n "$entry" ]] || entry="."
+  candidate="$entry/pi"
+  [[ -x "$candidate" ]] || continue
+  [[ "$(realpath "$candidate")" == "$self_path" ]] && continue
+  IFS=$old_ifs
+  for arg in "$@"; do
+    if [[ "$arg" == "--notify-sound" || "$arg" == --notify-sound=* ]]; then
+      exec "$candidate" "$@"
+    fi
+  done
+  exec "$candidate" --notify-sound off "$@"
+done
+IFS=$old_ifs
+printf 'pi: no underlying pi executable found in PATH\n' >&2
+exit 127

@@ -1,3 +1,7 @@
 skills/.system/**/__pycache__/
 skills/.system/**/*.pyc
+**/__pycache__/
+**/*.pyc
 **/.DS_Store
+pi/npm/node_modules/
+pi/npm/*.log

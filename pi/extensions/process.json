@@ -1,0 +1,22 @@
+{
+  "processList": {
+    "maxVisibleProcesses": 8,
+    "maxPreviewLines": 12
+  },
+  "output": {
+    "defaultTailLines": 80,
+    "maxOutputLines": 200
+  },
+  "widget": {
+    "showStatusWidget": false,
+    "dockDefaultState": "collapsed",
+    "dockHeight": 12
+  },
+  "follow": {
+    "enabledByDefault": true,
+    "autoHideOnFinish": true
+  },
+  "interception": {
+    "blockBackgroundCommands": true
+  }
+}

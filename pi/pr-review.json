@@ -1,0 +1,22 @@
+{
+  "tiers": {
+    "light": "openrouter/deepseek/deepseek-v4-flash:high",
+    "medium": "openai-codex/gpt-5.6-luna:high",
+    "heavy": "openai-codex/gpt-5.6-sol:high"
+  },
+  "thinkingLevels": {
+    "light": "high",
+    "medium": "high",
+    "heavy": "high"
+  },
+  "toolPolicies": {
+    "light": "none",
+    "medium": "none",
+    "heavy": "none"
+  },
+  "tools": [],
+  "autoPostReviews": false,
+  "allowStalePublish": false,
+  "allowStaleApprovals": false,
+  "approveMaxPriorityLevel": "off"
+}

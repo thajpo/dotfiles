@@ -1,0 +1,10 @@
+{
+  "tools": [
+    "chrome_devtools_list_pages",
+    "chrome_devtools_select_page",
+    "chrome_devtools_navigate",
+    "chrome_devtools_evaluate",
+    "chrome_devtools_screenshot"
+  ],
+  "updatedAt": 1785111447000
+}
