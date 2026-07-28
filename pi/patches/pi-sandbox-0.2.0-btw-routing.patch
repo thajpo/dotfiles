@@ -1,6 +1,6 @@
 --- a/index.ts
 +++ b/index.ts
-@@ -2549,6 +2549,7 @@
+@@ -2552,6 +2552,7 @@
  	pi.registerFlag("sandbox-env", { description: "Comma-separated host env vars to pass into sandbox commands", type: "string" });
  
  	const sandbox = new ContainerSandbox(pi);
@@ -8,7 +8,7 @@
  
  	function routedTool<TParams extends TSchema, TDetails>(
  		localFactory: (cwd: string) => ToolDefinition<TParams, TDetails>,
-@@ -2662,6 +2663,43 @@
+@@ -2665,6 +2666,43 @@
  		};
  	}
  
@@ -52,7 +52,7 @@
  	function reviewResourceLoader(systemPrompt: string): ResourceLoader {
  		const runtime = createExtensionRuntime();
  		return {
-@@ -3004,6 +3042,7 @@
+@@ -3007,6 +3045,7 @@
  	});
  
  	pi.on("session_start", async (_event, ctx) => {
@@ -60,7 +60,7 @@
  		sandbox.workspace.configure(ctx);
  		sandbox.workspace.restoreGitRefState(ctx);
  		await sandbox.workspace.preflight(ctx);
-@@ -3029,6 +3068,7 @@
+@@ -3032,6 +3071,7 @@
  	});
  
  	pi.on("before_agent_start", async (event, ctx) => {
@@ -68,7 +68,7 @@
  		sandbox.workspace.configure(ctx);
  		if (!sandbox.workspace.isEnabled()) return;
  		await sandbox.workspace.preflight(ctx);
-@@ -3091,10 +3131,12 @@
+@@ -3094,10 +3134,12 @@
  	});
  
  	pi.on("session_shutdown", async (_event, ctx) => {
