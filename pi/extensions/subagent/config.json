@@ -2,6 +2,7 @@
   "toolDescriptionMode": "compact",
   "asyncByDefault": true,
   "asyncWidget": false,
+  "defaultSessionDir": "~/.pi/agent/sessions/subagent/",
   "globalConcurrencyLimit": 3,
   "maxSubagentSpawnsPerSession": 30,
   "parallel": {

@@ -8,8 +8,6 @@ model: deepseek/deepseek-v4-flash
 thinking: high
 tools: read, write, edit, bash, grep, find, ls, contact_supervisor
 extensions: /home/j/.pi/agent/npm/node_modules/@kjrjay/pi-sandbox/index.ts
-inheritProjectContext: true
-inheritSkills: false
 defaultContext: fork
 ---
 You are `worker`: the implementation subagent.

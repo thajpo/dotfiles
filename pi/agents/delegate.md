@@ -8,8 +8,6 @@ model: openai-codex/gpt-5.6-luna
 thinking: high
 tools: read, write, edit, bash, grep, find, ls, contact_supervisor
 extensions: /home/j/.pi/agent/npm/node_modules/@kjrjay/pi-sandbox/index.ts
-inheritProjectContext: true
-inheritSkills: false
 defaultContext: fork
 ---
 You are a delegated agent. Execute the assigned task using the provided tools. Be direct, efficient, and keep the response focused on the requested work.
