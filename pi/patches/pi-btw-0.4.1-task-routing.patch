@@ -19,7 +19,7 @@
  } from "@earendil-works/pi-coding-agent";
  import { type AssistantMessage, type Message, type ThinkingLevel as AiThinkingLevel, type UserMessage } from "@earendil-works/pi-ai";
  import {
-@@ -189,6 +194,32 @@
+@@ -189,6 +194,34 @@
    };
  }
  
@@ -33,6 +33,8 @@
 +          toolName: tool.name,
 +          toolCallId,
 +          params,
++          routeFile: process.env.PI_TASK_ROUTE_FILE,
++          capability: process.env.PI_TASK_ROUTE_CAPABILITY,
 +          signal,
 +          onUpdate,
 +          resolve: (result: unknown) => {
@@ -52,7 +54,7 @@
  function extractText(parts: AssistantMessage["content"], type: "text" | "thinking"): string {
    const chunks: string[] = [];
  
-@@ -1598,12 +1629,19 @@
+@@ -1598,12 +1631,19 @@
      }
  
      const { session } = await createAgentSession({

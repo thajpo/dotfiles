@@ -1,124 +1,408 @@
 # Global Pi engineering workflow
 
-## Core principle
+## Core operating principle
 
-Use agents to make understanding, implementation, and verification more thorough without turning the human into a reviewer of endless duplicated work.
+Use agents to improve understanding, implementation, and verification without
+turning the human into a reviewer of endless duplicated work.
 
-> Diverge on understanding. Converge on the plan. Implement once. Diverge on verification.
+The default loop is:
+
+> Diverge on understanding. Converge on the plan. Implement once. Diverge on
+> verification.
+
+Also:
 
 > Durable intent, disposable attempts, severe evidence.
 
-Spend human attention on meaning, model tokens on search, and machine compute on rejection.
+Spend human attention on meaning, model tokens on search, and machine compute on
+rejection.
 
-## Models and roles
+## Models
 
-The main Pi session is the persistent Luna High parent and liaison.
+Default routing:
 
-- Parent and normal planner: `openai-codex/gpt-5.6-luna:high`
-- Fast scout, context gathering, test discovery, and bounded worker: `deepseek/deepseek-v4-flash:high`
-- Normal reviewer and integrator: `openai-codex/gpt-5.6-luna:high`
-- Oracle, architecture, difficult debugging, research uncertainty, numerical decisions, concurrency, compatibility, security, and high-risk review: `openai-codex/gpt-5.6-sol:high`
+- Parent and planner:
+  `openai-codex/gpt-5.6-luna:high`
 
-Use `pi-subagents` as the only coding-agent orchestrator. Sol Max is not routine. `/btw` remains an interactive side-question channel and does not own implementation or final decisions unless explicitly assigned.
+- Fast scout, code mapping, test discovery, and bounded worker:
+  `deepseek/deepseek-v4-flash:high`
 
-FirstMate, treehouse, pi-side-agents, and Workboard are dormant or removed. Do not install jj, swarm/team frameworks, vector memory, always-on autonomous review loops, or duplicate launcher families.
+- Normal integration and review:
+  `openai-codex/gpt-5.6-luna:high`
 
-## Parallelism and workflow
+- Architecture, difficult debugging, research uncertainty, public interfaces,
+  schemas, migration, concurrency, numerical behavior, compatibility, security,
+  and high-risk final review:
+  `openai-codex/gpt-5.6-sol:high`
 
-Parallel research across projects is allowed; unrelated active integration frontiers are not. Normally use at most two investigative/review agents, one implementation writer, and three children total. Use multiple implementations only when alternatives are genuinely uncertain and evaluation is cheap and objective.
+Use Sol because consequential uncertainty remains, not merely because a task is
+large.
 
-For nontrivial work:
+Use pi-subagents as the coding-agent orchestrator.
 
-1. Clarify intended behavior and what must remain unchanged.
-2. Use fresh impact and minimum-change scouts when useful; add a test/risk mapper for risky work.
-3. Luna reconciles reports and records the task contract.
-4. Ask Sol about consequential architecture, security, compatibility, numerical, concurrency, or research decisions.
-5. Run a fresh plan critic.
-6. Normally use exactly one implementation worker.
-7. Independently execute acceptance commands and inspect changed paths.
-8. Use fresh reviewers for correctness, security, tests, scope, and unnecessary complexity.
-9. The human reviews the final surviving diff.
-10. Nothing pushes, publishes, deploys, merges a remote PR, or changes production without explicit user intent.
+Keep pi-btw available.
 
-The contract covers intended behavior, unchanged behavior, interfaces and schemas, state and permissions, numerical and performance budgets, compatibility, allowed paths, failure behavior, acceptance commands, edge cases, unresolved decisions, and escalation conditions. If tests, traces, profilers, code, or candidate analyses disagree, investigate the disagreement and improve the contract or evidence rather than averaging it away.
+Do not invoke FirstMate, treehouse, pi-side-agents, Workboard, jj, or another
+orchestrator unless the user explicitly changes this policy.
+
+## Workspace mode
+
+The host harness chooses the workspace mode before the model starts.
+
+The model must not choose, broaden, or alter repository trust.
+
+### Trusted-live
+
+Trusted-live is used for repositories authored and trusted by the user.
+
+The assigned host Git worktree and required Git metadata are mounted read/write
+into one task container.
+
+Changes are live:
+
+- host edits are visible to agents;
+- agent edits are visible to the host;
+- local Git operations update the host repository immediately.
+
+The agent may fully modify or corrupt the assigned repository and its Git
+metadata. That is accepted.
+
+The agent must not receive access to unrelated host paths, credentials, runtime
+sockets, or host process control.
+
+### Isolated
+
+Isolated mode is used for external, unknown, or suspicious repositories.
+
+The repository remains in a private container workspace. Host Git metadata and
+the active host checkout are not mounted. Results publish only to an isolated
+branch.
+
+Unknown repositories default to isolated.
+
+### Host mode
+
+`pi-host` is an explicit unsandboxed normal-user maintenance mode.
+
+It is not the default coding mode.
+
+Do not silently switch into host mode.
+
+## Task and agent topology
+
+One normal task owns:
+
+- one workspace;
+- one branch;
+- one task container.
+
+The parent and collaborating subagents share that live task workspace.
+
+Fresh versus forked model context must not change the filesystem or container.
+
+Normally use:
+
+- up to two investigative or review agents;
+- one implementation writer;
+- three children total.
+
+Use separate worktrees and containers only for deliberately independent
+implementation candidates.
+
+Do not create multiple full implementations when there is no inexpensive way to
+compare them.
+
+## Default feature workflow
+
+For a nontrivial feature:
+
+1. Clarify the requested behavior.
+
+2. Run independent scouts when useful:
+
+   - Impact mapper:
+     identify affected files, services, interfaces, state, data flow, and tests.
+
+   - Minimum-change mapper:
+     identify the smallest correct change and what should remain untouched.
+
+   - Optional test/risk mapper:
+     identify failure cases, integration risks, regressions, and discriminating
+     tests.
+
+3. The Luna parent reconciles disagreements.
+
+4. Ask the Sol oracle when a consequential decision remains uncertain.
+
+5. Record the intended behavior, important boundaries, and acceptance evidence.
+
+6. Use a fresh critic for meaningful plans.
+
+7. Normally use one implementation worker.
+
+8. Independently run the important tests and inspect the actual changed paths.
+
+9. Use fresh reviewers for correctness, test quality, unnecessary complexity,
+   and plan deviations.
+
+10. Review the final surviving diff.
+
+## Task contract
+
+Before implementation, establish:
+
+- intended behavior;
+- behavior that must remain unchanged;
+- important interfaces and schemas;
+- state and persistence behavior;
+- authority and security boundaries;
+- numerical or performance expectations;
+- failure behavior;
+- expected change surface;
+- acceptance commands and examples;
+- important edge cases;
+- unresolved decisions requiring escalation.
+
+Do not silently weaken tests, redefine benchmarks, change public behavior, or
+expand scope to make an implementation pass.
+
+The contract can be wrong. Investigate disagreements among tests, code, traces,
+profilers, runtime behavior, and independent agents.
 
 ## Agent autonomy
 
-Inside the assigned sandbox, agents have broad normal engineering capabilities: read, write, edit, bash, grep, find, ls, tests, builds, package installation, diagnostics, profilers, formatters, local servers, and ordinary local Git including branch, commit, amend, rebase, merge, cherry-pick, reset, clean, reflog, and conflict resolution. Do not ask for routine command approvals.
+Inside the assigned workspace, agents may:
 
-Scouts may create reproducers, tests, instrumentation, and temporary diagnostic changes but must report every modification. Reviewers normally report findings before repairing them. Workers stop and contact the parent instead of guessing when a boundary, public interface, schema, migration, concurrency, security, numerical, compatibility, benchmark, or explicit non-goal decision is unresolved.
+- inspect and modify project files;
+- run shell commands;
+- install project dependencies;
+- run tests, builds, servers, debuggers, and profilers;
+- create diagnostics and temporary files;
+- use local Git, including branch, commit, amend, rebase, merge, cherry-pick,
+  reset, clean, reflog, and conflict resolution.
 
-Remote push/force-push, PR publication/comment/approval/merge, deployment, production mutation, and sending source or credentials to a new external service require explicit user intent.
+Do not request approval for routine project-local shell or Git operations.
 
-## Sandbox boundary
+A scout should normally avoid product changes but may create tests,
+instrumentation, reproducers, or diagnostic modifications when useful. It must
+report those changes.
 
-All model-callable file and shell operations execute inside the configured Docker sandbox. Sandbox failure is a hard failure; never silently fall back to host tools. The sandbox must not expose the host home, unrelated repositories, SSH/GPG files or agents, cloud credentials, browser profiles, Pi authentication, Docker/LXD sockets, host process control, broad host environment variables, or production credentials. Do not rely on command-name blacklists as the secret boundary; secrets are absent from the execution environment.
+A reviewer normally reports findings before repairing them unless explicitly
+asked to fix them.
 
-The active sandbox is `~/.pi/agent/extensions/pi-sandbox.json`, using the locally built pinned image and `target: sandbox`. It copies a local Git clone, keeps the trusted checked-out branch/worktree unchanged, publishes only to an isolated local sandbox branch, ignores host-untracked files, passes no host environment variables, and removes containers after checkpointing. Outbound network is allowed for ordinary dependency and documentation access. Docker is not a perfect hostile-code boundary. GPU access is not provided; do not silently run GPU work on the host.
+A worker must stop and contact the parent when:
+
+- an approved boundary must change;
+- an unexpected public interface or schema change is required;
+- existing tests contradict the agreed behavior;
+- a migration, concurrency, ownership, security, numerical, or compatibility
+  decision remains unresolved;
+- the benchmark or acceptance method appears invalid;
+- an explicit non-goal must be violated.
 
 ## Reports
 
-Use compact Markdown, not diaries or giant transcripts. Store full transcripts in session artifacts. Every difficult implementation produces a factual work log listing files, commands, tests, evidence, deviations, failed attempts, and remaining uncertainty.
+Use compact Markdown. Do not return a diary or dump the entire transcript.
 
 ### Impact mapper
 
-- Current behavior
-- Files and services involved
-- Interfaces, state, and data flow
-- Existing tests
-- Risks, assumptions, remaining uncertainty
+# Impact mapper
+
+## Current behavior
+
+## Files and services involved
+
+## Interfaces, state, and data flow
+
+## Existing tests
+
+## Risks
+
+## Assumptions
+
+## Remaining uncertainty
 
 ### Minimum-change mapper
 
-- Current behavior
-- Necessary changes
-- Things that should not change
-- Existing code to reuse
-- Tests, assumptions, remaining uncertainty
+# Minimum-change mapper
+
+## Current behavior
+
+## Necessary changes
+
+## Things that should not change
+
+## Existing code to reuse
+
+## Tests
+
+## Assumptions
+
+## Remaining uncertainty
 
 ### Test/risk mapper
 
-- Success and failure cases
-- Integration and regression risks
-- Proposed tests
-- Claims difficult to verify
-- Remaining uncertainty
+# Test/risk mapper
+
+## Success cases
+
+## Failure cases
+
+## Integration risks
+
+## Regression risks
+
+## Proposed tests
+
+## Claims that remain difficult to verify
+
+## Remaining uncertainty
 
 ### Plan critic
 
-- Verdict
-- Ambiguities and weak assumptions
-- Failure cases
-- Unnecessary complexity
-- Required corrections and missing tests
-- Remaining uncertainty
+# Plan critic
+
+## Verdict
+
+## Ambiguities
+
+## Incorrect or weak assumptions
+
+## Failure cases
+
+## Unnecessary complexity
+
+## Required corrections
+
+## Missing tests
+
+## Remaining uncertainty
 
 ### Worker work log
 
-- Initial hypothesis
-- Important files inspected and commands/tests run
-- Important discoveries and evidence
-- Files changed
-- Tests actually run with outcomes
-- Plan deviations and failed attempts
-- Remaining uncertainty
+# Worker work log
+
+## Initial hypothesis
+
+## Actions taken
+
+## Important discoveries
+
+## Files changed
+
+## Tests actually run
+
+## Plan deviations
+
+## Failed attempts
+
+## Remaining uncertainty
 
 ### Final reviewer
 
-Use `ACCEPT`, `REPAIR`, or `ESCALATE`, and report correctness, contract/boundary changes, test adequacy, unnecessary complexity, plan deviations, required actions, and remaining uncertainty.
+# Final reviewer
 
-## Context discipline
+## Verdict
 
-Independent agents begin with fresh context unless prior conversation is genuinely necessary. Do not give every reviewer the entire accumulated history. The normal final-review packet is the original request, approved behavior and boundaries, approved plan, final diff, independent test results, and worker deviations. Inject only useful summaries from BTW.
+Use one:
+
+- ACCEPT
+- REPAIR
+- ESCALATE
+
+## Correctness
+
+## Contract and boundary changes
+
+## Test adequacy
+
+## Unnecessary complexity
+
+## Plan deviations
+
+## Required actions
+
+## Remaining uncertainty
 
 ## Verification
 
-Do not trust a worker's claim that tests passed. Independently inspect committed, staged, unstaged, and untracked changes; changed paths relative to the agreed base; `git diff --check`; diagnostics; acceptance commands; benchmark methodology; and unexpected interfaces, schemas, state, permissions, dependencies, deployment, or compatibility changes. `scripts/pi-verify-change` is the mechanical final evidence gate and must reject out-of-scope files even when reviewer prose calls them harmless.
+Do not trust a worker's statement that tests passed.
 
-## Git and recovery
+The parent or verification runtime independently inspects:
 
-Use ordinary Git branches; do not introduce jj unless Git becomes a measured bottleneck. Agents may create candidate and integration branches. Do not automatically merge, push, publish, deploy, or modify the trusted checked-out branch. Preserve old side-agent branches, worktrees, reports, sessions, sandbox branches, recovery refs, and containers until their value is checked.
+- committed changes;
+- staged changes;
+- unstaged changes;
+- untracked files;
+- changed paths relative to the agreed base;
+- acceptance commands;
+- type checks and diagnostics where relevant;
+- benchmark methodology where relevant;
+- unexpected interface, schema, state, dependency, authority, or compatibility
+  changes.
+
+A reviewer result is evidence, not authority.
+
+A green test suite is not proof that the task contract was correct.
+
+## Code-review depth
+
+Do not line-review every rejected exploratory attempt.
+
+Review the final surviving change.
+
+Read more deeply when:
+
+- a public interface changes;
+- a schema or migration changes;
+- authority or permissions change;
+- state transitions or transaction boundaries change;
+- concurrency assumptions change;
+- numerical behavior changes;
+- benchmark definitions change;
+- evidence sources disagree;
+- performance lacks a plausible mechanism;
+- tests are weak;
+- the implementation is difficult to reverse or observe.
+
+Remain capable of descending into any implementation line when required.
+
+## Learning
+
+For difficult tasks, focus on:
+
+- which assumptions agents disagreed about;
+- which evidence discriminated between alternatives;
+- what changed the initial hypothesis;
+- why one design was selected;
+- when a rejected design would have been appropriate;
+- what test, benchmark, invariant, or design note should survive.
+
+## Version control
+
+Use Git and ordinary worktrees.
+
+Collaborating agents share one task worktree.
+
+Independent implementation candidates receive separate worktrees and branches.
+
+An integrated result is a new candidate and must be tested again.
+
+Do not introduce jj unless repeated splitting and recombination becomes a
+measured Git bottleneck.
+
+Local Git is autonomous.
+
+Authenticated remote push, publication, deployment, and production mutation
+require explicit user intent or an independently trusted host operation.
 
 ## Completion
 
-Before reporting completion, inspect the actual final diff and package inventory, independently rerun important verification, report exact commands and outcomes, name changed boundaries and remaining uncertainty, confirm no remote or production action occurred, and provide rollback commands. Human-facing output is one compact synthesis rather than raw reports and transcripts.
+Before reporting completion:
+
+- inspect the actual final diff;
+- rerun important verification independently;
+- report exact commands and outcomes;
+- report changed boundaries;
+- report remaining uncertainty;
+- confirm no unintended remote or production action occurred.

@@ -49,21 +49,14 @@ check_path "$HOME/.codex/skills" "$HOME/.skills"
 
 printf '\nCore commands\n'
 check_cmd git "required"
-check_cmd tmux "parallel visible agent sessions"
+check_cmd tmux "terminal session management"
 check_cmd gh "GitHub auth and PR workflow"
-check_cmd opencode "preferred harness"
+check_cmd pi "deterministic coding launcher"
+check_cmd pi-host "explicit unsandboxed maintenance launcher"
 
-printf '\nWorkflow tools\n'
-check_cmd treehouse "isolated reusable worktrees; install with: scripts/agent-workflow-install.sh --install-tools"
-check_cmd no-mistakes "validation and PR gate; install with: scripts/agent-workflow-install.sh --install-tools"
-check_cmd gnhf "bounded long-running loops; install with: scripts/agent-workflow-install.sh --install-tools"
-
-printf '\nFirstmate\n'
-if [ -d "$HOME/agent-workflows/firstmate/.git" ]; then
-  printf 'ok:      %s\n' "$HOME/agent-workflows/firstmate"
-else
-  printf 'missing: %s optional orchestrator repo; install with scripts/agent-workflow-install.sh --with-firstmate\n' "$HOME/agent-workflows/firstmate"
-fi
+printf '\nPi orchestration\n'
+printf 'policy:  pi-subagents is the only coding-agent orchestrator\n'
+printf 'policy:  FirstMate, treehouse, pi-side-agents, and Workboard are dormant/removed\n'
 
 printf '\nGitHub auth\n'
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then

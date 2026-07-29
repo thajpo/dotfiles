@@ -15,7 +15,8 @@ RUN apt-get update \
        procps less \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && useradd --create-home --shell /bin/bash sandbox \
-    && mkdir -p /home/sandbox/.local/bin /tmp/pi-home \
+    && mkdir -p /home/sandbox/.local/bin /tmp/pi-home /var/cache/pi-packages \
+    && chmod 1777 /var/cache/pi-packages \
     && chown -R sandbox:sandbox /home/sandbox /tmp/pi-home \
     && rm -rf /var/lib/apt/lists/*
 

@@ -67,13 +67,31 @@ apply_verified_patch \
   "$patch_dir/pi-subagents-0.35.1-resume-acceptance.patch"
 
 apply_verified_patch \
+  pi-subagents-task-worktrees \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/runs/shared/worktree.ts" \
+  0.35.1 \
+  ccbe23bc407b61dfa0bd3a9f5fb58a7fb065a8797413de5c2f00ebaca18fca9d \
+  54bfa158fa6e19f7696e1b918a7cd4d3026f74fdc6701f0bb5126a3571921d49 \
+  "$patch_dir/pi-subagents-0.35.1-task-worktrees.patch"
+
+apply_verified_patch \
+  pi-subagents-task-cwd \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/runs/foreground/subagent-executor.ts" \
+  0.35.1 \
+  bbdc07d40727b6799e56b4236cf10354a1e62b4aff40db1c47e3b56b8021dcbd \
+  f382fcf5bdc1bbbc2730ad5c1d37fb4d82b9655a8fc2ccbbb3895e33eb84c37f \
+  "$patch_dir/pi-subagents-0.35.1-task-cwd.patch"
+
+apply_verified_patch \
   pi-btw \
   "$agent_dir/npm/node_modules/pi-btw" \
   "$agent_dir/npm/node_modules/pi-btw/extensions/btw.ts" \
   0.4.1 \
   74f411f75b97af69bf8f6f5246dff8c7bfa3fa691d9a98004da7db83afa8f124 \
-  3057517dc086824faaa49cf2fd5889e9803dc1489475b0b943e8aee64065cc96 \
-  "$patch_dir/pi-btw-0.4.1-sandbox-routing.patch"
+  3aa25d6068224feea6da382d57d774bc7da8603c0767d752cfd64a1b8c17037a \
+  "$patch_dir/pi-btw-0.4.1-task-routing.patch"
 
 apply_verified_patch \
   pi-sandbox \
@@ -81,5 +99,5 @@ apply_verified_patch \
   "$agent_dir/npm/node_modules/@kjrjay/pi-sandbox/index.ts" \
   0.2.0 \
   fcc5244d55fb2853175b52f0befdb30debb57048b56c7f5fda5614f7450109f4 \
-  254271d29b7edacdb4612e0fbd91ed9a9b8fc0d256e211451b660154db2fe47c \
-  "$patch_dir/pi-sandbox-0.2.0-btw-routing.patch"
+  7252e2afbe184fa42374d901c9e2ca07c1a65af098dbe1dcfd0ce101737382d0 \
+  "$patch_dir/pi-sandbox-0.2.0-task-routing.patch"

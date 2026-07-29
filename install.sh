@@ -25,6 +25,7 @@ fi
 
 mkdir -p "$PI_CONFIG_DIR"
 backup_and_link "$SCRIPT_DIR/pi/settings.json" "$PI_CONFIG_DIR/settings.json"
+backup_and_link "$SCRIPT_DIR/agent/AGENTS.md" "$PI_CONFIG_DIR/AGENTS.md"
 for config in pi-chrome-devtools.json pi-plan-mode.json pi-statusline.json pr-review.json; do
     backup_and_link "$SCRIPT_DIR/pi/$config" "$PI_CONFIG_DIR/$config"
 done
@@ -37,9 +38,26 @@ cp "$SCRIPT_DIR/pi/npm/package.json" "$SCRIPT_DIR/pi/npm/package-lock.json" "$PI
 npm ci --prefix "$PI_CONFIG_DIR/npm" --legacy-peer-deps --no-audit --no-fund
 PI_CODING_AGENT_DIR="$PI_CONFIG_DIR" "$SCRIPT_DIR/scripts/pi-patch-subagents"
 
+POLICY_DIR="$HOME/.config/pi"
+POLICY_PATH="$POLICY_DIR/repository-policy.json"
+mkdir -p -m 700 "$POLICY_DIR" "$PI_CONFIG_DIR/generated"
+if [ -e "$POLICY_PATH" ] || [ -L "$POLICY_PATH" ]; then
+    [ ! -L "$POLICY_PATH" ] && [ -f "$POLICY_PATH" ] && [ -O "$POLICY_PATH" ] || {
+        echo "Refusing unsafe existing repository policy: $POLICY_PATH" >&2
+        exit 1
+    }
+    chmod 600 "$POLICY_PATH"
+    "$SCRIPT_DIR/scripts/pi-workspace.py" validate-policy "$POLICY_PATH" >/dev/null
+    echo "Preserved existing repository policy: $POLICY_PATH"
+else
+    install -m 600 "$SCRIPT_DIR/pi/repository-policy.json" "$POLICY_PATH"
+    echo "Installed repository policy: $POLICY_PATH"
+fi
+
 mkdir -p "$HOME/.local/bin"
 backup_and_link "$SCRIPT_DIR/bin/pi" "$HOME/.local/bin/pi"
-echo "Installed Pi ${PI_VERSION} configuration and silent completion wrapper"
+backup_and_link "$SCRIPT_DIR/bin/pi-host" "$HOME/.local/bin/pi-host"
+echo "Installed Pi ${PI_VERSION} configuration and deterministic launchers"
 
 echo "Installing tmux config..."
 
@@ -60,7 +78,7 @@ if command -v voxtype &> /dev/null && [ -f systemd/user/voxtype-mic-watchdog.ser
     echo "Installed Voxtype microphone watchdog"
 fi
 
-# Install shared agent workflow defaults for OpenCode, Claude Code, and Codex.
+# Install shared workflow files. Legacy orchestrators remain dormant.
 if [ -x scripts/agent-workflow-install.sh ]; then
     scripts/agent-workflow-install.sh
 fi

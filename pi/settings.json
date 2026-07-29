@@ -11,7 +11,7 @@
     "deepseek/deepseek-v4-flash:high",
     "deepseek/deepseek-v4-pro:high"
   ],
-  "defaultProjectTrust": "ask",
+  "defaultProjectTrust": "never",
   "enableInstallTelemetry": false,
   "enableAnalytics": false,
   "steeringMode": "one-at-a-time",

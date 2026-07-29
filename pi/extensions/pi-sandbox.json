@@ -1,7 +1,6 @@
 {
   "runtime": "docker",
   "image": "pi-tool-sandbox:node22-bookworm-20260728",
-  "target": "sandbox",
   "checkpointFrequency": "agent",
   "dockerPortMode": "dynamic",
   "dockerPortRange": "8000-8010",

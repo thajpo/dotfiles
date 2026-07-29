@@ -1,0 +1,805 @@
+--- a/index.ts
++++ b/index.ts
+@@ -27,9 +27,9 @@
+  *   --sandbox-env FOO,BAR                 Allowlist host env vars for tool commands
+  */
+ 
+-import { spawn } from "node:child_process";
++import { spawn, spawnSync } from "node:child_process";
+ import { createHash, randomBytes } from "node:crypto";
+-import { createWriteStream, existsSync, readFileSync } from "node:fs";
++import { createWriteStream, existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+ import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+ import path from "node:path";
+@@ -74,6 +74,33 @@
+ type CommitTarget = "sandbox" | "current";
+ type CheckpointFrequency = "turn" | "agent" | "settled";
+ type LifecycleMode = "remove" | "stopped" | "running";
++type WorkspaceMode = "trusted-live" | "isolated";
++
++interface TaskRoute {
++	version: 1;
++	task: string;
++	session: string;
++	mode: WorkspaceMode;
++	repository: string;
++	worktree: string;
++	branch: string;
++	startingOid: string;
++	gitCommonDir: string;
++	gitDir: string;
++	container: string;
++	ownerPid: number;
++	ownerStartTicks: string;
++	uid: number;
++	gid: number;
++	image: string;
++	worktreeRoot: string;
++	hostContext: string;
++	policyHash: string;
++	parentOwned: true;
++	capabilityHash: string;
++	createdAt: number;
++	controlPlane?: boolean;
++}
+ 
+ interface GitRefState {
+ 	sessionId: string;
+@@ -189,10 +216,13 @@
+ }
+ 
+ const DEFAULT_IMAGE = "pi-tool-sandbox:latest";
+-const GENERATED_SANDBOX_BRANCH_PREFIX = "pi-sandbox-";
++const GENERATED_SANDBOX_BRANCH_PREFIX = "pi-sandbox/";
+ const FALLBACK_COMMIT_PREFIX = "pi sandbox";
+ const DEFAULT_CAPTURE_BYTES = 16 * 1024 * 1024;
+ const PACKAGE_CACHE_ROOT = "/var/cache/pi-packages";
++const PACKAGE_CACHE_VOLUME = "pi-package-cache-v1";
++const TASK_ROUTE_ENV = "PI_TASK_ROUTE_FILE";
++const TASK_CAPABILITY_ENV = "PI_TASK_ROUTE_CAPABILITY";
+ const PACKAGE_CACHE_ENV: Record<string, string> = {
+ 	npm_config_cache: `${PACKAGE_CACHE_ROOT}/npm`,
+ 	npm_config_store_dir: `${PACKAGE_CACHE_ROOT}/pnpm`,
+@@ -242,10 +272,13 @@
+ }
+ 
+ interface ContainerInspectMount {
++	type?: string;
++	Type?: string;
+ 	source?: string;
+ 	destination?: string;
+ 	Source?: string;
+ 	Destination?: string;
++	RW?: boolean;
+ }
+ 
+ interface DockerPortBinding {
+@@ -276,6 +309,90 @@
+ 	return Array.from(new Set(values.filter(Boolean)));
+ }
+ 
++function isChildProcess(): boolean {
++	return process.env.PI_SUBAGENT_CHILD === "1";
++}
++
++function containedPath(root: string, candidate: string): boolean {
++	const relative = path.relative(path.resolve(root), path.resolve(candidate));
++	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
++}
++
++function processStartTicks(pid: number): string {
++	try {
++		return readFileSync(`/proc/${pid}/stat`, "utf8").split(/\s+/)[21] ?? "unavailable";
++	} catch {
++		return "unavailable";
++	}
++}
++
++function syncGit(cwd: string, args: string[]): string {
++	const result = spawnSync("git", args, {
++		cwd,
++		encoding: "utf8",
++		env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: process.env.HOME ?? "", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
++	});
++	if (result.status !== 0) throw new Error(result.stderr?.trim() || `git ${args.join(" ")} failed`);
++	return result.stdout.trim();
++}
++
++function routeForCwd(base: TaskRoute, cwd: string): TaskRoute {
++	const canonicalCwd = realpathSync(cwd);
++	if (containedPath(realpathSync(base.worktree), canonicalCwd)) return base;
++	if (!isChildProcess() || base.mode !== "trusted-live") throw new Error("Pi task route workspace mismatch");
++	const candidate = realpathSync(syncGit(canonicalCwd, ["rev-parse", "--show-toplevel"]));
++	if (candidate !== canonicalCwd || !containedPath(realpathSync(base.worktreeRoot), candidate)) throw new Error("Candidate worktree is outside the host-owned worktreeRoot");
++	const commonDir = realpathSync(syncGit(candidate, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
++	const gitDir = realpathSync(syncGit(candidate, ["rev-parse", "--path-format=absolute", "--git-dir"]));
++	const branch = syncGit(candidate, ["branch", "--show-current"]);
++	if (commonDir !== realpathSync(base.gitCommonDir) || !/^pi\/.+\/candidate-[1-9][0-9]*$/.test(branch)) {
++		throw new Error("Candidate Git metadata or branch does not match the parent task route");
++	}
++	const suffix = createHash("sha256").update(candidate).digest("hex").slice(0, 16);
++	return {
++		...base,
++		worktree: candidate,
++		branch,
++		startingOid: syncGit(candidate, ["rev-parse", "HEAD^{commit}"]),
++		gitCommonDir: commonDir,
++		gitDir,
++		container: `pi-candidate-${suffix}`,
++	};
++}
++
++function requireTaskRoute(): TaskRoute {
++	const routePath = process.env[TASK_ROUTE_ENV];
++	const capability = process.env[TASK_CAPABILITY_ENV];
++	if (!routePath || !capability) throw new Error("Missing host-owned Pi task route; refusing host fallback");
++	const metadata = lstatSync(routePath);
++	if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== process.getuid?.() || (metadata.mode & 0o077) !== 0) {
++		throw new Error("Pi task route must be a user-owned 0600 regular file");
++	}
++	const route = JSON.parse(readFileSync(routePath, "utf8")) as Partial<TaskRoute>;
++	const requiredStrings: Array<keyof TaskRoute> = [
++		"task", "session", "mode", "repository", "worktree", "branch", "startingOid", "gitCommonDir", "gitDir",
++		"container", "ownerStartTicks", "image", "worktreeRoot", "hostContext", "policyHash", "capabilityHash",
++	];
++	if (route.version !== 1 || requiredStrings.some((key) => typeof route[key] !== "string" || !route[key])) {
++		throw new Error("Malformed Pi task route");
++	}
++	if (route.mode !== "trusted-live" && route.mode !== "isolated") throw new Error("Invalid Pi task route mode");
++	if (!Number.isSafeInteger(route.ownerPid) || !Number.isSafeInteger(route.uid) || !Number.isSafeInteger(route.gid) || route.parentOwned !== true) {
++		throw new Error("Malformed Pi task route ownership");
++	}
++	if (createHash("sha256").update(capability).digest("hex") !== route.capabilityHash) throw new Error("Pi task route capability mismatch");
++	try { process.kill(route.ownerPid!, 0); } catch { throw new Error("Pi task route owner is no longer running"); }
++	if (route.ownerStartTicks !== "unavailable" && processStartTicks(route.ownerPid!) !== route.ownerStartTicks) {
++		throw new Error("Pi task route owner identity is stale");
++	}
++	if (route.uid !== process.getuid?.() || route.gid !== process.getgid?.()) throw new Error("Pi task route UID/GID mismatch");
++	if (Date.now() / 1000 - Number(route.createdAt ?? 0) > 7 * 24 * 60 * 60) throw new Error("Pi task route is stale");
++	for (const key of ["repository", "worktree", "gitCommonDir", "gitDir", "worktreeRoot", "hostContext"] as const) {
++		if (!path.isAbsolute(route[key]!)) throw new Error(`Pi task route ${key} must be absolute`);
++	}
++	return route as TaskRoute;
++}
++
+ function parseList(value: unknown): string[] | undefined {
+ 	if (Array.isArray(value)) return value.map(String).map((v) => v.trim()).filter(Boolean);
+ 	if (typeof value === "string") return value.split(",").map((v) => v.trim()).filter(Boolean);
+@@ -461,10 +578,13 @@
+ 	return parsed;
+ }
+ 
+-function loadConfig(cwd: string, projectTrusted: boolean, pi: ExtensionAPI): SandboxConfig {
++function loadConfig(_cwd: string, _projectTrusted: boolean, pi: ExtensionAPI): SandboxConfig {
++	// Repository content cannot alter workspace trust, publication, mounts, or
++	// environment. Only the user-scoped configuration is read.
+ 	const globalConfig = readJson(path.join(getAgentDir(), "extensions", "pi-sandbox.json"));
+-	const projectConfig = projectTrusted ? readJson(path.join(cwd, CONFIG_DIR_NAME, "pi-sandbox.json")) : {};
+-	const config = mergeConfig(mergeConfig(DEFAULT_CONFIG, globalConfig), projectConfig);
++	const config = mergeConfig(DEFAULT_CONFIG, globalConfig);
++	config.target = "sandbox";
++	config.passEnv = [];
+ 
+ 	const runtime = cliChoice(pi, "sandbox-runtime", ["container", "docker"] as const);
+ 	if (runtime !== undefined) config.runtime = runtime;
+@@ -474,8 +594,6 @@
+ 	if (dockerPortMode !== undefined) config.dockerPortMode = dockerPortMode;
+ 	const dockerPortRange = pi.getFlag("sandbox-docker-port-range");
+ 	if (dockerPortRange !== undefined) config.dockerPortRange = configPortRange(dockerPortRange, "--sandbox-docker-port-range");
+-	const targetFlag = pi.getFlag("sandbox-target");
+-	if (targetFlag !== undefined) config.target = configTarget(targetFlag, "--sandbox-target");
+ 	const checkpointFrequency = cliChoice(pi, "sandbox-checkpoint-frequency", ["turn", "agent", "settled"] as const);
+ 	if (checkpointFrequency !== undefined) config.checkpointFrequency = checkpointFrequency;
+ 	const gitCloneDepth = cliNonNegativeInteger(pi, "sandbox-git-clone-depth");
+@@ -484,9 +602,6 @@
+ 	if (installDeps !== undefined) config.installDeps = installDeps;
+ 	const lifecycle = cliChoice(pi, "sandbox-lifecycle", ["remove", "stopped", "running"] as const);
+ 	if (lifecycle !== undefined) config.lifecycle = lifecycle;
+-	const passEnvFlag = pi.getFlag("sandbox-env");
+-	if (passEnvFlag !== undefined) config.passEnv = configPassEnv(passEnvFlag, "--sandbox-env");
+-
+ 	return config;
+ }
+ 
+@@ -809,6 +924,7 @@
+ 	private config: SandboxConfig = DEFAULT_CONFIG;
+ 	private enabled = true;
+ 	private cwd = process.cwd();
++	private route: TaskRoute | undefined;
+ 	private containerName: string | undefined;
+ 	private starting: Promise<void> | undefined;
+ 	private depsInstalled = false;
+@@ -844,6 +960,16 @@
+ 		return this.config;
+ 	}
+ 
++	getMode(): WorkspaceMode {
++		if (!this.route) throw new Error("Pi task route is not configured");
++		return this.route.mode;
++	}
++
++	getRoute(): TaskRoute {
++		if (!this.route) throw new Error("Pi task route is not configured");
++		return this.route;
++	}
++
+ 	getGitRefState() {
+ 		return this.gitRefState;
+ 	}
+@@ -937,6 +1063,11 @@
+ 	}
+ 
+ 	restoreGitRefState(ctx: ExtensionContext) {
++		if (this.route) {
++			this.gitRefState = undefined;
++			this.pendingRebase = undefined;
++			return;
++		}
+ 		this.gitRefState = undefined;
+ 		this.pendingRebase = undefined;
+ 		const target = parseTarget(this.config.target, "target");
+@@ -961,9 +1092,11 @@
+ 	}
+ 
+ 	configure(ctx: ExtensionContext) {
++		this.route = routeForCwd(requireTaskRoute(), ctx.cwd);
+ 		this.cwd = ctx.cwd;
+-		this.config = loadConfig(ctx.cwd, ctx.isProjectTrusted(), this.pi);
+-		this.enabled = !this.pi.getFlag("no-sandbox");
++		this.config = loadConfig(ctx.cwd, false, this.pi);
++		this.config.image = this.route.image;
++		this.enabled = true;
+ 	}
+ 
+ 	private async runtimeExec(args: string[], options: ExecOptions = {}) {
+@@ -985,12 +1118,14 @@
+ 	}
+ 
+ 	private packageCacheHostRoot(): string {
+-		return path.join(getAgentDir(), "cache", "container-sandbox", "packages");
++		const route = this.getRoute();
++		const identity = createHash("sha256").update(route.mode === "isolated" ? route.task : route.repository).digest("hex").slice(0, 16);
++		return `${PACKAGE_CACHE_VOLUME}-${route.mode === "isolated" ? "task" : "repo"}-${identity}`;
+ 	}
+ 
+ 	private async ensurePackageCacheDirectories() {
+-		const root = this.packageCacheHostRoot();
+-		await Promise.all(["npm", "pnpm", "bun", "pip", "uv"].map((name) => mkdir(path.join(root, name), { recursive: true, mode: 0o700 })));
++		// Docker creates the named volume. It is initialized inside the task
++		// container and never exposes a general host cache path.
+ 	}
+ 
+ 	private async gitRepoRoot(): Promise<string | undefined> {
+@@ -1170,78 +1305,33 @@
+ 	}
+ 
+ 	private async ensureGitRefState(ctx?: ExtensionContext): Promise<GitRefState> {
+-		if (this.gitRefState) {
+-			const repoRoot = await this.gitRepoRoot();
+-			if (repoRoot !== this.gitRefState.repoRoot) throw new Error("Restored sandbox belongs to a different repository");
+-			await this.acquireTargetLock(this.gitRefState);
+-			try {
+-				await this.ensureHostSandboxRef(this.gitRefState);
+-				if (this.gitRefState.commitTarget === "current") await this.currentBranchHead(this.gitRefState);
+-				return this.gitRefState;
+-			} catch (error) {
+-				await this.releaseTargetLock();
+-				throw error;
+-			}
+-		}
+-		const sessionId = ctx?.sessionManager.getSessionId() ?? randomBytes(8).toString("hex");
+-		const defaultSessionKey = shortSessionKey(sessionId);
++		if (!this.route) throw new Error("Pi task route is not configured");
++		if (this.gitRefState) return this.gitRefState;
+ 		const repoRoot = await this.gitRepoRoot();
+-		if (!repoRoot) throw new Error("current directory is not inside a git repository");
+-		const baseCommit = await this.gitHead();
+-		if (!baseCommit) throw new Error("git repository has no commits yet (HEAD is unborn)");
+-
+-		const target = parseTarget(this.config.target, "target");
+-		let baseBranch: string;
+-		if (target.mode === "current") {
+-			const attached = await runGit(["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: repoRoot, timeoutMs: 10_000 });
+-			baseBranch = attached.code === 0 ? attached.stdout.toString().trim() : "";
+-			if (!baseBranch) throw new Error("current target requires an attached local branch");
+-		} else {
+-			baseBranch = await this.gitBranchName(baseCommit);
+-		}
+-
+-		const branchName = safeName(baseBranch.replace(/\//g, "-"), "branch");
+-		const commitTarget = target.mode;
+-		let sessionKey: string;
+-		let sandboxRef: string;
+-		let sandboxBranch: string;
+-		if (commitTarget === "current") {
+-			sessionKey = defaultSessionKey;
+-			sandboxRef = `refs/heads/${baseBranch}`;
+-			sandboxBranch = `pi-current/${branchName}`;
+-		} else if (target.branchName) {
+-			sessionKey = createHash("sha256").update(target.branchName).digest("hex").slice(0, 16);
+-			sandboxRef = namedSandboxBranchRef(target.branchName);
+-			sandboxBranch = `pi-sandbox/${sessionKey}`;
+-		} else {
+-			sessionKey = defaultSessionKey;
+-			sandboxRef = generatedSandboxBranchRef(sessionKey);
+-			sandboxBranch = `pi-sandbox/${sessionKey}`;
++		if (!repoRoot || realpathSync(repoRoot) !== realpathSync(this.route.worktree)) {
++			throw new Error("Task route workspace does not match the Pi working directory");
+ 		}
+-		const containerName = sandboxContainerName(repoRoot, sandboxRef);
+-
++		const sessionId = this.route.session;
++		const sessionKey = shortSessionKey(sessionId);
++		const baseCommit = this.route.startingOid;
++		const baseBranch = this.route.branch;
++		const sandboxRef = generatedSandboxBranchRef(sessionKey);
+ 		const state: GitRefState = {
+ 			sessionId,
+ 			sessionKey,
+-			target: this.config.target,
++			target: this.route.mode === "trusted-live" ? "trusted-live" : "sandbox",
+ 			baseBranch,
+ 			baseCommit,
+ 			sandboxRef,
+-			containerName,
+-			sandboxBranch,
++			containerName: this.route.container,
++			sandboxBranch: `pi-sandbox/${sessionKey}`,
+ 			repoRoot,
+-			commitTarget,
++			commitTarget: "sandbox",
+ 		};
+-		await this.acquireTargetLock(state);
+-		try {
+-			await this.ensureHostSandboxRef(state);
+-			this.gitRefState = state;
+-			this.pi.appendEntry("container-sandbox.git-ref-state", state);
+-			return state;
+-		} catch (error) {
+-			await this.releaseTargetLock();
+-			throw error;
+-		}
++		if (this.route.mode === "isolated") await this.ensureHostSandboxRef(state);
++		this.gitRefState = state;
++		if (!isChildProcess()) this.pi.appendEntry("container-sandbox.git-ref-state", state);
++		return state;
+ 	}
+ 
+ 	private async assertSandboxBranchNotCheckedOut(state: GitRefState) {
+@@ -1282,11 +1372,20 @@
+ 		this.preflightError = undefined;
+ 		if (!this.isEnabled()) return;
+ 		try {
++			if (!this.route) throw new Error("Pi task route is not configured");
++			const cwd = realpathSync(ctx.cwd);
++			const routedWorktree = realpathSync(this.route.worktree);
++			if (!containedPath(routedWorktree, cwd)) throw new Error(`Task route workspace mismatch: ${cwd} is outside ${routedWorktree}`);
+ 			const repoRoot = await this.gitRepoRoot();
+-			if (!repoRoot) throw new Error("current directory is not inside a git repository");
++			if (!repoRoot || realpathSync(repoRoot) !== routedWorktree) throw new Error("current directory is not the routed Git worktree");
+ 			const head = await this.gitHead();
+ 			if (!head) throw new Error("git repository has no commits yet (HEAD is unborn)");
+-			await this.ensureCleanHostTrackedFiles();
++			const commonDir = (await runGitChecked(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: repoRoot })).stdout.toString().trim();
++			const gitDir = (await runGitChecked(["rev-parse", "--path-format=absolute", "--git-dir"], { cwd: repoRoot })).stdout.toString().trim();
++			if (realpathSync(commonDir) !== realpathSync(this.route.gitCommonDir) || realpathSync(gitDir) !== realpathSync(this.route.gitDir)) {
++				throw new Error("Task route Git metadata mismatch");
++			}
++			if (this.route.mode === "isolated") await this.ensureCleanHostTrackedFiles();
+ 		} catch (error) {
+ 			const message = error instanceof Error ? error.message : String(error);
+ 			this.preflightError = message;
+@@ -1300,15 +1399,11 @@
+ 	}
+ 
+ 	async reserveTarget(ctx: ExtensionContext): Promise<string | undefined> {
++		// The capability-bound task route is the ownership lock. Collaborating
++		// children intentionally share it and must never contend on a branch lock.
+ 		this.targetLockError = undefined;
+-		try {
+-			await this.ensureGitRefState(ctx);
+-			return undefined;
+-		} catch (error) {
+-			if (!(error instanceof TargetLockOwnedError)) throw error;
+-			this.targetLockError = error.message;
+-			return error.message;
+-		}
++		await this.ensureGitRefState(ctx);
++		return undefined;
+ 	}
+ 
+ 	getTargetLockStatus() {
+@@ -1329,9 +1424,16 @@
+ 	}
+ 
+ 	private reusableContainerConfig(): Record<string, unknown> {
++		const route = this.getRoute();
+ 		const config: Record<string, unknown> = {
+ 			image: this.config.image,
+ 			packageCache: this.packageCacheHostRoot(),
++			mode: route.mode,
++			worktree: route.worktree,
++			gitCommonDir: route.gitCommonDir,
++			gitDir: route.gitDir,
++			uid: route.uid,
++			gid: route.gid,
+ 		};
+ 		if (this.config.runtime === "docker") {
+ 			config.dockerPortMode = this.config.dockerPortMode;
+@@ -1348,7 +1450,9 @@
+ 		return {
+ 			"pi.container-sandbox.managed": "true",
+ 			"pi.container-sandbox.repo": this.repoIdentity(state.repoRoot),
+-			"pi.container-sandbox.target": state.commitTarget,
++			"pi.container-sandbox.target": this.getMode(),
++			"pi.container-sandbox.task": this.getRoute().task,
++			"pi.container-sandbox.owner": String(this.getRoute().ownerPid),
+ 			"pi.container-sandbox.ref": createHash("sha256").update(state.sandboxRef).digest("hex").slice(0, 16),
+ 			"pi.container-sandbox.config": createHash("sha256")
+ 				.update(JSON.stringify(this.reusableContainerConfig()))
+@@ -1357,6 +1461,22 @@
+ 		};
+ 	}
+ 
++	private trustedBindSources(): string[] {
++		const route = this.getRoute();
++		if (route.mode !== "trusted-live") return [];
++		const sources = [realpathSync(route.worktree)];
++		for (const candidate of [route.gitCommonDir, route.gitDir].map((value) => realpathSync(value))) {
++			if (!sources.some((source) => containedPath(source, candidate))) sources.push(candidate);
++		}
++		return uniq(sources);
++	}
++
++	private trustedBindArgs(): string[] {
++		return this.trustedBindSources().flatMap((source) => [
++			"--mount", `type=bind,src=${source},dst=${source},rw,bind-propagation=rprivate`,
++		]);
++	}
++
+ 	private async inspectContainer(name: string): Promise<ContainerInspectData> {
+ 		const inspected = await this.runtimeExecChecked(["inspect", name], { timeoutMs: 30_000, maxCaptureBytes: 2 * 1024 * 1024 });
+ 		if (inspected.stdoutTruncated) throw new Error(`Container metadata is too large to validate: ${name}`);
+@@ -1381,11 +1501,22 @@
+ 			throw new Error(`Existing sandbox container ${name} uses image ${image ?? "(unknown)"}, expected ${this.config.image}; preserve or remove it before retrying`);
+ 		}
+ 		const mounts = appleConfig?.mounts ?? item?.Mounts ?? [];
+-		const expectedCache = path.resolve(this.packageCacheHostRoot());
+ 		const cacheMount = mounts.find((mount) => (mount?.destination ?? mount?.Destination) === PACKAGE_CACHE_ROOT);
+-		const cacheSource = cacheMount?.source ?? cacheMount?.Source;
+-		if (!cacheMount || path.resolve(String(cacheSource ?? "")) !== expectedCache) {
+-			throw new Error(`Existing sandbox container ${name} does not have the expected package-cache bind mount; preserve or remove it before retrying`);
++		if (!cacheMount || (cacheMount.type ?? cacheMount.Type) === "bind") {
++			throw new Error(`Existing sandbox container ${name} does not have the expected package-cache named volume; preserve or remove it before retrying`);
++		}
++		const route = this.getRoute();
++		const bindMounts = mounts.filter((mount) => (mount.type ?? mount.Type) === "bind");
++		const expectedBinds = this.trustedBindSources().map((source) => path.resolve(source));
++		const contextSource = path.resolve(route.hostContext);
++		for (const mount of bindMounts) {
++			const source = path.resolve(String(mount.source ?? mount.Source ?? ""));
++			if (source !== contextSource && !expectedBinds.includes(source)) throw new Error(`Existing sandbox container ${name} exposes unexpected host bind ${source}`);
++		}
++		if (route.mode === "trusted-live") {
++			for (const source of expectedBinds) {
++				if (!bindMounts.some((mount) => path.resolve(String(mount.source ?? mount.Source ?? "")) === source)) throw new Error(`Existing sandbox container ${name} is missing trusted-live bind ${source}`);
++			}
+ 		}
+ 		const labels = (appleConfig?.labels ?? dockerConfig?.Labels ?? item?.Labels ?? {}) as Record<string, string>;
+ 		if (labels["pi.container-sandbox.managed"] === "true") {
+@@ -1438,6 +1569,17 @@
+ 	private async prepareGitRefWorkspace(ctx?: ExtensionContext) {
+ 		if (!this.containerName) throw new Error("Sandbox container is not running");
+ 		const state = await this.ensureGitRefState(ctx);
++		if (this.getMode() === "trusted-live") {
++			if (!(await this.containerHasGitRepo(state.repoRoot))) throw new Error("Trusted-live bind is not a usable Git worktree inside the container");
++			const [commonDir, gitDir] = await Promise.all([
++				this.runtimeExecChecked(["exec", "-w", state.repoRoot, this.containerName, "git", "rev-parse", "--path-format=absolute", "--git-common-dir"]),
++				this.runtimeExecChecked(["exec", "-w", state.repoRoot, this.containerName, "git", "rev-parse", "--path-format=absolute", "--git-dir"]),
++			]);
++			if (commonDir.stdout.toString().trim() !== this.getRoute().gitCommonDir || gitDir.stdout.toString().trim() !== this.getRoute().gitDir) {
++				throw new Error("Trusted-live Git metadata mounts do not match the task route");
++			}
++			return;
++		}
+ 		const identity = (await this.runtimeExecChecked(["exec", this.containerName, "sh", "-c", "printf '%s:%s' \"$(id -u)\" \"$(id -g)\""])).stdout
+ 			.toString()
+ 			.trim();
+@@ -1572,22 +1714,30 @@
+ 			return;
+ 		}
+ 
++		const route = this.getRoute();
+ 		await this.runtimeExecChecked([
+ 			"create",
+ 			"--name",
+ 			targetName,
+ 			...Object.entries(this.containerLabels(state)).flatMap(([key, value]) => ["--label", `${key}=${value}`]),
+ 			...this.dockerPublishArgs(),
++			...(this.config.runtime === "docker"
++				? [
++					"--user", `${route.uid}:${route.gid}`,
++					"--cap-drop", "ALL",
++					"--security-opt", "no-new-privileges:true",
++					"--tmpfs", `/tmp/pi-home:rw,nosuid,nodev,mode=0700,uid=${route.uid},gid=${route.gid}`,
++				]
++				: []),
+ 			...(this.config.runtime === "docker" && this.config.hostGateway
+ 				? ["--add-host", `${this.config.hostGateway}:host-gateway`]
+ 				: []),
+-			"-e",
+-			"HOME=/tmp/pi-home",
+-			"-e",
+-			"CI=1",
++			...this.trustedBindArgs(),
++			"--mount", `type=bind,src=${route.hostContext},dst=/run/pi/HOST_CONTEXT.md,ro,bind-propagation=rprivate`,
++			"--mount", `type=volume,src=${this.packageCacheHostRoot()},dst=${PACKAGE_CACHE_ROOT}`,
++			"-e", "HOME=/tmp/pi-home",
++			"-e", "CI=1",
+ 			...Object.entries(PACKAGE_CACHE_ENV).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
+-			"-v",
+-			`${this.packageCacheHostRoot()}:${PACKAGE_CACHE_ROOT}`,
+ 			this.config.image,
+ 			"sleep",
+ 			"infinity",
+@@ -2019,7 +2169,9 @@
+ 	}
+ 
+ 	private async checkpointGitRefUnlocked(ctx?: ExtensionContext): Promise<GitRefCheckpointResult> {
+-		if (!this.isEnabled()) throw new Error("Sandbox is disabled by --no-sandbox");
++		if (!this.isEnabled()) throw new Error("Sandbox is disabled");
++		if (this.getMode() === "trusted-live") return { committed: false, imported: false, message: "Trusted-live changes are already visible; no checkpoint or import was performed" };
++		if (isChildProcess()) throw new Error("Collaborating children cannot checkpoint or publish the parent task");
+ 		if (this.pendingRebase) throw new Error("Sandbox rebase is pending; complete or abort it before checkpointing");
+ 		await this.ensure(ctx);
+ 		const state = await this.ensureGitRefState(ctx);
+@@ -2271,6 +2423,7 @@
+ 	}
+ 
+ 	async rebaseHost(ctx?: ExtensionContext): Promise<RebaseResult> {
++		if (this.getMode() === "trusted-live") throw new Error("Use ordinary Git directly in trusted-live mode; no promotion rebase exists");
+ 		if (parseTarget(this.config.target, "target").mode === "current") return this.rebaseCurrentBranch(ctx);
+ 		await this.ensure(ctx);
+ 		if (this.pendingRebase) return this.rebaseStatus();
+@@ -2418,12 +2571,13 @@
+ 	}
+ 
+ 	async assertReadyForAgentTurn() {
++		if (this.getMode() === "trusted-live") return;
+ 		const state = this.gitRefState;
+ 		if (state?.commitTarget === "current") await this.assertCurrentBranchBaseline(state, state.baseCommit);
+ 	}
+ 
+ 	async autoCheckpointSandboxChanges(ctx?: ExtensionContext) {
+-		if (!this.isEnabled() || this.pendingRebase) return;
++		if (!this.isEnabled() || this.pendingRebase || this.getMode() === "trusted-live" || isChildProcess()) return;
+ 		try {
+ 			const result = await this.checkpointGitRef(ctx);
+ 			if (result.committed || result.imported) ctx?.ui.notify(result.message, "info");
+@@ -2441,18 +2595,39 @@
+ 		return this.checkpointGitRef(ctx);
+ 	}
+ 
++	private async removeOwnedTaskContainers() {
++		if (this.config.runtime !== "docker" || !this.route) return;
++		const filters = [
++			"ps", "-aq",
++			"--filter", "label=pi.container-sandbox.managed=true",
++			"--filter", `label=pi.container-sandbox.task=${this.route.task}`,
++			"--filter", `label=pi.container-sandbox.owner=${this.route.ownerPid}`,
++		];
++		const listed = await this.runtimeExec(filters, { timeoutMs: 30_000 });
++		if (listed.code !== 0) return;
++		const containers = listed.stdout.toString().split(/\s+/).filter(Boolean);
++		for (const container of containers) await this.runtimeExec(["rm", "-f", container], { timeoutMs: 60_000 }).catch(() => undefined);
++	}
++
+ 	async shutdown(ctx?: ExtensionContext, explicitStop = false) {
++		if (isChildProcess()) {
++			ctx?.ui.setStatus("sandbox", undefined);
++			this.containerName = undefined;
++			this.started = false;
++			this.dockerPortMappings = [];
++			return;
++		}
+ 		const containerToCleanup = this.containerName;
+ 		try {
+ 			// Do not auto-checkpoint unless the sandbox was actually started.
+ 			// checkpointGitRef() calls ensure(), and on a resume/session
+ 			// switch that would create a throwaway container for the session being
+ 			// left, producing two containers for one visible resume.
+-			if (this.started && this.containerName) await this.autoCheckpointSandboxChanges(ctx);
++			if (this.started && this.containerName && this.getMode() === "isolated") await this.autoCheckpointSandboxChanges(ctx);
+ 		} finally {
+ 			if (containerToCleanup) {
+ 				if (this.config.lifecycle === "remove") {
+-					await this.runtimeExec(["rm", "-f", containerToCleanup]).catch(() => undefined);
++					await this.removeOwnedTaskContainers();
+ 				} else if (explicitStop || this.config.lifecycle === "stopped") {
+ 					await this.runtimeExec(["stop", containerToCleanup]).catch(() => undefined);
+ 				}
+@@ -2485,6 +2660,8 @@
+ 	configure(ctx: ExtensionContext) { this.engine.configure(ctx); }
+ 	isEnabled() { return this.engine.isEnabled(); }
+ 	getConfig() { return this.engine.getConfig(); }
++	getMode() { return this.engine.getMode(); }
++	getRoute() { return this.engine.getRoute(); }
+ 	getGitRefState() { return this.engine.getGitRefState(); }
+ 	hasPendingRebase() { return this.engine.hasPendingRebase(); }
+ 	restoreGitRefState(ctx: ExtensionContext) { this.engine.restoreGitRefState(ctx); }
+@@ -2536,20 +2713,25 @@
+ }
+ 
+ export default function (pi: ExtensionAPI) {
+-	pi.registerFlag("no-sandbox", { description: "Disable container sandbox tool backend", type: "boolean", default: false });
+ 	pi.registerFlag("sandbox-runtime", { description: "Container runtime: container or docker", type: "string" });
+ 	pi.registerFlag("sandbox-image", { description: "Container image for sandbox tools", type: "string" });
+ 	pi.registerFlag("sandbox-docker-port-mode", { description: "Docker port publishing: disabled, dynamic, or fixed (default: dynamic)", type: "string" });
+ 	pi.registerFlag("sandbox-docker-port-range", { description: "Docker container port or range to publish (default: 8000-8010)", type: "string" });
+-	pi.registerFlag("sandbox-target", { description: "Checkpoint destination: sandbox, sandbox:<branch>, or current", type: "string" });
+ 	pi.registerFlag("sandbox-checkpoint-frequency", { description: "Automatic checkpoint boundary: turn, agent, or settled", type: "string" });
+ 	pi.registerFlag("sandbox-git-clone-depth", { description: "Host local clone depth for new sandboxes: 1 shallow default, 0 full history", type: "string" });
+ 	pi.registerFlag("sandbox-install-deps", { description: "Dependency bootstrap: auto or never", type: "string" });
+ 	pi.registerFlag("sandbox-lifecycle", { description: "Container lifecycle after session shutdown: remove, stopped, or running", type: "string" });
+-	pi.registerFlag("sandbox-env", { description: "Comma-separated host env vars to pass into sandbox commands", type: "string" });
+ 
+ 	const sandbox = new ContainerSandbox(pi);
+ 
++	pi.on("project_trust", () => {
++		// Project extensions/settings execute in the host Pi process. Ordinary
++		// coding mode never authorizes them; control-plane activation is explicit.
++		requireTaskRoute();
++		return { trusted: "no" as const, remember: false };
++	});
++	let activeContext: ExtensionContext | undefined;
++
+ 	function routedTool<TParams extends TSchema, TDetails>(
+ 		localFactory: (cwd: string) => ToolDefinition<TParams, TDetails>,
+ 		sandboxFactory: (cwd: string) => ToolDefinition<TParams, TDetails>,
+@@ -2559,8 +2741,12 @@
+ 			...base,
+ 			async execute(id, params, signal, onUpdate, ctx) {
+ 				sandbox.workspace.configure(ctx);
+-				const tool = sandbox.workspace.isEnabled() ? sandboxFactory(ctx.cwd) : localFactory(ctx.cwd);
+-				return tool.execute(id, params, signal, onUpdate, ctx);
++				if (!sandbox.workspace.isEnabled()) throw new Error("Pi sandbox is disabled; host tool fallback is forbidden");
++				await sandbox.workspace.preflight(ctx);
++				const preflightError = sandbox.workspace.getPreflightError();
++				if (preflightError) throw new Error(`Sandbox unavailable: ${preflightError}`);
++				await sandbox.lifecycle.ensure(ctx);
++				return sandboxFactory(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
+ 			},
+ 		};
+ 	}
+@@ -2662,6 +2848,50 @@
+ 		};
+ 	}
+ 
++	pi.events.on("pi-sandbox:tool-request", (raw) => {
++		const request = raw as {
++			toolName?: string;
++			toolCallId?: string;
++			params?: Record<string, unknown>;
++			routeFile?: string;
++			capability?: string;
++			signal?: AbortSignal;
++			onUpdate?: (update: unknown) => void;
++			resolve?: (result: unknown) => void;
++			reject?: (error: unknown) => void;
++		};
++		if (!request || typeof request.toolName !== "string" || typeof request.resolve !== "function" || typeof request.reject !== "function") return;
++		const toolName = request.toolName;
++		const resolveRequest = request.resolve;
++		void (async () => {
++			try {
++				const ctx = activeContext;
++				if (!ctx) throw new Error("Pi sandbox is not initialized for BTW tool execution");
++				if (request.routeFile !== process.env[TASK_ROUTE_ENV] || request.capability !== process.env[TASK_CAPABILITY_ENV]) {
++					throw new Error("BTW task route capability mismatch");
++				}
++				sandbox.workspace.configure(ctx);
++				if (!sandbox.workspace.isEnabled()) throw new Error("Pi sandbox is disabled; BTW refuses host tool fallback");
++				await sandbox.workspace.preflight(ctx);
++				if (sandbox.workspace.getPreflightError()) throw new Error(`Sandbox unavailable: ${sandbox.workspace.getPreflightError()}`);
++				await sandbox.lifecycle.ensure(ctx);
++				const factories: Record<string, (cwd: string) => ToolDefinition<any, any>> = {
++					read: (cwd) => createReadToolDefinition(cwd, { operations: readOps() }),
++					write: (cwd) => createWriteToolDefinition(cwd, { operations: writeOps() }),
++					edit: (cwd) => createEditToolDefinition(cwd, { operations: editOps() }),
++					bash: (cwd) => createBashToolDefinition(cwd, { operations: bashOps() }),
++				};
++				const factory = factories[toolName];
++				if (!factory) throw new Error(`BTW tool is not permitted in the sandbox: ${toolName}`);
++				const tool = factory(ctx.cwd);
++				const result = await tool.execute(request.toolCallId ?? "btw", request.params ?? {}, request.signal, request.onUpdate, ctx);
++				resolveRequest(result);
++			} catch (error) {
++				request.reject?.(error);
++			}
++		})();
++	});
++
+ 	function reviewResourceLoader(systemPrompt: string): ResourceLoader {
+ 		const runtime = createExtensionRuntime();
+ 		return {
+@@ -3004,6 +3234,7 @@
+ 	});
+ 
+ 	pi.on("session_start", async (_event, ctx) => {
++		activeContext = ctx;
+ 		sandbox.workspace.configure(ctx);
+ 		sandbox.workspace.restoreGitRefState(ctx);
+ 		await sandbox.workspace.preflight(ctx);
+@@ -3029,8 +3260,9 @@
+ 	});
+ 
+ 	pi.on("before_agent_start", async (event, ctx) => {
++		activeContext = ctx;
+ 		sandbox.workspace.configure(ctx);
+-		if (!sandbox.workspace.isEnabled()) return;
++		if (!sandbox.workspace.isEnabled()) throw new Error("Pi sandbox is disabled; host agent execution is forbidden");
+ 		await sandbox.workspace.preflight(ctx);
+ 		if (sandbox.workspace.getPreflightError()) throw new Error(`Sandbox unavailable: ${sandbox.workspace.getPreflightError()}`);
+ 		const lockError = await sandbox.workspace.reserveTarget(ctx);
+@@ -3045,10 +3277,11 @@
+ 			: config.checkpointFrequency === "agent"
+ 				? "agent run"
+ 				: "settled agent cycle";
+-		const destinationNote = parseTarget(config.target, "target").mode === "current"
+-			? ` After each ${checkpointBoundary}, sandbox changes receive an AI-generated commit message and fast-forward the checked-out host branch ${gitRefState?.baseBranch ?? ""}; the host worktree is updated after validation.`
+-			: ` After each ${checkpointBoundary}, sandbox changes receive an AI-generated commit message and are imported through a validated, hard-coded checkpoint operation into host branch ${gitRefState?.sandboxRef ?? "refs/heads/..."}; the checked-out host branch/worktree is not modified.`;
+-		const gitNote = `${destinationNote} Host-untracked files are handled with hostUntrackedFiles=${config.hostUntrackedFiles}.`;
++		const mode = sandbox.workspace.getMode();
++		const destinationNote = mode === "trusted-live"
++			? " Host and container share the exact assigned worktree and required Git metadata. Changes and local Git operations are immediately host-visible; no clone, checkpoint, bundle import, synthetic commit, or publication target is used."
++			: ` After each ${checkpointBoundary}, sandbox changes are imported through a validated checkpoint into isolated host branch ${gitRefState?.sandboxRef ?? "refs/heads/pi-sandbox-..."}; the checked-out host branch/worktree is not modified.`;
++		const gitNote = mode === "trusted-live" ? destinationNote : `${destinationNote} Host-untracked files are handled with hostUntrackedFiles=${config.hostUntrackedFiles}.`;
+ 		const dockerPorts = formatDockerPortMappings(sandbox.lifecycle.getDockerPortMappings());
+ 		const portNote = config.runtime === "docker"
+ 			? config.dockerPortMode === "disabled"
+@@ -3063,7 +3296,9 @@
+ 		return {
+ 			systemPrompt:
+ 				event.systemPrompt +
+-				"\n\nTool execution note: file and shell tools run inside an isolated container copy of the current working directory. Use the normal tool paths and commands; dependency installs and tests run in that container." +
++				(mode === "trusted-live"
++					? "\n\nTool execution note: file and shell tools run inside the task container against the exact trusted-live host worktree. The assigned repository and Git metadata are writable; unrelated host resources remain hidden."
++					: "\n\nTool execution note: file and shell tools run inside an isolated private container clone. No host repository files or Git metadata are mounted.") +
+ 				gitNote +
+ 				portNote +
+ 				rebaseNote,
+@@ -3091,12 +3326,14 @@
+ 	});
+ 
+ 	pi.on("session_shutdown", async (_event, ctx) => {
++		activeContext = undefined;
+ 		await sandbox.lifecycle.shutdown(ctx);
+ 	});
+ 
+ 	pi.on("user_bash", async (_event, ctx) => {
++		activeContext = ctx;
+ 		sandbox.workspace.configure(ctx);
+-		if (!sandbox.workspace.isEnabled()) return;
++		if (!sandbox.workspace.isEnabled()) throw new Error("Pi sandbox is disabled; host bash fallback is forbidden");
+ 		await sandbox.workspace.preflight(ctx);
+ 		if (sandbox.workspace.getPreflightError()) throw new Error(`Sandbox unavailable: ${sandbox.workspace.getPreflightError()}`);
+ 		const lockError = await sandbox.workspace.reserveTarget(ctx);
+@@ -3158,7 +3395,7 @@
+ 		...localGrep,
+ 		async execute(id, params, signal, onUpdate, ctx) {
+ 			sandbox.workspace.configure(ctx);
+-			if (!sandbox.workspace.isEnabled()) return createGrepToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
++			if (!sandbox.workspace.isEnabled()) throw new Error("Pi sandbox is disabled; host grep fallback is forbidden");
+ 			const searchPath = resolveToolPath(ctx.cwd, params.path || ".");
+ 			const args = [
+ 				"rg",
+@@ -3230,7 +3467,7 @@
+ 					const dockerPorts = formatDockerPortMappings(sandbox.lifecycle.getDockerPortMappings());
+ 					ctx.ui.notify(
+ 						[
+-							`Container sandbox: ${sandbox.workspace.isEnabled() ? "enabled" : "disabled by --no-sandbox"}`,
++							`Container workspace: ${sandbox.workspace.isEnabled() ? sandbox.workspace.getMode() : "unavailable"}`,
+ 							`Runtime: ${config.runtime}`,
+ 							`Image: ${config.image}`,
+ 							`Docker port mode: ${config.runtime === "docker" ? config.dockerPortMode : "(not applicable)"}`,
