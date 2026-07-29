@@ -59,7 +59,11 @@ class HarnessStaticTests(unittest.TestCase):
             "DeviceRequests?.length",
             'tmpfs["/tmp/pi-home"]',
             "contains an unexpected environment variable",
+            "contains duplicate environment variables",
             "has unexpected published ports",
+            "GIT_CONFIG_GLOBAL=/run/pi/GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM=1",
+            "must have exactly one read-only Git identity",
         ]:
             self.assertIn(evidence, patch)
         self.assertIn("candidatePrefix", patch)

@@ -84,9 +84,12 @@ status, branch, task/session/container identity, owner PID and Linux start
 identity, UID/GID, image, worktree root, policy hash, and parent ownership. Only
 the capability hash is stored in the route.
 
-Same-task children inherit this route and reuse its container. A missing,
-malformed, stale, wrong-owner, wrong-capability, wrong-workspace, or wrong-Git
-route fails before tool execution. Independent trusted candidates may derive a
+Same-task children inherit this route and reuse its container. A task-specific,
+read-only Git config contains only the effective `user.name` and `user.email`;
+this makes ordinary commits work without mounting host Git configuration or
+credentials. A missing, malformed, stale, wrong-owner, wrong-capability,
+wrong-workspace, wrong-Git, or wrong-identity-resource route fails before tool
+execution. Independent trusted candidates may derive a
 separate container only for a linked worktree below the policy worktree root,
 with the same Git common directory and a harness-created candidate branch.
 

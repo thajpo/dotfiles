@@ -31,6 +31,13 @@ The agent can damage the assigned repository, its hooks/config, branches, refs,
 reflogs, and worktree. This is accepted for authored repositories. Unrelated
 host paths, credentials, sockets, host processes, and devices remain absent.
 
+Before launch, the host snapshots only the effective Git `user.name` and
+`user.email` into a task-specific `0600` config. That minimal file is mounted
+read-only and selected with `GIT_CONFIG_GLOBAL`, so ordinary commits work
+without exposing credential helpers, signing keys, includes, URL rewrites, or
+the host Git configuration. Isolated tasks receive the same minimal identity
+resource without receiving host repository metadata.
+
 A clean protected checkout receives a linked `pi/<session>` worktree below the
 configured worktree root. A dirty protected checkout fails without stashing,
 copying, resetting, or discarding anything.

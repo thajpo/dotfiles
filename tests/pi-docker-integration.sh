@@ -42,6 +42,10 @@ worktree=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["work
 common=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gitCommonDir"])' "$route")
 gitdir=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gitDir"])' "$route")
 context=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["hostContext"])' "$route")
+gitconfig=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gitConfig"])' "$route")
+# Prove the task snapshot, rather than repository-local identity, supplies commits.
+git -C "$repo" config --unset-all user.name
+git -C "$repo" config --unset-all user.email
 uid=$(id -u); gid=$(id -g)
 container="pi-harness-integration-$$"
 mounts=(--mount "type=bind,src=$worktree,dst=$worktree,bind-propagation=rprivate")
@@ -54,8 +58,10 @@ docker create --name "$container" --user "$uid:$gid" --cap-drop ALL --security-o
   --tmpfs "/tmp/pi-home:rw,nosuid,nodev,mode=0700,uid=$uid,gid=$gid" \
   "${publish[@]}" "${mounts[@]}" \
   --mount "type=bind,src=$context,dst=/run/pi/HOST_CONTEXT.md,readonly=true,bind-propagation=rprivate" \
+  --mount "type=bind,src=$gitconfig,dst=/run/pi/GIT_CONFIG_GLOBAL,readonly=true,bind-propagation=rprivate" \
   --mount "type=volume,src=$volume,dst=/var/cache/pi-packages" \
   -e HOME=/tmp/pi-home -e CI=1 \
+  -e GIT_CONFIG_GLOBAL=/run/pi/GIT_CONFIG_GLOBAL -e GIT_CONFIG_NOSYSTEM=1 \
   -e npm_config_cache=/var/cache/pi-packages/npm \
   -e npm_config_store_dir=/var/cache/pi-packages/pnpm \
   -e PNPM_STORE_DIR=/var/cache/pi-packages/pnpm \
@@ -76,9 +82,20 @@ docker exec "$container" test ! -e "$root/host-home-sentinel"
 docker exec "$container" test ! -e /dev/dri
 docker exec "$container" test -r /run/pi/HOST_CONTEXT.md
 docker exec "$container" test ! -w /run/pi/HOST_CONTEXT.md
+docker exec "$container" test -r /run/pi/GIT_CONFIG_GLOBAL
+docker exec "$container" test ! -w /run/pi/GIT_CONFIG_GLOBAL
+test "$(docker exec "$container" git config --global --name-only --list)" = $'user.name\nuser.email'
+printf 'identity\n' > "$worktree/identity.txt"
+docker exec -w "$worktree" "$container" git add identity.txt
+docker exec -w "$worktree" "$container" git commit -m 'verify mounted Git identity' >/dev/null
+mapfile -t committed_identity < <(docker exec -w "$worktree" "$container" git show -s --format='%an%n%ae%n%cn%n%ce')
+test "${committed_identity[0]}" = 'Pi Test'
+test "${committed_identity[1]}" = 'pi-test@example.invalid'
+test "${committed_identity[2]}" = 'Pi Test'
+test "${committed_identity[3]}" = 'pi-test@example.invalid'
 inspect=$(docker inspect "$container")
 image_id=$(docker image inspect --format '{{.Id}}' pi-tool-sandbox:node22-bookworm-20260728)
-INSPECT_JSON="$inspect" python3 - "$worktree" "$common" "$gitdir" "$context" "$image_id" <<'PY'
+INSPECT_JSON="$inspect" python3 - "$worktree" "$common" "$gitdir" "$context" "$gitconfig" "$image_id" <<'PY'
 import json, os, sys
 item = json.loads(os.environ["INSPECT_JSON"])[0]
 mounts = item["Mounts"]
@@ -88,13 +105,16 @@ for raw in sys.argv[1:4]:
     if not any(os.path.commonpath([source, candidate]) == source for source in expected_list):
         expected_list.append(candidate)
 expected = set(expected_list)
-actual = {os.path.realpath(m["Source"]) for m in mounts if m["Type"] == "bind" and m["Destination"] != "/run/pi/HOST_CONTEXT.md"}
+special_destinations = {"/run/pi/HOST_CONTEXT.md", "/run/pi/GIT_CONFIG_GLOBAL"}
+actual = {os.path.realpath(m["Source"]) for m in mounts if m["Type"] == "bind" and m["Destination"] not in special_destinations}
 assert actual == expected, (actual, expected)
 for mount in mounts:
     if mount["Type"] == "bind": assert mount["Propagation"] == "rprivate"
 context = next(m for m in mounts if m["Destination"] == "/run/pi/HOST_CONTEXT.md")
+gitconfig = next(m for m in mounts if m["Destination"] == "/run/pi/GIT_CONFIG_GLOBAL")
 assert not context["RW"] and os.path.realpath(context["Source"]) == os.path.realpath(sys.argv[4])
-assert item["Image"] == sys.argv[5]
+assert not gitconfig["RW"] and os.path.realpath(gitconfig["Source"]) == os.path.realpath(sys.argv[5])
+assert item["Image"] == sys.argv[6]
 host = item["HostConfig"]
 config = item["Config"]
 assert config["User"] == f"{os.getuid()}:{os.getgid()}"
@@ -111,6 +131,8 @@ assert {"rw", "nosuid", "nodev", f"uid={os.getuid()}", f"gid={os.getgid()}"} <= 
 assert "mode=0700" in tmpfs or "mode=700" in tmpfs
 expected_env = {
     "HOME": "/tmp/pi-home", "CI": "1",
+    "GIT_CONFIG_GLOBAL": "/run/pi/GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM": "1",
     "npm_config_cache": "/var/cache/pi-packages/npm",
     "npm_config_store_dir": "/var/cache/pi-packages/pnpm",
     "PNPM_STORE_DIR": "/var/cache/pi-packages/pnpm",
@@ -118,7 +140,9 @@ expected_env = {
     "PIP_CACHE_DIR": "/var/cache/pi-packages/pip",
     "UV_CACHE_DIR": "/var/cache/pi-packages/uv",
 }
-environment = dict(entry.split("=", 1) for entry in config["Env"])
+environment_entries = [entry.split("=", 1) for entry in config["Env"]]
+environment = dict(environment_entries)
+assert len(environment_entries) == len(environment)
 assert all(environment.get(key) == value for key, value in expected_env.items())
 assert set(host["PortBindings"]) == {f"{port}/tcp" for port in range(8000, 8011)}
 assert all(bindings == [{"HostIp": "127.0.0.1", "HostPort": ""}] for bindings in host["PortBindings"].values())

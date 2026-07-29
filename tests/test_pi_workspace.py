@@ -177,9 +177,14 @@ class WorkspacePreparationTests(unittest.TestCase):
             route_path = Path(prepared["route"])
             route = json.loads(route_path.read_text())
             context_path = Path(route["hostContext"])
+            git_config_path = Path(route["gitConfig"])
             self.assertEqual(stat.S_IMODE(route_path.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(context_path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(git_config_path.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(context_path.parent.stat().st_mode), 0o700)
+            self.assertEqual(git(git_config_path.parent, "config", "--file", str(git_config_path), "--get", "user.name"), "Pi Test")
+            self.assertEqual(git(git_config_path.parent, "config", "--file", str(git_config_path), "--get", "user.email"), "pi-test@example.invalid")
+            self.assertEqual(git(git_config_path.parent, "config", "--file", str(git_config_path), "--name-only", "--list"), "user.name\nuser.email")
             self.assertEqual(route["capabilityHash"], hashlib.sha256(prepared["capability"].encode()).hexdigest())
             self.assertNotIn(prepared["capability"], route_path.read_text())
             context = context_path.read_text()
@@ -199,9 +204,58 @@ class WorkspacePreparationTests(unittest.TestCase):
             second_route = json.loads(Path(second["route"]).read_text())
             second_path = Path(second_route["hostContext"])
             self.assertNotEqual(first_path, second_path)
+            self.assertNotEqual(Path(first_route["gitConfig"]), Path(second_route["gitConfig"]))
             self.assertEqual(first_path.read_text(), first_content)
             self.assertNotEqual(first_content, second_path.read_text())
+            self.assertTrue(Path(first_route["gitConfig"]).is_file())
+            self.assertTrue(Path(second_route["gitConfig"]).is_file())
             self.assertTrue((home / ".pi/agent/generated/HOST_CONTEXT.md").is_file())
+
+    def test_missing_git_identity_fails_before_task_route_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, repo = self.prepare_home(root, branch="main")
+            git(repo, "config", "--unset-all", "user.name")
+            git(repo, "config", "--unset-all", "user.email")
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                with self.assertRaisesRegex(ws.WorkspaceError, "host Git identity is missing user.name"):
+                    ws.prepare(repo, os.getpid())
+            self.assertFalse((home / ".pi/agent/generated").exists())
+            self.assertFalse((home / ".local/share/pi/runtime/pi-tasks").exists())
+            self.assertFalse((home / ".local/share/pi/worktrees/repo").exists())
+
+    def test_isolated_route_receives_minimal_git_identity_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            repo = make_repo(root / "source", branch="feature")
+            write_policy(home, repo, trusted=False)
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                prepared = ws.prepare(repo, os.getpid())
+            route = json.loads(Path(prepared["route"]).read_text())
+            git_config_path = Path(route["gitConfig"])
+            self.assertEqual(route["mode"], "isolated")
+            self.assertEqual(stat.S_IMODE(git_config_path.stat().st_mode), 0o600)
+            self.assertEqual(git(git_config_path.parent, "config", "--file", str(git_config_path), "--name-only", "--list"), "user.name\nuser.email")
+
+    def test_generated_identity_supports_an_ordinary_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, repo = self.prepare_home(root, branch="feature")
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                prepared = ws.prepare(repo, os.getpid())
+            route = json.loads(Path(prepared["route"]).read_text())
+            git(repo, "config", "--unset-all", "user.name")
+            git(repo, "config", "--unset-all", "user.email")
+            (repo / "identity.txt").write_text("identity\n")
+            git(repo, "add", "identity.txt")
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "GIT_CONFIG_GLOBAL": route["gitConfig"], "GIT_CONFIG_NOSYSTEM": "1"})
+            result = subprocess.run(["git", "commit", "-m", "identity"], cwd=repo, env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            identity = git(repo, "show", "-s", "--format=%an%n%ae%n%cn%n%ce")
+            self.assertEqual(identity.splitlines(), ["Pi Test", "pi-test@example.invalid", "Pi Test", "pi-test@example.invalid"])
 
 
 if __name__ == "__main__":

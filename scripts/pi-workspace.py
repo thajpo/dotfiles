@@ -184,6 +184,39 @@ def git_output(repository: pathlib.Path, *args: str) -> str:
     return run(["git", *args], cwd=repository).stdout.strip()
 
 
+def git_identity(repository: pathlib.Path) -> tuple[str, str]:
+    values: list[str] = []
+    for key in ("user.name", "user.email"):
+        result = run(["git", "config", "--get", key], cwd=repository, check=False)
+        value = result.stdout.rstrip("\n")
+        if result.returncode != 0 or not value.strip():
+            raise WorkspaceError(f"host Git identity is missing {key}; configure it before launching Pi")
+        if len(value) > 512 or any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise WorkspaceError(f"host Git identity {key} contains unsupported characters")
+        values.append(value)
+    return values[0], values[1]
+
+
+def write_git_identity_config(path: pathlib.Path, name: str, email: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    os.close(fd)
+    try:
+        os.chmod(temporary, 0o600)
+        run(["git", "config", "--file", temporary, "user.name", name])
+        run(["git", "config", "--file", temporary, "user.email", email])
+        with open(temporary, "rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
 def repository_root(cwd: pathlib.Path) -> pathlib.Path:
     result = run(["git", "rev-parse", "--show-toplevel"], cwd=cwd)
     return pathlib.Path(result.stdout.strip()).resolve(strict=True)
@@ -423,6 +456,7 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
     policy = load_policy()
     repository = repository_root(cwd.resolve(strict=True))
     mode, control_plane = classify(repository, policy)
+    identity_name, identity_email = git_identity(repository)
     starting_oid = git_output(repository, "rev-parse", "--verify", "HEAD^{commit}")
     branch = git_output(repository, "branch", "--show-current")
     session = task_id()
@@ -444,7 +478,11 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
     capability = secrets.token_urlsafe(48)
     generated_root = pathlib.Path.home() / ".pi/agent/generated"
     machine_context_path = generated_root / "HOST_CONTEXT.md"
-    context_path = generated_root / "tasks" / session / "HOST_CONTEXT.md"
+    task_resource_root = generated_root / "tasks" / session
+    context_path = task_resource_root / "HOST_CONTEXT.md"
+    git_config_path = task_resource_root / "GIT_CONFIG_GLOBAL"
+    write_git_identity_config(git_config_path, identity_name, identity_email)
+    git_config_path = git_config_path.resolve(strict=True)
     route: dict[str, Any] = {
         "version": 1,
         "task": session,
@@ -465,6 +503,7 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
         "image": DEFAULT_IMAGE,
         "worktreeRoot": policy["worktreeRoot"],
         "hostContext": str(context_path),
+        "gitConfig": str(git_config_path),
         "policyHash": policy.get("policyHash", "invalid"),
         "policyValid": bool(policy.get("policyValid")),
         "controlPlane": control_plane,
