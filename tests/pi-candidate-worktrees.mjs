@@ -6,7 +6,8 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 const root = path.resolve(import.meta.dirname, "..");
-const modulePath = path.join(root, "pi/npm/node_modules/pi-subagents/src/runs/shared/worktree.ts");
+const packageRoot = process.env.PI_TEST_PACKAGE_ROOT || path.join(root, "pi/npm");
+const modulePath = path.join(packageRoot, "node_modules/pi-subagents/src/runs/shared/worktree.ts");
 const { createWorktrees, diffWorktrees, cleanupWorktrees } = await import(pathToFileURL(modulePath));
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-candidates-test-"));
 const repo = path.join(temp, "repo");

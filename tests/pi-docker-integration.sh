@@ -48,12 +48,20 @@ mounts=(--mount "type=bind,src=$worktree,dst=$worktree,bind-propagation=rprivate
 case "$common" in "$worktree"/*) ;; *) mounts+=(--mount "type=bind,src=$common,dst=$common,bind-propagation=rprivate");; esac
 case "$gitdir" in "$worktree"/*|"$common"/*) ;; *) mounts+=(--mount "type=bind,src=$gitdir,dst=$gitdir,bind-propagation=rprivate");; esac
 volume="pi-integration-cache-$$"
+publish=()
+for port in $(seq 8000 8010); do publish+=(--publish "127.0.0.1::$port"); done
 docker create --name "$container" --user "$uid:$gid" --cap-drop ALL --security-opt no-new-privileges:true \
   --tmpfs "/tmp/pi-home:rw,nosuid,nodev,mode=0700,uid=$uid,gid=$gid" \
-  "${mounts[@]}" \
+  "${publish[@]}" "${mounts[@]}" \
   --mount "type=bind,src=$context,dst=/run/pi/HOST_CONTEXT.md,readonly=true,bind-propagation=rprivate" \
   --mount "type=volume,src=$volume,dst=/var/cache/pi-packages" \
   -e HOME=/tmp/pi-home -e CI=1 \
+  -e npm_config_cache=/var/cache/pi-packages/npm \
+  -e npm_config_store_dir=/var/cache/pi-packages/pnpm \
+  -e PNPM_STORE_DIR=/var/cache/pi-packages/pnpm \
+  -e BUN_INSTALL_CACHE_DIR=/var/cache/pi-packages/bun \
+  -e PIP_CACHE_DIR=/var/cache/pi-packages/pip \
+  -e UV_CACHE_DIR=/var/cache/pi-packages/uv \
   pi-tool-sandbox:node22-bookworm-20260728 sleep infinity >/dev/null
 docker start "$container" >/dev/null
 
@@ -69,7 +77,8 @@ docker exec "$container" test ! -e /dev/dri
 docker exec "$container" test -r /run/pi/HOST_CONTEXT.md
 docker exec "$container" test ! -w /run/pi/HOST_CONTEXT.md
 inspect=$(docker inspect "$container")
-INSPECT_JSON="$inspect" python3 - "$worktree" "$common" "$gitdir" "$context" <<'PY'
+image_id=$(docker image inspect --format '{{.Id}}' pi-tool-sandbox:node22-bookworm-20260728)
+INSPECT_JSON="$inspect" python3 - "$worktree" "$common" "$gitdir" "$context" "$image_id" <<'PY'
 import json, os, sys
 item = json.loads(os.environ["INSPECT_JSON"])[0]
 mounts = item["Mounts"]
@@ -81,9 +90,37 @@ for raw in sys.argv[1:4]:
 expected = set(expected_list)
 actual = {os.path.realpath(m["Source"]) for m in mounts if m["Type"] == "bind" and m["Destination"] != "/run/pi/HOST_CONTEXT.md"}
 assert actual == expected, (actual, expected)
+for mount in mounts:
+    if mount["Type"] == "bind": assert mount["Propagation"] == "rprivate"
 context = next(m for m in mounts if m["Destination"] == "/run/pi/HOST_CONTEXT.md")
 assert not context["RW"] and os.path.realpath(context["Source"]) == os.path.realpath(sys.argv[4])
-assert "no-new-privileges:true" in item["HostConfig"]["SecurityOpt"]
-assert item["HostConfig"]["CapDrop"] == ["ALL"]
+assert item["Image"] == sys.argv[5]
+host = item["HostConfig"]
+config = item["Config"]
+assert config["User"] == f"{os.getuid()}:{os.getgid()}"
+assert host["SecurityOpt"] == ["no-new-privileges:true"]
+assert not (host.get("CapAdd") or [])
+assert host["CapDrop"] == ["ALL"]
+assert not host["Privileged"] and not host["PidMode"]
+assert host["NetworkMode"] != "host" and host["IpcMode"] != "host"
+assert set(item["NetworkSettings"]["Networks"]) == {"bridge"}
+assert not host["Devices"] and not (host.get("DeviceRequests") or [])
+assert config["Cmd"] == ["sleep", "infinity"]
+tmpfs = set(host["Tmpfs"]["/tmp/pi-home"].split(","))
+assert {"rw", "nosuid", "nodev", f"uid={os.getuid()}", f"gid={os.getgid()}"} <= tmpfs
+assert "mode=0700" in tmpfs or "mode=700" in tmpfs
+expected_env = {
+    "HOME": "/tmp/pi-home", "CI": "1",
+    "npm_config_cache": "/var/cache/pi-packages/npm",
+    "npm_config_store_dir": "/var/cache/pi-packages/pnpm",
+    "PNPM_STORE_DIR": "/var/cache/pi-packages/pnpm",
+    "BUN_INSTALL_CACHE_DIR": "/var/cache/pi-packages/bun",
+    "PIP_CACHE_DIR": "/var/cache/pi-packages/pip",
+    "UV_CACHE_DIR": "/var/cache/pi-packages/uv",
+}
+environment = dict(entry.split("=", 1) for entry in config["Env"])
+assert all(environment.get(key) == value for key, value in expected_env.items())
+assert set(host["PortBindings"]) == {f"{port}/tcp" for port in range(8000, 8011)}
+assert all(bindings == [{"HostIp": "127.0.0.1", "HostPort": ""}] for bindings in host["PortBindings"].values())
 PY
 printf 'PASS trusted-live Docker mount, ownership, and boundary integration\n'

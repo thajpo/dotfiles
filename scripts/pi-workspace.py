@@ -324,6 +324,26 @@ def first_line(command: list[str]) -> str:
         return "unavailable"
 
 
+def gpu_description() -> str:
+    try:
+        result = subprocess.run(
+            ["/usr/bin/lspci"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=10,
+            check=False,
+        )
+        gpu_lines = [
+            line[:300]
+            for line in result.stdout.splitlines()
+            if "VGA" in line or "3D" in line or "Display" in line
+        ]
+        return "; ".join(gpu_lines) if gpu_lines else "unavailable"
+    except (OSError, subprocess.SubprocessError):
+        return "unavailable"
+
+
 def host_context(route: dict[str, Any], pi_executable: pathlib.Path | None) -> str:
     os_release = "unavailable"
     try:
@@ -350,8 +370,7 @@ def host_context(route: dict[str, Any], pi_executable: pathlib.Path | None) -> s
             ram = f"{int(match.group(1)) // 1024} MiB"
     except OSError:
         pass
-    gpu_lines = [line for line in first_line(["/usr/bin/lspci"]).splitlines() if "VGA" in line or "3D" in line]
-    gpu = "; ".join(gpu_lines) if gpu_lines else "unavailable"
+    gpu = gpu_description()
     disk = shutil.disk_usage(route["worktree"])
     shell = pwd.getpwuid(os.getuid()).pw_shell
     tool_names = ["node", "npm", "bun", "python3", "git", "docker", "tmux", "nvim"]
@@ -423,7 +442,9 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
     digest = hashlib.sha256(f"{repository}\0{worktree}\0{session}".encode()).hexdigest()[:16]
     container = f"pi-task-{safe_component(repository.name)}-{digest}"[:63]
     capability = secrets.token_urlsafe(48)
-    context_path = pathlib.Path.home() / ".pi/agent/generated/HOST_CONTEXT.md"
+    generated_root = pathlib.Path.home() / ".pi/agent/generated"
+    machine_context_path = generated_root / "HOST_CONTEXT.md"
+    context_path = generated_root / "tasks" / session / "HOST_CONTEXT.md"
     route: dict[str, Any] = {
         "version": 1,
         "task": session,
@@ -451,7 +472,9 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
         "capabilityHash": hashlib.sha256(capability.encode()).hexdigest(),
         "createdAt": int(time.time()),
     }
-    atomic_write(context_path, host_context(route, pi_executable), 0o600)
+    context = host_context(route, pi_executable)
+    atomic_write(machine_context_path, context, 0o600)
+    atomic_write(context_path, context, 0o600)
     runtime_root = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR", str(pathlib.Path.home() / ".local/share/pi/runtime"))) / "pi-tasks"
     runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(runtime_root, 0o700)

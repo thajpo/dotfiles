@@ -109,7 +109,7 @@
  const PACKAGE_CACHE_ENV: Record<string, string> = {
  	npm_config_cache: `${PACKAGE_CACHE_ROOT}/npm`,
  	npm_config_store_dir: `${PACKAGE_CACHE_ROOT}/pnpm`,
-@@ -242,10 +257,14 @@
+@@ -242,10 +257,15 @@
  }
  
  interface ContainerInspectMount {
@@ -121,10 +121,45 @@
  	Destination?: string;
 +	RW?: boolean;
 +	Name?: string;
++	Propagation?: string;
  }
  
  interface DockerPortBinding {
-@@ -276,6 +295,90 @@
+@@ -265,8 +285,31 @@
+ 		mounts?: ContainerInspectMount[];
+ 		labels?: Record<string, string>;
+ 	};
+-	Config?: { Image?: string; Labels?: Record<string, string> };
+-	NetworkSettings?: { Ports?: Record<string, DockerPortBinding[] | null> };
++	Config?: {
++		Image?: string;
++		Labels?: Record<string, string>;
++		User?: string;
++		Env?: string[];
++		Cmd?: string[];
++	};
++	Image?: string;
++	HostConfig?: {
++		CapAdd?: string[];
++		CapDrop?: string[];
++		SecurityOpt?: string[];
++		Privileged?: boolean;
++		PidMode?: string;
++		NetworkMode?: string;
++		IpcMode?: string;
++		Devices?: unknown[];
++		DeviceRequests?: unknown[];
++		Tmpfs?: Record<string, string>;
++		PortBindings?: Record<string, DockerPortBinding[] | null>;
++	};
++	NetworkSettings?: {
++		Ports?: Record<string, DockerPortBinding[] | null>;
++		Networks?: Record<string, unknown>;
++	};
+ 	ImageName?: string;
+ 	Mounts?: ContainerInspectMount[];
+ 	Labels?: Record<string, string>;
+@@ -276,6 +319,93 @@
  	return Array.from(new Set(values.filter(Boolean)));
  }
  
@@ -164,7 +199,10 @@
 +	const commonDir = realpathSync(syncGit(candidate, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
 +	const gitDir = realpathSync(syncGit(candidate, ["rev-parse", "--path-format=absolute", "--git-dir"]));
 +	const branch = syncGit(candidate, ["branch", "--show-current"]);
-+	if (commonDir !== realpathSync(base.gitCommonDir) || !/^pi\/.+\/candidate-[1-9][0-9]*$/.test(branch)) {
++	const safeTask = base.task.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 64);
++	const candidatePrefix = `pi/${safeTask}/candidate-`;
++	const candidateNumber = branch.startsWith(candidatePrefix) ? branch.slice(candidatePrefix.length) : "";
++	if (commonDir !== realpathSync(base.gitCommonDir) || !/^[1-9][0-9]*$/.test(candidateNumber)) {
 +		throw new Error("Candidate Git metadata or branch does not match the parent task route");
 +	}
 +	const suffix = createHash("sha256").update(candidate).digest("hex").slice(0, 16);
@@ -215,7 +253,7 @@
  function parseList(value: unknown): string[] | undefined {
  	if (Array.isArray(value)) return value.map(String).map((v) => v.trim()).filter(Boolean);
  	if (typeof value === "string") return value.split(",").map((v) => v.trim()).filter(Boolean);
-@@ -318,11 +421,10 @@
+@@ -318,11 +448,10 @@
  }
  
  function parseTarget(value: unknown, source: string): TargetSpec {
@@ -229,7 +267,7 @@
  	const branchName = target.slice("sandbox:".length).trim();
  	if (branchName.length > 96) throw new Error(`${source} sandbox branch name must not exceed 96 characters`);
  	if (
-@@ -337,7 +439,7 @@
+@@ -337,7 +466,7 @@
  }
  
  function formatTarget(spec: TargetSpec): string {
@@ -238,7 +276,7 @@
  }
  
  function configTarget(value: unknown, source: string): string {
-@@ -461,10 +563,13 @@
+@@ -461,10 +590,13 @@
  	return parsed;
  }
  
@@ -255,7 +293,7 @@
  
  	const runtime = cliChoice(pi, "sandbox-runtime", ["container", "docker"] as const);
  	if (runtime !== undefined) config.runtime = runtime;
-@@ -474,8 +579,6 @@
+@@ -474,8 +606,6 @@
  	if (dockerPortMode !== undefined) config.dockerPortMode = dockerPortMode;
  	const dockerPortRange = pi.getFlag("sandbox-docker-port-range");
  	if (dockerPortRange !== undefined) config.dockerPortRange = configPortRange(dockerPortRange, "--sandbox-docker-port-range");
@@ -264,7 +302,7 @@
  	const checkpointFrequency = cliChoice(pi, "sandbox-checkpoint-frequency", ["turn", "agent", "settled"] as const);
  	if (checkpointFrequency !== undefined) config.checkpointFrequency = checkpointFrequency;
  	const gitCloneDepth = cliNonNegativeInteger(pi, "sandbox-git-clone-depth");
-@@ -484,9 +587,6 @@
+@@ -484,9 +614,6 @@
  	if (installDeps !== undefined) config.installDeps = installDeps;
  	const lifecycle = cliChoice(pi, "sandbox-lifecycle", ["remove", "stopped", "running"] as const);
  	if (lifecycle !== undefined) config.lifecycle = lifecycle;
@@ -274,7 +312,7 @@
  	return config;
  }
  
-@@ -601,14 +701,6 @@
+@@ -601,14 +728,6 @@
  	return safe || fallback;
  }
  
@@ -289,7 +327,7 @@
  function shortSessionKey(sessionId: string): string {
  	return createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
  }
-@@ -617,27 +709,10 @@
+@@ -617,27 +736,10 @@
  	return `refs/heads/${GENERATED_SANDBOX_BRANCH_PREFIX}${sessionKey}`;
  }
  
@@ -317,7 +355,7 @@
  async function run(command: string, args: string[], options: ExecOptions = {}): Promise<ExecResult> {
  	return new Promise((resolve, reject) => {
  		const child = spawn(command, args, {
-@@ -809,6 +884,7 @@
+@@ -809,6 +911,7 @@
  	private config: SandboxConfig = DEFAULT_CONFIG;
  	private enabled = true;
  	private cwd = process.cwd();
@@ -325,7 +363,7 @@
  	private containerName: string | undefined;
  	private starting: Promise<void> | undefined;
  	private depsInstalled = false;
-@@ -817,9 +893,6 @@
+@@ -817,9 +920,6 @@
  	private gitRefState: GitRefState | undefined;
  	private pendingRebase: PendingRebase | undefined;
  	private preflightError: string | undefined;
@@ -335,7 +373,7 @@
  	private checkpointTail: Promise<unknown> = Promise.resolve();
  
  	constructor(private readonly pi: ExtensionAPI) {}
-@@ -844,6 +917,16 @@
+@@ -844,6 +944,16 @@
  		return this.config;
  	}
  
@@ -352,7 +390,7 @@
  	getGitRefState() {
  		return this.gitRefState;
  	}
-@@ -852,118 +935,20 @@
+@@ -852,118 +962,20 @@
  		return createHash("sha256").update(repoRoot).digest("hex").slice(0, 10);
  	}
  
@@ -478,7 +516,7 @@
  	}
  
  	private async runtimeExec(args: string[], options: ExecOptions = {}) {
-@@ -985,12 +970,14 @@
+@@ -985,12 +997,14 @@
  	}
  
  	private packageCacheHostRoot(): string {
@@ -496,7 +534,7 @@
  	}
  
  	private async gitRepoRoot(): Promise<string | undefined> {
-@@ -1170,78 +1157,33 @@
+@@ -1170,78 +1184,33 @@
  	}
  
  	private async ensureGitRefState(ctx?: ExtensionContext): Promise<GitRefState> {
@@ -530,9 +568,7 @@
 -			if (!baseBranch) throw new Error("current target requires an attached local branch");
 -		} else {
 -			baseBranch = await this.gitBranchName(baseCommit);
-+		if (!repoRoot || realpathSync(repoRoot) !== realpathSync(this.route.worktree)) {
-+			throw new Error("Task route workspace does not match the Pi working directory");
- 		}
+-		}
 -
 -		const branchName = safeName(baseBranch.replace(/\//g, "-"), "branch");
 -		const commitTarget = target.mode;
@@ -551,7 +587,9 @@
 -			sessionKey = defaultSessionKey;
 -			sandboxRef = generatedSandboxBranchRef(sessionKey);
 -			sandboxBranch = `pi-sandbox/${sessionKey}`;
--		}
++		if (!repoRoot || realpathSync(repoRoot) !== realpathSync(this.route.worktree)) {
++			throw new Error("Task route workspace does not match the Pi working directory");
+ 		}
 -		const containerName = sandboxContainerName(repoRoot, sandboxRef);
 -
 +		const sessionId = this.route.session;
@@ -592,7 +630,7 @@
  	}
  
  	private async assertSandboxBranchNotCheckedOut(state: GitRefState) {
-@@ -1263,7 +1205,6 @@
+@@ -1263,7 +1232,6 @@
  			if (state.commitTarget === "sandbox") await this.assertSandboxBranchNotCheckedOut(state);
  			return;
  		}
@@ -600,7 +638,7 @@
  		await runGitChecked(["update-ref", state.sandboxRef, state.baseCommit], { cwd: state.repoRoot, timeoutMs: 10_000 });
  	}
  
-@@ -1282,11 +1223,20 @@
+@@ -1282,11 +1250,20 @@
  		this.preflightError = undefined;
  		if (!this.isEnabled()) return;
  		try {
@@ -623,7 +661,7 @@
  		} catch (error) {
  			const message = error instanceof Error ? error.message : String(error);
  			this.preflightError = message;
-@@ -1300,22 +1250,14 @@
+@@ -1300,22 +1277,14 @@
  	}
  
  	async reserveTarget(ctx: ExtensionContext): Promise<string | undefined> {
@@ -651,7 +689,7 @@
  	}
  
  	private async ensureRuntime() {
-@@ -1329,9 +1271,16 @@
+@@ -1329,9 +1298,16 @@
  	}
  
  	private reusableContainerConfig(): Record<string, unknown> {
@@ -668,7 +706,7 @@
  		};
  		if (this.config.runtime === "docker") {
  			config.dockerPortMode = this.config.dockerPortMode;
-@@ -1348,7 +1297,9 @@
+@@ -1348,7 +1324,9 @@
  		return {
  			"pi.container-sandbox.managed": "true",
  			"pi.container-sandbox.repo": this.repoIdentity(state.repoRoot),
@@ -679,7 +717,7 @@
  			"pi.container-sandbox.ref": createHash("sha256").update(state.sandboxRef).digest("hex").slice(0, 16),
  			"pi.container-sandbox.config": createHash("sha256")
  				.update(JSON.stringify(this.reusableContainerConfig()))
-@@ -1357,6 +1308,22 @@
+@@ -1357,6 +1335,22 @@
  		};
  	}
  
@@ -702,22 +740,25 @@
  	private async inspectContainer(name: string): Promise<ContainerInspectData> {
  		const inspected = await this.runtimeExecChecked(["inspect", name], { timeoutMs: 30_000, maxCaptureBytes: 2 * 1024 * 1024 });
  		if (inspected.stdoutTruncated) throw new Error(`Container metadata is too large to validate: ${name}`);
-@@ -1381,18 +1348,34 @@
+@@ -1380,18 +1374,88 @@
+ 		if (typeof image !== "string" || normalizeImage(image) !== normalizeImage(this.config.image)) {
  			throw new Error(`Existing sandbox container ${name} uses image ${image ?? "(unknown)"}, expected ${this.config.image}; preserve or remove it before retrying`);
  		}
++		if (this.config.runtime === "docker") {
++			const expectedImageId = (await this.runtimeExecChecked(["image", "inspect", "--format", "{{.Id}}", this.config.image], { timeoutMs: 30_000 })).stdout.toString().trim();
++			if (!expectedImageId || item.Image !== expectedImageId) throw new Error(`Existing container ${name} was created from a stale image generation`);
++		}
  		const mounts = appleConfig?.mounts ?? item?.Mounts ?? [];
 -		const expectedCache = path.resolve(this.packageCacheHostRoot());
- 		const cacheMount = mounts.find((mount) => (mount?.destination ?? mount?.Destination) === PACKAGE_CACHE_ROOT);
+-		const cacheMount = mounts.find((mount) => (mount?.destination ?? mount?.Destination) === PACKAGE_CACHE_ROOT);
 -		const cacheSource = cacheMount?.source ?? cacheMount?.Source;
 -		if (!cacheMount || path.resolve(String(cacheSource ?? "")) !== expectedCache) {
 -			throw new Error(`Existing sandbox container ${name} does not have the expected package-cache bind mount; preserve or remove it before retrying`);
-+		if (!cacheMount || (cacheMount.type ?? cacheMount.Type) === "bind" || (cacheMount.Name && cacheMount.Name !== this.packageCacheHostRoot())) {
++		const cacheMounts = mounts.filter((mount) => (mount.destination ?? mount.Destination) === PACKAGE_CACHE_ROOT);
++		const cacheMount = cacheMounts[0];
++		if (cacheMounts.length !== 1 || !cacheMount || (cacheMount.type ?? cacheMount.Type) !== "volume" || cacheMount.Name !== this.packageCacheHostRoot()) {
 +			throw new Error(`Existing sandbox container ${name} does not have the expected package-cache named volume; preserve or remove it before retrying`);
- 		}
--		const labels = (appleConfig?.labels ?? dockerConfig?.Labels ?? item?.Labels ?? {}) as Record<string, string>;
--		if (labels["pi.container-sandbox.managed"] === "true") {
--			for (const [key, expected] of Object.entries(this.containerLabels(state))) {
--				if (labels[key] !== expected) throw new Error(`Existing sandbox container ${name} has incompatible metadata (${key}); preserve or remove it before retrying`);
++		}
 +		const route = this.getRoute();
 +		const bindMounts = mounts.filter((mount) => (mount.type ?? mount.Type) === "bind");
 +		const expectedBinds = this.trustedBindSources().map((source) => path.resolve(source));
@@ -725,27 +766,79 @@
 +		for (const mount of bindMounts) {
 +			const source = path.resolve(String(mount.source ?? mount.Source ?? ""));
 +			const destination = path.resolve(String(mount.destination ?? mount.Destination ?? ""));
++			if (mount.Propagation !== "rprivate") throw new Error(`Existing sandbox container ${name} has unsafe bind propagation`);
 +			if (source === contextSource) {
 +				if (destination !== "/run/pi/HOST_CONTEXT.md" || mount.RW !== false) throw new Error(`Existing sandbox container ${name} has an unsafe host-context mount`);
 +			} else if (!expectedBinds.includes(source) || destination !== source || mount.RW !== true) {
 +				throw new Error(`Existing sandbox container ${name} exposes unexpected host bind ${source} -> ${destination}`);
 +			}
 +		}
++		if (bindMounts.length !== expectedBinds.length + 1) throw new Error(`Existing sandbox container ${name} has an unexpected bind-mount count`);
 +		if (!bindMounts.some((mount) => path.resolve(String(mount.source ?? mount.Source ?? "")) === contextSource)) throw new Error(`Existing sandbox container ${name} is missing its read-only host context`);
-+		if (route.mode === "trusted-live") {
-+			for (const source of expectedBinds) {
-+				if (!bindMounts.some((mount) => path.resolve(String(mount.source ?? mount.Source ?? "")) === source)) throw new Error(`Existing sandbox container ${name} is missing trusted-live bind ${source}`);
- 			}
++		const allowedTmpfsMount = (mount: ContainerInspectMount) => (mount.type ?? mount.Type) === "tmpfs" && (mount.destination ?? mount.Destination) === "/tmp/pi-home";
++		if (mounts.some((mount) => (mount.type ?? mount.Type) !== "bind" && mount !== cacheMount && !allowedTmpfsMount(mount))) throw new Error(`Existing sandbox container ${name} has an unexpected non-bind mount`);
++		for (const source of expectedBinds) {
++			if (!bindMounts.some((mount) => path.resolve(String(mount.source ?? mount.Source ?? "")) === source)) throw new Error(`Existing sandbox container ${name} is missing trusted-live bind ${source}`);
  		}
-+		const labels = (appleConfig?.labels ?? dockerConfig?.Labels ?? item?.Labels ?? {}) as Record<string, string>;
+ 		const labels = (appleConfig?.labels ?? dockerConfig?.Labels ?? item?.Labels ?? {}) as Record<string, string>;
+-		if (labels["pi.container-sandbox.managed"] === "true") {
+-			for (const [key, expected] of Object.entries(this.containerLabels(state))) {
+-				if (labels[key] !== expected) throw new Error(`Existing sandbox container ${name} has incompatible metadata (${key}); preserve or remove it before retrying`);
+-			}
 +		if (labels["pi.container-sandbox.managed"] !== "true") throw new Error(`Existing container ${name} is not owned by the Pi task harness`);
 +		for (const [key, expected] of Object.entries(this.containerLabels(state))) {
 +			if (labels[key] !== expected) throw new Error(`Existing sandbox container ${name} has incompatible metadata (${key}); preserve or remove it before retrying`);
 +		}
++		if (this.config.runtime !== "docker") return;
++
++		// Reuse is allowed only when every security-relevant creation invariant still matches.
++		const hostConfig = item.HostConfig;
++		const uidGid = `${route.uid}:${route.gid}`;
++		if (!dockerConfig || !hostConfig || dockerConfig.User !== uidGid) {
++			throw new Error(`Existing container ${name} has an unexpected user; expected ${uidGid}`);
++		}
++		if ((hostConfig.CapAdd?.length ?? 0) !== 0) throw new Error(`Existing container ${name} adds Linux capabilities`);
++		if (hostConfig.CapDrop?.length !== 1 || hostConfig.CapDrop[0] !== "ALL") throw new Error(`Existing container ${name} is missing required --cap-drop ALL`);
++		if (hostConfig.SecurityOpt?.length !== 1 || hostConfig.SecurityOpt[0] !== "no-new-privileges:true") throw new Error(`Existing container ${name} has unexpected security options`);
++		if (hostConfig.Privileged) throw new Error(`Existing container ${name} must not run as privileged`);
++		if (hostConfig.PidMode) throw new Error(`Existing container ${name} must not share another PID namespace`);
++		if (!["", "default", "bridge"].includes(hostConfig.NetworkMode ?? "")) throw new Error(`Existing container ${name} has an unexpected network namespace`);
++		if (!["", "private"].includes(hostConfig.IpcMode ?? "")) throw new Error(`Existing container ${name} has an unexpected IPC namespace`);
++		const attachedNetworks = Object.keys(item.NetworkSettings?.Networks ?? {});
++		if (attachedNetworks.length !== 1 || attachedNetworks[0] !== "bridge") throw new Error(`Existing container ${name} has unexpected network attachments`);
++		if ((hostConfig.Devices?.length ?? 0) > 0 || (hostConfig.DeviceRequests?.length ?? 0) > 0) throw new Error(`Existing container ${name} must not have device mappings`);
++
++		const tmpfs = hostConfig.Tmpfs ?? {};
++		const tmpfsOptions = new Set((tmpfs["/tmp/pi-home"] ?? "").split(","));
++		for (const option of ["rw", "nosuid", "nodev", `uid=${route.uid}`, `gid=${route.gid}`]) {
++			if (!tmpfsOptions.has(option)) throw new Error(`Existing container ${name} has unsafe /tmp/pi-home tmpfs options`);
++		}
++		if (!tmpfsOptions.has("mode=0700") && !tmpfsOptions.has("mode=700")) throw new Error(`Existing container ${name} has unsafe /tmp/pi-home mode`);
++		if (Object.keys(tmpfs).length !== 1) throw new Error(`Existing container ${name} has unexpected tmpfs mounts`);
++
++		const requiredEnvironment = { HOME: "/tmp/pi-home", CI: "1", ...PACKAGE_CACHE_ENV };
++		const allowedEnvironment = new Set([...Object.keys(requiredEnvironment), "LANG", "LC_ALL", "PATH", "NODE_VERSION", "YARN_VERSION"]);
++		const environment = new Map<string, string>((dockerConfig.Env ?? []).map((entry): [string, string] => {
++			const boundary = entry.indexOf("=");
++			return boundary < 0 ? [entry, ""] : [entry.slice(0, boundary), entry.slice(boundary + 1)];
++		}));
++		for (const [key, value] of Object.entries(requiredEnvironment)) {
++			if (environment.get(key) !== value) throw new Error(`Existing container ${name} has unexpected ${key} environment`);
++		}
++		if ([...environment.keys()].some((key) => !allowedEnvironment.has(key))) throw new Error(`Existing container ${name} contains an unexpected environment variable`);
++		if (dockerConfig.Cmd?.length !== 2 || dockerConfig.Cmd[0] !== "sleep" || dockerConfig.Cmd[1] !== "infinity") throw new Error(`Existing container ${name} has an unexpected command`);
++
++		const portBindings = hostConfig.PortBindings ?? {};
++		const expectedPortKeys = this.config.dockerPortMode === "disabled" ? [] : portsFromRange(this.config.dockerPortRange).map((port) => `${port}/tcp`);
++		if (Object.keys(portBindings).sort().join("\0") !== expectedPortKeys.sort().join("\0")) throw new Error(`Existing container ${name} has unexpected published ports`);
++		for (const [key, bindings] of Object.entries(portBindings)) {
++			if (bindings?.length !== 1 || bindings[0]?.HostIp !== "127.0.0.1") throw new Error(`Existing container ${name} publishes ${key} outside host loopback`);
++			const containerPort = Number(key.split("/", 1)[0]);
++			if (this.config.dockerPortMode === "fixed" && bindings[0]?.HostPort !== String(containerPort)) throw new Error(`Existing container ${name} has an unexpected fixed host port`);
+ 		}
  	}
  
- 	private dockerPublishArgs(): string[] {
-@@ -1438,6 +1421,17 @@
+@@ -1438,6 +1502,17 @@
  	private async prepareGitRefWorkspace(ctx?: ExtensionContext) {
  		if (!this.containerName) throw new Error("Sandbox container is not running");
  		const state = await this.ensureGitRefState(ctx);
@@ -763,7 +856,7 @@
  		const identity = (await this.runtimeExecChecked(["exec", this.containerName, "sh", "-c", "printf '%s:%s' \"$(id -u)\" \"$(id -g)\""])).stdout
  			.toString()
  			.trim();
-@@ -1453,15 +1447,8 @@
+@@ -1453,15 +1528,8 @@
  				const hostKnowsContainerHead = (await runGit(["cat-file", "-e", `${containerHead}^{commit}`], { cwd: state.repoRoot, timeoutMs: 10_000 })).code === 0;
  				const hostAdvanced = hostKnowsContainerHead &&
  					(await runGit(["merge-base", "--is-ancestor", containerHead, hostHead], { cwd: state.repoRoot, timeoutMs: 30_000 })).code === 0;
@@ -780,7 +873,7 @@
  				} else {
  					throw new Error(`${state.commitTarget} sandbox container is out of sync with ${state.sandboxRef}; preserve or inspect the container before retrying`);
  				}
-@@ -1572,22 +1559,30 @@
+@@ -1572,22 +1640,30 @@
  			return;
  		}
  
@@ -817,7 +910,7 @@
  			this.config.image,
  			"sleep",
  			"infinity",
-@@ -1854,33 +1849,6 @@
+@@ -1854,33 +1930,6 @@
  			.trim();
  	}
  
@@ -851,7 +944,7 @@
  
  	private async importContainerHistory<T>(
  		state: GitRefState,
-@@ -1920,23 +1888,12 @@
+@@ -1920,23 +1969,12 @@
  		state: GitRefState,
  		importedHead: string,
  		expectedTargetHead: string,
@@ -880,7 +973,7 @@
  	}
  
  	private async importSandboxHeadToHost(state: GitRefState, expectedParent: string): Promise<{ imported: boolean; commitHash: string }> {
-@@ -1957,7 +1914,7 @@
+@@ -1957,7 +1995,7 @@
  				timeoutMs: 30_000,
  			})).stdout.toString().trim();
  			if (commitCount !== "1") throw new Error(`Refusing sandbox checkpoint containing ${commitCount} commits; expected exactly 1`);
@@ -889,7 +982,7 @@
  		});
  		return { imported: true, commitHash: sandboxHead };
  	}
-@@ -2019,18 +1976,15 @@
+@@ -2019,18 +2057,15 @@
  	}
  
  	private async checkpointGitRefUnlocked(ctx?: ExtensionContext): Promise<GitRefCheckpointResult> {
@@ -912,7 +1005,7 @@
  		return {
  			committed: checkpoint.committed,
  			imported: imported.imported,
-@@ -2235,43 +2189,9 @@
+@@ -2235,43 +2270,9 @@
  		throw new Error(result.stderr.toString().trim() || result.stdout.toString().trim() || "Container rebase failed");
  	}
  
@@ -957,7 +1050,7 @@
  		await this.ensure(ctx);
  		if (this.pendingRebase) return this.rebaseStatus();
  
-@@ -2350,12 +2270,8 @@
+@@ -2350,12 +2351,8 @@
  		}
  
  		if (pending.expectedCommitCount === 0) {
@@ -972,7 +1065,7 @@
  			await this.completeRebaseState(state, pending);
  			ctx?.ui.setStatus("sandbox-rebase", undefined);
  			return { completed: true, conflicted: false, message: `Rebased sandbox onto ${state.baseBranch} @ ${pending.newBase.slice(0, 12)}` };
-@@ -2373,11 +2289,11 @@
+@@ -2373,11 +2370,11 @@
  				.toString()
  				.trim();
  			if (mergeCount !== "0") throw new Error("Imported rebased history contains unexpected merge commits");
@@ -986,7 +1079,7 @@
  		ctx?.ui.setStatus("sandbox-rebase", undefined);
  		return { completed: true, conflicted: false, message: `Rebased ${pending.expectedCommitCount} commit(s) onto ${state.baseBranch} @ ${pending.newBase.slice(0, 12)}` };
  	}
-@@ -2418,22 +2334,13 @@
+@@ -2418,22 +2415,13 @@
  	}
  
  	async assertReadyForAgentTurn() {
@@ -1013,7 +1106,7 @@
  	}
  
  
-@@ -2441,18 +2348,39 @@
+@@ -2441,18 +2429,39 @@
  		return this.checkpointGitRef(ctx);
  	}
  
@@ -1055,7 +1148,7 @@
  				} else if (explicitStop || this.config.lifecycle === "stopped") {
  					await this.runtimeExec(["stop", containerToCleanup]).catch(() => undefined);
  				}
-@@ -2462,7 +2390,6 @@
+@@ -2462,7 +2471,6 @@
  			this.started = false;
  			this.dockerPortMappings = [];
  			this.depsInstalled = false;
@@ -1063,7 +1156,7 @@
  		}
  	}
  }
-@@ -2485,6 +2412,8 @@
+@@ -2485,6 +2493,8 @@
  	configure(ctx: ExtensionContext) { this.engine.configure(ctx); }
  	isEnabled() { return this.engine.isEnabled(); }
  	getConfig() { return this.engine.getConfig(); }
@@ -1072,7 +1165,7 @@
  	getGitRefState() { return this.engine.getGitRefState(); }
  	hasPendingRebase() { return this.engine.hasPendingRebase(); }
  	restoreGitRefState(ctx: ExtensionContext) { this.engine.restoreGitRefState(ctx); }
-@@ -2536,20 +2465,25 @@
+@@ -2536,20 +2546,25 @@
  }
  
  export default function (pi: ExtensionAPI) {
@@ -1101,7 +1194,7 @@
  	function routedTool<TParams extends TSchema, TDetails>(
  		localFactory: (cwd: string) => ToolDefinition<TParams, TDetails>,
  		sandboxFactory: (cwd: string) => ToolDefinition<TParams, TDetails>,
-@@ -2559,8 +2493,12 @@
+@@ -2559,8 +2574,12 @@
  			...base,
  			async execute(id, params, signal, onUpdate, ctx) {
  				sandbox.workspace.configure(ctx);
@@ -1116,7 +1209,7 @@
  			},
  		};
  	}
-@@ -2662,6 +2600,50 @@
+@@ -2662,6 +2681,50 @@
  		};
  	}
  
@@ -1167,7 +1260,7 @@
  	function reviewResourceLoader(systemPrompt: string): ResourceLoader {
  		const runtime = createExtensionRuntime();
  		return {
-@@ -3004,6 +2986,7 @@
+@@ -3004,6 +3067,7 @@
  	});
  
  	pi.on("session_start", async (_event, ctx) => {
@@ -1175,7 +1268,7 @@
  		sandbox.workspace.configure(ctx);
  		sandbox.workspace.restoreGitRefState(ctx);
  		await sandbox.workspace.preflight(ctx);
-@@ -3017,7 +3000,7 @@
+@@ -3017,7 +3081,7 @@
  			if (lockError) {
  				ctx.ui.notify(lockError, "error");
  				const target = parseTarget(sandbox.workspace.getConfig().target, "target");
@@ -1184,7 +1277,7 @@
  				ctx.ui.setStatus("sandbox", ctx.ui.theme.fg("error", `sandbox: locked (${targetLabel})`));
  				return;
  			}
-@@ -3029,8 +3012,9 @@
+@@ -3029,8 +3093,9 @@
  	});
  
  	pi.on("before_agent_start", async (event, ctx) => {
@@ -1195,7 +1288,7 @@
  		await sandbox.workspace.preflight(ctx);
  		if (sandbox.workspace.getPreflightError()) throw new Error(`Sandbox unavailable: ${sandbox.workspace.getPreflightError()}`);
  		const lockError = await sandbox.workspace.reserveTarget(ctx);
-@@ -3045,10 +3029,11 @@
+@@ -3045,10 +3110,11 @@
  			: config.checkpointFrequency === "agent"
  				? "agent run"
  				: "settled agent cycle";
@@ -1211,7 +1304,7 @@
  		const dockerPorts = formatDockerPortMappings(sandbox.lifecycle.getDockerPortMappings());
  		const portNote = config.runtime === "docker"
  			? config.dockerPortMode === "disabled"
-@@ -3060,13 +3045,19 @@
+@@ -3060,13 +3126,19 @@
  		const rebaseNote = sandbox.workspace.hasPendingRebase()
  			? " A sandbox rebase is currently pending. Normal automatic checkpoints are paused. Resolve any conflicts inside the container, stage them, run GIT_EDITOR=true git rebase --continue until complete, and leave the tracked worktree clean; never attempt to modify the host ref directly."
  			: "";
@@ -1233,7 +1326,7 @@
  		};
  	});
  
-@@ -3091,12 +3082,14 @@
+@@ -3091,12 +3163,14 @@
  	});
  
  	pi.on("session_shutdown", async (_event, ctx) => {
@@ -1249,7 +1342,7 @@
  		await sandbox.workspace.preflight(ctx);
  		if (sandbox.workspace.getPreflightError()) throw new Error(`Sandbox unavailable: ${sandbox.workspace.getPreflightError()}`);
  		const lockError = await sandbox.workspace.reserveTarget(ctx);
-@@ -3158,7 +3151,7 @@
+@@ -3158,7 +3232,7 @@
  		...localGrep,
  		async execute(id, params, signal, onUpdate, ctx) {
  			sandbox.workspace.configure(ctx);
@@ -1258,7 +1351,7 @@
  			const searchPath = resolveToolPath(ctx.cwd, params.path || ".");
  			const args = [
  				"rg",
-@@ -3230,7 +3223,7 @@
+@@ -3230,7 +3304,7 @@
  					const dockerPorts = formatDockerPortMappings(sandbox.lifecycle.getDockerPortMappings());
  					ctx.ui.notify(
  						[
@@ -1267,7 +1360,7 @@
  							`Runtime: ${config.runtime}`,
  							`Image: ${config.image}`,
  							`Docker port mode: ${config.runtime === "docker" ? config.dockerPortMode : "(not applicable)"}`,
-@@ -3244,7 +3237,7 @@
+@@ -3244,7 +3318,7 @@
  							`Host untracked files: ${config.hostUntrackedFiles}`,
  							`Target ref: ${gitRefState?.sandboxRef ?? "(not initialized)"}`,
  							`Target lock: ${targetLock.error ?? (targetLock.owned ? "owned by this session" : "not acquired")}`,

@@ -107,6 +107,24 @@ class LauncherTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("refusing nested invocation", result.stderr)
 
+    def test_installer_refuses_activation_when_docker_daemon_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            fake_bin = root / "bin"
+            home.mkdir()
+            fake_bin.mkdir()
+            docker = fake_bin / "docker"
+            docker.write_text("#!/bin/sh\nexit 1\n")
+            docker.chmod(0o755)
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "PATH": f"{fake_bin}:{env['PATH']}", "PI_HARNESS_ONLY": "1"})
+            result = subprocess.run([str(ROOT / "install.sh")], cwd=ROOT, env=env, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("refusing partial Pi harness activation", result.stderr)
+            self.assertFalse((home / ".local/share/pi/core").exists())
+            self.assertFalse((home / ".pi/agent").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

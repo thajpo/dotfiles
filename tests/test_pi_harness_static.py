@@ -46,13 +46,47 @@ class HarnessStaticTests(unittest.TestCase):
             'return { trusted: "no"',
         ]:
             self.assertIn(evidence, patch)
+        for evidence in [
+            "Reuse is allowed only when every security-relevant creation invariant still matches",
+            "CapAdd?.length",
+            "CapDrop?.length !== 1",
+            'SecurityOpt[0] !== "no-new-privileges:true"',
+            "was created from a stale image generation",
+            "has unsafe bind propagation",
+            "must not share another PID namespace",
+            "has an unexpected network namespace",
+            "has unexpected network attachments",
+            "DeviceRequests?.length",
+            'tmpfs["/tmp/pi-home"]',
+            "contains an unexpected environment variable",
+            "has unexpected published ports",
+        ]:
+            self.assertIn(evidence, patch)
+        self.assertIn("candidatePrefix", patch)
+        self.assertIn("/^[1-9][0-9]*$/.test(candidateNumber)", patch)
         self.assertNotIn("safe.directory=*", patch)
-        installed = ROOT / "pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts"
-        if installed.exists():
-            source = installed.read_text()
-            self.assertNotIn("fastForwardCurrentBranch", source)
-            self.assertNotIn('target === "current"', source)
-            self.assertIn("candidateNote", source)
+        added_source = "\n".join(
+            line[1:] for line in patch.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        )
+        self.assertNotIn("fastForwardCurrentBranch", added_source)
+        self.assertNotIn('target === "current"', added_source)
+        self.assertIn("candidateNote", added_source)
+
+    def test_installer_is_fail_closed_and_rollback_protected(self):
+        installer = (ROOT / "install.sh").read_text()
+        docker_guard = installer.index("docker info")
+        core_staging = installer.index("Staging dedicated Pi CLI")
+        self.assertLess(docker_guard, core_staging)
+        self.assertIn("refusing partial Pi harness activation", installer)
+        self.assertIn("trap finish_install EXIT", installer)
+        self.assertIn("trap 'exit 130' INT", installer)
+        self.assertIn("ACTIVATION_COMMITTED", installer)
+        self.assertIn("ACTIVATED_TARGETS", installer)
+        self.assertIn("OLD_IMAGE_ID", installer)
+        self.assertIn("ROLLBACK_REF=refs/heads/rollback/pi-harness-pre-trusted-live-20260729", installer)
+        self.assertIn("Refusing to replace mismatched rollback ref", installer)
+        self.assertIn("Existing Pi core has unsafe ownership or writable modes", installer)
 
     def test_btw_and_subagents_task_routes_are_pinned(self):
         btw = (ROOT / "pi/patches/pi-btw-0.4.1-task-routing.patch").read_text()
