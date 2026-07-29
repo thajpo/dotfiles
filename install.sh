@@ -41,9 +41,24 @@ install_control_tree() {
     mv "$temporary" "$target"
 }
 
-if ! command -v pi >/dev/null 2>&1 || [ "$(pi --version 2>/dev/null || true)" != "$PI_VERSION" ]; then
-    echo "Installing Pi CLI ${PI_VERSION}..."
-    npm install --global "@earendil-works/pi-coding-agent@${PI_VERSION}"
+PI_CORE_DIR="${PI_CORE_DIR:-$HOME/.local/share/pi/core}"
+PI_CORE_BIN="$PI_CORE_DIR/node_modules/.bin/pi"
+if [ ! -x "$PI_CORE_BIN" ] || [ "$("$PI_CORE_BIN" --version 2>/dev/null || true)" != "$PI_VERSION" ]; then
+    echo "Installing dedicated Pi CLI ${PI_VERSION}..."
+    mkdir -p "$(dirname "$PI_CORE_DIR")"
+    CORE_STAGING=$(mktemp -d "$(dirname "$PI_CORE_DIR")/.core-install.XXXXXX")
+    trap 'rm -rf "$CORE_STAGING"' EXIT
+    npm install --prefix "$CORE_STAGING" --no-save --no-package-lock --no-audit --no-fund \
+        "@earendil-works/pi-coding-agent@${PI_VERSION}"
+    [ "$("$CORE_STAGING/node_modules/.bin/pi" --version 2>/dev/null || true)" = "$PI_VERSION" ] || {
+        echo "Dedicated Pi CLI version verification failed" >&2
+        exit 1
+    }
+    if [ -e "$PI_CORE_DIR" ]; then
+        mv "$PI_CORE_DIR" "$PI_CORE_DIR.rollback.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    fi
+    mv "$CORE_STAGING" "$PI_CORE_DIR"
+    trap - EXIT
 fi
 
 mkdir -p "$PI_CONFIG_DIR"

@@ -286,7 +286,13 @@ def resolve_pi(self_path: pathlib.Path, cwd: pathlib.Path) -> pathlib.Path:
     resolved_self = self_path.resolve(strict=True)
     repo_result = run(["git", "rev-parse", "--show-toplevel"], cwd=cwd.resolve(strict=True), check=False)
     excluded = [pathlib.Path(repo_result.stdout.strip()).resolve(strict=True)] if repo_result.returncode == 0 else []
-    candidate = safe_command_path("pi", exclude=excluded)
+    core_bin = pathlib.Path.home() / ".local/share/pi/core/node_modules/.bin"
+    original = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{core_bin}{os.pathsep}{original}"
+    try:
+        candidate = safe_command_path("pi", exclude=excluded)
+    finally:
+        os.environ["PATH"] = original
     if not candidate or candidate == resolved_self:
         # Continue searching after excluding the wrapper itself.
         original = os.environ.get("PATH", "")
