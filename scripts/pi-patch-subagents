@@ -99,5 +99,5 @@ apply_verified_patch \
   "$agent_dir/npm/node_modules/@kjrjay/pi-sandbox/index.ts" \
   0.2.0 \
   fcc5244d55fb2853175b52f0befdb30debb57048b56c7f5fda5614f7450109f4 \
-  f4d062b0c2f085fc1e36b4e6b47fefe645f75cd33f3fdc9b4c33f90f0d6af291 \
+  26caa5148a458e5e5c74eeed1abfbda30a63557537bf20e215de0fd40f34e911 \
   "$patch_dir/pi-sandbox-0.2.0-task-routing.patch"

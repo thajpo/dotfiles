@@ -44,14 +44,14 @@ gitdir=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gitDir
 context=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["hostContext"])' "$route")
 uid=$(id -u); gid=$(id -g)
 container="pi-harness-integration-$$"
-mounts=(--mount "type=bind,src=$worktree,dst=$worktree,rw,bind-propagation=rprivate")
-case "$common" in "$worktree"/*) ;; *) mounts+=(--mount "type=bind,src=$common,dst=$common,rw,bind-propagation=rprivate");; esac
-case "$gitdir" in "$worktree"/*|"$common"/*) ;; *) mounts+=(--mount "type=bind,src=$gitdir,dst=$gitdir,rw,bind-propagation=rprivate");; esac
+mounts=(--mount "type=bind,src=$worktree,dst=$worktree,bind-propagation=rprivate")
+case "$common" in "$worktree"/*) ;; *) mounts+=(--mount "type=bind,src=$common,dst=$common,bind-propagation=rprivate");; esac
+case "$gitdir" in "$worktree"/*|"$common"/*) ;; *) mounts+=(--mount "type=bind,src=$gitdir,dst=$gitdir,bind-propagation=rprivate");; esac
 volume="pi-integration-cache-$$"
 docker create --name "$container" --user "$uid:$gid" --cap-drop ALL --security-opt no-new-privileges:true \
   --tmpfs "/tmp/pi-home:rw,nosuid,nodev,mode=0700,uid=$uid,gid=$gid" \
   "${mounts[@]}" \
-  --mount "type=bind,src=$context,dst=/run/pi/HOST_CONTEXT.md,ro,bind-propagation=rprivate" \
+  --mount "type=bind,src=$context,dst=/run/pi/HOST_CONTEXT.md,readonly=true,bind-propagation=rprivate" \
   --mount "type=volume,src=$volume,dst=/var/cache/pi-packages" \
   -e HOME=/tmp/pi-home -e CI=1 \
   pi-tool-sandbox:node22-bookworm-20260728 sleep infinity >/dev/null

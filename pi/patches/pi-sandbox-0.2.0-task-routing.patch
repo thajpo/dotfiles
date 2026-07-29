@@ -695,7 +695,7 @@
 +
 +	private trustedBindArgs(): string[] {
 +		return this.trustedBindSources().flatMap((source) => [
-+			"--mount", `type=bind,src=${source},dst=${source},rw,bind-propagation=rprivate`,
++			"--mount", `type=bind,src=${source},dst=${source},bind-propagation=rprivate`,
 +		]);
 +	}
 +
@@ -807,7 +807,7 @@
 -			"-e",
 -			"CI=1",
 +			...this.trustedBindArgs(),
-+			"--mount", `type=bind,src=${route.hostContext},dst=/run/pi/HOST_CONTEXT.md,ro,bind-propagation=rprivate`,
++			"--mount", `type=bind,src=${route.hostContext},dst=/run/pi/HOST_CONTEXT.md,readonly=true,bind-propagation=rprivate`,
 +			"--mount", `type=volume,src=${this.packageCacheHostRoot()},dst=${PACKAGE_CACHE_ROOT}`,
 +			"-e", "HOME=/tmp/pi-home",
 +			"-e", "CI=1",
