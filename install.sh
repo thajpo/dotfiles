@@ -60,6 +60,9 @@ if [ ! -x "$PI_CORE_BIN" ] || [ "$("$PI_CORE_BIN" --version 2>/dev/null || true)
     mv "$CORE_STAGING" "$PI_CORE_DIR"
     trap - EXIT
 fi
+# npm packages may publish group-writable executable files. The launcher rejects
+# those paths, so harden the entire dedicated control-plane tree after install.
+chmod -R go-w "$PI_CORE_DIR"
 
 mkdir -p "$PI_CONFIG_DIR"
 STAGING_DIR=$(mktemp -d "$PI_CONFIG_DIR/.install.XXXXXX")
