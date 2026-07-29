@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "defaultMode": "isolated",
+  "trustedRoots": [
+    "/home/j/dotfiles"
+  ],
+  "isolatedRoots": [],
+  "controlPlaneRepositories": [
+    "/home/j/dotfiles"
+  ],
+  "protectedBranches": [
+    "main",
+    "master"
+  ],
+  "worktreeRoot": "/home/j/.local/share/pi/worktrees"
+}

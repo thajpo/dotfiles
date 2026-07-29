@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( EUID == 0 )); then
+  printf 'pi-host: refusing to run Pi as root\n' >&2
+  exit 1
+fi
+if [[ -n "${PI_TASK_ROUTE_FILE:-}${PI_TASK_ROUTE_CAPABILITY:-}${PI_SUBAGENT_CHILD:-}" ]]; then
+  printf 'pi-host: refusing nested invocation from a coding task or subagent\n' >&2
+  exit 1
+fi
+
+printf '%s\n%s\n' \
+  'UNSANDBOXED HOST MODE' \
+  'This session can read and modify host-user files and processes.' >&2
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+dotfiles_dir=$(realpath "$self_dir/..")
+helper="$dotfiles_dir/scripts/pi-workspace.py"
+# pi-host is a sibling of the normal wrapper; exclude both from resolution.
+real_pi=$($helper resolve-pi --self "$dotfiles_dir/bin/pi" --cwd "$PWD")
+
+while IFS='=' read -r name _; do
+  case "$name" in
+    PI_TASK_*|PI_SUBAGENT_*|PI_SESSION_*|PI_PROVIDER|PI_MODEL|PI_REASONING_LEVEL|PI_CODING_AGENT_SESSION_DIR)
+      unset "$name"
+      ;;
+  esac
+done < <(env)
+
+session_id=$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import secrets; print(secrets.token_hex(8))')
+session_dir="$HOME/.pi/agent/sessions/host-maintenance/$session_id"
+mkdir -p -m 700 "$session_dir"
+exec "$real_pi" \
+  --no-context-files \
+  --no-extensions \
+  --no-skills \
+  --no-prompt-templates \
+  --session-dir "$session_dir" \
+  --name "host-maintenance-$session_id" \
+  "$@"

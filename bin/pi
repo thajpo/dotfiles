@@ -1,20 +1,53 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Resolve the underlying Pi binary without injecting notification flags.
-# Sound and desktop notifications are intentionally not part of the daily setup.
+if (( EUID == 0 )); then
+  printf 'pi: ordinary coding mode must not run as root\n' >&2
+  exit 1
+fi
+
 self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 self_path=$(realpath "$self_dir/$(basename -- "${BASH_SOURCE[0]}")")
-old_ifs=$IFS
-IFS=:
-for entry in $PATH; do
-  [[ -n "$entry" ]] || entry="."
-  candidate="$entry/pi"
-  [[ -x "$candidate" ]] || continue
-  [[ "$(realpath "$candidate")" == "$self_path" ]] && continue
-  IFS=$old_ifs
-  exec "$candidate" "$@"
+dotfiles_dir=$(realpath "$self_dir/..")
+helper="$dotfiles_dir/scripts/pi-workspace.py"
+
+for argument in "$@"; do
+  [[ "$argument" == "--" ]] && break
+  case "$argument" in
+    --no-sandbox|--sandbox-*|--approve|-a|--no-approve|-na)
+      printf 'pi: workspace mode and project trust are host-policy owned; rejected option: %s\n' "$argument" >&2
+      exit 2
+      ;;
+  esac
 done
-IFS=$old_ifs
-printf 'pi: no underlying pi executable found in PATH\n' >&2
-exit 127
+
+real_pi=$($helper resolve-pi --self "$self_path" --cwd "$PWD")
+case "${1:-}" in
+  -h|--help|-v|--version)
+    exec "$real_pi" "$@"
+    ;;
+  install|remove|uninstall|update|config)
+    printf 'pi: package and control-plane maintenance must be run explicitly with pi-host\n' >&2
+    exit 2
+    ;;
+esac
+
+prepared=$($helper prepare --cwd "$PWD" --owner-pid "$$" --pi-executable "$real_pi")
+eval "$(python3 - "$prepared" <<'PY'
+import json, shlex, sys
+value = json.loads(sys.argv[1])
+for source, target in [
+    ("route", "PI_TASK_ROUTE_FILE"),
+    ("capability", "PI_TASK_ROUTE_CAPABILITY"),
+    ("worktreeRoot", "PI_SUBAGENTS_WORKTREE_DIR"),
+    ("worktree", "PI_TASK_WORKTREE"),
+    ("mode", "PI_TASK_MODE"),
+    ("container", "PI_TASK_CONTAINER"),
+]:
+    print(f"export {target}={shlex.quote(str(value[source]))}")
+PY
+)"
+printf 'Pi workspace mode: %s\nTask worktree: %s\nTask container: %s\n' \
+  "$PI_TASK_MODE" "$PI_TASK_WORKTREE" "$PI_TASK_CONTAINER" >&2
+cd "$PI_TASK_WORKTREE"
+exec "$real_pi" "$@"
