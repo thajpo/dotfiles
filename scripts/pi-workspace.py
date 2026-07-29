@@ -240,6 +240,12 @@ def create_linked_worktree(
             raise WorkspaceError("created task worktree is on an unexpected branch")
         if git_output(task_root, "rev-parse", "HEAD^{commit}") != starting_oid:
             raise WorkspaceError("created task worktree moved from the recorded starting commit")
+        if git_output(repository, "rev-parse", "HEAD^{commit}") != starting_oid or git_output(
+            repository, "status", "--porcelain=v1", "--untracked-files=all"
+        ):
+            run(["git", "worktree", "remove", "--force", str(task_root)], cwd=repository, check=False)
+            run(["git", "branch", "-D", branch], cwd=repository, check=False)
+            raise WorkspaceError("protected checkout changed while preparing the task worktree")
         return task_root, branch
 
 
@@ -278,7 +284,9 @@ def safe_command_path(name: str, *, exclude: list[pathlib.Path] | None = None) -
 
 def resolve_pi(self_path: pathlib.Path, cwd: pathlib.Path) -> pathlib.Path:
     resolved_self = self_path.resolve(strict=True)
-    candidate = safe_command_path("pi", exclude=[cwd.resolve(strict=True)])
+    repo_result = run(["git", "rev-parse", "--show-toplevel"], cwd=cwd.resolve(strict=True), check=False)
+    excluded = [pathlib.Path(repo_result.stdout.strip()).resolve(strict=True)] if repo_result.returncode == 0 else []
+    candidate = safe_command_path("pi", exclude=excluded)
     if not candidate or candidate == resolved_self:
         # Continue searching after excluding the wrapper itself.
         original = os.environ.get("PATH", "")
@@ -294,7 +302,7 @@ def resolve_pi(self_path: pathlib.Path, cwd: pathlib.Path) -> pathlib.Path:
             parts.append(entry)
         os.environ["PATH"] = os.pathsep.join(parts)
         try:
-            candidate = safe_command_path("pi", exclude=[cwd.resolve(strict=True)])
+            candidate = safe_command_path("pi", exclude=excluded)
         finally:
             os.environ["PATH"] = original
     if not candidate:
@@ -342,8 +350,9 @@ def host_context(route: dict[str, Any], pi_executable: pathlib.Path | None) -> s
     shell = pwd.getpwuid(os.getuid()).pw_shell
     tool_names = ["node", "npm", "bun", "python3", "git", "docker", "tmux", "nvim"]
     tool_lines: list[str] = []
+    excluded_tools = [pathlib.Path(route["repository"]), pathlib.Path(route["worktree"]), pathlib.Path(route["worktreeRoot"])]
     for name in tool_names:
-        executable = safe_command_path(name)
+        executable = safe_command_path(name, exclude=excluded_tools)
         if executable:
             tool_lines.append(f"- {name}: {executable} — {first_line([str(executable), '--version'])}")
         else:

@@ -14,8 +14,12 @@ helper="$dotfiles_dir/scripts/pi-workspace.py"
 for argument in "$@"; do
   [[ "$argument" == "--" ]] && break
   case "$argument" in
-    --no-sandbox|--sandbox-*|--approve|-a|--no-approve|-na)
+    --no-sandbox|--sandbox-*|--approve|-a|--no-approve|-na|--no-extensions|--extension|--extension=*|-e)
       printf 'pi: workspace mode and project trust are host-policy owned; rejected option: %s\n' "$argument" >&2
+      exit 2
+      ;;
+    install|remove|uninstall|update|config)
+      printf 'pi: package and control-plane maintenance must be run explicitly with pi-host\n' >&2
       exit 2
       ;;
   esac
@@ -25,10 +29,6 @@ real_pi=$($helper resolve-pi --self "$self_path" --cwd "$PWD")
 case "${1:-}" in
   -h|--help|-v|--version)
     exec "$real_pi" "$@"
-    ;;
-  install|remove|uninstall|update|config)
-    printf 'pi: package and control-plane maintenance must be run explicitly with pi-host\n' >&2
-    exit 2
     ;;
 esac
 
@@ -43,11 +43,15 @@ for source, target in [
     ("worktree", "PI_TASK_WORKTREE"),
     ("mode", "PI_TASK_MODE"),
     ("container", "PI_TASK_CONTAINER"),
+    ("policyValid", "PI_TASK_POLICY_VALID"),
 ]:
     print(f"export {target}={shlex.quote(str(value[source]))}")
 PY
 )"
 printf 'Pi workspace mode: %s\nTask worktree: %s\nTask container: %s\n' \
   "$PI_TASK_MODE" "$PI_TASK_WORKTREE" "$PI_TASK_CONTAINER" >&2
+if [[ "$PI_TASK_POLICY_VALID" != "True" && "$PI_TASK_POLICY_VALID" != "true" ]]; then
+  printf 'Pi repository policy was unavailable or invalid; fail-closed isolated mode selected.\n' >&2
+fi
 cd "$PI_TASK_WORKTREE"
 exec "$real_pi" "$@"

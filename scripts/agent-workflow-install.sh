@@ -42,4 +42,3 @@ if [[ $# -ne 0 ]]; then
 fi
 
 printf '\nDone. Pi uses pi-subagents; legacy orchestrators remain dormant.\n'
-

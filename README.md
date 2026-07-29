@@ -144,11 +144,7 @@ Install or repair the shared memory/config symlinks:
 ~/dotfiles/scripts/agent-workflow-install.sh
 ```
 
-Install the optional workflow tools and clone Firstmate:
-
-```bash
-~/dotfiles/scripts/agent-workflow-install.sh --all
-```
+Legacy FirstMate, treehouse, side-agent, and Workboard installation has been removed. Pi uses `pi-subagents` as its only coding-agent orchestrator.
 
 Inspect the setup:
 
@@ -160,12 +156,13 @@ Core loop:
 
 - Use Luna as the persistent Pi parent and liaison.
 - Delegate bounded scouts and workers through `pi-subagents`.
-- Run child tools inside the disposable Docker sandbox and review isolated
-  `pi-sandbox/*` branches before local integration.
+- Let the host policy select trusted-live for authored repositories and isolated
+  private clones for unknown/external repositories.
+- Share one task container across collaborating agents; use linked worktrees and
+  separate containers only for explicit independent candidates.
 - Use Sol for architecture, difficult debugging, and high-risk review.
-- Keep FirstMate and Treehouse dormant unless explicitly invoked for unrelated
-  legacy workflows.
-- Validate PR-bound work with No Mistakes only when explicitly requested.
+- Use `pi-host` explicitly for unsandboxed machine maintenance and reviewed Pi
+  control-plane activation.
 
 ## What's Included
 
@@ -197,10 +194,11 @@ threshold is `-55 dBFS`. Override calibration with
 - Syncs to `~/.config/nvim`
 
 ### Pi
-- Reproducible Pi CLI version and pinned extension package manifests
-- Local prompts, theme, statusline, plan-mode, review, and sandboxed subagent configuration
+- Reproducible Pi CLI and exact extension package pins with verified patches
+- Deterministic trusted-live/isolated repository policy and hardened Docker task containers
+- One shared execution plane for parent, subagents, and pi-btw
+- Explicit unsandboxed `pi-host` maintenance launcher
 - Installs to `~/.pi/agent` without tracking credentials, sessions, or runtime state
-- Keeps completion visual-only: no sound or desktop notification extension
 
 ### Tools installed
 - **gitmux** - git status in tmux

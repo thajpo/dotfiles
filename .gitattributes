@@ -1,0 +1,2 @@
+# Unified diff context uses a leading marker before source indentation.
+pi/patches/*.patch -whitespace

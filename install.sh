@@ -18,25 +18,52 @@ backup_and_link() {
     ln -sfn "$source" "$target"
 }
 
+install_control_file() {
+    local source="$1" target="$2" mode="${3:-600}"
+    mkdir -p "$(dirname "$target")"
+    local temporary="${target}.new.$$"
+    install -m "$mode" "$source" "$temporary"
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        mv "$target" "${target}.rollback.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    fi
+    mv "$temporary" "$target"
+}
+
+install_control_tree() {
+    local source="$1" target="$2"
+    mkdir -p "$(dirname "$target")"
+    local temporary="${target}.new.$$"
+    rm -rf "$temporary"
+    cp -a "$source" "$temporary"
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        mv "$target" "${target}.rollback.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    fi
+    mv "$temporary" "$target"
+}
+
 if ! command -v pi >/dev/null 2>&1 || [ "$(pi --version 2>/dev/null || true)" != "$PI_VERSION" ]; then
     echo "Installing Pi CLI ${PI_VERSION}..."
     npm install --global "@earendil-works/pi-coding-agent@${PI_VERSION}"
 fi
 
 mkdir -p "$PI_CONFIG_DIR"
-backup_and_link "$SCRIPT_DIR/pi/settings.json" "$PI_CONFIG_DIR/settings.json"
-backup_and_link "$SCRIPT_DIR/agent/AGENTS.md" "$PI_CONFIG_DIR/AGENTS.md"
-for config in pi-chrome-devtools.json pi-plan-mode.json pi-statusline.json pr-review.json; do
-    backup_and_link "$SCRIPT_DIR/pi/$config" "$PI_CONFIG_DIR/$config"
-done
-backup_and_link "$SCRIPT_DIR/pi/extensions" "$PI_CONFIG_DIR/extensions"
-backup_and_link "$SCRIPT_DIR/pi/agents" "$PI_CONFIG_DIR/agents"
-backup_and_link "$SCRIPT_DIR/pi/prompts" "$PI_CONFIG_DIR/prompts"
-backup_and_link "$SCRIPT_DIR/pi/themes" "$PI_CONFIG_DIR/themes"
-mkdir -p "$PI_CONFIG_DIR/npm"
-cp "$SCRIPT_DIR/pi/npm/package.json" "$SCRIPT_DIR/pi/npm/package-lock.json" "$PI_CONFIG_DIR/npm/"
-npm ci --prefix "$PI_CONFIG_DIR/npm" --legacy-peer-deps --no-audit --no-fund
-PI_CODING_AGENT_DIR="$PI_CONFIG_DIR" "$SCRIPT_DIR/scripts/pi-patch-subagents"
+STAGING_DIR=$(mktemp -d "$PI_CONFIG_DIR/.install.XXXXXX")
+DOCKER_STAGING_IMAGE=""
+cleanup_staging() {
+    rm -rf "$STAGING_DIR"
+    if [ -n "$DOCKER_STAGING_IMAGE" ]; then docker image rm "$DOCKER_STAGING_IMAGE" >/dev/null 2>&1 || true; fi
+}
+trap cleanup_staging EXIT
+mkdir -p "$STAGING_DIR/npm"
+cp "$SCRIPT_DIR/pi/npm/package.json" "$SCRIPT_DIR/pi/npm/package-lock.json" "$STAGING_DIR/npm/"
+npm ci --prefix "$STAGING_DIR/npm" --legacy-peer-deps --no-audit --no-fund
+PI_CODING_AGENT_DIR="$STAGING_DIR" "$SCRIPT_DIR/scripts/pi-patch-subagents"
+if command -v docker >/dev/null 2>&1; then
+    DOCKER_STAGING_IMAGE="pi-tool-sandbox:staging-$$"
+    docker build --pull=false -t "$DOCKER_STAGING_IMAGE" "$SCRIPT_DIR/pi/sandbox"
+else
+    echo "Warning: Docker is unavailable; Pi coding sessions will fail closed" >&2
+fi
 
 POLICY_DIR="$HOME/.config/pi"
 POLICY_PATH="$POLICY_DIR/repository-policy.json"
@@ -54,10 +81,53 @@ else
     echo "Installed repository policy: $POLICY_PATH"
 fi
 
+# Activate only after package patching, image build, and policy validation pass.
+if [ -e "$PI_CONFIG_DIR/npm" ]; then
+    mv "$PI_CONFIG_DIR/npm" "$PI_CONFIG_DIR/npm.rollback.$(date -u +%Y%m%dT%H%M%SZ).$$"
+fi
+mv "$STAGING_DIR/npm" "$PI_CONFIG_DIR/npm"
+# Host-executing Pi extensions/settings are installed copies, never live
+# symlinks into the editable repository. AGENTS.md remains the requested global
+# dotfiles symlink.
+install_control_file "$SCRIPT_DIR/pi/settings.json" "$PI_CONFIG_DIR/settings.json"
+backup_and_link "$SCRIPT_DIR/agent/AGENTS.md" "$PI_CONFIG_DIR/AGENTS.md"
+for config in pi-chrome-devtools.json pi-plan-mode.json pi-statusline.json pr-review.json; do
+    install_control_file "$SCRIPT_DIR/pi/$config" "$PI_CONFIG_DIR/$config"
+done
+install_control_tree "$SCRIPT_DIR/pi/extensions" "$PI_CONFIG_DIR/extensions"
+install_control_tree "$SCRIPT_DIR/pi/agents" "$PI_CONFIG_DIR/agents"
+install_control_tree "$SCRIPT_DIR/pi/prompts" "$PI_CONFIG_DIR/prompts"
+install_control_tree "$SCRIPT_DIR/pi/themes" "$PI_CONFIG_DIR/themes"
+if [ -n "$DOCKER_STAGING_IMAGE" ]; then
+    docker image tag "$DOCKER_STAGING_IMAGE" pi-tool-sandbox:node22-bookworm-20260728
+    docker image rm "$DOCKER_STAGING_IMAGE" >/dev/null
+    DOCKER_STAGING_IMAGE=""
+    echo "Built hardened Pi task image"
+fi
+rmdir "$STAGING_DIR"
+trap - EXIT
+
 mkdir -p "$HOME/.local/bin"
-backup_and_link "$SCRIPT_DIR/bin/pi" "$HOME/.local/bin/pi"
-backup_and_link "$SCRIPT_DIR/bin/pi-host" "$HOME/.local/bin/pi-host"
+install_control_file "$SCRIPT_DIR/scripts/pi-workspace.py" "$HOME/.local/share/pi/control/pi-workspace.py" 755
+install_control_file "$SCRIPT_DIR/bin/pi" "$HOME/.local/bin/pi" 755
+install_control_file "$SCRIPT_DIR/bin/pi-host" "$HOME/.local/bin/pi-host" 755
+# Installed launchers resolve their helper from the reviewed control directory.
+python3 - "$HOME/.local/bin/pi" "$HOME/.local/bin/pi-host" <<'PY'
+from pathlib import Path
+import sys
+for name in sys.argv[1:]:
+    path = Path(name)
+    text = path.read_text()
+    text = text.replace('helper="$dotfiles_dir/scripts/pi-workspace.py"', 'helper="$HOME/.local/share/pi/control/pi-workspace.py"')
+    path.write_text(text)
+    path.chmod(0o755)
+PY
 echo "Installed Pi ${PI_VERSION} configuration and deterministic launchers"
+
+if [ "${PI_HARNESS_ONLY:-0}" = "1" ]; then
+    echo "Pi harness installation complete (host-only scope)"
+    exit 0
+fi
 
 echo "Installing tmux config..."
 
