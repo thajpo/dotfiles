@@ -52,6 +52,7 @@ check_cmd git "required"
 check_cmd tmux "terminal session management"
 check_cmd gh "GitHub auth and PR workflow"
 check_cmd pi "deterministic coding launcher"
+check_cmd pidev "repo-scoped tmux Pi workspace launcher"
 check_cmd pi-host "explicit unsandboxed maintenance launcher"
 
 printf '\nPi orchestration\n'

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Status"
+  short_description: "Read-only repository state and direction synthesis"
+  default_prompt: "Use $project-status to synthesize this repository's recent history, attempts, gaps, and evidence-backed directions."

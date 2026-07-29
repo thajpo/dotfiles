@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,8 +16,11 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertEqual(overrides["scout"]["model"], "deepseek/deepseek-v4-flash")
         self.assertEqual(overrides["worker"]["model"], "deepseek/deepseek-v4-flash")
         self.assertEqual(overrides["reviewer"]["model"], "openai-codex/gpt-5.6-luna")
-        self.assertEqual(overrides["advisor"]["model"], "openai-codex/gpt-5.6-sol")
+        self.assertEqual(overrides["oracle"]["model"], "openai-codex/gpt-5.6-sol")
+        self.assertNotIn("advisor", overrides)
+        self.assertTrue(all(value["defaultContext"] == "fresh" for value in overrides.values()))
         config = json.loads((ROOT / "pi/extensions/subagent/config.json").read_text())
+        self.assertFalse(config["asyncByDefault"])
         self.assertEqual(config["globalConcurrencyLimit"], 3)
         self.assertEqual(config["parallel"]["maxTasks"], 3)
         self.assertEqual(config["maxSubagentDepth"], 1)
@@ -92,6 +96,18 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("Refusing to replace mismatched rollback ref", installer)
         self.assertIn("Existing Pi core has unsafe ownership or writable modes", installer)
 
+    def test_pidev_is_installed_as_a_managed_pi_wrapper(self):
+        installer = (ROOT / "install.sh").read_text()
+        pidev = (ROOT / "bin/pidev").read_text()
+        tmux_helper = (ROOT / "bin/pi-tmux-session").read_text()
+        self.assertTrue((ROOT / "bin/pidev").stat().st_mode & 0o111)
+        self.assertTrue((ROOT / "bin/pi-tmux-session").stat().st_mode & 0o111)
+        self.assertIn("for launcher in pi pi-host pidev pi-tmux-session", installer)
+        self.assertIn("--session-id", pidev)
+        self.assertIn("tmux new-session", pidev)
+        self.assertIn('"$self_dir/pi-tmux-session" "$@"', pidev)
+        self.assertIn('exec "$self_dir/pi" "$@"', tmux_helper)
+
     def test_btw_and_subagents_task_routes_are_pinned(self):
         btw = (ROOT / "pi/patches/pi-btw-0.4.1-task-routing.patch").read_text()
         self.assertIn("PI_TASK_ROUTE_CAPABILITY", btw)
@@ -103,7 +119,11 @@ class HarnessStaticTests(unittest.TestCase):
 
     def test_global_agents_hash_and_removed_legacy_orchestrators(self):
         agents = (ROOT / "agent/AGENTS.md").read_bytes()
-        self.assertEqual(hashlib.sha256(agents).hexdigest(), "3452e9a33b92a5c837f5b5aa7cbde68a66c00a70030d68d9d0000a5cdfc2a7c7")
+        self.assertEqual(hashlib.sha256(agents).hexdigest(), "74c99dc419b64a3976f77320e5ceb335c37340b3e45a71d7ce09125ed7c26d5b")
+        policy = agents.decode()
+        for heading in ["### FAST", "### RIP", "### BUILD", "### MAJOR", "### OFF", "### LIGHT", "### DEEP"]:
+            self.assertIn(heading, policy)
+        self.assertNotIn("## Default feature workflow", policy)
         workflow = (ROOT / "scripts/agent-workflow-install.sh").read_text()
         self.assertNotIn("clone_firstmate", workflow)
         self.assertNotIn("treehouse/install", workflow)
@@ -111,6 +131,50 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("pi-btw", package["dependencies"])
         self.assertIn("pi-subagents", package["dependencies"])
         self.assertNotIn("pi-side-agents", package["dependencies"])
+
+    def test_children_use_fresh_scoped_context_and_one_writer(self):
+        agent_dir = ROOT / "pi/agents"
+        expected = {
+            "context-builder", "delegate", "oracle", "planner",
+            "researcher", "reviewer", "scout", "worker",
+        }
+        self.assertEqual({path.stem for path in agent_dir.glob("*.md")}, expected)
+        for path in agent_dir.glob("*.md"):
+            text = path.read_text()
+            frontmatter = text.split("---", 2)[1]
+            self.assertIn("defaultContext: fresh", frontmatter, path.name)
+            self.assertIn("inheritProjectContext: false", frontmatter, path.name)
+            self.assertIn("inheritSkills: false", frontmatter, path.name)
+            self.assertIn("subagentOnlyExtensions: /home/j/.pi/agent/extensions/workflow-state/index.ts", frontmatter, path.name)
+            tools = re.search(r"^tools: (.+)$", frontmatter, re.MULTILINE).group(1).split(", ")
+            if path.stem == "worker":
+                self.assertIn("write", tools)
+                self.assertIn("edit", tools)
+                self.assertIn("acceptanceRole: writer", frontmatter)
+            else:
+                self.assertNotIn("write", tools, path.name)
+                self.assertNotIn("edit", tools, path.name)
+                self.assertIn("acceptanceRole: read-only", frontmatter)
+
+    def test_workflow_state_and_compact_parent_skill_are_installed(self):
+        extension = (ROOT / "pi/extensions/workflow-state/index.ts").read_text()
+        self.assertIn('const TOOL_NAME = "task_packet"', extension)
+        self.assertIn('process.env[CHILD_ENV] === "1"', extension)
+        self.assertIn("workflowArtifactsDirForSession", extension)
+        patch = (ROOT / "pi/patches/pi-subagents-0.35.1-skill.patch").read_text()
+        added = "\n".join(
+            line[1:] for line in patch.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        )
+        self.assertIn("Fresh scoped children by default", added)
+        self.assertIn("Configured nesting depth is 1", added)
+        self.assertNotIn("Fable mode is the default", added)
+        patch_installer = (ROOT / "scripts/pi-patch-subagents").read_text()
+        self.assertIn("pi-subagents-0.35.1-skill.patch", patch_installer)
+        self.assertIn("496b5d02e0f578336a46aee46534ffddd6097f501791c7844986250e93f776ec", patch_installer)
+        installer = (ROOT / "install.sh").read_text()
+        self.assertIn("for tree in extensions agents prompts themes", installer)
+        self.assertIn('activate_path "$STAGING_DIR/control/$tree" "$PI_CONFIG_DIR/$tree"', installer)
 
 
 if __name__ == "__main__":

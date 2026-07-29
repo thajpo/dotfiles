@@ -1,6 +1,6 @@
 {
   "toolDescriptionMode": "compact",
-  "asyncByDefault": true,
+  "asyncByDefault": false,
   "asyncWidget": true,
   "defaultSessionDir": "~/.pi/agent/sessions/subagent/",
   "globalConcurrencyLimit": 3,

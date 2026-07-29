@@ -107,6 +107,64 @@ class LauncherTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("refusing nested invocation", result.stderr)
 
+    def test_pidev_separates_same_named_repositories_in_tmux(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            tmux_log = root / "tmux.jsonl"
+            fake_tmux = fake_bin / "tmux"
+            fake_tmux.write_text("""#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+with pathlib.Path(os.environ[\"FAKE_TMUX_LOG\"]).open(\"a\") as stream:
+    stream.write(json.dumps(args) + \"\\n\")
+if args and args[0] == \"has-session\":
+    raise SystemExit(1)
+""")
+            fake_tmux.chmod(0o755)
+            fake_uuidgen = fake_bin / "uuidgen"
+            fake_uuidgen.write_text("#!/bin/sh\nprintf 'test-session-id\\n'\n")
+            fake_uuidgen.chmod(0o755)
+
+            repositories = []
+            for parent in ("first", "second"):
+                repo = root / parent / "service"
+                repo.mkdir(parents=True)
+                git(repo, "init", "-b", "feature")
+                git(repo, "config", "user.name", "Pi Test")
+                git(repo, "config", "user.email", "pi-test@example.invalid")
+                (repo / "file.txt").write_text("start\\n")
+                git(repo, "add", "file.txt")
+                git(repo, "commit", "-m", "initial")
+                repositories.append(repo)
+
+            home = root / "home"
+            home.mkdir()
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(home),
+                "PATH": f"{fake_bin}:{ROOT / 'bin'}:{env['PATH']}",
+                "FAKE_TMUX_LOG": str(tmux_log),
+            })
+            for repo in repositories:
+                result = subprocess.run([str(ROOT / "bin/pidev")], cwd=repo, env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+            calls = [json.loads(line) for line in tmux_log.read_text().splitlines()]
+            new_sessions = [args for args in calls if args and args[0] == "new-session"]
+            self.assertEqual(len(new_sessions), 2)
+            session_targets = [args[args.index("-s") + 1] for args in new_sessions]
+            self.assertEqual(len(set(session_targets)), 2)
+            self.assertTrue(all(target.startswith("pi-service-") for target in session_targets))
+
+            working_directories = [args[args.index("-c") + 1] for args in calls if "-c" in args]
+            self.assertEqual(working_directories, [str(repo.resolve()) for repo in repositories for _ in range(2)])
+
     def test_installer_refuses_activation_when_docker_daemon_is_unavailable(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

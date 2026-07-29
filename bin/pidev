@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Open or attach a repo-scoped tmux workspace: Neovim left, Pi right.
+# Pi receives one stable project session ID so tmux-resurrect can reopen the
+# same conversation after a reboot.
+set -euo pipefail
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+self_path=$(realpath "$self_dir/$(basename -- "${BASH_SOURCE[0]}")")
+
+# Internal mode is used by the Pi pane. Keep the helper as a child process so
+# tmux-resurrect can capture the exact --session-id command line.
+if [[ ${1:-} == --launch ]]; then
+  shift
+  # Do not exec: tmux-resurrect needs pidev to remain the pane's parent.
+  "$self_dir/pi-tmux-session" "$@"
+  exit $?
+fi
+
+if ! command -v tmux >/dev/null 2>&1; then
+  printf 'pidev: tmux is required\n' >&2
+  exit 127
+fi
+
+cwd=$(pwd -P)
+if root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null); then
+  cwd=$(CDPATH= cd -- "$root" && pwd -P)
+fi
+repo=$(basename -- "$cwd")
+safe_repo=$(printf '%s' "$repo" | tr -cs '[:alnum:]_-' '-')
+safe_repo=${safe_repo#-}
+safe_repo=${safe_repo%-}
+[[ -n $safe_repo ]] || safe_repo=repo
+
+agent_dir=${PI_CODING_AGENT_DIR:-"$HOME/.pi/agent"}
+state_dir="$agent_dir/tmux-sessions"
+mkdir -p "$state_dir"
+
+# Keep both the tmux target and Pi mapping separate for same-named repositories
+# in different paths while retaining the readable repository name.
+state_key=$(printf '%s' "$cwd" | sha256sum | awk '{print $1}')
+session="pi-$safe_repo-${state_key:0:12}"
+state_file="$state_dir/${safe_repo}-${state_key}.session-id"
+session_id=""
+if [[ -r $state_file ]]; then
+  read -r session_id < "$state_file" || true
+fi
+
+# Migrate an existing project session on first use instead of starting a new
+# conversation. Pi encodes project directories this way in its session store.
+if [[ -z $session_id ]]; then
+  encoded_cwd=${cwd#/}
+  encoded_cwd=${encoded_cwd//\//-}
+  pi_session_dir="$agent_dir/sessions/--${encoded_cwd}--"
+  latest_session=$(find "$pi_session_dir" -maxdepth 1 -type f -name '*.jsonl' \
+    -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2- || true)
+  if [[ -n $latest_session ]]; then
+    session_id=$(sed -n '1s/.*"id":"\([^"]*\)".*/\1/p' "$latest_session")
+  fi
+fi
+
+if [[ -z $session_id ]]; then
+  session_id=$(uuidgen)
+fi
+printf '%s\n' "$session_id" > "$state_file"
+
+display_name="$repo: liaison — daily"
+# Quote every argument because tmux receives one shell command string.
+pi_cmd=""
+printf -v quoted '%q' "$self_path"
+pi_cmd=$quoted
+for argument in --launch --session-id "$session_id" --name "$display_name" "$@"; do
+  printf -v quoted ' %q' "$argument"
+  pi_cmd+=$quoted
+done
+
+# The Pi TUI may be wrapped by bash or node, so inspect the pane's process tree
+# instead of relying only on pane_current_command. This also repairs a pane
+# that tmux-resurrect restored as an ordinary shell.
+pi_process_in_tree() {
+  local parent=$1 child command
+  command=$(ps -o comm= -p "$parent" 2>/dev/null || true)
+  case "$command" in
+    pi|node) return 0 ;;
+  esac
+  while read -r child; do
+    [[ -n $child ]] || continue
+    if pi_process_in_tree "$child"; then
+      return 0
+    fi
+  done < <(pgrep -P "$parent" 2>/dev/null || true)
+  return 1
+}
+
+if ! tmux has-session -t "=$session" 2>/dev/null; then
+  tmux new-session -d -s "$session" -c "$cwd" -n editor 'exec nvim'
+  tmux split-window -h -l 42% -t "=$session:editor" -c "$cwd" "$pi_cmd"
+  tmux select-pane -t "=$session:editor.1"
+else
+  pi_pane_pid=$(tmux display-message -p -t "=$session:editor.1" '#{pane_pid}' 2>/dev/null || true)
+  if [[ -z $pi_pane_pid ]]; then
+    # The Pi pane may have exited while the restored editor pane remained.
+    tmux split-window -h -l 42% -t "=$session:editor" -c "$cwd" "$pi_cmd"
+    tmux select-pane -t "=$session:editor.1"
+  elif ! pi_process_in_tree "$pi_pane_pid"; then
+    tmux send-keys -t "=$session:editor.1" "$pi_cmd" C-m
+  fi
+fi
+
+if [[ -n ${TMUX:-} ]]; then
+  exec tmux switch-client -t "=$session"
+else
+  exec tmux attach-session -t "=$session"
+fi

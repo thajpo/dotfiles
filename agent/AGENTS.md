@@ -1,408 +1,613 @@
-# Global Pi engineering workflow
+# Global Pi engineering policy
 
-## Core operating principle
+## Purpose
 
-Use agents to improve understanding, implementation, and verification without
-turning the human into a reviewer of endless duplicated work.
+Use agents to improve engineering judgment, implementation, experimentation,
+and verification without turning every task into a ceremony or flooding agents
+with accumulated context.
 
-The default loop is:
+The default principle is:
+
+> Use the minimum process needed to make the next important mistake cheap and
+> visible.
+
+For consequential work:
+
+> Durable intent, disposable attempts, severe evidence.
+
+And:
 
 > Diverge on understanding. Converge on the plan. Implement once. Diverge on
 > verification.
 
-Also:
+Spend human attention on meaning, model tokens on search, and machine compute
+on rejection.
 
-> Durable intent, disposable attempts, severe evidence.
-
-Spend human attention on meaning, model tokens on search, and machine compute on
-rejection.
-
-## Models
+## Models and primary roles
 
 Default routing:
 
-- Parent and planner:
+- Parent and ordinary planner:
   `openai-codex/gpt-5.6-luna:high`
 
-- Fast scout, code mapping, test discovery, and bounded worker:
+- Fast scouts, code mapping, test discovery, bounded experimentation, and
+  bounded implementation:
   `deepseek/deepseek-v4-flash:high`
 
-- Normal integration and review:
+- Ordinary integration and review:
   `openai-codex/gpt-5.6-luna:high`
 
 - Architecture, difficult debugging, research uncertainty, public interfaces,
-  schemas, migration, concurrency, numerical behavior, compatibility, security,
-  and high-risk final review:
+  schemas, migration, concurrency, numerical behavior, compatibility,
+  security, and high-risk review:
   `openai-codex/gpt-5.6-sol:high`
 
-Use Sol because consequential uncertainty remains, not merely because a task is
-large.
+Use Sol because consequential uncertainty remains, not merely because the task
+is large.
 
 Use pi-subagents as the coding-agent orchestrator.
 
-Keep pi-btw available.
+Keep pi-btw available for side questions. Its context remains separate until a
+result is deliberately injected.
 
 Do not invoke FirstMate, treehouse, pi-side-agents, Workboard, jj, or another
 orchestrator unless the user explicitly changes this policy.
 
-## Workspace mode
+## Workspace and host policy
 
-The host harness chooses the workspace mode before the model starts.
+The host harness selects the repository execution mode before the model starts.
 
-The model must not choose, broaden, or alter repository trust.
+The model must not choose or broaden repository trust.
 
-### Trusted-live
+- Trusted repositories use the configured trusted-live workspace.
+- External or unknown repositories use the configured isolated workspace.
+- `pi-host` is an explicit unsandboxed host-maintenance mode.
 
-Trusted-live is used for repositories authored and trusted by the user.
+Within an assigned workspace, agents may use ordinary engineering tools:
 
-The assigned host Git worktree and required Git metadata are mounted read/write
-into one task container.
+- shell commands;
+- file editing;
+- project-local package installation;
+- tests, builds, servers, debuggers, and profilers;
+- local Git operations, including commit, amend, rebase, merge, cherry-pick,
+  reset, clean, reflog, and conflict resolution.
 
-Changes are live:
+Do not request approval for routine project-local shell or Git operations.
 
-- host edits are visible to agents;
-- agent edits are visible to the host;
-- local Git operations update the host repository immediately.
+Remote publication, deployment, production mutation, and activation of new
+host-executing Pi control-plane code require explicit user intent.
 
-The agent may fully modify or corrupt the assigned repository and its Git
-metadata. That is accepted.
+## Work modes
 
-The agent must not receive access to unrelated host paths, credentials, runtime
-sockets, or host process control.
+Every task uses one current work mode:
 
-### Isolated
+- FAST
+- RIP
+- BUILD
+- MAJOR
 
-Isolated mode is used for external, unknown, or suspicious repositories.
+The parent selects the mode from the task’s uncertainty and reversibility. The
+user may override it naturally.
 
-The repository remains in a private container workspace. Host Git metadata and
-the active host checkout are not mounted. Results publish only to an isolated
-branch.
+Do not ask the user to classify every task.
 
-Unknown repositories default to isolated.
+State the selected mode briefly when doing so provides useful orientation.
 
-### Host mode
+### FAST
 
-`pi-host` is an explicit unsandboxed normal-user maintenance mode.
+Use FAST when:
 
-It is not the default coding mode.
+- the desired result is clear;
+- affected code is obvious;
+- verification is strong;
+- mistakes are cheap to reverse.
 
-Do not silently switch into host mode.
+Examples:
 
-## Task and agent topology
+- obvious bug fixes;
+- mechanical refactors;
+- logging;
+- straightforward helpers;
+- clear dependency updates;
+- simple CLI changes.
 
-One normal task owns:
+Workflow:
 
-- one workspace;
-- one branch;
-- one task container.
+1. Give one worker the goal, constraints, and acceptance command.
+2. Implement.
+3. Run verification independently.
+4. Inspect the final diff.
+5. Finish.
 
-The parent and collaborating subagents share that live task workspace.
+Do not automatically add:
 
-Fresh versus forked model context must not change the filesystem or container.
+- impact mappers;
+- competing plans;
+- plan critics;
+- candidate ledgers;
+- multiple reviewers;
+- learning exercises.
 
-Normally use:
+A FAST task may be large in line count. Conceptual uncertainty and consequence,
+not raw size, determine the mode.
 
-- up to two investigative or review agents;
-- one implementation writer;
-- three children total.
+### RIP
 
-Use separate worktrees and containers only for deliberately independent
-implementation candidates.
+Use RIP when the purpose is to explore, learn, profile, prototype, reproduce,
+or discover the correct question.
 
-Do not create multiple full implementations when there is no inexpensive way to
-compare them.
+Examples:
 
-## Default feature workflow
+- profiling an unfamiliar model;
+- investigating an unknown bottleneck;
+- reproducing a paper;
+- trying compiler configurations;
+- exploring a speculative VLA intervention;
+- diagnosing a bug with an unknown cause;
+- prototyping several data representations.
 
-For a nontrivial feature:
+The initial brief should contain only:
 
-1. Clarify the requested behavior.
+- the question;
+- available environment;
+- useful evidence;
+- stop condition.
 
-2. Run independent scouts when useful:
+The agent may:
 
-   - Impact mapper:
-     identify affected files, services, interfaces, state, data flow, and tests.
+- inspect broadly;
+- modify code;
+- create instrumentation;
+- run experiments;
+- abandon approaches;
+- preserve useful intermediate states;
+- request bounded parallel investigations.
 
-   - Minimum-change mapper:
-     identify the smallest correct change and what should remain untouched.
+Do not require a production implementation plan before exploration.
 
-   - Optional test/risk mapper:
-     identify failure cases, integration risks, regressions, and discriminating
-     tests.
+Do not force a full contract before the task is capable of having one.
 
-3. The Luna parent reconciles disagreements.
+The agent must distinguish:
 
-4. Ask the Sol oracle when a consequential decision remains uncertain.
+- measurements;
+- observations;
+- inferences;
+- speculation.
 
-5. Record the intended behavior, important boundaries, and acceptance evidence.
+RIP output should contain:
 
-6. Use a fresh critic for meaningful plans.
+- what was learned;
+- supporting evidence;
+- what was tried;
+- useful code, tests, or instrumentation produced;
+- what remains uncertain;
+- the best next experiment.
 
-7. Normally use one implementation worker.
+Exploratory code must not be represented as production-ready without a later
+BUILD step.
 
-8. Independently run the important tests and inspect the actual changed paths.
+Parallel agents in RIP should test different explanations or collect
+independent evidence. Do not launch a ceremonial set of roles when one agent
+can simply run the experiment.
 
-9. Use fresh reviewers for correctness, test quality, unnecessary complexity,
-   and plan deviations.
+### BUILD
 
-10. Review the final surviving diff.
+Use BUILD when:
 
-## Task contract
+- desired behavior is reasonably clear;
+- the change crosses meaningful boundaries;
+- the result should be production-quality;
+- one implementation is normally sufficient.
 
-Before implementation, establish:
+Examples:
+
+- ordinary full-stack features;
+- API additions;
+- persistence changes;
+- moderate cross-module work;
+- new VLA Lens views or endpoints;
+- changes with meaningful integration behavior.
+
+Use independent perspectives only where they reduce real uncertainty.
+
+Typical workflow:
+
+1. Impact mapper:
+   identify affected files, services, interfaces, state, data flow, and tests.
+
+2. Minimum-change mapper:
+   identify the smallest correct change and what should remain untouched.
+
+3. Optional test/risk mapper:
+   use when state, persistence, retries, concurrency, authorization, numerical
+   behavior, compatibility, or weak integration coverage makes it worthwhile.
+
+4. Parent and user settle important behavior and boundaries.
+
+5. Use a plan critic only when the plan has meaningful risk or ambiguity.
+
+6. Normally use one implementation worker.
+
+7. Independently run acceptance checks.
+
+8. Use fresh review for correctness, test quality, scope, and changed system
+   surfaces.
+
+9. Inspect the final surviving diff.
+
+Do not pass raw scout transcripts to the worker.
+
+### MAJOR
+
+Use MAJOR when:
+
+- the desired result or architecture remains materially uncertain;
+- several systems or contracts must change;
+- later decisions depend on earlier implementation or integration results;
+- one giant plan would become stale before completion.
+
+Examples:
+
+- storage or API redesign;
+- broad concurrency changes;
+- system-wide migration;
+- major Pi harness changes;
+- multi-stage VLA Lens architecture changes.
+
+A MAJOR task is a program, not one worker assignment.
+
+The parent maintains:
+
+- desired end state;
+- non-negotiable boundaries;
+- major work areas;
+- dependency order;
+- decisions already made;
+- unresolved decisions;
+- current slice.
+
+Begin with system mapping and, where practical, a thin end-to-end walking
+skeleton.
+
+Divide the work into independently testable slices.
+
+Each slice uses FAST, RIP, or BUILD.
+
+A worker receives only:
+
+- current slice goal;
+- relevant current behavior;
+- relevant decisions and boundaries;
+- acceptance evidence;
+- nearby dependencies;
+- stop conditions.
+
+Do not give a slice worker:
+
+- the complete parent transcript;
+- every prior report;
+- every architectural debate;
+- unrelated future slices.
+
+After each slice:
+
+1. Integrate.
+2. Run the relevant cross-boundary tests.
+3. Update the current program brief.
+4. Replace obsolete understanding rather than appending another narrative.
+5. Select the next slice.
+
+If a slice exposes fundamental uncertainty, switch that slice to RIP.
+
+If the architecture stabilizes, continue through BUILD and FAST slices.
+
+## Mode selection
+
+Use:
+
+- Clear and reversible → FAST
+- Unclear and cheap to experiment → RIP
+- Clear but consequential → BUILD
+- Unclear and consequential or cross-system → MAJOR
+
+Mode transitions are expected:
+
+- RIP → BUILD when the benchmark, behavior, or evaluation stabilizes.
+- BUILD → RIP when the apparent implementation problem becomes an unknown
+  diagnosis problem.
+- BUILD → MAJOR when several unresolved system decisions appear.
+- MAJOR → a sequence of BUILD and FAST slices after architecture stabilizes.
+
+Briefly announce meaningful mode changes.
+
+## Learning overlay
+
+Learning is independent of work mode:
+
+- OFF
+- LIGHT
+- DEEP
+
+### OFF
+
+Use for:
+
+- commodity work;
+- automated research queues;
+- tasks where only the result matters;
+- explicit “just rip” or “do this autonomously” requests.
+
+Do not quiz the user or add explanation overhead.
+
+Leave reproducible evidence.
+
+### LIGHT
+
+Use as the normal learning level for relevant personal engineering projects.
+
+At completion, report:
+
+- the most important design or research decision;
+- the most surprising finding;
+- the evidence that resolved it;
+- one piece of code, trace, or test the user should inspect.
+
+Keep this brief.
+
+### DEEP
+
+Use when the user explicitly wants to internalize the work or when the task is
+central to the user’s intended expertise.
+
+Add:
+
+1. A short user prediction before investigation:
+   - likely affected surfaces;
+   - key invariant;
+   - likely failure;
+   - evidence that would change the prediction.
+
+2. User ownership of at least one consequential design seam.
+
+3. A comparison between the initial mental model and discovered behavior.
+
+4. A reverse design review at completion:
+   - critical path;
+   - main design choice;
+   - important failure modes;
+   - what the tests establish;
+   - where deeper code inspection remains warranted.
+
+Do not impose DEEP learning automatically.
+
+## Context discipline
+
+The parent owns the global mental model.
+
+Maintain one session-scoped current task packet outside the repository.
+
+Rewrite current understanding as it changes. Do not endlessly append old and
+new interpretations.
+
+A child should receive only:
+
+- original task or current slice;
+- selected mode;
+- learning level when relevant;
+- role;
+- current accepted decisions;
+- relevant boundaries;
+- relevant repository instructions;
+- acceptance evidence;
+- stop or escalation conditions.
+
+Do not automatically give children:
+
+- raw parent transcripts;
+- unrelated scout reports;
+- obsolete plans;
+- reports from other modes;
+- the full history of the program;
+- every prior failed approach.
+
+Use progressive disclosure:
+
+1. Compact brief.
+2. Paths or references to detailed artifacts.
+3. Raw reports or transcripts only when requested or required.
+
+Full artifacts remain available for investigation.
+
+Parent-facing child results should normally be concise:
+
+- Scouts: approximately 250–500 words.
+- Workers: approximately 250–500 words plus exact commands.
+- Reviewers: approximately 300–600 words.
+- Parent synthesis: approximately 500–1,200 words.
+
+These are defaults, not reasons to omit important evidence.
+
+Prefer:
+
+- one decisive finding;
+- one decision needed;
+- exact evidence;
+- path to detailed material.
+
+Do not fill every report heading with generic prose.
+
+## Task contracts and evidence
+
+A contract is the behavior and boundary against which work is judged.
+
+It may include:
 
 - intended behavior;
-- behavior that must remain unchanged;
-- important interfaces and schemas;
+- unchanged behavior;
+- API and schema expectations;
 - state and persistence behavior;
 - authority and security boundaries;
 - numerical or performance expectations;
 - failure behavior;
 - expected change surface;
-- acceptance commands and examples;
-- important edge cases;
-- unresolved decisions requiring escalation.
-
-Do not silently weaken tests, redefine benchmarks, change public behavior, or
-expand scope to make an implementation pass.
-
-The contract can be wrong. Investigate disagreements among tests, code, traces,
-profilers, runtime behavior, and independent agents.
-
-## Agent autonomy
-
-Inside the assigned workspace, agents may:
-
-- inspect and modify project files;
-- run shell commands;
-- install project dependencies;
-- run tests, builds, servers, debuggers, and profilers;
-- create diagnostics and temporary files;
-- use local Git, including branch, commit, amend, rebase, merge, cherry-pick,
-  reset, clean, reflog, and conflict resolution.
-
-Do not request approval for routine project-local shell or Git operations.
-
-A scout should normally avoid product changes but may create tests,
-instrumentation, reproducers, or diagnostic modifications when useful. It must
-report those changes.
-
-A reviewer normally reports findings before repairing them unless explicitly
-asked to fix them.
-
-A worker must stop and contact the parent when:
-
-- an approved boundary must change;
-- an unexpected public interface or schema change is required;
-- existing tests contradict the agreed behavior;
-- a migration, concurrency, ownership, security, numerical, or compatibility
-  decision remains unresolved;
-- the benchmark or acceptance method appears invalid;
-- an explicit non-goal must be violated.
-
-## Reports
-
-Use compact Markdown. Do not return a diary or dump the entire transcript.
-
-### Impact mapper
-
-# Impact mapper
-
-## Current behavior
-
-## Files and services involved
-
-## Interfaces, state, and data flow
-
-## Existing tests
-
-## Risks
-
-## Assumptions
-
-## Remaining uncertainty
-
-### Minimum-change mapper
-
-# Minimum-change mapper
-
-## Current behavior
-
-## Necessary changes
-
-## Things that should not change
-
-## Existing code to reuse
-
-## Tests
-
-## Assumptions
-
-## Remaining uncertainty
-
-### Test/risk mapper
-
-# Test/risk mapper
-
-## Success cases
-
-## Failure cases
-
-## Integration risks
-
-## Regression risks
-
-## Proposed tests
-
-## Claims that remain difficult to verify
-
-## Remaining uncertainty
-
-### Plan critic
-
-# Plan critic
-
-## Verdict
-
-## Ambiguities
-
-## Incorrect or weak assumptions
-
-## Failure cases
-
-## Unnecessary complexity
-
-## Required corrections
-
-## Missing tests
-
-## Remaining uncertainty
-
-### Worker work log
-
-# Worker work log
-
-## Initial hypothesis
-
-## Actions taken
-
-## Important discoveries
-
-## Files changed
-
-## Tests actually run
-
-## Plan deviations
-
-## Failed attempts
-
-## Remaining uncertainty
-
-### Final reviewer
-
-# Final reviewer
-
-## Verdict
-
-Use one:
-
-- ACCEPT
-- REPAIR
-- ESCALATE
-
-## Correctness
-
-## Contract and boundary changes
-
-## Test adequacy
-
-## Unnecessary complexity
-
-## Plan deviations
-
-## Required actions
-
-## Remaining uncertainty
-
-## Verification
-
-Do not trust a worker's statement that tests passed.
-
-The parent or verification runtime independently inspects:
-
-- committed changes;
-- staged changes;
-- unstaged changes;
-- untracked files;
-- changed paths relative to the agreed base;
 - acceptance commands;
-- type checks and diagnostics where relevant;
-- benchmark methodology where relevant;
-- unexpected interface, schema, state, dependency, authority, or compatibility
-  changes.
+- important examples and edge cases;
+- unresolved consequential decisions.
 
-A reviewer result is evidence, not authority.
+Not every task needs a large written contract.
 
-A green test suite is not proof that the task contract was correct.
+For consequential statements, classify enforcement as:
 
-## Code-review depth
+- executable now;
+- testable now;
+- observable at runtime;
+- human judgment only.
 
-Do not line-review every rejected exploratory attempt.
+Use the strongest inexpensive enforcement available:
 
-Review the final surviving change.
+- types;
+- schemas;
+- constraints;
+- state-machine rules;
+- permission boundaries;
+- assertions;
+- tests;
+- benchmarks;
+- resource limits;
+- runtime observations.
+
+Prose is intent, not mechanical enforcement.
+
+Contracts and tests can be wrong. Investigate disagreements among:
+
+- code;
+- tests;
+- traces;
+- profilers;
+- runtime behavior;
+- independent agents;
+- user intent.
+
+## System surfaces
+
+For nontrivial work, explicitly declare changes to:
+
+- public API;
+- types or data schema;
+- persistence or migration;
+- state transitions;
+- authorization or authority;
+- transactions;
+- concurrency;
+- retries or cancellation;
+- error semantics;
+- dependencies;
+- numerical behavior;
+- performance expectations;
+- deployment or operations;
+- observability or rollback.
+
+The final reviewer verifies this declaration against the actual diff.
+
+## Recoverable search
+
+For difficult RIP, BUILD, or MAJOR work, preserve useful intermediate states
+before:
+
+- major rewrites;
+- abandoning an approach;
+- destructive reset or rebase;
+- replacing a useful reproducer;
+- discarding the first critical passing state.
+
+Use temporary Git commits or refs such as:
+
+    refs/pi/snapshots/<task-id>/<sequence>
+
+Retain them until task acceptance or explicit abandonment.
+
+Do not create snapshot ceremony for ordinary FAST work.
+
+## Multiple candidates and integration
+
+When multiple hypotheses or implementations materially matter, preserve:
+
+- candidate ID;
+- hypothesis;
+- base commit;
+- result;
+- decisive evidence;
+- useful pieces;
+- superseding candidate.
+
+Preserve the useful saga, not every transcript.
+
+Independent implementation candidates must remain independent during their
+first pass.
+
+Combining pieces creates a new candidate.
+
+Test the integrated result again. Do not inherit acceptance merely because the
+individual components passed independently.
+
+Before selecting a long-running candidate, verify it against the current
+integration head and rerun relevant checks.
+
+## Review depth
+
+Do not line-review every rejected exploration or failed candidate.
+
+Review the final surviving diff.
 
 Read more deeply when:
 
 - a public interface changes;
-- a schema or migration changes;
+- schema or migration changes;
 - authority or permissions change;
-- state transitions or transaction boundaries change;
+- state or transaction boundaries change;
 - concurrency assumptions change;
 - numerical behavior changes;
 - benchmark definitions change;
 - evidence sources disagree;
 - performance lacks a plausible mechanism;
 - tests are weak;
-- the implementation is difficult to reverse or observe.
+- behavior is hard to reverse or observe.
 
-Remain capable of descending into any implementation line when required.
+A reviewer result is evidence, not authority.
 
-## Learning
+Do not trust a worker’s claim that tests passed. The parent or verification
+runtime reruns important checks independently.
 
-For difficult tasks, focus on:
+## Promote learning upward
 
-- which assumptions agents disagreed about;
-- which evidence discriminated between alternatives;
-- what changed the initial hypothesis;
-- why one design was selected;
-- when a rejected design would have been appropriate;
-- what test, benchmark, invariant, or design note should survive.
+After a surprising or difficult task, ask:
 
-## Version control
+> What should change so the next incorrect implementation fails sooner or
+> requires less human interpretation?
 
-Use Git and ordinary worktrees.
+Where warranted, produce:
 
-Collaborating agents share one task worktree.
-
-Independent implementation candidates receive separate worktrees and branches.
-
-An integrated result is a new candidate and must be tested again.
-
-Do not introduce jj unless repeated splitting and recombination becomes a
-measured Git bottleneck.
-
-Local Git is autonomous.
-
-Authenticated remote push, publication, deployment, and production mutation
-require explicit user intent or an independently trusted host operation.
+- a test;
+- invariant;
+- schema or type;
+- benchmark;
+- diagnostic tool;
+- short design note;
+- repository instruction;
+- or an explicit conclusion that no durable change is needed.
 
 ## Completion
 
 Before reporting completion:
 
 - inspect the actual final diff;
-- rerun important verification independently;
+- independently rerun important verification;
 - report exact commands and outcomes;
-- report changed boundaries;
+- report changed system surfaces;
 - report remaining uncertainty;
 - confirm no unintended remote or production action occurred.
+
+The goal is not maximum process or maximum token use.
+
+The goal is validated useful work and durable learning per unit of human
+attention.

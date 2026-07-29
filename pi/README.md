@@ -14,7 +14,7 @@ This directory contains the reproducible, non-secret Pi harness:
 Secrets, auth, sessions, runtime routes, generated host context, and live policy
 state remain outside Git.
 
-## Modes
+## Workspace modes
 
 `pi` reads the host-owned policy before Pi starts. It canonicalizes the current
 repository and logs one deterministic mode. Repository files, project settings,
@@ -71,6 +71,40 @@ the execution plane. Children cannot publish or remove the task container.
 Explicit independent candidates receive linked worktrees, branches, and
 containers. They must commit before comparison; candidate worktrees and branches
 remain until explicitly removed.
+
+## Engineering workflow and context
+
+The Luna parent selects one engineering mode—FAST, RIP, BUILD, or MAJOR—and an
+independent learning level—OFF, LIGHT, or DEEP. These are conversation policy,
+not launcher or settings variants.
+
+The auto-discovered global `workflow-state` extension provides a branch-aware
+`task_packet` tool. It stores versioned, schema-bounded task state in Pi's existing session JSONL and
+injects only the latest active packet into the parent prompt. It creates no
+packet state for idle or trivial sessions until `replace` is called.
+
+Custom children start with fresh context and do not inherit global/project
+context files. The parent supplies only the applicable repository instructions,
+accepted decisions, boundaries, evidence, and stop conditions in the child
+assignment. Detailed subagent sessions and artifacts stay outside repositories.
+Forked context is an explicit exception because it contains the complete parent
+history rather than a filtered brief.
+
+Report-only roles omit `write` and `edit`, but their sandboxed `bash` can still
+mutate the worktree. `acceptanceRole: read-only` controls acceptance inference;
+it is not an authority boundary. The parent therefore verifies the actual
+changed paths after children run. Long work opts into async explicitly; the
+default is synchronous so FAST does not acquire an automatic reviewed gate.
+
+Context measurement is opt-in:
+
+```bash
+PI_WORKFLOW_CONTEXT_AUDIT=1 pi
+```
+
+This records hashes and byte counts beside the owning session. Add
+`PI_WORKFLOW_CONTEXT_AUDIT_RAW=1` only in disposable acceptance sessions when
+raw prompts/messages are required for a boundary audit.
 
 ## Installation and activation
 

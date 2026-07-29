@@ -11,7 +11,7 @@
   activation and Docker boundary tests therefore remain an explicit `pi-host`
   step.
 - Final global `AGENTS.md` SHA-256:
-  `3452e9a33b92a5c837f5b5aa7cbde68a66c00a70030d68d9d0000a5cdfc2a7c7`.
+  `74c99dc419b64a3976f77320e5ceb335c37340b3e45a71d7ce09125ed7c26d5b`.
   Installation links `~/.pi/agent/AGENTS.md` to
   `/home/j/dotfiles/agent/AGENTS.md`; project-specific context files are not
   changed.
@@ -66,14 +66,35 @@ Observed before modification:
 
 - The files in this migration are not active merely because they are committed.
 - The hardened Docker image, patched installed npm sources, global workflow
-  symlink, repository policy, launchers, and generated host context require the
-  reviewed installer from explicit `pi-host`.
+  symlink, workflow-state extension, scoped child roles, repository policy,
+  launchers, and generated host context require the reviewed installer from
+  explicit `pi-host`.
 
 ### UNKNOWN
 
 - Host-global backup directories and symlink state.
 - Stopped host containers not exposed to the old task container.
 - Exact host Docker, GPU, Bun, tmux, and Neovim runtime state.
+
+## Workflow and context layer
+
+The parent selects FAST, RIP, BUILD, or MAJOR and an independent OFF, LIGHT, or
+DEEP learning level. Subagent execution is synchronous by default; genuinely
+long work opts into async explicitly. Child roles start fresh, do not inherit the parent
+transcript or context files, and receive applicable repository instructions in
+their scoped assignment. Forking remains an explicit exception when the full
+persisted parent history is the required source material.
+
+`workflow-state` stores the current task packet as branch-aware custom entries
+inside Pi's existing session JSONL. Old packet entries do not enter model
+context; only the latest active packet is injected into the parent system
+prompt. No packet entry is created until the parent calls `task_packet` with
+`replace`, and `clear` appends a tombstone.
+
+Context manifests are disabled by default. Setting
+`PI_WORKFLOW_CONTEXT_AUDIT=1` records hashes and sizes beside the owning session;
+`PI_WORKFLOW_CONTEXT_AUDIT_RAW=1` additionally records raw prompt/context data
+and is intended only for disposable acceptance sessions.
 
 ## Final route contract
 

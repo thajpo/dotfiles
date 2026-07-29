@@ -85,6 +85,15 @@ apply_verified_patch \
   "$patch_dir/pi-subagents-0.35.1-task-cwd.patch"
 
 apply_verified_patch \
+  pi-subagents-skill \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/skills/pi-subagents/SKILL.md" \
+  0.35.1 \
+  188a6d85ed2c1102d3351e3138a0a11a9864f00d6e36a7ae1371377d3e57333d \
+  496b5d02e0f578336a46aee46534ffddd6097f501791c7844986250e93f776ec \
+  "$patch_dir/pi-subagents-0.35.1-skill.patch"
+
+apply_verified_patch \
   pi-btw \
   "$agent_dir/npm/node_modules/pi-btw" \
   "$agent_dir/npm/node_modules/pi-btw/extensions/btw.ts" \

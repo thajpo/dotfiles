@@ -128,8 +128,9 @@ done
 for tree in extensions agents prompts themes; do cp -a "$SCRIPT_DIR/pi/$tree" "$STAGING_DIR/control/$tree"; done
 ln -s "$SCRIPT_DIR/agent/AGENTS.md" "$STAGING_DIR/control/AGENTS.md"
 install -m 755 "$SCRIPT_DIR/scripts/pi-workspace.py" "$STAGING_DIR/control/pi-workspace.py"
-install -m 755 "$SCRIPT_DIR/bin/pi" "$STAGING_DIR/control/pi"
-install -m 755 "$SCRIPT_DIR/bin/pi-host" "$STAGING_DIR/control/pi-host"
+for launcher in pi pi-host pidev pi-tmux-session; do
+    install -m 755 "$SCRIPT_DIR/bin/$launcher" "$STAGING_DIR/control/$launcher"
+done
 python3 - "$STAGING_DIR/control/pi" "$STAGING_DIR/control/pi-host" <<'PY'
 from pathlib import Path
 import sys
@@ -185,8 +186,9 @@ for config in settings.json pi-chrome-devtools.json pi-plan-mode.json pi-statusl
 done
 for tree in extensions agents prompts themes; do activate_path "$STAGING_DIR/control/$tree" "$PI_CONFIG_DIR/$tree"; done
 activate_path "$STAGING_DIR/control/pi-workspace.py" "$HOME/.local/share/pi/control/pi-workspace.py"
-activate_path "$STAGING_DIR/control/pi" "$HOME/.local/bin/pi"
-activate_path "$STAGING_DIR/control/pi-host" "$HOME/.local/bin/pi-host"
+for launcher in pi pi-host pidev pi-tmux-session; do
+    activate_path "$STAGING_DIR/control/$launcher" "$HOME/.local/bin/$launcher"
+done
 
 # All active paths now form a complete generation. Switch back to immediate
 # signal handling before the commit point so no pending signal is discarded.

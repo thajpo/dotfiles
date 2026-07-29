@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Keep this wrapper as a child process so tmux-resurrect captures the exact
+# --session-id command line. Run the managed policy wrapper, not PATH lookup.
+set -euo pipefail
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+exec "$self_dir/pi" "$@"

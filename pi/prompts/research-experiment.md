@@ -4,4 +4,4 @@ argument-hint: "<hypothesis>"
 ---
 Design an experiment for this hypothesis: $@
 
-Produce: hypothesis, competing explanations, minimum discriminating experiment, metrics/instrumentation, controlled variables, expected outcomes by explanation, stop/escalation conditions, and an interpretation template. Separate observed evidence from inference. Keep Sol central when results could change the research direction; delegate only bounded collection or harness work.
+Produce: hypothesis, competing explanations, minimum discriminating experiment, metrics/instrumentation, controlled variables, expected outcomes by explanation, stop/escalation conditions, and an interpretation template. Separate observed evidence from inference. The parent, not Sol, is the decision authority on experiment direction; delegate only bounded collection or harness work.

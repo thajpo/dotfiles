@@ -34,6 +34,8 @@ mkdir -p "$DOTFILES_DIR/skills" "$HOME/.config/opencode" "$HOME/.codex"
 link_file "$DOTFILES_DIR/skills" "$HOME/.skills"
 link_file "$HOME/.skills" "$HOME/.config/opencode/skills"
 link_file "$HOME/.skills" "$HOME/.codex/skills"
+mkdir -p "$HOME/.agents/skills"
+link_file "$DOTFILES_DIR/skills/project-status" "$HOME/.agents/skills/project-status"
 
 if [[ $# -ne 0 ]]; then
   printf 'usage: %s\n' "$0" >&2

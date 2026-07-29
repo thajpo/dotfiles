@@ -154,13 +154,18 @@ Inspect the setup:
 
 Core loop:
 
-- Use Luna as the persistent Pi parent and liaison.
-- Delegate bounded scouts and workers through `pi-subagents`.
+- Use Luna as the persistent Pi parent and decision authority.
+- Select FAST, RIP, BUILD, or MAJOR from uncertainty and consequence; select
+  OFF, LIGHT, or DEEP learning independently.
+- Delegate bounded fresh-context scouts and workers through `pi-subagents`; fork
+  only when the complete parent history is explicitly required.
+- Keep current task state in Pi's session-scoped task packet and keep detailed
+  artifacts outside repositories.
 - Let the host policy select trusted-live for authored repositories and isolated
   private clones for unknown/external repositories.
 - Share one task container across collaborating agents; use linked worktrees and
   separate containers only for explicit independent candidates.
-- Use Sol for architecture, difficult debugging, and high-risk review.
+- Use Sol for unresolved architecture, difficult debugging, and high-risk review.
 - Use `pi-host` explicitly for unsandboxed machine maintenance and reviewed Pi
   control-plane activation.
 
@@ -188,6 +193,7 @@ threshold is `-55 dBFS`. Override calibration with
 - Session persistence (survives reboot)
 - Catppuccin Mocha theme
 - Status bar: session | windows | directory | git | app | time
+- `pidev` opens or attaches a repo-scoped session with Neovim on the left and Pi on the right
 
 ### Neovim
 - LazyVim base config
@@ -198,6 +204,7 @@ threshold is `-55 dBFS`. Override calibration with
 - Deterministic trusted-live/isolated repository policy and hardened Docker task containers
 - One shared execution plane for parent, subagents, and pi-btw
 - Explicit unsandboxed `pi-host` maintenance launcher
+- `pidev` is the managed Pi development launcher and keeps stable project sessions for tmux-resurrect
 - Installs to `~/.pi/agent` without tracking credentials, sessions, or runtime state
 
 ### Tools installed
