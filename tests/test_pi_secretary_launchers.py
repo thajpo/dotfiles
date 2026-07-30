@@ -98,7 +98,7 @@ pathlib.Path(os.environ['FAKE_PI_OUTPUT']).write_text(json.dumps({
     def test_pisec_initial_grid_sends_one_quoted_command_per_project(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            home, _, records, env = setup_registry(root, 2)
+            home, _, records, env = setup_registry(root, 3)
             fake_bin = root / "bin"
             fake_bin.mkdir()
             log = root / "tmux.jsonl"
@@ -129,7 +129,7 @@ raise SystemExit(0)
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             sends = [call for call in calls if call[0] == "send-keys"]
-            self.assertEqual(len(sends), 2)
+            self.assertEqual(len(sends), 3)
             for call in sends:
                 self.assertEqual(len(call), 5)
                 self.assertEqual(call[-1], "C-m")
@@ -137,6 +137,9 @@ raise SystemExit(0)
             self.assertEqual({record["projectId"] for record in records},
                              {call[3].rsplit(" ", 1)[-1] for call in sends})
             self.assertEqual(len([call for call in calls if call[0] == "split-window"]), 1)
+            first_layout = next(i for i, call in enumerate(calls) if call[0] == "select-layout")
+            first_split = next(i for i, call in enumerate(calls) if call[0] == "split-window")
+            self.assertLess(first_layout, first_split)
             self.assertIn(["select-layout", "-t", "@2", "even-horizontal"], calls)
 
     def test_pisec_relaunch_maps_live_processes_without_titles_or_duplicates(self):

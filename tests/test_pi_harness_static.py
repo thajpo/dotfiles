@@ -17,7 +17,7 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertEqual(overrides["scout"]["model"], "openai-codex/gpt-5.6-luna")
         self.assertEqual(overrides["scout"]["thinking"], "high")
         self.assertEqual(overrides["worker"]["model"], "openai-codex/gpt-5.6-luna")
-        self.assertEqual(overrides["worker"]["thinking"], "xhigh")
+        self.assertEqual(overrides["worker"]["thinking"], "max")
         self.assertEqual(overrides["reviewer"]["model"], "openai-codex/gpt-5.6-luna")
         self.assertEqual(overrides["reviewer"]["thinking"], "xhigh")
         self.assertEqual(overrides["oracle"]["model"], "openai-codex/gpt-5.6-sol")
@@ -269,7 +269,7 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
 
     def test_global_agents_hash_and_removed_legacy_orchestrators(self):
         agents = (ROOT / "agent/AGENTS.md").read_bytes()
-        self.assertEqual(hashlib.sha256(agents).hexdigest(), "5fdf1b474c242ad391424c68d27a3291e07c501363b19b8a486be1470ac7d839")
+        self.assertEqual(hashlib.sha256(agents).hexdigest(), "50d08656662704ea0a476d501e122eebae11a47a5514d707c1514d25b5e7c5ff")
         policy = agents.decode()
         for heading in ["### FAST", "### RIP", "### BUILD", "### MAJOR", "### OFF", "### LIGHT", "### DEEP"]:
             self.assertIn(heading, policy)

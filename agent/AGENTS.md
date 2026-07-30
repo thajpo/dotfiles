@@ -27,7 +27,10 @@ on rejection.
 
 Default routing:
 
-- Primary worker and parent decision authority:
+- Primary worker:
+  `openai-codex/gpt-5.6-luna:max`
+
+- Parent decision authority:
   `openai-codex/gpt-5.6-luna:xhigh`
 
 - Secretary and read-only investigation/context collection:

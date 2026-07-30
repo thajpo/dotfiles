@@ -37,7 +37,7 @@ Observed before modification:
 
 - Pi and all npm version pins and lockfile integrity values.
 - `pi-subagents` as the sole coding-agent orchestrator.
-- Luna/Sol role mapping and child depth/concurrency caps; investigation uses Luna high, workers use Luna xhigh, and review tiers use Luna xhigh/Luna max/Sol xhigh.
+- Luna/Sol role mapping and child depth/concurrency caps; investigation uses Luna high, workers use Luna max, and review tiers use Luna xhigh/Luna max/Sol xhigh.
 - User-scoped child sessions and the no-project-artifact patch.
 - Fail-closed tool routing and disabled host-side acceptance commands.
 - `pi-btw` and its sandbox proxy design.

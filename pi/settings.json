@@ -107,7 +107,7 @@
       },
       "worker": {
         "model": "openai-codex/gpt-5.6-luna",
-        "thinking": "xhigh",
+        "thinking": "max",
         "defaultContext": "fresh"
       }
     }

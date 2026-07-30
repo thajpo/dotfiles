@@ -10,10 +10,10 @@ dotfiles_dir=$(realpath "$self_dir/..")
 control="$dotfiles_dir/scripts/pi-secretary-control.py"
 if [[ -f "$HOME/.local/share/pi/control/pi-secretary-control.py" ]]; then control="$HOME/.local/share/pi/control/pi-secretary-control.py"; fi
 
-declare -a default_aliases=(vla-lens csv-agent vla-infra SleepyDreamyV3)
+declare -a default_aliases=(vla-lens csv-agent SleepyDreamyV3)
 usage() {
   printf '%s\n' 'usage: pisec [register --alias ALIAS [REPOSITORY] | list | launch-info PROJECT_ID | open]'
-  printf '%s\n' '       pisec                 (open the default four projects)'
+  printf '%s\n' '       pisec                 (open the default three projects)'
   printf '%s\n' '       pisec activate ALIAS [ALIAS ...]'
   printf '%s\n' '       pisec swap ACTIVE_ALIAS INACTIVE_ALIAS'
   printf '%s\n' '       each projects-N window contains at most two side-by-side secretary panes'
@@ -292,7 +292,9 @@ target_count=${#target_indices[@]}
 
 # Rebuild the pane layout without killing the pisec session itself. Creating
 # replacement windows first keeps attached clients alive while old windows are
-# retired, and Pi session history remains on disk across the restart.
+# retired, and Pi session history remains on disk across the restart. With an
+# odd project count, the first window is a single pane so the first project can
+# stand alone; remaining windows contain up to two side-by-side panes.
 declare -a old_windows=("${window_ids[@]}") rebuilt_windows=() pending_panes=() pending_projects=()
 window_count=$(( (target_count + 1) / 2 ))
 for ((w=1; w<=window_count; w++)); do
@@ -305,8 +307,16 @@ for ((w=1; w<=window_count; w++)); do
     [[ -n "$pane_id" ]] && { first_pane=$pane_id; break; }
   done < <(tmux list-panes -t "$rebuilt" -F $'#{pane_id}\t#{pane_index}')
   [[ "$first_pane" =~ ^% ]] || fail 'tmux returned no initial project pane'
+  if (( target_count % 2 == 1 && w == 1 )); then
+    group_start=0; group_size=1
+  elif (( target_count % 2 == 1 )); then
+    group_start=$((1 + (w - 2) * 2)); group_size=2
+  else
+    group_start=$(( (w - 1) * 2 )); group_size=2
+  fi
   for slot in 0 1; do
-    target_position=$(( (w - 1) * 2 + slot ))
+    (( slot < group_size )) || break
+    target_position=$((group_start + slot))
     (( target_position < target_count )) || break
     if (( slot == 0 )); then
       pane_target=$first_pane
