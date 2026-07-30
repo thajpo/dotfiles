@@ -855,6 +855,25 @@ raise SystemExit(2)
             window_id = json.loads(state_path.read_text())["sessions"][project]["windows"][0]["id"]
             self.assertIn(["select-window", "-t", window_id], calls)
 
+    def test_pidev_review_window_is_read_only_and_resurrection_keeps_assignment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, _, log, state_path, env = make_tmux_fixture(root)
+            repo = make_git_repo(root)
+            env.update({"PI_PIDEV_SESSION_ID": "rv-abcdef0123456789",
+                        "PI_PIDEV_REVIEW_PROJECT_ID": "b" * 64,
+                        "PI_PIDEV_REVIEW_REQUEST_ID": "rr-review"})
+            result = subprocess.run([str(ROOT / "bin/pidev")], cwd=repo, env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertTrue(any("exec nvim -R -M" in call for call in calls if call))
+            state = json.loads(state_path.read_text())
+            pane_args = [pane["args"] for session in state["sessions"].values() for window in session["windows"] for pane in window["panes"]]
+            review_command = next(value for value in pane_args if "--review-request-id" in value)
+            self.assertIn("--review-project-id", review_command)
+            self.assertIn("rr-review", review_command)
+            self.assertIn("rv-abcdef0123456789", review_command)
+
     def test_pidev_rejects_subagent_launch_bypass_before_tmux(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

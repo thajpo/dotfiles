@@ -23,7 +23,20 @@ if [[ ${1:-} == --launch ]]; then
     exit 2
   fi
   set +e
-  "$self_dir/pi-tmux-session" "$@"
+  review_project=""; review_request=""
+  launch_args=("$@")
+  for ((i=0; i<${#launch_args[@]}; i++)); do
+    case ${launch_args[i]} in
+      --review-project-id) (( i + 1 < ${#launch_args[@]} )) || exit 2; review_project=${launch_args[i+1]}; i=$((i+1)) ;;
+      --review-request-id) (( i + 1 < ${#launch_args[@]} )) || exit 2; review_request=${launch_args[i+1]}; i=$((i+1)) ;;
+    esac
+  done
+  if [[ -n $review_project || -n $review_request ]]; then
+    [[ $review_project =~ ^[0-9a-f]{64}$ && $review_request =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || exit 2
+    "$self_dir/pi-review-agent" --project-id "$review_project" --request-id "$review_request"
+  else
+    "$self_dir/pi-tmux-session" "$@"
+  fi
   launch_status=$?
   set -e
   if [[ -n ${PI_WORKSTREAM_CONTROL:-} && -n ${PI_WORKSTREAM_ID:-} ]]; then
@@ -334,6 +347,11 @@ fi
 
 # Stable worktree/full-agent naming replaces the obsolete daily liaison name.
 pi_cmd=""
+review_project=${PI_PIDEV_REVIEW_PROJECT_ID:-}
+review_request=${PI_PIDEV_REVIEW_REQUEST_ID:-}
+if [[ -n $review_project || -n $review_request ]]; then
+  [[ $review_project =~ ^[0-9a-f]{64}$ && $review_request =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || fail "invalid host review assignment"
+fi
 if [[ -n ${PI_PIDEV_WORKSTREAM_ID:-} || -n ${PI_PIDEV_BRIEF_PATH:-} || -n ${PI_PIDEV_PROJECT_ID:-} ]]; then
   [[ ${PI_PIDEV_WORKSTREAM_ID:-} =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || fail "invalid host workstream ID"
   [[ ${PI_PIDEV_PROJECT_ID:-} =~ ^[0-9a-f]{64}$ ]] || fail "invalid host project ID"
@@ -344,7 +362,13 @@ if [[ -n ${PI_PIDEV_WORKSTREAM_ID:-} || -n ${PI_PIDEV_BRIEF_PATH:-} || -n ${PI_P
 fi
 printf -v quoted '%q' "$self_path"
 pi_cmd+=$quoted
-for argument in --launch --session-id "$session_id" --name "$repo: $worktree — full-agent" "$@"; do
+agent_name="$repo: $worktree — full-agent"
+review_args=()
+if [[ -n $review_project ]]; then
+  agent_name="$repo: $worktree — exact-OID review"
+  review_args=(--review-project-id "$review_project" --review-request-id "$review_request")
+fi
+for argument in --launch --session-id "$session_id" --name "$agent_name" "${review_args[@]}" "$@"; do
   printf -v quoted ' %q' "$argument"
   pi_cmd+=$quoted
 done
@@ -405,12 +429,14 @@ fi
 
 # Creating a session/window only starts Neovim. Pi is started later, after all
 # pane safety checks and after the state ID has been atomically persisted.
+nvim_launch='exec nvim'
+[[ -z $review_project ]] || nvim_launch='exec nvim -R -M'
 if tmux_has_session "$project_session"; then
   :
 else
   rc=$?
   [[ $rc -eq 1 ]] || fail "cannot query project session $project_session"
-  tmux new-session -d -s "$project_session" -c "$cwd" -n "$window_name" 'exec nvim'
+  tmux new-session -d -s "$project_session" -c "$cwd" -n "$window_name" "$nvim_launch"
 fi
 
 if ! rows=$(window_rows "$project_session"); then
@@ -492,7 +518,7 @@ else
   fi
   # Adding Neovim to a sole known pane is safe; unknown two-pane layouts were
   # rejected above. This happens before Pi persistence/start, never after it.
-  tmux split-window -b -h -l 58% -t "$pi_id" -c "$cwd" 'exec nvim'
+  tmux split-window -b -h -l 58% -t "$pi_id" -c "$cwd" "$nvim_launch"
   if ! rows=$(pane_rows "$window_id"); then
     fail "cannot re-query panes for $window_id"
   fi

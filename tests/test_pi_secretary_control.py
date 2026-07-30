@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 import json
 import os
@@ -214,6 +215,89 @@ class SecretaryControlTests(unittest.TestCase):
         self.assertEqual(event["source"], "host")
         opened = secretary.open_workstream(self.source, self.capability, workstream["workstreamId"])
         self.assertIsNone(opened["closedAt"])
+
+    def test_exact_oid_review_receipt_and_later_commit_staleness(self):
+        registered = secretary.register_project(self.source, "review-project")
+        brief = self._brief()
+        workstream = self._workstream(brief["briefId"], workstream_id="reviewed-work")
+        feature = Path(workstream["workspace"])
+        (feature / "tracked").write_text("candidate\n")
+        git(feature, "add", "tracked"); git(feature, "commit", "-m", "candidate")
+        route_cap = "review-route"
+        route = Path(self.tmp.name) / "review-route.json"
+        import hashlib
+        route.write_text(json.dumps({"uid": os.getuid(), "capabilityHash": hashlib.sha256(route_cap.encode()).hexdigest(),
+                                     "readOnly": False, "worktree": workstream["workspace"]}))
+        route.chmod(0o600)
+        with mock.patch.dict(os.environ, {"PI_TASK_ROUTE_FILE": str(route), "PI_TASK_ROUTE_CAPABILITY": route_cap}, clear=False):
+            event = secretary.append_event(registered["projectId"], workstream["workstreamId"],
+                                            "review-requested", "Review the candidate", "model text is replaced")
+        request_id = json.loads(event["details"])["reviewRequestId"]
+        fake = Path(self.tmp.name) / "review-pidev"
+        fake.write_text("#!/bin/sh\nexit 19\n"); fake.chmod(0o700)
+        with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
+             mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability}, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "review launch failed"):
+                secretary.create_reviewer(registered["projectId"], event["eventId"])
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
+             mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability}, clear=False):
+            request = secretary.create_reviewer(registered["projectId"], event["eventId"])
+        review_workspace = Path(request["reviewWorkspace"])
+        self.assertEqual(git(review_workspace, "rev-parse", "HEAD^{commit}"), request["candidateOid"])
+        self.assertEqual(git(review_workspace, "branch", "--show-current"), "")
+        git(review_workspace, "checkout", "--detach", request["baseOid"])
+        with self.assertRaisesRegex(secretary.SecretaryError, "moved"):
+            secretary.review_launch_info(registered["projectId"], request_id)
+        git(review_workspace, "checkout", "--detach", request["candidateOid"])
+        review_env = {"PI_REVIEW_CAPABILITY": self.capability, "PI_REVIEW_SESSION_ID": request["reviewerSessionId"]}
+        with mock.patch.dict(os.environ, {**review_env, "PI_REVIEW_CAPABILITY": "wrong"}, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "capability"):
+                secretary.submit_review(registered["projectId"], request_id, "accept", "Looks good", "No findings")
+        with mock.patch.dict(os.environ, {**review_env, "PI_REVIEW_SESSION_ID": "wrong"}, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "capability"):
+                secretary.submit_review(registered["projectId"], request_id, "accept", "Looks good", "No findings")
+        (review_workspace / "dirty").write_text("not allowed")
+        with mock.patch.dict(os.environ, review_env, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "dirty"):
+                secretary.submit_review(registered["projectId"], request_id, "accept", "Looks good", "No findings")
+        (review_workspace / "dirty").unlink()
+        project_dir = Path(self.env["XDG_STATE_HOME"]) / "pi-secretary/projects" / registered["projectId"]
+        request_path = project_dir / "reviews/requests" / f"{request_id}.json"
+        real_lock = secretary._project_lock
+        raced = False
+        @contextlib.contextmanager
+        def racing_lock(project):
+            nonlocal raced
+            if not raced:
+                changed = json.loads(request_path.read_text())
+                changed["reviewerSessionId"] = "rv-" + "f" * 48
+                request_path.write_text(json.dumps(changed)); request_path.chmod(0o600)
+                raced = True
+            with real_lock(project):
+                yield
+        with mock.patch.dict(os.environ, review_env, clear=False), mock.patch.object(secretary, "_project_lock", racing_lock):
+            with self.assertRaisesRegex(secretary.SecretaryError, "changed during"):
+                secretary.submit_review(registered["projectId"], request_id, "accept", "Looks good", "No findings")
+        request_path.write_text(json.dumps(request)); request_path.chmod(0o600)
+        with mock.patch.dict(os.environ, review_env, clear=False):
+            receipt = secretary.submit_review(registered["projectId"], request_id, "accept", "Looks good", "No findings")
+        self.assertEqual(receipt["candidateOid"], request["candidateOid"])
+        with mock.patch.dict(os.environ, review_env, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "conflicting"):
+                secretary.submit_review(registered["projectId"], request_id, "reject", "Changed verdict", "Finding")
+        (feature / "tracked").write_text("later\n")
+        git(feature, "add", "tracked"); git(feature, "commit", "-m", "later")
+        status = secretary.review_status(registered["projectId"], request_id)
+        self.assertTrue(status["stale"])
+        self.assertEqual(status["receipt"]["candidateOid"], request["candidateOid"])
+        receipt_path = Path(self.env["XDG_STATE_HOME"]) / "pi-secretary/projects" / registered["projectId"] / "reviews/receipts" / f"{receipt['receiptId']}.json"
+        original = json.loads(receipt_path.read_text())
+        malformed = {**original, "workstreamId": "different-work"}
+        receipt_path.write_text(json.dumps(malformed)); receipt_path.chmod(0o600)
+        with self.assertRaisesRegex(secretary.SecretaryError, "exact assignment"):
+            secretary.review_status(registered["projectId"], request_id)
+        receipt_path.write_text(json.dumps(original)); receipt_path.chmod(0o600)
 
     def test_two_workstreams_reference_one_brief_and_dirty_source_survives(self):
         brief = self._brief("Design", "bounded text")
@@ -717,6 +801,18 @@ class SecretaryControlTests(unittest.TestCase):
         self.assertEqual(git(sha_root, "rev-parse", "--show-object-format"), "sha256")
         self.assertEqual(len(ws["baseOid"]), 64)
         self.assertEqual(len(secretary.open_workstream(sha_root, cap, ws["workstreamId"])["currentOid"]), 64)
+        registered = secretary.register_project(sha_root, "sha256-review")
+        route_cap = "sha256-route"
+        import hashlib
+        route = Path(self.tmp.name) / "sha256-route.json"
+        route.write_text(json.dumps({"uid": os.getuid(), "capabilityHash": hashlib.sha256(route_cap.encode()).hexdigest(),
+                                     "readOnly": False, "worktree": ws["workspace"]})); route.chmod(0o600)
+        with mock.patch.dict(os.environ, {"PI_TASK_ROUTE_FILE": str(route), "PI_TASK_ROUTE_CAPABILITY": route_cap}, clear=False):
+            event = secretary.append_event(registered["projectId"], ws["workstreamId"], "review-requested", "SHA review")
+        request_id = json.loads(event["details"])["reviewRequestId"]
+        project = Path(self.env["XDG_STATE_HOME"]) / "pi-secretary/projects" / registered["projectId"]
+        request = secretary._validate_review_request(secretary._review_request_path(project, request_id), registered["projectId"])
+        self.assertEqual({len(request[name]) for name in ("candidateOid", "candidateTree", "baseOid")}, {64})
 
 
 if __name__ == "__main__":

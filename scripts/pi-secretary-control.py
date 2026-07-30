@@ -272,7 +272,7 @@ def _capability_path(root: Path, project_id: str) -> Path:
 
 
 def _foundation(project: Path) -> None:
-    for name in ("briefs", "workstreams", "workstream-runtime", "events", "events/inbox", "operations", "operations/facts"):
+    for name in ("briefs", "workstreams", "workstream-runtime", "events", "events/inbox", "reviews", "reviews/requests", "reviews/receipts", "operations", "operations/facts"):
         _ensure_dir(project / name)
     inbox = project / "events/inbox.jsonl"
     if inbox.exists() or inbox.is_symlink():
@@ -682,6 +682,75 @@ def _validate_feature_route(record: dict[str, Any]) -> None:
         raise SecretaryError("feature route does not own workstream")
 
 
+def _review_request_path(project: Path, request_id: str) -> Path:
+    return project / "reviews" / "requests" / f"{_id(request_id, 'review request id')}.json"
+
+
+def _review_receipt_path(project: Path, receipt_id: str) -> Path:
+    return project / "reviews" / "receipts" / f"{_id(receipt_id, 'review receipt id')}.json"
+
+
+def _validate_review_receipt(path: Path, request: dict[str, Any] | None = None) -> dict[str, Any]:
+    fields = {"schemaVersion", "receiptId", "projectId", "requestId", "workstreamId", "candidateOid",
+              "candidateTree", "baseOid", "reviewerSessionId", "verdict", "summary", "findings", "reviewedAt"}
+    value = _read_json(path, fields, required=fields)
+    if (value.get("schemaVersion") != 1 or value.get("receiptId") != path.stem or
+            value.get("verdict") not in {"accept", "reject"} or
+            not re.fullmatch(r"[0-9a-f]{64}", str(value.get("projectId", ""))) or
+            not SESSION_RE.fullmatch(str(value.get("reviewerSessionId", "")))):
+        raise SecretaryError("malformed review receipt")
+    for name in ("requestId", "workstreamId"):
+        _id(value.get(name), f"review receipt {name}")
+    for name in ("candidateOid", "candidateTree", "baseOid"):
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", str(value.get(name, ""))):
+            raise SecretaryError("malformed review receipt")
+    _line(value.get("summary"), "review summary", 1000)
+    if not isinstance(value.get("findings"), str) or len(value["findings"].encode()) > 16 * 1024:
+        raise SecretaryError("malformed review receipt")
+    _timestamp(value.get("reviewedAt"), "review reviewedAt")
+    if request is not None:
+        bindings = {"projectId": "projectId", "requestId": "requestId", "workstreamId": "workstreamId",
+                    "candidateOid": "candidateOid", "candidateTree": "candidateTree", "baseOid": "baseOid",
+                    "reviewerSessionId": "reviewerSessionId"}
+        if any(value[left] != request[right] for left, right in bindings.items()):
+            raise SecretaryError("review receipt does not bind exact assignment")
+    return value
+
+
+def _validate_review_request(path: Path, project_id: str) -> dict[str, Any]:
+    fields = {"schemaVersion", "requestId", "projectId", "workstreamId", "candidateOid",
+              "candidateTree", "baseOid", "requestedAt", "reviewerSessionId", "reviewWorkspace", "receiptId"}
+    value = _read_json(path, fields, required=fields)
+    if value.get("schemaVersion") != 1 or value.get("projectId") != project_id or value.get("requestId") != path.stem:
+        raise SecretaryError("malformed review request")
+    _id(value.get("workstreamId"), "workstream id")
+    for name in ("candidateOid", "candidateTree", "baseOid"):
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", str(value.get(name, ""))):
+            raise SecretaryError("malformed review request")
+    _timestamp(value.get("requestedAt"), "review requestedAt")
+    if value.get("reviewerSessionId") is not None and not SESSION_RE.fullmatch(str(value["reviewerSessionId"])):
+        raise SecretaryError("malformed review request")
+    if value.get("reviewWorkspace") is not None and not Path(str(value["reviewWorkspace"])).is_absolute():
+        raise SecretaryError("malformed review request")
+    if value.get("receiptId") is not None:
+        _id(value["receiptId"], "review receipt id")
+    return value
+
+
+def _create_review_request(project_id: str, workstream_id: str, record: dict[str, Any]) -> dict[str, Any]:
+    project = _record_dir(_state_root(), project_id)
+    workspace = Path(record["workspace"])
+    candidate = _git(workspace, "rev-parse", "HEAD^{commit}").lower()
+    tree = _git(workspace, "rev-parse", "HEAD^{tree}").lower()
+    request_id = "rr-" + secrets.token_hex(16)
+    value = {"schemaVersion": 1, "requestId": request_id, "projectId": project_id,
+             "workstreamId": workstream_id, "candidateOid": candidate, "candidateTree": tree,
+             "baseOid": record["baseOid"], "requestedAt": _utc_now(), "reviewerSessionId": None,
+             "reviewWorkspace": None, "receiptId": None}
+    _atomic(_review_request_path(project, request_id), json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+    return value
+
+
 def append_event(project_id: str, workstream_id: str, kind: str, summary: str,
                  details: str = "", *, source: str = "agent", validate_route: bool = True) -> dict[str, Any]:
     if kind not in EVENT_KINDS or (source == "agent" and kind == "process-exit"):
@@ -698,6 +767,9 @@ def append_event(project_id: str, workstream_id: str, kind: str, summary: str,
              "workstreamId": workstream_id, "kind": kind, "summary": summary,
              "details": details, "source": source, "createdAt": _utc_now(), "acknowledgedAt": None}
     with _project_lock(project):
+        if kind == "review-requested":
+            request = _create_review_request(project_id, workstream_id, record)
+            value["details"] = json.dumps({"reviewRequestId": request["requestId"]}, separators=(",", ":"))
         _atomic(_event_path(project, event_id), json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
     return value
 
@@ -1104,6 +1176,117 @@ def list_workstreams(repository: str | Path, capability: str) -> list[dict[str, 
     return result
 
 
+def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
+    info = launch_info(project_id, internal=True)
+    if not hmac.compare_digest(os.environ.get("PI_SECRETARY_CAPABILITY", ""), info["capability"]):
+        raise SecretaryError("secretary capability required")
+    project = _record_dir(_state_root(), project_id)
+    event = _validate_event(_event_path(project, event_id), project_id)
+    if event["kind"] != "review-requested" or event["acknowledgedAt"] is not None:
+        raise SecretaryError("event is not an open review request")
+    try:
+        request_id = json.loads(event["details"])["reviewRequestId"]
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise SecretaryError("review event is malformed") from error
+    request_path = _review_request_path(project, request_id)
+    before = _validate_review_request(request_path, project_id)
+    workstream = None
+    if before["reviewerSessionId"] is None:
+        _, _, workstream = _require_workstream(project_id, before["workstreamId"])
+    with _project_lock(project):
+        request = _validate_review_request(request_path, project_id)
+        if request["reviewerSessionId"] is None:
+            if workstream is None or workstream["workstreamId"] != request["workstreamId"]:
+                raise SecretaryError("review assignment changed concurrently")
+            parent = Path(workstream["workspace"]).parent
+            workspace = parent / f"review-{request_id}"
+            if workspace.exists() or workspace.is_symlink():
+                raise SecretaryError("review workspace already exists")
+            repo = Path(info["primaryRepository"])
+            created = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(workspace), request["candidateOid"]],
+                                     env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if created.returncode:
+                raise SecretaryError("could not create exact review worktree")
+            request["reviewerSessionId"] = "rv-" + secrets.token_hex(24)
+            request["reviewWorkspace"] = str(workspace.resolve(strict=True))
+            _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
+    environment = _env()
+    for name in ("TMUX", "TERM", "COLORTERM", "PI_CODING_AGENT_DIR"):
+        if os.environ.get(name): environment[name] = os.environ[name]
+    environment.update({"PI_PIDEV_SESSION_ID": request["reviewerSessionId"],
+                        "PI_PIDEV_REVIEW_PROJECT_ID": project_id,
+                        "PI_PIDEV_REVIEW_REQUEST_ID": request_id,
+                        "PI_PIDEV_CONTROL": str(Path(__file__).resolve())})
+    result = subprocess.run([str(_pidev_path())], cwd=request["reviewWorkspace"], env=environment,
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode:
+        raise SecretaryError(f"review launch failed: {(result.stderr or result.stdout).strip()[:300]}")
+    return request
+
+
+def review_launch_info(project_id: str, request_id: str) -> dict[str, Any]:
+    info = launch_info(project_id, internal=True)
+    project = _record_dir(_state_root(), project_id)
+    request = _validate_review_request(_review_request_path(project, request_id), project_id)
+    if request["reviewerSessionId"] is None or request["reviewWorkspace"] is None:
+        raise SecretaryError("review request is not assigned")
+    workspace = Path(request["reviewWorkspace"]).resolve(strict=True)
+    if _git(workspace, "rev-parse", "HEAD^{commit}").lower() != request["candidateOid"]:
+        raise SecretaryError("review checkout moved from assigned commit")
+    return {**request, "capability": info["capability"]}
+
+
+def submit_review(project_id: str, request_id: str, verdict: str, summary: str, findings: str) -> dict[str, Any]:
+    request = review_launch_info(project_id, request_id)
+    if verdict not in {"accept", "reject"}:
+        raise SecretaryError("invalid review verdict")
+    summary = _line(summary, "review summary", 1000)
+    if not isinstance(findings, str) or len(findings.encode()) > 16 * 1024:
+        raise SecretaryError("invalid review findings")
+    if (not hmac.compare_digest(os.environ.get("PI_REVIEW_CAPABILITY", ""), request["capability"]) or
+            os.environ.get("PI_REVIEW_SESSION_ID") != request["reviewerSessionId"]):
+        raise SecretaryError("reviewer capability required")
+    workspace = Path(request["reviewWorkspace"])
+    if _git(workspace, "rev-parse", "HEAD^{tree}").lower() != request["candidateTree"]:
+        raise SecretaryError("review tree differs from assignment")
+    if _git(workspace, "status", "--porcelain=v1"):
+        raise SecretaryError("review checkout is dirty")
+    project = _record_dir(_state_root(), project_id)
+    request_path = _review_request_path(project, request_id)
+    with _project_lock(project):
+        current = _validate_review_request(request_path, project_id)
+        immutable = ("projectId", "requestId", "workstreamId", "candidateOid", "candidateTree", "baseOid",
+                     "reviewerSessionId", "reviewWorkspace")
+        if any(current[name] != request[name] for name in immutable):
+            raise SecretaryError("review assignment changed during receipt submission")
+        if current["receiptId"] is not None:
+            existing = _validate_review_receipt(_review_receipt_path(project, current["receiptId"]), current)
+            if (existing["verdict"], existing["summary"], existing["findings"]) != (verdict, summary, findings):
+                raise SecretaryError("conflicting review receipt already exists")
+            return existing
+        receipt_id = "receipt-" + secrets.token_hex(16)
+        receipt = {"schemaVersion": 1, "receiptId": receipt_id, "projectId": project_id,
+                   "requestId": request_id, "workstreamId": request["workstreamId"],
+                   "candidateOid": request["candidateOid"], "candidateTree": request["candidateTree"],
+                   "baseOid": request["baseOid"], "reviewerSessionId": request["reviewerSessionId"],
+                   "verdict": verdict, "summary": summary, "findings": findings, "reviewedAt": _utc_now()}
+        _atomic(_review_receipt_path(project, receipt_id), json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n")
+        current["receiptId"] = receipt_id
+        _atomic(request_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+    return receipt
+
+
+def review_status(project_id: str, request_id: str) -> dict[str, Any]:
+    request = review_launch_info(project_id, request_id)
+    _, _, workstream = _require_workstream(project_id, request["workstreamId"])
+    current_oid = _git(Path(workstream["workspace"]), "rev-parse", "HEAD^{commit}").lower()
+    receipt = None
+    if request["receiptId"] is not None:
+        receipt = _validate_review_receipt(_review_receipt_path(_record_dir(_state_root(), project_id), request["receiptId"]), request)
+    return {**request, "capability": None, "currentOid": current_oid,
+            "stale": current_oid != request["candidateOid"], "receipt": receipt}
+
+
 def record_process_exit(workspace: str | Path, exit_code: int) -> dict[str, Any]:
     workspace_path = Path(workspace).resolve(strict=True)
     matches: list[tuple[str, str]] = []
@@ -1220,6 +1403,12 @@ def _cli() -> int:
     p = sub.add_parser("events-list"); p.add_argument("--project-id", required=True); p.add_argument("--all", action="store_true")
     p = sub.add_parser("event-ack"); p.add_argument("--project-id", required=True); p.add_argument("--event-id", required=True)
     p = sub.add_parser("process-exit"); p.add_argument("--workspace", required=True); p.add_argument("--exit-code", required=True, type=int)
+    p = sub.add_parser("review-create"); p.add_argument("--project-id", required=True); p.add_argument("--event-id", required=True)
+    p = sub.add_parser("review-launch-info"); p.add_argument("--project-id", required=True); p.add_argument("--request-id", required=True)
+    p.add_argument("--internal-launch", action="store_true")
+    p = sub.add_parser("review-submit"); p.add_argument("--project-id", required=True); p.add_argument("--request-id", required=True)
+    p.add_argument("--verdict", required=True); p.add_argument("--summary", required=True); p.add_argument("--findings", default="")
+    p = sub.add_parser("review-status"); p.add_argument("--project-id", required=True); p.add_argument("--request-id", required=True)
     args = parser.parse_args()
     try:
         if args.command == "init":
@@ -1268,8 +1457,18 @@ def _cli() -> int:
             result = list_events(args.project_id, include_acknowledged=args.all)
         elif args.command == "event-ack":
             result = acknowledge_event(args.project_id, args.event_id)
-        else:
+        elif args.command == "process-exit":
             result = record_process_exit(args.workspace, args.exit_code)
+        elif args.command == "review-create":
+            result = create_reviewer(args.project_id, args.event_id)
+        elif args.command == "review-launch-info":
+            if not args.internal_launch:
+                raise SecretaryError("review launch info is internal-only")
+            result = review_launch_info(args.project_id, args.request_id)
+        elif args.command == "review-submit":
+            result = submit_review(args.project_id, args.request_id, args.verdict, args.summary, args.findings)
+        else:
+            result = review_status(args.project_id, args.request_id)
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
     except SecretaryError as error:

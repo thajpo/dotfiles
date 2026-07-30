@@ -114,7 +114,7 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertNotIn("--tools read,grep,find,ls,bash", launcher)
         for forbidden in ["task_packet", "--edit", "--write"]:
             self.assertNotIn(forbidden, launcher)
-        self.assertEqual(extension.count("pi.registerTool"), 6)
+        self.assertEqual(extension.count("pi.registerTool"), 7)
         self.assertIn("Current user turn did not authorize", extension)
         self.assertIn("project-status", extension)
         self.assertIn("bind-key -T prefix g", (ROOT / "tmux.conf").read_text())
@@ -126,6 +126,13 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('name: "notify_secretary"', channel_extension)
         self.assertNotIn("sendUserMessage", channel_extension)
         self.assertNotIn("registerCommand", channel_extension)
+        reviewer = (ROOT / "bin/pi-review-agent").read_text()
+        self.assertIn("--tools read,grep,find,ls,submit_review_receipt", reviewer)
+        self.assertIn("--no-extensions", reviewer)
+        self.assertNotIn("bash,", reviewer)
+        receipt_extension = (ROOT / "pi/extensions/review-receipt/index.ts").read_text()
+        self.assertEqual(receipt_extension.count("pi.registerTool"), 1)
+        self.assertIn("PI_REVIEW_CANDIDATE_OID", receipt_extension)
         self.assertLess(brief_extension.index("pi.appendEntry"), brief_extension.index("pi.sendUserMessage"))
 
     def test_pidev_is_installed_as_a_managed_pi_wrapper(self):

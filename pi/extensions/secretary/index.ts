@@ -11,7 +11,7 @@ const ROLE = Type.Union([
   Type.Literal("review"), Type.Literal("integration"),
 ]);
 
-type Authorization = "record" | "promote" | "open" | "ack";
+type Authorization = "record" | "promote" | "open" | "ack" | "review";
 let authorized = new Set<Authorization>();
 
 function requiredEnvironment(): { projectId: string; alias: string; control: string } {
@@ -55,8 +55,9 @@ function updateAuthorization(text: string, source: string): void {
   if (/\b(spin|promote)\b.*\b(out|session|agent)|\b(new feature|create (an? )?agent|open (an? )?agent)\b/.test(value)) authorized.add("promote");
   if (/\b(open|resume|focus|switch to)\b/.test(value)) authorized.add("open");
   if (/\b(acknowledge|dismiss|clear)\b.*\b(attention|event|notification|this)\b/.test(value)) authorized.add("ack");
+  if (/\b(review|reviewer)\b.*\b(create|start|assign|open|this|it)\b|\b(create|start|assign)\b.*\breviewer\b/.test(value)) authorized.add("review");
   if (/^\s*(yes|yep|do it|go ahead|please do|sounds good)[.!\s]*$/i.test(text)) {
-    authorized.add("record"); authorized.add("promote"); authorized.add("open"); authorized.add("ack");
+    authorized.add("record"); authorized.add("promote"); authorized.add("open"); authorized.add("ack"); authorized.add("review");
   }
 }
 
@@ -123,6 +124,16 @@ export default function secretary(pi: ExtensionAPI): void {
     async execute(_id, params, signal) {
       consume("open"); const { projectId } = requiredEnvironment();
       const text = await invoke(["focus-workstream", "--project-id", projectId, "--workstream-id", params.workstreamId], signal);
+      return { content: [{ type: "text", text }], details: {} };
+    },
+  });
+  pi.registerTool({
+    name: "secretary_create_reviewer", label: "Create exact-OID reviewer",
+    description: "Create and focus a distinct read-only reviewer for an exact pending review event after explicit user instruction.",
+    parameters: Type.Object({ eventId: Type.String({ pattern: ID.source }) }),
+    async execute(_id, params, signal) {
+      consume("review"); const { projectId } = requiredEnvironment();
+      const text = await invoke(["review-create", "--project-id", projectId, "--event-id", params.eventId], signal);
       return { content: [{ type: "text", text }], details: {} };
     },
   });
