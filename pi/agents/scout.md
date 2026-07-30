@@ -4,7 +4,7 @@ description: Fast codebase recon that returns compressed context for handoff
 systemPromptMode: replace
 inheritProjectContext: false
 inheritSkills: false
-model: deepseek/deepseek-v4-flash
+model: openai-codex/gpt-5.6-luna
 thinking: high
 tools: read, bash, grep, find, ls, contact_supervisor
 extensions: /home/j/.pi/agent/npm/node_modules/@kjrjay/pi-sandbox/index.ts

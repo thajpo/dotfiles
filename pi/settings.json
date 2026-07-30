@@ -3,10 +3,14 @@
   "theme": "tokyo-night-pi",
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.6-luna",
-  "defaultThinkingLevel": "high",
+  "defaultThinkingLevel": "xhigh",
   "enabledModels": [
     "openai-codex/gpt-5.6-luna:high",
+    "openai-codex/gpt-5.6-luna:xhigh",
+    "openai-codex/gpt-5.6-luna:max",
     "openai-codex/gpt-5.6-sol:high",
+    "openai-codex/gpt-5.6-sol:xhigh",
+    "openai-codex/gpt-5.6-sol:max",
     "openai-codex/gpt-5.6-terra:high",
     "deepseek/deepseek-v4-flash:high",
     "deepseek/deepseek-v4-pro:high"
@@ -54,7 +58,7 @@
     }
   },
   "subagents": {
-    "defaultModel": "deepseek/deepseek-v4-flash:high",
+    "defaultModel": "openai-codex/gpt-5.6-luna:high",
     "modelScope": {
       "enforce": true,
       "allow": [
@@ -67,7 +71,7 @@
     },
     "agentOverrides": {
       "context-builder": {
-        "model": "deepseek/deepseek-v4-flash",
+        "model": "openai-codex/gpt-5.6-luna",
         "thinking": "high",
         "defaultContext": "fresh"
       },
@@ -87,23 +91,23 @@
         "defaultContext": "fresh"
       },
       "researcher": {
-        "model": "deepseek/deepseek-v4-flash",
+        "model": "openai-codex/gpt-5.6-luna",
         "thinking": "high",
         "defaultContext": "fresh"
       },
       "reviewer": {
         "model": "openai-codex/gpt-5.6-luna",
-        "thinking": "high",
+        "thinking": "xhigh",
         "defaultContext": "fresh"
       },
       "scout": {
-        "model": "deepseek/deepseek-v4-flash",
+        "model": "openai-codex/gpt-5.6-luna",
         "thinking": "high",
         "defaultContext": "fresh"
       },
       "worker": {
         "model": "openai-codex/gpt-5.6-luna",
-        "thinking": "high",
+        "thinking": "xhigh",
         "defaultContext": "fresh"
       }
     }

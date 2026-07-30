@@ -12,12 +12,21 @@ class HarnessStaticTests(unittest.TestCase):
     def test_models_and_agent_limits(self):
         settings = json.loads((ROOT / "pi/settings.json").read_text())
         self.assertEqual(settings["defaultModel"], "gpt-5.6-luna")
-        self.assertEqual(settings["defaultThinkingLevel"], "high")
+        self.assertEqual(settings["defaultThinkingLevel"], "xhigh")
         overrides = settings["subagents"]["agentOverrides"]
-        self.assertEqual(overrides["scout"]["model"], "deepseek/deepseek-v4-flash")
+        self.assertEqual(overrides["scout"]["model"], "openai-codex/gpt-5.6-luna")
+        self.assertEqual(overrides["scout"]["thinking"], "high")
         self.assertEqual(overrides["worker"]["model"], "openai-codex/gpt-5.6-luna")
+        self.assertEqual(overrides["worker"]["thinking"], "xhigh")
         self.assertEqual(overrides["reviewer"]["model"], "openai-codex/gpt-5.6-luna")
+        self.assertEqual(overrides["reviewer"]["thinking"], "xhigh")
         self.assertEqual(overrides["oracle"]["model"], "openai-codex/gpt-5.6-sol")
+        review = json.loads((ROOT / "pi/pr-review.json").read_text())
+        self.assertEqual(review["tiers"], {
+            "light": "openai-codex/gpt-5.6-luna:xhigh",
+            "medium": "openai-codex/gpt-5.6-luna:max",
+            "heavy": "openai-codex/gpt-5.6-sol:xhigh",
+        })
         self.assertNotIn("advisor", overrides)
         self.assertTrue(all(value["defaultContext"] == "fresh" for value in overrides.values()))
         worker = (ROOT / "pi/agents/worker.md").read_text()
@@ -260,7 +269,7 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
 
     def test_global_agents_hash_and_removed_legacy_orchestrators(self):
         agents = (ROOT / "agent/AGENTS.md").read_bytes()
-        self.assertEqual(hashlib.sha256(agents).hexdigest(), "3db9306dacc365af42d531bda1a040538b55f070ec75da7b64b9e5c88cda70f8")
+        self.assertEqual(hashlib.sha256(agents).hexdigest(), "5fdf1b474c242ad391424c68d27a3291e07c501363b19b8a486be1470ac7d839")
         policy = agents.decode()
         for heading in ["### FAST", "### RIP", "### BUILD", "### MAJOR", "### OFF", "### LIGHT", "### DEEP"]:
             self.assertIn(heading, policy)

@@ -27,20 +27,18 @@ on rejection.
 
 Default routing:
 
-- Parent and ordinary planner:
-  `openai-codex/gpt-5.6-luna:high`
+- Primary worker and parent decision authority:
+  `openai-codex/gpt-5.6-luna:xhigh`
 
-- Fast scouts, read-only research/context collection, test discovery, and
-  bounded experimentation (never implementation):
-  `deepseek/deepseek-v4-flash:high`
+- Secretary and read-only investigation/context collection:
+  `openai-codex/gpt-5.6-luna:high` (secretary itself uses xhigh)
 
-- Ordinary integration, review, and bounded implementation:
-  `openai-codex/gpt-5.6-luna:high`
+- Reviewer tiers by circumstance:
+  light `openai-codex/gpt-5.6-luna:xhigh`, medium `openai-codex/gpt-5.6-luna:max`,
+  heavy/high-risk `openai-codex/gpt-5.6-sol:xhigh`
 
-- Architecture, difficult debugging, research uncertainty, public interfaces,
-  schemas, migration, concurrency, numerical behavior, compatibility,
-  security, and high-risk review:
-  `openai-codex/gpt-5.6-sol:high`
+Use Sol because consequential uncertainty remains, not merely because the task
+is large.
 
 Use Sol because consequential uncertainty remains, not merely because the task
 is large.
