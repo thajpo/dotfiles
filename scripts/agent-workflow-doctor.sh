@@ -57,7 +57,7 @@ check_cmd pi-host "explicit unsandboxed maintenance launcher"
 
 printf '\nPi orchestration\n'
 printf 'policy:  pi-subagents is the only coding-agent orchestrator\n'
-printf 'policy:  FirstMate, treehouse, pi-side-agents, and Workboard are dormant/removed\n'
+printf 'policy:  legacy coding-agent orchestrators are dormant/removed\n'
 
 printf '\nGitHub auth\n'
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then

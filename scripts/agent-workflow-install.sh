@@ -39,7 +39,7 @@ link_file "$DOTFILES_DIR/skills/project-status" "$HOME/.agents/skills/project-st
 
 if [[ $# -ne 0 ]]; then
   printf 'usage: %s\n' "$0" >&2
-  printf 'Legacy FirstMate/treehouse/tool installation has been removed.\n' >&2
+  printf 'Legacy coding-agent orchestrator installation has been removed.\n' >&2
   exit 2
 fi
 

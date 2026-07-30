@@ -144,7 +144,7 @@ Install or repair the shared memory/config symlinks:
 ~/dotfiles/scripts/agent-workflow-install.sh
 ```
 
-Legacy FirstMate, treehouse, side-agent, and Workboard installation has been removed. Pi uses `pi-subagents` as its only coding-agent orchestrator.
+Legacy coding-agent orchestrator installation has been removed. Pi uses `pi-subagents` as its only coding-agent orchestrator.
 
 Inspect the setup:
 

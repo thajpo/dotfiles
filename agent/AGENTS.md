@@ -50,8 +50,8 @@ Use pi-subagents as the coding-agent orchestrator.
 Keep pi-btw available for side questions. Its context remains separate until a
 result is deliberately injected.
 
-Do not invoke FirstMate, treehouse, pi-side-agents, Workboard, jj, or another
-orchestrator unless the user explicitly changes this policy.
+Do not invoke pi-side-agents, Workboard, jj, or another orchestrator unless the
+user explicitly changes this policy.
 
 ## Workspace and host policy
 

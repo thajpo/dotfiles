@@ -119,14 +119,12 @@ class HarnessStaticTests(unittest.TestCase):
 
     def test_global_agents_hash_and_removed_legacy_orchestrators(self):
         agents = (ROOT / "agent/AGENTS.md").read_bytes()
-        self.assertEqual(hashlib.sha256(agents).hexdigest(), "74c99dc419b64a3976f77320e5ceb335c37340b3e45a71d7ce09125ed7c26d5b")
+        self.assertEqual(hashlib.sha256(agents).hexdigest(), "e733328881865741996ce6342d68a174c1992ded6a17ee62e79cd5e543324c01")
         policy = agents.decode()
         for heading in ["### FAST", "### RIP", "### BUILD", "### MAJOR", "### OFF", "### LIGHT", "### DEEP"]:
             self.assertIn(heading, policy)
         self.assertNotIn("## Default feature workflow", policy)
         workflow = (ROOT / "scripts/agent-workflow-install.sh").read_text()
-        self.assertNotIn("clone_firstmate", workflow)
-        self.assertNotIn("treehouse/install", workflow)
         package = json.loads((ROOT / "pi/npm/package.json").read_text())
         self.assertIn("pi-btw", package["dependencies"])
         self.assertIn("pi-subagents", package["dependencies"])

@@ -59,7 +59,7 @@ Observed before modification:
 - Model/user-selectable publication targets in ordinary `pi`.
 - Per-child competing target locks and per-child replacement containers.
 - Host bind package caches.
-- FirstMate/treehouse installation and doctor guidance.
+- Legacy orchestrator installation and doctor guidance.
 - Universal documentation claiming the host worktree never changes.
 
 ### NOT YET LOADED
