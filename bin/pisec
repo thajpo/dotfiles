@@ -290,18 +290,14 @@ fi
 target_count=${#target_indices[@]}
 (( target_count > 0 )) || fail 'no active projects selected'
 
-# Rebuild the pisec session into two-pane windows. Pi sessions are persistent
-# on disk, so this safely rearranges panes without losing secretary history.
-tmux kill-session -t "=$session" || fail 'cannot rebuild pisec session'
+# Rebuild the pane layout without killing the pisec session itself. Creating
+# replacement windows first keeps attached clients alive while old windows are
+# retired, and Pi session history remains on disk across the restart.
+declare -a old_windows=("${window_ids[@]}") rebuilt_windows=() pending_panes=() pending_projects=()
 window_count=$(( (target_count + 1) / 2 ))
-declare -a rebuilt_windows=()
 for ((w=1; w<=window_count; w++)); do
-  window_name="projects-$w"
-  if (( w == 1 )); then
-    rebuilt=$(tmux new-session -d -P -F '#{window_id}' -s "$session" -n "$window_name" -c "$HOME" 'exec sh') || fail 'cannot create pisec session'
-  else
-    rebuilt=$(tmux new-window -d -P -F '#{window_id}' -t "=$session" -n "$window_name" -c "$HOME" 'exec sh') || fail 'cannot create pisec window'
-  fi
+  temporary_name="__pisec-rebuild-$w"
+  rebuilt=$(tmux new-window -d -P -F '#{window_id}' -t "=$session" -n "$temporary_name" -c "$HOME" 'exec sh') || fail 'cannot create pisec window'
   [[ "$rebuilt" =~ ^@ ]] || fail 'tmux returned an invalid projects window id'
   rebuilt_windows+=("$rebuilt")
   first_pane=""
@@ -319,10 +315,19 @@ for ((w=1; w<=window_count; w++)); do
       [[ "$pane_target" =~ ^% ]] || fail 'tmux returned an invalid secretary pane id'
     fi
     tmux select-pane -t "$pane_target" -T "${aliases[${target_indices[$target_position]}]}" || fail 'cannot title secretary pane'
-    command=$(secretary_command "${ids[${target_indices[$target_position]}]}")
-    tmux send-keys -t "$pane_target" "$command" C-m || fail 'cannot start secretary pane'
+    pending_panes+=("$pane_target"); pending_projects+=("${target_indices[$target_position]}")
   done
   tmux select-layout -t "$rebuilt" even-horizontal || fail 'cannot arrange projects window'
+done
+for old_window in "${old_windows[@]}"; do
+  tmux kill-window -t "$old_window" || fail 'cannot retire old pisec window'
+done
+for ((w=1; w<=window_count; w++)); do
+  tmux rename-window -t "${rebuilt_windows[$((w - 1))]}" "projects-$w" || fail 'cannot name pisec window'
+done
+for k in "${!pending_panes[@]}"; do
+  command=$(secretary_command "${ids[${pending_projects[$k]}]}")
+  tmux send-keys -t "${pending_panes[$k]}" "$command" C-m || fail 'cannot start secretary pane'
 done
 
 if [[ "$action" == default || "$action" == open || "$action" == "" ]]; then

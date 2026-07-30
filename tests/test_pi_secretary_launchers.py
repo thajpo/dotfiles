@@ -110,7 +110,9 @@ with pathlib.Path(os.environ['FAKE_TMUX_LOG']).open('a') as f: f.write(json.dump
 cmd=args[0]
 if cmd=='has-session': raise SystemExit(1)
 if cmd=='new-session': print('@1'); raise SystemExit(0)
-if cmd=='kill-session': raise SystemExit(0)
+if cmd=='new-window': print('@2'); raise SystemExit(0)
+if cmd=='kill-window': raise SystemExit(0)
+if cmd=='rename-window': raise SystemExit(0)
 if cmd=='list-panes': print('%1\\t0\\tshell-1\\tsh\\t'); raise SystemExit(0)
 if cmd=='split-window': print('%2'); raise SystemExit(0)
 raise SystemExit(0)
@@ -135,7 +137,7 @@ raise SystemExit(0)
             self.assertEqual({record["projectId"] for record in records},
                              {call[3].rsplit(" ", 1)[-1] for call in sends})
             self.assertEqual(len([call for call in calls if call[0] == "split-window"]), 1)
-            self.assertIn(["select-layout", "-t", "@1", "even-horizontal"], calls)
+            self.assertIn(["select-layout", "-t", "@2", "even-horizontal"], calls)
 
     def test_pisec_relaunch_maps_live_processes_without_titles_or_duplicates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -163,8 +165,10 @@ with pathlib.Path(os.environ['FAKE_TMUX_LOG']).open('a') as f: f.write(json.dump
 if args[0]=='has-session': raise SystemExit(0)
 if args[0]=='list-windows': print('@1\\tprojects'); raise SystemExit(0)
 if args[0]=='kill-session': raise SystemExit(0)
-if args[0]=='new-session': print('@9'); raise SystemExit(0)
+if args[0]=='new-window': print('@9'); raise SystemExit(0)
 if args[0]=='split-window': print('%3'); raise SystemExit(0)
+if args[0]=='kill-window': raise SystemExit(0)
+if args[0]=='rename-window': raise SystemExit(0)
 if args[0]=='list-panes':
  print('%1\\t0\\troot-0\\tsh\\tchanged-title')
  print('%2\\t1\\troot-1\\tsh\\tother-title')
