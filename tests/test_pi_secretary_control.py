@@ -179,6 +179,42 @@ class SecretaryControlTests(unittest.TestCase):
         self.assertTrue(Path(workstreams[0]["workspace"]).is_dir())
         self.assertEqual(len(secretary.list_briefs(self.source, self.capability)), 1)
 
+    def test_bounded_attention_requires_owned_feature_route_and_exact_ack(self):
+        registered = secretary.register_project(self.source, "attention-project")
+        brief = self._brief()
+        workstream = self._workstream(brief["briefId"], workstream_id="attention-work")
+        route_cap = "route-capability"
+        route = Path(self.tmp.name) / "route.json"
+        route.write_text(json.dumps({"uid": os.getuid(), "capabilityHash": __import__("hashlib").sha256(route_cap.encode()).hexdigest(),
+                                     "readOnly": False, "worktree": workstream["workspace"]}))
+        route.chmod(0o600)
+        with mock.patch.dict(os.environ, {"PI_TASK_ROUTE_FILE": str(route),
+                                          "PI_TASK_ROUTE_CAPABILITY": route_cap}, clear=False):
+            event = secretary.append_event(registered["projectId"], workstream["workstreamId"],
+                                            "needs-user", "Choose the durable format", "Two bounded options")
+        self.assertEqual(event["source"], "agent")
+        self.assertEqual(secretary.list_events(registered["projectId"])[0]["eventId"], event["eventId"])
+        with mock.patch.dict(os.environ, {"PI_TASK_ROUTE_FILE": str(route),
+                                          "PI_TASK_ROUTE_CAPABILITY": "wrong"}, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "route rejected"):
+                secretary.append_event(registered["projectId"], workstream["workstreamId"],
+                                        "referral", "Wrong route")
+        with mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability}, clear=False):
+            acknowledged = secretary.acknowledge_event(registered["projectId"], event["eventId"])
+        self.assertIsNotNone(acknowledged["acknowledgedAt"])
+        self.assertEqual(secretary.list_events(registered["projectId"]), [])
+        self.assertEqual(len(secretary.list_events(registered["projectId"], include_acknowledged=True)), 1)
+
+    def test_process_exit_is_host_fact_not_completion(self):
+        registered = secretary.register_project(self.source, "process-exit")
+        brief = self._brief()
+        workstream = self._workstream(brief["briefId"], workstream_id="exiting-work")
+        event = secretary.record_process_exit(workstream["workspace"], 143)
+        self.assertEqual(event["kind"], "process-exit")
+        self.assertEqual(event["source"], "host")
+        opened = secretary.open_workstream(self.source, self.capability, workstream["workstreamId"])
+        self.assertIsNone(opened["closedAt"])
+
     def test_two_workstreams_reference_one_brief_and_dirty_source_survives(self):
         brief = self._brief("Design", "bounded text")
         (self.source / "dirty").write_text("human change\n")

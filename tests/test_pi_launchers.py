@@ -837,7 +837,9 @@ raise SystemExit(2)
             brief.write_text("# Assigned brief\n")
             env.update({"PI_PIDEV_SESSION_ID": "ws-abcdef0123456789",
                         "PI_PIDEV_WORKSTREAM_ID": "assigned-work",
-                        "PI_PIDEV_BRIEF_PATH": str(brief)})
+                        "PI_PIDEV_PROJECT_ID": "a" * 64,
+                        "PI_PIDEV_BRIEF_PATH": str(brief),
+                        "PI_PIDEV_CONTROL": str(ROOT / "scripts/pi-secretary-control.py")})
             result = subprocess.run([str(ROOT / "bin/pidev")], cwd=repo, env=env,
                                     text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)

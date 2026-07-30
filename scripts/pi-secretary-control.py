@@ -272,7 +272,7 @@ def _capability_path(root: Path, project_id: str) -> Path:
 
 
 def _foundation(project: Path) -> None:
-    for name in ("briefs", "workstreams", "workstream-runtime", "events", "operations", "operations/facts"):
+    for name in ("briefs", "workstreams", "workstream-runtime", "events", "events/inbox", "operations", "operations/facts"):
         _ensure_dir(project / name)
     inbox = project / "events/inbox.jsonl"
     if inbox.exists() or inbox.is_symlink():
@@ -625,6 +625,106 @@ def _validate_oid(oid: str, object_format: str) -> str:
 
 
 # --- Briefs ---
+
+EVENT_KINDS = {"needs-user", "review-requested", "referral", "process-exit"}
+
+
+def _event_path(project: Path, event_id: str) -> Path:
+    return project / "events" / "inbox" / f"{_id(event_id, 'event id')}.json"
+
+
+def _validate_event(path: Path, project_id: str) -> dict[str, Any]:
+    fields = {"schemaVersion", "eventId", "projectId", "workstreamId", "kind", "summary",
+              "details", "source", "createdAt", "acknowledgedAt"}
+    value = _read_json(path, fields, required=fields)
+    if (value.get("schemaVersion") != 1 or value.get("projectId") != project_id or
+            value.get("eventId") != path.stem or value.get("kind") not in EVENT_KINDS or
+            value.get("source") not in {"agent", "host"}):
+        raise SecretaryError("malformed attention event")
+    _id(value.get("workstreamId"), "workstream id")
+    _line(value.get("summary"), "event summary", 500)
+    if not isinstance(value.get("details"), str) or len(value["details"].encode()) > 4096:
+        raise SecretaryError("malformed attention event")
+    _timestamp(value.get("createdAt"), "event createdAt")
+    if value.get("acknowledgedAt") is not None:
+        _timestamp(value["acknowledgedAt"], "event acknowledgedAt")
+    return value
+
+
+def _require_workstream(project_id: str, workstream_id: str) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+    info = launch_info(project_id, internal=True)
+    repo = Path(info["primaryRepository"])
+    record = open_workstream(repo, info["capability"], workstream_id)
+    return info, repo, record
+
+
+def _validate_feature_route(record: dict[str, Any]) -> None:
+    route_path = os.environ.get("PI_TASK_ROUTE_FILE", "")
+    capability = os.environ.get("PI_TASK_ROUTE_CAPABILITY", "")
+    if not route_path or not capability:
+        raise SecretaryError("feature route is required")
+    path = Path(route_path)
+    info = _safe_lstat(path, directory=False)
+    assert info is not None
+    if info.st_size > MAX_JSON:
+        raise SecretaryError("feature route is too large")
+    try:
+        route = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise SecretaryError("malformed feature route") from error
+    expected = hashlib.sha256(capability.encode()).hexdigest()
+    if (not isinstance(route, dict) or route.get("uid") != os.getuid() or
+            not hmac.compare_digest(str(route.get("capabilityHash", "")), expected) or
+            route.get("readOnly") is True):
+        raise SecretaryError("feature route rejected")
+    worktree = route.get("worktree")
+    if not isinstance(worktree, str) or Path(worktree).resolve(strict=True) != Path(record["workspace"]).resolve(strict=True):
+        raise SecretaryError("feature route does not own workstream")
+
+
+def append_event(project_id: str, workstream_id: str, kind: str, summary: str,
+                 details: str = "", *, source: str = "agent", validate_route: bool = True) -> dict[str, Any]:
+    if kind not in EVENT_KINDS or (source == "agent" and kind == "process-exit"):
+        raise SecretaryError("invalid event kind")
+    _, _, record = _require_workstream(project_id, workstream_id)
+    if validate_route:
+        _validate_feature_route(record)
+    summary = _line(summary, "event summary", 500)
+    if not isinstance(details, str) or len(details.encode()) > 4096:
+        raise SecretaryError("invalid event details")
+    project = _record_dir(_state_root(), project_id)
+    event_id = "evt-" + secrets.token_hex(16)
+    value = {"schemaVersion": 1, "eventId": event_id, "projectId": project_id,
+             "workstreamId": workstream_id, "kind": kind, "summary": summary,
+             "details": details, "source": source, "createdAt": _utc_now(), "acknowledgedAt": None}
+    with _project_lock(project):
+        _atomic(_event_path(project, event_id), json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+    return value
+
+
+def list_events(project_id: str, *, include_acknowledged: bool = False) -> list[dict[str, Any]]:
+    launch_info(project_id)
+    project = _record_dir(_state_root(), project_id)
+    directory = project / "events" / "inbox"
+    _safe_lstat(directory, directory=True)
+    result = [_validate_event(path, project_id) for path in sorted(directory.glob("*.json"))]
+    return result if include_acknowledged else [item for item in result if item["acknowledgedAt"] is None]
+
+
+def acknowledge_event(project_id: str, event_id: str) -> dict[str, Any]:
+    info = launch_info(project_id, internal=True)
+    supplied = os.environ.get("PI_SECRETARY_CAPABILITY", "")
+    if not supplied or not hmac.compare_digest(supplied, info["capability"]):
+        raise SecretaryError("secretary capability required")
+    project = _record_dir(_state_root(), project_id)
+    path = _event_path(project, event_id)
+    with _project_lock(project):
+        value = _validate_event(path, project_id)
+        if value["acknowledgedAt"] is None:
+            value["acknowledgedAt"] = _utc_now()
+            _atomic(path, json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+    return value
+
 
 def _brief_path(project: Path, brief_id: str) -> Path:
     return project / "briefs" / f"{_id(brief_id, 'brief id')}.md"
@@ -1004,6 +1104,28 @@ def list_workstreams(repository: str | Path, capability: str) -> list[dict[str, 
     return result
 
 
+def record_process_exit(workspace: str | Path, exit_code: int) -> dict[str, Any]:
+    workspace_path = Path(workspace).resolve(strict=True)
+    matches: list[tuple[str, str]] = []
+    root = _state_root()
+    for registry in _registry_records(root):
+        info = launch_info(registry["projectId"], internal=True)
+        _, project, project_record, repo = _project_context(info["primaryRepository"], info["capability"])
+        directory = project / "workstreams"
+        if not directory.is_dir():
+            continue
+        for entry in directory.glob("*.json"):
+            record = _validate_workstream_record(entry, project, repo, project_record["objectFormat"], project_record["gitCommonDir"])
+            if Path(record["workspace"]).resolve(strict=True) == workspace_path and record["closedAt"] is None:
+                matches.append((registry["projectId"], record["workstreamId"]))
+    if len(matches) != 1:
+        raise SecretaryError("workspace is not owned by exactly one open workstream")
+    project_id, workstream_id = matches[0]
+    return append_event(project_id, workstream_id, "process-exit",
+                        f"Full agent process exited with status {exit_code}",
+                        source="host", validate_route=False)
+
+
 def _pidev_path() -> Path:
     candidates = [Path(__file__).resolve().parents[1] / "bin" / "pidev",
                   Path.home() / ".local" / "bin" / "pidev"]
@@ -1032,7 +1154,9 @@ def launch_workstream(project_id: str, workstream_id: str) -> dict[str, Any]:
             environment[name] = os.environ[name]
     environment.update({"PI_PIDEV_SESSION_ID": record["piSessionId"],
                         "PI_PIDEV_WORKSTREAM_ID": workstream_id,
-                        "PI_PIDEV_BRIEF_PATH": str(brief_path)})
+                        "PI_PIDEV_PROJECT_ID": project_id,
+                        "PI_PIDEV_BRIEF_PATH": str(brief_path),
+                        "PI_PIDEV_CONTROL": str(Path(__file__).resolve())})
     result = subprocess.run([str(_pidev_path())], cwd=record["workspace"], env=environment,
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if result.returncode:
@@ -1091,6 +1215,11 @@ def _cli() -> int:
     p.add_argument("--role", required=True); p.add_argument("--brief-id"); p.add_argument("--workstream-id")
     p = sub.add_parser("focus-workstream"); p.add_argument("--project-id", required=True); p.add_argument("--workstream-id", required=True)
     p = sub.add_parser("project-workstreams"); p.add_argument("--project-id", required=True)
+    p = sub.add_parser("notify"); p.add_argument("--project-id", required=True); p.add_argument("--workstream-id", required=True)
+    p.add_argument("--kind", required=True); p.add_argument("--summary", required=True); p.add_argument("--details", default="")
+    p = sub.add_parser("events-list"); p.add_argument("--project-id", required=True); p.add_argument("--all", action="store_true")
+    p = sub.add_parser("event-ack"); p.add_argument("--project-id", required=True); p.add_argument("--event-id", required=True)
+    p = sub.add_parser("process-exit"); p.add_argument("--workspace", required=True); p.add_argument("--exit-code", required=True, type=int)
     args = parser.parse_args()
     try:
         if args.command == "init":
@@ -1130,9 +1259,17 @@ def _cli() -> int:
                                         args.brief_id, args.workstream_id)
         elif args.command == "focus-workstream":
             result = launch_workstream(args.project_id, args.workstream_id)
-        else:
+        elif args.command == "project-workstreams":
             info = launch_info(args.project_id, internal=True)
             result = list_workstreams(info["primaryRepository"], info["capability"])
+        elif args.command == "notify":
+            result = append_event(args.project_id, args.workstream_id, args.kind, args.summary, args.details)
+        elif args.command == "events-list":
+            result = list_events(args.project_id, include_acknowledged=args.all)
+        elif args.command == "event-ack":
+            result = acknowledge_event(args.project_id, args.event_id)
+        else:
+            result = record_process_exit(args.workspace, args.exit_code)
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
     except SecretaryError as error:

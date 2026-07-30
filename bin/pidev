@@ -22,8 +22,15 @@ if [[ ${1:-} == --launch ]]; then
     printf 'pidev: --launch requires --session-id\n' >&2
     exit 2
   fi
+  set +e
   "$self_dir/pi-tmux-session" "$@"
-  exit $?
+  launch_status=$?
+  set -e
+  if [[ -n ${PI_WORKSTREAM_CONTROL:-} && -n ${PI_WORKSTREAM_ID:-} ]]; then
+    /usr/bin/python3 "$PI_WORKSTREAM_CONTROL" process-exit --workspace "$PWD" --exit-code "$launch_status" >/dev/null 2>&1 ||
+      printf 'pidev: warning: could not record full-agent process exit\n' >&2
+  fi
+  exit "$launch_status"
 fi
 
 if ! command -v tmux >/dev/null 2>&1; then
@@ -327,10 +334,12 @@ fi
 
 # Stable worktree/full-agent naming replaces the obsolete daily liaison name.
 pi_cmd=""
-if [[ -n ${PI_PIDEV_WORKSTREAM_ID:-} || -n ${PI_PIDEV_BRIEF_PATH:-} ]]; then
+if [[ -n ${PI_PIDEV_WORKSTREAM_ID:-} || -n ${PI_PIDEV_BRIEF_PATH:-} || -n ${PI_PIDEV_PROJECT_ID:-} ]]; then
   [[ ${PI_PIDEV_WORKSTREAM_ID:-} =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || fail "invalid host workstream ID"
+  [[ ${PI_PIDEV_PROJECT_ID:-} =~ ^[0-9a-f]{64}$ ]] || fail "invalid host project ID"
   [[ ${PI_PIDEV_BRIEF_PATH:-} == /* && -f ${PI_PIDEV_BRIEF_PATH:-} && ! -L ${PI_PIDEV_BRIEF_PATH:-} ]] || fail "invalid host brief path"
-  printf -v quoted 'env PI_WORKSTREAM_ID=%q PI_WORKSTREAM_BRIEF_PATH=%q ' "$PI_PIDEV_WORKSTREAM_ID" "$PI_PIDEV_BRIEF_PATH"
+  [[ ${PI_PIDEV_CONTROL:-} == /* && -f ${PI_PIDEV_CONTROL:-} && ! -L ${PI_PIDEV_CONTROL:-} && $(basename -- "$PI_PIDEV_CONTROL") == pi-secretary-control.py ]] || fail "invalid host secretary control path"
+  printf -v quoted 'env PI_WORKSTREAM_ID=%q PI_WORKSTREAM_PROJECT_ID=%q PI_WORKSTREAM_BRIEF_PATH=%q PI_WORKSTREAM_CONTROL=%q ' "$PI_PIDEV_WORKSTREAM_ID" "$PI_PIDEV_PROJECT_ID" "$PI_PIDEV_BRIEF_PATH" "$PI_PIDEV_CONTROL"
   pi_cmd=$quoted
 fi
 printf -v quoted '%q' "$self_path"

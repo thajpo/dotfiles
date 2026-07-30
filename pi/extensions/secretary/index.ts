@@ -11,7 +11,7 @@ const ROLE = Type.Union([
   Type.Literal("review"), Type.Literal("integration"),
 ]);
 
-type Authorization = "record" | "promote" | "open";
+type Authorization = "record" | "promote" | "open" | "ack";
 let authorized = new Set<Authorization>();
 
 function requiredEnvironment(): { projectId: string; alias: string; control: string } {
@@ -54,8 +54,9 @@ function updateAuthorization(text: string, source: string): void {
   if (/\b(record|save|park)\b.*\b(idea|this)|\b(save|record) this\b/.test(value)) authorized.add("record");
   if (/\b(spin|promote)\b.*\b(out|session|agent)|\b(new feature|create (an? )?agent|open (an? )?agent)\b/.test(value)) authorized.add("promote");
   if (/\b(open|resume|focus|switch to)\b/.test(value)) authorized.add("open");
+  if (/\b(acknowledge|dismiss|clear)\b.*\b(attention|event|notification|this)\b/.test(value)) authorized.add("ack");
   if (/^\s*(yes|yep|do it|go ahead|please do|sounds good)[.!\s]*$/i.test(text)) {
-    authorized.add("record"); authorized.add("promote"); authorized.add("open");
+    authorized.add("record"); authorized.add("promote"); authorized.add("open"); authorized.add("ack");
   }
 }
 
@@ -122,6 +123,26 @@ export default function secretary(pi: ExtensionAPI): void {
     async execute(_id, params, signal) {
       consume("open"); const { projectId } = requiredEnvironment();
       const text = await invoke(["focus-workstream", "--project-id", projectId, "--workstream-id", params.workstreamId], signal);
+      return { content: [{ type: "text", text }], details: {} };
+    },
+  });
+  pi.registerTool({
+    name: "secretary_list_attention", label: "List attention",
+    description: "List unacknowledged bounded workstream attention and host process-exit events.",
+    parameters: Type.Object({}),
+    async execute(_id, _params, signal) {
+      const { projectId } = requiredEnvironment();
+      const text = await invoke(["events-list", "--project-id", projectId], signal);
+      return { content: [{ type: "text", text }], details: {} };
+    },
+  });
+  pi.registerTool({
+    name: "secretary_acknowledge_attention", label: "Acknowledge attention",
+    description: "Acknowledge one exact attention event after explicit user instruction or affirmation.",
+    parameters: Type.Object({ eventId: Type.String({ pattern: ID.source }) }),
+    async execute(_id, params, signal) {
+      consume("ack"); const { projectId } = requiredEnvironment();
+      const text = await invoke(["event-ack", "--project-id", projectId, "--event-id", params.eventId], signal);
       return { content: [{ type: "text", text }], details: {} };
     },
   });

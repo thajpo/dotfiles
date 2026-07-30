@@ -3,6 +3,7 @@ import fs from "node:fs";
 
 const MARKER = "workstream-brief-seeded-v1";
 const ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const PROJECT_ID = /^[0-9a-f]{64}$/;
 
 function alreadySeeded(ctx: ExtensionContext, workstreamId: string): boolean {
   try {
@@ -17,15 +18,16 @@ function alreadySeeded(ctx: ExtensionContext, workstreamId: string): boolean {
 export default function workstreamBrief(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     const workstreamId = process.env.PI_WORKSTREAM_ID ?? "";
+    const projectId = process.env.PI_WORKSTREAM_PROJECT_ID ?? "";
     const briefPath = process.env.PI_WORKSTREAM_BRIEF_PATH ?? "";
     if (!workstreamId && !briefPath) return;
-    if (!ID.test(workstreamId) || !briefPath.startsWith("/") || alreadySeeded(ctx, workstreamId)) return;
+    if (!ID.test(workstreamId) || !PROJECT_ID.test(projectId) || !briefPath.startsWith("/") || alreadySeeded(ctx, workstreamId)) return;
     const info = fs.lstatSync(briefPath);
     if (!info.isFile() || info.isSymbolicLink() || info.size > 20 * 1024) {
       throw new Error("workstream brief is not a bounded regular file");
     }
     const brief = fs.readFileSync(briefPath, "utf8");
-    pi.appendEntry(MARKER, { workstreamId, seededAt: new Date().toISOString() });
+    pi.appendEntry(MARKER, { projectId, workstreamId, seededAt: new Date().toISOString() });
     pi.setSessionName(`workstream-${workstreamId}`);
     pi.sendUserMessage(
       `Host-assigned workstream brief (supplied once):\n\n${brief}\n\n` +

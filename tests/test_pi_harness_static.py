@@ -114,7 +114,7 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertNotIn("--tools read,grep,find,ls,bash", launcher)
         for forbidden in ["task_packet", "--edit", "--write"]:
             self.assertNotIn(forbidden, launcher)
-        self.assertEqual(extension.count("pi.registerTool"), 4)
+        self.assertEqual(extension.count("pi.registerTool"), 6)
         self.assertIn("Current user turn did not authorize", extension)
         self.assertIn("project-status", extension)
         self.assertIn("bind-key -T prefix g", (ROOT / "tmux.conf").read_text())
@@ -122,6 +122,10 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("getBranch", brief_extension)
         self.assertIn("pi.appendEntry", brief_extension)
         self.assertIn("pi.sendUserMessage", brief_extension)
+        channel_extension = (ROOT / "pi/extensions/workstream-channel/index.ts").read_text()
+        self.assertIn('name: "notify_secretary"', channel_extension)
+        self.assertNotIn("sendUserMessage", channel_extension)
+        self.assertNotIn("registerCommand", channel_extension)
         self.assertLess(brief_extension.index("pi.appendEntry"), brief_extension.index("pi.sendUserMessage"))
 
     def test_pidev_is_installed_as_a_managed_pi_wrapper(self):
