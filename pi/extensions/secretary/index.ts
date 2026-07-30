@@ -47,11 +47,20 @@ function projectStatusSkill(): string {
   }
 }
 
+function recordWasAuthorized(value: string): boolean {
+  const verb = "(?:record|save|park|log|note|capture|document|write\\s+down)\\w*";
+  const object = "(?:idea|this|guidance|lesson|constraint|finding|insight|recommendation|baseline|capacity|note|it)";
+  const direct = new RegExp(`\\b${verb}\\b[\\s\\S]{0,120}\\b${object}\\b`).test(value);
+  const evaluative = new RegExp(`\\b(?:worth|useful|valuable|important|helpful)\\b[\\s\\S]{0,80}\\b${verb}\\b`).test(value);
+  const negative = new RegExp(`\\b(?:don't|do not|never|not|without)\\b[\\s\\S]{0,30}\\b${verb}\\b`).test(value);
+  return !negative && (direct || evaluative);
+}
+
 function updateAuthorization(text: string, source: string): void {
   authorized = new Set();
   if (source === "extension") return;
   const value = text.toLowerCase();
-  if (/\b(record|save|park)\b.*\b(idea|this)|\b(save|record) this\b/.test(value)) authorized.add("record");
+  if (recordWasAuthorized(value)) authorized.add("record");
   if (/\b(spin|promote)\b.*\b(out|session|agent)|\b(new feature|create (an? )?agent|open (an? )?agent)\b/.test(value)) authorized.add("promote");
   if (/\b(open|resume|focus|switch to)\b/.test(value)) authorized.add("open");
   if (/\b(acknowledge|dismiss|clear)\b.*\b(attention|event|notification|this)\b/.test(value)) authorized.add("ack");
@@ -85,7 +94,7 @@ export default function secretary(pi: ExtensionAPI): void {
     const { alias, projectId } = requiredEnvironment();
     return {
       systemPrompt: event.systemPrompt + `\n\nYou are the persistent secretary for project ${alias} (project ID ${projectId}).\n` +
-        "Switchboard boundary: inspect project evidence, record bounded ideas, and create/open peer full agents only after the current natural-language user turn explicitly authorizes it. " +
+        "Switchboard boundary: inspect project evidence, record bounded ideas, and create/open peer full agents only after the current natural-language user turn explicitly authorizes it. Natural-language requests to log, note, capture, document, save, record, or park guidance count as record authorization; do not require the user to repeat a particular keyword. " +
         "Apply this boundary over any skill suggestion to fan out: never use subagents. You are not a coding agent and cannot modify repository files, Git, or run shell commands. " +
         "A promoted full agent owns implementation, its task_packet, direct technical discussion, and headless subagents. Never fabricate a user turn or relay general agent chat. Use secretary_git for bounded read-only Git inspection; never claim Git is unavailable when that tool can answer.\n\n" +
         "## Project-status skill\n" + projectStatusSkill() +
@@ -118,7 +127,7 @@ export default function secretary(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "secretary_record_idea", label: "Record idea",
-    description: "Record a bounded idea after the user explicitly asks to save, record, or park it.",
+    description: "Record a bounded idea after the user explicitly asks to log, note, capture, document, save, record, or park it.",
     parameters: Type.Object({ title: Type.String({ maxLength: 200 }), brief: Type.String({ maxLength: 16384 }) }),
     async execute(_id, params, signal) {
       consume("record"); const { projectId } = requiredEnvironment();

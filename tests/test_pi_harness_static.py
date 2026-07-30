@@ -125,6 +125,8 @@ class HarnessStaticTests(unittest.TestCase):
             self.assertNotIn(forbidden, launcher)
         self.assertEqual(extension.count("pi.registerTool"), 11)
         self.assertIn("Current user turn did not authorize", extension)
+        self.assertIn("Natural-language requests to log", extension)
+        self.assertIn("log|note|capture|document", extension)
         self.assertIn("fast-forward-only landing", extension)
         self.assertIn("Refuses dirty, live, moved, uncertain, or unlanded", extension)
         self.assertIn("project-status", extension)
