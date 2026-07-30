@@ -11,7 +11,7 @@ const ROLE = Type.Union([
   Type.Literal("review"), Type.Literal("integration"),
 ]);
 
-type Authorization = "record" | "promote" | "open" | "ack" | "review";
+type Authorization = "record" | "promote" | "open" | "ack" | "review" | "land" | "integrate" | "cleanup";
 let authorized = new Set<Authorization>();
 
 function requiredEnvironment(): { projectId: string; alias: string; control: string } {
@@ -56,8 +56,11 @@ function updateAuthorization(text: string, source: string): void {
   if (/\b(open|resume|focus|switch to)\b/.test(value)) authorized.add("open");
   if (/\b(acknowledge|dismiss|clear)\b.*\b(attention|event|notification|this)\b/.test(value)) authorized.add("ack");
   if (/\b(review|reviewer)\b.*\b(create|start|assign|open|this|it)\b|\b(create|start|assign)\b.*\breviewer\b/.test(value)) authorized.add("review");
+  if (/\b(land|fast-forward)\b.*\b(review|candidate|workstream|this|it)\b|\bmerge\b.*\b(reviewed|candidate|workstream|this|it)\b/.test(value)) authorized.add("land");
+  if (/\b(integrat|integration)\w*\b.*\b(agent|workstream|create|start|this|it)\b|\b(create|start)\b.*\bintegration\b/.test(value)) authorized.add("integrate");
+  if (/\b(clean up|cleanup|remove)\b.*\b(workstream|agent|resources|this|it)\b/.test(value)) authorized.add("cleanup");
   if (/^\s*(yes|yep|do it|go ahead|please do|sounds good)[.!\s]*$/i.test(text)) {
-    authorized.add("record"); authorized.add("promote"); authorized.add("open"); authorized.add("ack"); authorized.add("review");
+    authorized.add("record"); authorized.add("promote"); authorized.add("open"); authorized.add("ack"); authorized.add("review"); authorized.add("land"); authorized.add("integrate"); authorized.add("cleanup");
   }
 }
 
@@ -124,6 +127,36 @@ export default function secretary(pi: ExtensionAPI): void {
     async execute(_id, params, signal) {
       consume("open"); const { projectId } = requiredEnvironment();
       const text = await invoke(["focus-workstream", "--project-id", projectId, "--workstream-id", params.workstreamId], signal);
+      return { content: [{ type: "text", text }], details: {} };
+    },
+  });
+  pi.registerTool({
+    name: "secretary_land_reviewed", label: "Land reviewed commit",
+    description: "Human-origin fast-forward-only landing of an exact current ACCEPT receipt under the target lock.",
+    parameters: Type.Object({ requestId: Type.String({ pattern: ID.source }) }),
+    async execute(_id, params, signal) {
+      consume("land"); const { projectId } = requiredEnvironment();
+      const text = await invoke(["land-reviewed", "--project-id", projectId, "--request-id", params.requestId], signal);
+      return { content: [{ type: "text", text }], details: {} };
+    },
+  });
+  pi.registerTool({
+    name: "secretary_create_integration", label: "Create integration agent",
+    description: "Create a separate full integration agent for a reviewed candidate after explicit user instruction; never merges automatically.",
+    parameters: Type.Object({ requestId: Type.String({ pattern: ID.source }) }),
+    async execute(_id, params, signal) {
+      consume("integrate"); const { projectId } = requiredEnvironment();
+      const text = await invoke(["integration-create", "--project-id", projectId, "--request-id", params.requestId], signal);
+      return { content: [{ type: "text", text }], details: {} };
+    },
+  });
+  pi.registerTool({
+    name: "secretary_cleanup_workstream", label: "Clean landed workstream",
+    description: "Guarded cleanup of exact-owned landed resources after explicit user instruction. Refuses dirty, live, moved, uncertain, or unlanded state and never forces.",
+    parameters: Type.Object({ workstreamId: Type.String({ pattern: ID.source }) }),
+    async execute(_id, params, signal) {
+      consume("cleanup"); const { projectId } = requiredEnvironment();
+      const text = await invoke(["workstream-cleanup", "--project-id", projectId, "--workstream-id", params.workstreamId], signal);
       return { content: [{ type: "text", text }], details: {} };
     },
   });

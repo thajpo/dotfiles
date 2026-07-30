@@ -114,8 +114,10 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertNotIn("--tools read,grep,find,ls,bash", launcher)
         for forbidden in ["task_packet", "--edit", "--write"]:
             self.assertNotIn(forbidden, launcher)
-        self.assertEqual(extension.count("pi.registerTool"), 7)
+        self.assertEqual(extension.count("pi.registerTool"), 10)
         self.assertIn("Current user turn did not authorize", extension)
+        self.assertIn("fast-forward-only landing", extension)
+        self.assertIn("Refuses dirty, live, moved, uncertain, or unlanded", extension)
         self.assertIn("project-status", extension)
         self.assertIn("bind-key -T prefix g", (ROOT / "tmux.conf").read_text())
         brief_extension = (ROOT / "pi/extensions/workstream-brief/index.ts").read_text()

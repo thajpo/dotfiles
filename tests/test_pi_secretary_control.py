@@ -156,16 +156,22 @@ class SecretaryControlTests(unittest.TestCase):
         fake = Path(self.tmp.name) / "fake-pidev"
         fake.write_text("#!/usr/bin/env python3\nimport json,os,pathlib\npathlib.Path(%r).write_text(json.dumps({k:os.environ.get(k) for k in ['PI_PIDEV_SESSION_ID','PI_PIDEV_WORKSTREAM_ID','PI_PIDEV_BRIEF_PATH']}))\n" % str(output))
         fake.chmod(0o700)
-        with mock.patch.object(secretary, "_pidev_path", return_value=fake):
+        with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
+             mock.patch.dict(os.environ, {"TMUX": "/tmp/promotion-tmux,11,0"}, clear=False):
             promoted = secretary.promote_workstream(registered["projectId"], "Promoted", "Goal and boundaries", "feature")
         self.assertRegex(promoted["piSessionId"], r"^ws-[0-9a-f]{48}$")
         self.assertTrue(promoted["tmuxSession"].startswith("pi-source-"))
+        self.assertEqual(promoted["tmuxSocket"], "/tmp/promotion-tmux")
         launched = json.loads(output.read_text())
         self.assertEqual(launched["PI_PIDEV_SESSION_ID"], promoted["piSessionId"])
         self.assertEqual(launched["PI_PIDEV_WORKSTREAM_ID"], promoted["workstreamId"])
         self.assertTrue(Path(launched["PI_PIDEV_BRIEF_PATH"]).is_file())
         opened = secretary.open_workstream(self.source, self.capability, promoted["workstreamId"])
         self.assertEqual(opened["piSessionId"], promoted["piSessionId"])
+        with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
+             mock.patch.dict(os.environ, {"TMUX": "/tmp/other-tmux,22,0"}, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "different tmux server"):
+                secretary.launch_workstream(registered["projectId"], promoted["workstreamId"])
 
     def test_failed_initial_launch_preserves_durable_workstream_for_reopen(self):
         registered = secretary.register_project(self.source, "failed-launch")
@@ -298,6 +304,123 @@ class SecretaryControlTests(unittest.TestCase):
         with self.assertRaisesRegex(secretary.SecretaryError, "exact assignment"):
             secretary.review_status(registered["projectId"], request_id)
         receipt_path.write_text(json.dumps(original)); receipt_path.chmod(0o600)
+
+    def test_tmux_cleanup_probe_preserves_server_and_fails_closed(self):
+        calls = []
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs["env"]))
+            if args[3] == "list-sessions":
+                return subprocess.CompletedProcess(args, 0, stdout="pi-project\n", stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout="w-feature\n", stderr="")
+        with mock.patch.dict(os.environ, {"TMUX": "/tmp/custom-tmux,123,0", "TMUX_TMPDIR": "/tmp/custom"}, clear=False), \
+             mock.patch.object(secretary.subprocess, "run", side_effect=fake_run):
+            socket = secretary._current_tmux_socket()
+            self.assertEqual(socket, "/tmp/custom-tmux")
+            self.assertTrue(secretary._tmux_window_live("pi-project", "w-feature", socket))
+        self.assertTrue(all(args[1:3] == ["-S", "/tmp/custom-tmux"] for args, _ in calls))
+        failed = subprocess.CompletedProcess(["tmux"], 1, stdout="", stderr="unreachable")
+        with mock.patch.object(secretary.subprocess, "run", return_value=failed):
+            with self.assertRaisesRegex(secretary.SecretaryError, "cannot prove"):
+                secretary._tmux_window_live("pi-project", "w-feature", "/tmp/custom-tmux")
+
+    def test_fast_forward_landing_integration_escalation_and_guarded_cleanup(self):
+        registered = secretary.register_project(self.source, "landing-project")
+        import hashlib
+        def accepted(title, workstream_id):
+            brief = self._brief(title, "landing brief")
+            workstream = self._workstream(brief["briefId"], title=title, workstream_id=workstream_id)
+            feature = Path(workstream["workspace"])
+            (feature / "tracked").write_text(title + "\n")
+            git(feature, "add", "tracked"); git(feature, "commit", "-m", title)
+            route_cap = "route-" + workstream_id
+            route = Path(self.tmp.name) / f"{workstream_id}.route.json"
+            route.write_text(json.dumps({"uid": os.getuid(), "capabilityHash": hashlib.sha256(route_cap.encode()).hexdigest(),
+                                         "readOnly": False, "worktree": workstream["workspace"]})); route.chmod(0o600)
+            with mock.patch.dict(os.environ, {"PI_TASK_ROUTE_FILE": str(route), "PI_TASK_ROUTE_CAPABILITY": route_cap}, clear=False):
+                event = secretary.append_event(registered["projectId"], workstream_id, "review-requested", "Ready")
+            request_id = json.loads(event["details"])["reviewRequestId"]
+            fake = Path(self.tmp.name) / f"{workstream_id}.pidev"
+            fake.write_text("#!/bin/sh\nexit 0\n"); fake.chmod(0o700)
+            with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
+                 mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability}, clear=False):
+                request = secretary.create_reviewer(registered["projectId"], event["eventId"])
+            with mock.patch.dict(os.environ, {"PI_REVIEW_CAPABILITY": self.capability,
+                                              "PI_REVIEW_SESSION_ID": request["reviewerSessionId"]}, clear=False):
+                secretary.submit_review(registered["projectId"], request_id, "accept", "Accepted", "")
+            return workstream, request_id, request
+
+        workstream, request_id, request = accepted("landable", "landable-work")
+        secretary_env = {"PI_SECRETARY_CAPABILITY": self.capability}
+        with mock.patch.dict(os.environ, secretary_env, clear=False), \
+             mock.patch.object(secretary, "_record_landing", side_effect=secretary.SecretaryError("simulated fact interruption")):
+            with self.assertRaisesRegex(secretary.SecretaryError, "fact interruption"):
+                secretary.land_reviewed(registered["projectId"], request_id)
+        with mock.patch.dict(os.environ, secretary_env, clear=False):
+            landed = secretary.land_reviewed(registered["projectId"], request_id)
+            landed_again = secretary.land_reviewed(registered["projectId"], request_id)
+        self.assertTrue(landed["landed"]); self.assertTrue(landed_again["landed"])
+        self.assertEqual(git(self.source, "rev-parse", "HEAD"), request["candidateOid"])
+        feature = Path(workstream["workspace"])
+        with mock.patch.dict(os.environ, secretary_env, clear=False), \
+             mock.patch.object(secretary, "_tmux_window_live", side_effect=secretary.SecretaryError("tmux uncertain")):
+            with self.assertRaisesRegex(secretary.SecretaryError, "tmux uncertain"):
+                secretary.cleanup_workstream(registered["projectId"], workstream["workstreamId"])
+        self.assertTrue(feature.exists())
+        self.assertEqual(git(feature, "rev-parse", "HEAD"), request["candidateOid"])
+        with mock.patch.dict(os.environ, secretary_env, clear=False), \
+             mock.patch.object(secretary, "_tmux_window_live", return_value=True):
+            with self.assertRaisesRegex(secretary.SecretaryError, "live"):
+                secretary.cleanup_workstream(registered["projectId"], workstream["workstreamId"])
+        (feature / "dirty").write_text("preserve")
+        with mock.patch.dict(os.environ, secretary_env, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "dirty"):
+                secretary.cleanup_workstream(registered["projectId"], workstream["workstreamId"])
+        self.assertTrue((feature / "dirty").exists())
+        (feature / "dirty").unlink()
+        record_path = Path(self.env["XDG_STATE_HOME"]) / "pi-secretary/projects" / registered["projectId"] / "workstreams" / f"{workstream['workstreamId']}.json"
+        real_atomic = secretary._atomic
+        def interrupted_atomic(path, content):
+            if Path(path) == record_path:
+                raise secretary.SecretaryError("simulated cleanup interruption")
+            return real_atomic(path, content)
+        with mock.patch.dict(os.environ, secretary_env, clear=False), \
+             mock.patch.object(secretary, "_tmux_window_live", return_value=False), \
+             mock.patch.object(secretary, "_atomic", side_effect=interrupted_atomic):
+            with self.assertRaisesRegex(secretary.SecretaryError, "cleanup interruption"):
+                secretary.cleanup_workstream(registered["projectId"], workstream["workstreamId"])
+        self.assertFalse(feature.exists())
+        with mock.patch.dict(os.environ, secretary_env, clear=False), \
+             mock.patch.object(secretary, "_tmux_window_live", return_value=False):
+            cleaned = secretary.cleanup_workstream(registered["projectId"], workstream["workstreamId"])
+        self.assertFalse(feature.exists())
+        self.assertFalse(Path(request["reviewWorkspace"]).exists())
+        self.assertIsNotNone(cleaned["closedAt"])
+        self.assertTrue((Path(self.env["XDG_STATE_HOME"]) / "pi-secretary/projects" / registered["projectId"] / "reviews/receipts").exists())
+
+        moved, moved_request_id, _ = accepted("needs integration", "integration-source")
+        (self.source / "target-dirty").write_text("preserve\n")
+        with mock.patch.dict(os.environ, secretary_env, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "target worktree is dirty"):
+                secretary.land_reviewed(registered["projectId"], moved_request_id)
+        self.assertTrue((self.source / "target-dirty").exists())
+        (self.source / "target-dirty").unlink()
+        (self.source / "target-only").write_text("advance\n")
+        git(self.source, "add", "target-only"); git(self.source, "commit", "-m", "advance target")
+        with mock.patch.dict(os.environ, secretary_env, clear=False):
+            outcome = secretary.land_reviewed(registered["projectId"], moved_request_id)
+        self.assertTrue(outcome["requiresIntegration"])
+        self.assertEqual(outcome["reason"], "target-moved")
+        fake = Path(self.tmp.name) / "integration-pidev"
+        fake.write_text("#!/bin/sh\nexit 0\n"); fake.chmod(0o700)
+        with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
+             mock.patch.dict(os.environ, secretary_env, clear=False):
+            integration = secretary.create_integration(registered["projectId"], moved_request_id)
+        self.assertEqual(integration["role"], "integration")
+        self.assertNotEqual(integration["workstreamId"], moved["workstreamId"])
+        self.assertEqual(git(Path(integration["workspace"]), "rev-parse", "HEAD"), git(self.source, "rev-parse", "HEAD"))
+        with mock.patch.dict(os.environ, secretary_env, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "unlanded"):
+                secretary.cleanup_workstream(registered["projectId"], integration["workstreamId"])
 
     def test_two_workstreams_reference_one_brief_and_dirty_source_survives(self):
         brief = self._brief("Design", "bounded text")
