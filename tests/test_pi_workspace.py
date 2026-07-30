@@ -130,6 +130,18 @@ class WorkspacePreparationTests(unittest.TestCase):
         write_policy(home, repo, control=True)
         return home, repo
 
+    def test_read_only_prepare_uses_dirty_protected_checkout_without_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, repo = self.prepare_home(Path(tmp))
+            (repo / "human.txt").write_text("dirty\n")
+            before = git(repo, "status", "--porcelain=v1", "--untracked-files=all")
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                prepared = ws.prepare(repo, os.getpid(), read_only=True)
+            self.assertEqual(Path(prepared["worktree"]), repo)
+            self.assertTrue(prepared["readOnly"])
+            self.assertEqual(git(repo, "status", "--porcelain=v1", "--untracked-files=all"), before)
+            self.assertFalse((home / ".local/share/pi/worktrees/repo").exists())
+
     def test_protected_dirty_checkout_is_refused_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
             home, repo = self.prepare_home(Path(tmp))

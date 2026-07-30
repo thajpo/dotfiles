@@ -88,6 +88,56 @@ class SecretaryControlTests(unittest.TestCase):
         self.assertNotEqual(secretary.project_identity(self.source)[0],
                             secretary.project_identity(other)[0])
 
+    def test_registry_round_trip_is_readable_without_capability(self):
+        registered = secretary.register_project(self.source, "primary-repo")
+        self.assertEqual(registered["projectId"], self.initial["projectId"])
+        self.assertEqual(registered["alias"], "primary-repo")
+        listing = secretary.registry_list()
+        self.assertEqual(len(listing), 1)
+        self.assertNotIn("capability", listing[0])
+        info = secretary.launch_info(self.initial["projectId"])
+        self.assertEqual(info["secretarySessionId"], registered["secretarySessionId"])
+        self.assertNotIn("capability", info)
+        internal = secretary.launch_info(self.initial["projectId"], internal=True)
+        self.assertEqual(internal["capability"], self.capability)
+        state = Path(self.env["XDG_STATE_HOME"]) / "pi-secretary"
+        project_record = json.loads((state / "projects" / self.initial["projectId"] / "project.json").read_text())
+        self.assertEqual(project_record["schemaVersion"], 1)
+        self.assertNotIn("secretarySessionId", project_record)
+        self.assertTrue((state / "registry" / f"{self.initial['projectId']}.json").is_file())
+
+    def test_concurrent_duplicate_alias_registration_fails_once(self):
+        other = repo(Path(self.tmp.name), "other-repository")
+        barrier = threading.Barrier(2)
+        results, errors = [], []
+
+        def register(repository):
+            try:
+                barrier.wait()
+                results.append(secretary.register_project(repository, "same-alias"))
+            except Exception as error:
+                errors.append(str(error))
+
+        threads = [threading.Thread(target=register, args=(repository,))
+                   for repository in (self.source, other)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("alias already registered", errors[0])
+        self.assertEqual([item["alias"] for item in secretary.registry_list()], ["same-alias"])
+
+    def test_registry_lookup_revalidates_primary_repository_identity(self):
+        secretary.register_project(self.source, "Primary")
+        state = Path(self.env["XDG_STATE_HOME"]) / "pi-secretary"
+        record_path = state / "registry" / f"{self.initial['projectId']}.json"
+        record = json.loads(record_path.read_text())
+        record["primaryRepository"] = str(Path(self.tmp.name) / "missing")
+        record_path.write_text(json.dumps(record))
+        record_path.chmod(0o600)
+        with self.assertRaises(secretary.SecretaryError):
+            secretary.registry_list()
+
     def test_capability_and_state_permissions(self):
         with self.assertRaises(secretary.SecretaryError):
             secretary.create_brief(self.source, "wrong", "x", "x")

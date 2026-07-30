@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+# Global read-only secretary grid. Registry values are data only; no registry
+# field is ever used as a tmux command or target.
+set -euo pipefail
+
+if (( EUID == 0 )); then printf 'pisec: refusing to run as root\n' >&2; exit 1; fi
+if [[ -n "${PI_SUBAGENT_CHILD:-}${PI_TASK_ROUTE_FILE:-}" ]]; then printf 'pisec: refusing nested or subagent invocation\n' >&2; exit 2; fi
+self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+dotfiles_dir=$(realpath "$self_dir/..")
+control="$dotfiles_dir/scripts/pi-secretary-control.py"
+if [[ -f "$HOME/.local/share/pi/control/pi-secretary-control.py" ]]; then control="$HOME/.local/share/pi/control/pi-secretary-control.py"; fi
+
+usage() { printf '%s\n' 'usage: pisec [register --alias ALIAS [REPOSITORY] | list | launch-info PROJECT_ID | open]'; }
+
+registry_json() { /usr/bin/python3 "$control" registry-list; }
+registry_rows() {
+  /usr/bin/python3 -c '
+import base64, json, sys
+for item in json.load(sys.stdin):
+    values = [item[k] for k in ("projectId", "alias", "primaryRepository", "secretarySessionId")]
+    print("\t".join(base64.urlsafe_b64encode(v.encode()).decode() for v in values))
+' <<<"$(registry_json)"
+}
+decode() { /usr/bin/python3 - "$1" <<'PY'
+import base64, sys
+print(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)).decode(), end="")
+PY
+}
+
+case "${1:-}" in
+  register)
+    shift; alias=""; repository="."
+    while (( $# )); do
+      case "$1" in
+        --alias) [[ $# -ge 2 && -z "$alias" ]] || { usage >&2; exit 2; }; alias=$2; shift 2 ;;
+        --) shift; [[ $# -eq 1 ]] || { usage >&2; exit 2; }; repository=$1; shift ;;
+        -*) usage >&2; exit 2 ;;
+        *) [[ "$repository" == "." ]] || { usage >&2; exit 2; }; repository=$1; shift ;;
+      esac
+    done
+    [[ -n "$alias" ]] || { usage >&2; exit 2; }
+    exec /usr/bin/python3 "$control" --repository "$repository" register --alias "$alias"
+    ;;
+  list)
+    [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+    registry_json
+    exit $?
+    ;;
+  launch-info)
+    [[ $# -eq 2 && "$2" =~ ^[0-9a-f]{64}$ ]] || { usage >&2; exit 2; }
+    exec /usr/bin/python3 "$control" launch-info --project-id "$2"
+    ;;
+  open|launch)
+    [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+    ;;
+  "")
+    [[ $# -eq 0 ]] || { usage >&2; exit 2; }
+    ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+# Read and validate the complete registry before taking tmux mutation actions.
+rows=$(registry_rows) || { printf 'pisec: registry lookup failed closed\n' >&2; exit 1; }
+declare -a ids=() aliases=() repositories=() session_ids=()
+while IFS=$'\t' read -r id64 alias64 repo64 session64; do
+  [[ -n "$id64" ]] || continue
+  id=$(decode "$id64"); alias=$(decode "$alias64"); repository=$(decode "$repo64"); session_id=$(decode "$session64")
+  [[ "$id" =~ ^[0-9a-f]{64}$ && "$alias" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$ && "$session_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || { printf 'pisec: malformed registry entry\n' >&2; exit 1; }
+  ids+=("$id"); aliases+=("$alias"); repositories+=("$repository"); session_ids+=("$session_id")
+done <<< "$rows"
+project_count=${#ids[@]}
+(( project_count > 0 )) || { printf 'pisec: no registered projects\n' >&2; exit 1; }
+
+if ! command -v tmux >/dev/null 2>&1; then printf 'pisec: tmux is required\n' >&2; exit 127; fi
+state_root=${XDG_STATE_HOME:-$HOME/.local/state}/pi-secretary
+mkdir -p -m 700 "$state_root"
+chmod 700 "$state_root"
+lock="$state_root/pisec-grid.lock"
+: > "$lock"; chmod 600 "$lock"
+exec {lock_fd}>"$lock"
+flock -x "$lock_fd"
+fail() { printf 'pisec: %s\n' "$1" >&2; exit 1; }
+
+session=pisec
+window_name=projects
+self_launch="$self_dir/pi-secretary"
+# Query commands distinguish tmux observation failure from a normal miss.
+tmux_has() { tmux has-session -t "=$session" >/dev/null 2>&1; }
+if tmux_has; then session_exists=1; else rc=$?; [[ $rc -eq 1 ]] || fail 'cannot query pisec session'; session_exists=0; fi
+window_rows() { tmux list-windows -t "=$session" -F $'#{window_id}\t#{window_name}' 2>/dev/null; }
+pane_rows() { tmux list-panes -t "$1" -F $'#{pane_id}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_title}' 2>/dev/null; }
+
+if (( ! session_exists )); then
+  window_id=$(tmux new-session -d -P -F '#{window_id}' -s "$session" -n "$window_name" -c "$HOME" 'exec sh') || fail 'cannot create pisec session'
+  [[ "$window_id" =~ ^@ ]] || fail 'tmux returned an invalid projects window id'
+  newly_created=1
+else
+  newly_created=0
+  windows=$(window_rows) || fail 'cannot query pisec windows'
+  window_id=""; window_count=0
+  while IFS=$'\t' read -r wid name; do
+    [[ -n "$wid" ]] || continue
+    window_count=$((window_count + 1))
+    [[ "$name" == "$window_name" ]] && { window_id=$wid; }
+  done <<< "$windows"
+  if (( window_count != 1 )) || [[ -z $window_id ]]; then
+    fail 'pisec session does not contain exactly one projects window'
+  fi
+fi
+
+# Exact launcher/process proof. A shell wrapper is accepted only when its next
+# executable is this launcher and its arguments are the fixed internal form.
+launcher_project() {
+  local args=$1 index=0
+  local -a argv=()
+  read -r -a argv <<< "$args"
+  case "${argv[0]:-}" in bash|sh|dash) index=1;; esac
+  (( ${#argv[@]} == index + 4 )) || return 1
+  [[ "${argv[$index]}" == "$self_launch" &&
+     "${argv[$((index + 1))]}" == --internal-launch &&
+     "${argv[$((index + 2))]}" == --project-id &&
+     "${argv[$((index + 3))]}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "${argv[$((index + 3))]}"
+}
+descendant_has_session() {
+  local parent=$1 wanted=$2 args children child rc
+  if args=$(ps -o args= -p "$parent" 2>/dev/null); then :; else return 2; fi
+  [[ " $args " == *" --session-id $wanted "* ]] && return 0
+  if children=$(pgrep -P "$parent" 2>/dev/null); then :; else rc=$?; [[ $rc -eq 1 ]] && return 1; return 2; fi
+  while read -r child; do
+    [[ -n $child ]] || continue
+    if descendant_has_session "$child" "$wanted"; then return 0; else rc=$?; [[ $rc -eq 1 ]] || return 2; fi
+  done <<< "$children"
+  return 1
+}
+process_is_secretary() {
+  local parent=$1 wanted_id=$2 wanted_session=$3 args children child found rc
+  if args=$(ps -o args= -p "$parent" 2>/dev/null); then :; else return 2; fi
+  if found=$(launcher_project "$args"); then
+    [[ $found == "$wanted_id" ]] || return 1
+    descendant_has_session "$parent" "$wanted_session"
+    return $?
+  fi
+  if children=$(pgrep -P "$parent" 2>/dev/null); then :; else rc=$?; [[ $rc -eq 1 ]] && return 1; return 2; fi
+  while read -r child; do
+    [[ -n $child ]] || continue
+    if process_is_secretary "$child" "$wanted_id" "$wanted_session"; then return 0; else rc=$?; [[ $rc -eq 1 ]] || return 2; fi
+  done <<< "$children"
+  return 1
+}
+process_is_any_secretary() {
+  local parent=$1 args children child rc
+  if args=$(ps -o args= -p "$parent" 2>/dev/null); then :; else return 2; fi
+  launcher_project "$args" >/dev/null && return 0
+  if children=$(pgrep -P "$parent" 2>/dev/null); then :; else rc=$?; [[ $rc -eq 1 ]] && return 1; return 2; fi
+  while read -r child; do
+    [[ -n $child ]] || continue
+    if process_is_any_secretary "$child"; then return 0; else rc=$?; [[ $rc -eq 1 ]] || return 2; fi
+  done <<< "$children"
+  return 1
+}
+secretary_command() {
+  local project_id=$1 command
+  printf -v command '%q --internal-launch --project-id %q' "$self_launch" "$project_id"
+  printf '%s' "$command"
+}
+pane_idle_shell() {
+  local command=$1 pid=$2 args children rc
+  case "$command" in bash|zsh|sh|dash|fish|sleep) ;; *) return 1;; esac
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 2
+  [[ "$args" == *bash* || "$args" == *sh* || "$args" == *sleep* ]] || return 1
+  if children=$(pgrep -P "$pid" 2>/dev/null); then [[ -z "$children" ]] && return 0; return 1; else rc=$?; [[ $rc -eq 1 ]] && return 0; return 2; fi
+}
+
+panes=$(pane_rows "$window_id") || fail 'cannot query projects panes'
+declare -a pane_ids=() pane_pids=() pane_commands=() pane_titles=()
+while IFS=$'\t' read -r pane_id pane_index pane_pid pane_command pane_title; do
+  [[ -n "$pane_id" ]] || continue
+  pane_ids+=("$pane_id"); pane_pids+=("$pane_pid"); pane_commands+=("$pane_command"); pane_titles+=("$pane_title")
+done <<< "$panes"
+(( ${#pane_ids[@]} > 0 )) || fail 'projects window has no panes'
+(( ${#pane_ids[@]} <= project_count )) || fail 'unknown extra pane in projects window'
+
+# Map live processes first; pane titles are labels only and may be changed by a
+# restored TUI. Idle panes may be repaired by an exact unique alias title.
+declare -a mapped=()
+for _id in "${ids[@]}"; do mapped+=(0); done
+for i in "${!pane_ids[@]}"; do
+  matched=-1
+  for j in "${!ids[@]}"; do
+    if process_is_secretary "${pane_pids[$i]}" "${ids[$j]}" "${session_ids[$j]}"; then
+      (( matched == -1 )) || fail 'pane matches multiple secretary records'
+      matched=$j
+    else
+      rc=$?
+      (( rc == 1 )) || fail 'cannot inspect secretary pane process'
+    fi
+  done
+  if (( matched >= 0 )); then
+    (( mapped[$matched] == 0 )) || fail 'duplicate live secretary process'
+    mapped[$matched]=1
+    tmux select-pane -t "${pane_ids[$i]}" -T "${aliases[$matched]}" || fail 'cannot title secretary pane'
+    continue
+  fi
+  if process_is_any_secretary "${pane_pids[$i]}"; then
+    fail 'pane runs an unregistered secretary process'
+  else
+    rc=$?
+    (( rc == 1 )) || fail 'cannot inspect pane process'
+  fi
+  alias_match=-1
+  for j in "${!ids[@]}"; do
+    [[ "${pane_titles[$i]}" == "${aliases[$j]}" ]] || continue
+    (( alias_match == -1 )) || fail 'pane title matches multiple projects'
+    alias_match=$j
+  done
+  if (( alias_match < 0 )); then
+    (( newly_created == 1 && ${#pane_ids[@]} == 1 )) || fail 'unknown pane state in projects window'
+    for j in "${!ids[@]}"; do
+      (( mapped[$j] == 0 )) || continue
+      alias_match=$j
+      break
+    done
+  fi
+  (( alias_match >= 0 && mapped[$alias_match] == 0 )) || fail 'duplicate or missing secretary pane mapping'
+  if pane_idle_shell "${pane_commands[$i]}" "${pane_pids[$i]}"; then :; else
+    rc=$?; (( rc == 1 )) && fail 'missing secretary pane is not idle'; fail 'cannot inspect idle pane'
+  fi
+  command=$(secretary_command "${ids[$alias_match]}")
+  tmux select-pane -t "${pane_ids[$i]}" -T "${aliases[$alias_match]}" || fail 'cannot title secretary pane'
+  tmux send-keys -t "${pane_ids[$i]}" "$command" C-m || fail 'cannot start secretary pane'
+  mapped[$alias_match]=1
+done
+for j in "${!ids[@]}"; do
+  (( mapped[$j] == 1 )) && continue
+  new_pane=$(tmux split-window -d -P -F '#{pane_id}' -t "$window_id" -c "$HOME" 'exec sh') || fail 'cannot create secretary pane'
+  [[ "$new_pane" =~ ^% ]] || fail 'tmux returned an invalid secretary pane id'
+  tmux select-pane -t "$new_pane" -T "${aliases[$j]}" || fail 'cannot title secretary pane'
+  command=$(secretary_command "${ids[$j]}")
+  tmux send-keys -t "$new_pane" "$command" C-m || fail 'cannot start secretary pane'
+done
+tmux select-layout -t "$window_id" tiled || fail 'cannot tile projects window'
+
+if [[ "${1:-open}" == open || -z "${1:-}" ]]; then
+  if [[ -n "${TMUX:-}" ]]; then exec tmux switch-client -t "=$session:$window_id"; else exec tmux attach-session -t "=$session:$window_id"; fi
+fi

@@ -101,6 +101,23 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("Refusing to replace mismatched rollback ref", installer)
         self.assertIn("Existing Pi core has unsafe ownership or writable modes", installer)
 
+    def test_secretary_slice_is_installed_and_mechanically_read_only(self):
+        installer = (ROOT / "install.sh").read_text()
+        launcher = (ROOT / "bin/pi-secretary").read_text()
+        extension = (ROOT / "pi/extensions/secretary/index.ts").read_text()
+        self.assertIn("pi-secretary-control.py", installer)
+        self.assertIn('activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status"', installer)
+        self.assertIn("for launcher in pi pi-host pidev pi-tmux-session pisec pi-secretary", installer)
+        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls", "--session-id", "--name"]:
+            self.assertIn(flag, launcher)
+        self.assertEqual(launcher.count("-e \"$"), 2)
+        self.assertNotIn("--tools read,grep,find,ls,bash", launcher)
+        for forbidden in ["task_packet", "--edit", "--write"]:
+            self.assertNotIn(forbidden, launcher)
+        self.assertNotIn("registerTool", extension)
+        self.assertIn("project-status", extension)
+        self.assertIn("bind-key -T prefix g", (ROOT / "tmux.conf").read_text())
+
     def test_pidev_is_installed_as_a_managed_pi_wrapper(self):
         installer = (ROOT / "install.sh").read_text()
         pidev = (ROOT / "bin/pidev").read_text()

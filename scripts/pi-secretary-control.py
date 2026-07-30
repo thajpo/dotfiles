@@ -39,8 +39,17 @@ MAX_TITLE = 200
 MAX_ROLE = 80
 SUPPORTED_OBJECT_FORMATS = {"sha1": 40, "sha256": 64}
 WORKSTREAM_ROLES = {"feature", "research", "analysis", "review", "integration"}
-PROJECT_FIELDS = {"schemaVersion", "projectId", "gitCommonDir", "gitCommonDevice", "gitCommonInode", "objectFormat", "capabilityHash"}
+PROJECT_FIELDS = {
+    "schemaVersion", "projectId", "gitCommonDir", "gitCommonDevice", "gitCommonInode",
+    "objectFormat", "capabilityHash",
+}
+REGISTRY_FIELDS = {
+    "schemaVersion", "projectId", "alias", "primaryRepository", "secretarySessionId",
+    "registeredAt",
+}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$")
+SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 BRANCH_RE = re.compile(r"^pi/[a-z0-9][a-z0-9-]{0,62}$")
 
 class SecretaryError(RuntimeError):
@@ -176,6 +185,11 @@ def _common_identity(common: Path) -> tuple[int, int]:
 
 def _utc_now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _default_alias(repo: Path) -> str:
+    value = re.sub(r"[^A-Za-z0-9._-]+", "-", repo.name).strip("-._")[:48]
+    return value if value and re.match(r"^[A-Za-z0-9]", value) else "project"
 
 
 def _timestamp(value: Any, label: str = "timestamp") -> str:
@@ -390,6 +404,11 @@ def _validate_project_record(path: Path, project_id: str, common: Path,
     cap_hash = record.get("capabilityHash")
     if not isinstance(cap_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", cap_hash):
         raise SecretaryError("malformed capability hash in project record")
+    # Registry lookup is always a capability integrity check, even when the
+    # secret is intentionally not returned to the caller.
+    stored = _stored_capability(path.parents[2], project_id)
+    if not hmac.compare_digest(hashlib.sha256(stored.encode()).hexdigest(), cap_hash):
+        raise SecretaryError("capability rejected")
     return record
 
 
@@ -462,6 +481,111 @@ def status(repository: str | Path, capability: str | None = None) -> dict[str, A
         return {"projectId": project_id, "initialized": False}
     _project_context(repo, capability)
     return {"projectId": project_id, "initialized": True}
+
+
+@contextlib.contextmanager
+def _registry_lock(root: Path) -> Iterator[None]:
+    path = root / ".registry.lock"
+    if path.exists() or path.is_symlink():
+        _safe_lstat(path, directory=False)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _registry_path(root: Path, project_id: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{64}", project_id):
+        raise SecretaryError("invalid project id")
+    return root / "registry" / f"{project_id}.json"
+
+
+def _validate_registry_record(root: Path, path: Path) -> dict[str, Any]:
+    record = _read_json(path, REGISTRY_FIELDS, required=REGISTRY_FIELDS)
+    project_id = record.get("projectId")
+    if not isinstance(project_id, str) or path != _registry_path(root, project_id):
+        raise SecretaryError("registry path does not match project")
+    alias = record.get("alias")
+    session_id = record.get("secretarySessionId")
+    primary = record.get("primaryRepository")
+    if (record.get("schemaVersion") != 1 or not isinstance(alias, str) or
+            not ALIAS_RE.fullmatch(alias) or not isinstance(session_id, str) or
+            not SESSION_RE.fullmatch(session_id) or not isinstance(primary, str) or
+            not Path(primary).is_absolute()):
+        raise SecretaryError("malformed project registry record")
+    _timestamp(record.get("registeredAt"), "registeredAt")
+    repo = _canonical_repo(primary)
+    current_id, common, object_format = project_identity(repo)
+    if current_id != project_id:
+        raise SecretaryError("project identity does not match registry path")
+    _validate_project_record(_record_dir(root, project_id) / "project.json",
+                             project_id, common, object_format)
+    return record
+
+
+def _registry_records(root: Path) -> list[dict[str, Any]]:
+    registry = root / "registry"
+    if not registry.exists():
+        return []
+    _safe_lstat(registry, directory=True)
+    result: list[dict[str, Any]] = []
+    for path in sorted(registry.iterdir()):
+        if path.suffix != ".json":
+            raise SecretaryError("unexpected project registry entry")
+        result.append(_validate_registry_record(root, path))
+    return result
+
+
+def register_project(repository: str | Path, alias: str) -> dict[str, Any]:
+    alias = _line(alias, "project alias", 48)
+    if not ALIAS_RE.fullmatch(alias):
+        raise SecretaryError("invalid project alias")
+    repo = _canonical_repo(repository)
+    project_id, _, _ = project_identity(repo)
+    root = _state_root()
+    _assert_state_root_not_repo(root, repo)
+    _ensure_dir(root / "registry")
+    init_project(repo)
+    with _registry_lock(root):
+        for other in _registry_records(root):
+            if other["alias"] == alias and other["projectId"] != project_id:
+                raise SecretaryError("project alias already registered")
+        path = _registry_path(root, project_id)
+        if path.exists() or path.is_symlink():
+            current = _validate_registry_record(root, path)
+            secretary_session = current["secretarySessionId"]
+            registered_at = current["registeredAt"]
+        else:
+            secretary_session = "sec-" + secrets.token_hex(24)
+            registered_at = _utc_now()
+        record = {"schemaVersion": 1, "projectId": project_id, "alias": alias,
+                  "primaryRepository": str(repo), "secretarySessionId": secretary_session,
+                  "registeredAt": registered_at}
+        _atomic(path, json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+    return {key: record[key] for key in
+            ("projectId", "alias", "primaryRepository", "secretarySessionId", "registeredAt")}
+
+
+def registry_list() -> list[dict[str, Any]]:
+    root = _state_root()
+    return [{key: record[key] for key in
+             ("projectId", "alias", "primaryRepository", "secretarySessionId", "registeredAt")}
+            for record in _registry_records(root)]
+
+
+def launch_info(project_id: str, *, internal: bool = False) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{64}", project_id):
+        raise SecretaryError("invalid project id")
+    root = _state_root()
+    record = _validate_registry_record(root, _registry_path(root, project_id))
+    result = {key: record[key] for key in
+              ("projectId", "alias", "primaryRepository", "secretarySessionId", "registeredAt")}
+    if internal:
+        result["capability"] = _stored_capability(root, project_id)
+    return result
 
 
 # --- IDs and text validation ---
@@ -850,6 +974,11 @@ def _cli() -> int:
                         help="explicit bootstrap/test hook; never used by normal output")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
+    p = sub.add_parser("register"); p.add_argument("--alias", required=True)
+    p.add_argument("--repository", default=argparse.SUPPRESS)
+    sub.add_parser("registry-list")
+    p = sub.add_parser("launch-info"); p.add_argument("--project-id", required=True)
+    p.add_argument("--internal-launch", action="store_true")
     sub.add_parser("status")
     p = sub.add_parser("brief-create"); p.add_argument("title"); p.add_argument("text")
     p = sub.add_parser("brief-read"); p.add_argument("brief_id")
@@ -869,6 +998,12 @@ def _cli() -> int:
                 result["capability"] = capability_path.read_text(encoding="utf-8").strip()
             else:
                 result.pop("capability", None)
+        elif args.command == "register":
+            result = register_project(args.repository, args.alias)
+        elif args.command == "registry-list":
+            result = registry_list()
+        elif args.command == "launch-info":
+            result = launch_info(args.project_id, internal=args.internal_launch)
         elif args.command == "status":
             result = status(args.repository, args.capability)
         elif args.command == "brief-create":

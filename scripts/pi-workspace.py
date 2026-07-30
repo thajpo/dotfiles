@@ -452,7 +452,8 @@ def host_context(route: dict[str, Any], pi_executable: pathlib.Path | None) -> s
     )
 
 
-def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | None = None) -> dict[str, Any]:
+def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | None = None,
+            *, read_only: bool = False) -> dict[str, Any]:
     policy = load_policy()
     repository = repository_root(cwd.resolve(strict=True))
     mode, control_plane = classify(repository, policy)
@@ -463,7 +464,7 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
     worktree = repository
     starting_status = git_output(repository, "status", "--porcelain=v1", "--untracked-files=all")
     protected = branch in policy["protectedBranches"]
-    if mode == "trusted-live" and (protected or not branch):
+    if not read_only and mode == "trusted-live" and (protected or not branch):
         worktree, branch = create_linked_worktree(
             repository,
             pathlib.Path(policy["worktreeRoot"]),
@@ -508,6 +509,7 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
         "policyValid": bool(policy.get("policyValid")),
         "controlPlane": control_plane,
         "parentOwned": True,
+        "readOnly": read_only,
         "capabilityHash": hashlib.sha256(capability.encode()).hexdigest(),
         "createdAt": int(time.time()),
     }
@@ -535,6 +537,7 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
         "worktreeRoot": policy["worktreeRoot"],
         "controlPlane": control_plane,
         "policyValid": bool(policy.get("policyValid")),
+        "readOnly": read_only,
     }
 
 
@@ -552,6 +555,10 @@ def main() -> int:
     prepare_parser.add_argument("--cwd", default=".", type=pathlib.Path)
     prepare_parser.add_argument("--owner-pid", required=True, type=int)
     prepare_parser.add_argument("--pi-executable", type=pathlib.Path)
+    read_only_parser = subparsers.add_parser("prepare-read-only")
+    read_only_parser.add_argument("--cwd", default=".", type=pathlib.Path)
+    read_only_parser.add_argument("--owner-pid", required=True, type=int)
+    read_only_parser.add_argument("--pi-executable", type=pathlib.Path)
     args = parser.parse_args()
     try:
         if args.command == "validate-policy":
@@ -566,6 +573,8 @@ def main() -> int:
             print(resolve_pi(args.self, args.cwd))
         elif args.command == "prepare":
             print(json.dumps(prepare(args.cwd, args.owner_pid, args.pi_executable), sort_keys=True))
+        elif args.command == "prepare-read-only":
+            print(json.dumps(prepare(args.cwd, args.owner_pid, args.pi_executable, read_only=True), sort_keys=True))
         return 0
     except WorkspaceError as error:
         print(f"pi workspace: {error}", file=sys.stderr)
