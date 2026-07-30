@@ -102,7 +102,7 @@
         "defaultContext": "fresh"
       },
       "worker": {
-        "model": "deepseek/deepseek-v4-flash",
+        "model": "openai-codex/gpt-5.6-luna",
         "thinking": "high",
         "defaultContext": "fresh"
       }

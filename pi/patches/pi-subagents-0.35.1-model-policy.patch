@@ -1,0 +1,303 @@
+diff -ruN a/src/runs/background/async-execution.ts b/src/runs/background/async-execution.ts
+--- a/src/runs/background/async-execution.ts	2026-07-30 03:50:49.203754920 +0000
++++ b/src/runs/background/async-execution.ts	2026-07-30 03:57:28.186130505 +0000
+@@ -619,7 +619,7 @@
+ 			ctx.currentModel,
+ 			availableModels,
+ 			ctx.currentModelProvider,
+-			{ scope: ctx.modelScope },
++			{ scope: ctx.modelScope, acceptanceRole: a.acceptanceRole },
+ 		);
+ 		const thinkingOverride = flatIndex === undefined ? undefined : thinkingOverridesByFlatIndex?.[flatIndex];
+ 		const effectiveThinking = thinkingOverride ?? a.thinking;
+@@ -635,7 +635,7 @@
+ 			cwd: stepCwd,
+ 			model,
+ 			thinking: resolveEffectiveThinking(model, effectiveThinking),
+-			modelCandidates: buildModelCandidates(primaryModel, a.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }).map((candidate) =>
++			modelCandidates: buildModelCandidates(primaryModel, a.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope, acceptanceRole: a.acceptanceRole }).map((candidate) =>
+ 				applyThinkingSuffix(candidate, effectiveThinking, thinkingOverride !== undefined),
+ 			),
+ 			tools: a.tools,
+@@ -1113,6 +1113,7 @@
+ 		ctx.currentModel,
+ 		availableModels,
+ 		ctx.currentModelProvider,
++		{ acceptanceRole: agentConfig.acceptanceRole },
+ 	);
+ 	const effectiveThinking = params.thinkingOverride ?? agentConfig.thinking;
+ 	const model = applyThinkingSuffix(primaryModel, effectiveThinking, params.thinkingOverride !== undefined);
+@@ -1142,6 +1143,7 @@
+ 		cwd: runnerCwd,
+ 		...(model ? { model } : {}),
+ 		...(agentConfig.fallbackModels ? { fallbackModels: [...agentConfig.fallbackModels] } : {}),
++		...(agentConfig.acceptanceRole ? { acceptanceRole: agentConfig.acceptanceRole } : {}),
+ 		...(effectiveThinking ? { thinking: resolveEffectiveThinking(model, effectiveThinking) } : {}),
+ 		...(agentConfig.tools ? { tools: [...agentConfig.tools] } : {}),
+ 		...(agentConfig.extensions ? { extensions: [...agentConfig.extensions] } : {}),
+@@ -1190,7 +1192,7 @@
+ 						cwd: runnerCwd,
+ 						model,
+ 						thinking: resolveEffectiveThinking(model, effectiveThinking),
+-						modelCandidates: buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }).map((candidate) =>
++						modelCandidates: buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope, acceptanceRole: agentConfig.acceptanceRole }).map((candidate) =>
+ 							applyThinkingSuffix(candidate, effectiveThinking, params.thinkingOverride !== undefined),
+ 						),
+ 						tools: agentConfig.tools,
+@@ -1209,6 +1211,7 @@
+ 						maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, agentConfig.maxSubagentDepth),
+ 						waitToolEnabled: params.waitToolEnabled,
+ 						effectiveAcceptance: resolvedAcceptance,
++						acceptanceRole: agentConfig.acceptanceRole,
+ 						...(resolvedToolBudget.budget ? { toolBudget: resolvedToolBudget.budget } : {}),
+ 					},
+ 				],
+diff -ruN a/src/runs/background/async-resume.ts b/src/runs/background/async-resume.ts
+--- a/src/runs/background/async-resume.ts	1985-10-26 08:15:00.000000000 +0000
++++ b/src/runs/background/async-resume.ts	2026-07-30 03:57:28.187130561 +0000
+@@ -263,7 +263,7 @@
+ 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': expected an object.`);
+ 	const parsed = value as Record<string, unknown>;
+ 	const allowedFields = new Set([
+-		"version", "sourceRunId", "agent", "sessionFile", "cwd", "model", "fallbackModels", "thinking", "tools", "extensions",
++		"version", "sourceRunId", "agent", "sessionFile", "cwd", "model", "fallbackModels", "acceptanceRole", "thinking", "tools", "extensions",
+ 		"subagentOnlyExtensions", "mcpDirectTools", "systemPrompt", "systemPromptMode", "inheritProjectContext", "inheritSkills", "skills",
+ 		"skillPath", "agentFilePath", "completionGuard", "memory", "outputPath", "outputMode", "acceptance", "sessionDir", "artifactConfig",
+ 		"artifactsDir", "maxOutput", "controlConfig", "absoluteDeadlineAt", "initialTurnBudget", "initialToolBudget", "maxSubagentDepth", "share",
+@@ -278,6 +278,7 @@
+ 	if (parsed.version !== 1) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': version must be 1.`);
+ 	if (parsed.systemPromptMode !== "append" && parsed.systemPromptMode !== "replace") throw new Error(`Invalid async recovery descriptor '${descriptorPath}': systemPromptMode is invalid.`);
+ 	if (parsed.outputMode !== "inline" && parsed.outputMode !== "file-only") throw new Error(`Invalid async recovery descriptor '${descriptorPath}': outputMode is invalid.`);
++	if (parsed.acceptanceRole !== undefined && parsed.acceptanceRole !== "read-only" && parsed.acceptanceRole !== "writer") throw new Error(`Invalid async recovery descriptor '${descriptorPath}': acceptanceRole is invalid.`);
+ 	for (const field of ["inheritProjectContext", "inheritSkills", "share"] as const) {
+ 		if (typeof parsed[field] !== "boolean") throw new Error(`Invalid async recovery descriptor '${descriptorPath}': ${field} must be a boolean.`);
+ 	}
+@@ -458,8 +459,12 @@
+ }
+ 
+ export function applySteeringRecoveryAgentConfig(agentConfig: AgentConfig, descriptor: SteeringRecoveryDescriptor): AgentConfig {
++	const acceptanceRole = agentConfig.acceptanceRole === "writer" || descriptor.acceptanceRole === "writer"
++		? "writer"
++		: (descriptor.acceptanceRole ?? agentConfig.acceptanceRole);
+ 	return {
+ 		...agentConfig,
++		...(acceptanceRole ? { acceptanceRole } : {}),
+ 		model: descriptor.model,
+ 		fallbackModels: descriptor.fallbackModels ? [...descriptor.fallbackModels] : undefined,
+ 		thinking: descriptor.thinking,
+diff -ruN a/src/runs/background/subagent-runner.ts b/src/runs/background/subagent-runner.ts
+--- a/src/runs/background/subagent-runner.ts	1985-10-26 08:15:00.000000000 +0000
++++ b/src/runs/background/subagent-runner.ts	2026-07-30 03:57:28.188130617 +0000
+@@ -63,7 +63,7 @@
+ import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
+ import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection } from "../shared/dynamic-fanout.ts";
+ import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent } from "../shared/nested-events.ts";
+-import { formatModelAttemptNote, isRetryableModelFailure } from "../shared/model-fallback.ts";
++import { enforceSubagentModelPolicy, formatModelAttemptNote, isRetryableModelFailure } from "../shared/model-fallback.ts";
+ import { createSteeringStatus, recordSteeringRequest, steeringStatus, terminalSteeringNoticeState, updateSteeringTarget } from "./steering.ts";
+ import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
+ import { detectSubagentError, extractTextFromContent, extractToolArgsPreview, getFinalOutput, readStatus } from "../../shared/utils.ts";
+@@ -1080,11 +1080,11 @@
+ 	}
+ 	transcriptWriter?.writeInitialUserMessage(task);
+ 
+-	const candidates = step.modelCandidates && step.modelCandidates.length > 0
++	const candidates = (step.modelCandidates && step.modelCandidates.length > 0
+ 		? step.modelCandidates
+ 		: step.model
+ 			? [step.model]
+-			: [undefined];
++			: [undefined]).map((candidate) => enforceSubagentModelPolicy(candidate, step.acceptanceRole));
+ 	const attemptedModels: string[] = [];
+ 	const modelAttempts: ModelAttempt[] = [];
+ 	const attemptNotes: string[] = [];
+diff -ruN a/src/runs/foreground/chain-execution.ts b/src/runs/foreground/chain-execution.ts
+--- a/src/runs/foreground/chain-execution.ts	1985-10-26 08:15:00.000000000 +0000
++++ b/src/runs/foreground/chain-execution.ts	2026-07-30 03:57:28.190130729 +0000
+@@ -239,7 +239,7 @@
+ 			input.ctx.model,
+ 			input.availableModels,
+ 			input.ctx.model?.provider,
+-			{ scope: input.modelScope },
++			{ scope: input.modelScope, acceptanceRole: taskAgentConfig?.acceptanceRole },
+ 		);
+ 	});
+ 	for (let taskIndex = 0; taskIndex < input.step.parallel.length; taskIndex++) {
+@@ -1132,7 +1132,7 @@
+ 				ctx.model,
+ 				availableModels,
+ 				ctx.model?.provider,
+-				{ scope: modelScope },
++				{ scope: modelScope, acceptanceRole: agentConfig.acceptanceRole },
+ 			);
+ 
+ 			const outputPath = typeof behavior.output === "string"
+diff -ruN a/src/runs/foreground/execution.ts b/src/runs/foreground/execution.ts
+--- a/src/runs/foreground/execution.ts	1985-10-26 08:15:00.000000000 +0000
++++ b/src/runs/foreground/execution.ts	2026-07-30 03:57:28.191130785 +0000
+@@ -1227,7 +1227,7 @@
+ 		agent.fallbackModels,
+ 		options.availableModels,
+ 		options.preferredModelProvider,
+-		{ scope: options.modelScope },
++		{ scope: options.modelScope, acceptanceRole: agent.acceptanceRole },
+ 	);
+ 	const attemptedModels: string[] = [];
+ 	const modelAttempts: ModelAttempt[] = [];
+diff -ruN a/src/runs/foreground/subagent-executor.ts b/src/runs/foreground/subagent-executor.ts
+--- a/src/runs/foreground/subagent-executor.ts	2026-07-30 03:50:49.205755033 +0000
++++ b/src/runs/foreground/subagent-executor.ts	2026-07-30 03:57:28.192130841 +0000
+@@ -1158,6 +1158,7 @@
+ 		systemPromptMode: recoveryDescriptor.systemPromptMode,
+ 		inheritProjectContext: recoveryDescriptor.inheritProjectContext,
+ 		inheritSkills: recoveryDescriptor.inheritSkills,
++		acceptanceRole: recoveryDescriptor.acceptanceRole,
+ 		source: "project",
+ 		filePath: recoveryDescriptor.agentFilePath ?? path.join(recoveryDescriptor.cwd, ".pi-subagents-recovery-agent"),
+ 	} : undefined);
+@@ -2073,7 +2074,7 @@
+ 		const normalizedSkills = normalizeSkillInput(params.skill);
+ 		const skills = normalizedSkills === false ? [] : normalizedSkills;
+ 		const maxSubagentDepth = resolveChildMaxSubagentDepth(currentMaxSubagentDepth, a.maxSubagentDepth);
+-		const modelOverride = resolveEffectiveSubagentModel(params.model as string | undefined, a.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope });
++		const modelOverride = resolveEffectiveSubagentModel(params.model as string | undefined, a.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope, acceptanceRole: a.acceptanceRole });
+ 		return executeAsyncSingle(id, {
+ 			agent: params.agent!,
+ 			task: shouldForkAgent(contextPolicy, params.agent!) ? wrapForkTask(params.task ?? "") : (params.task ?? ""),
+@@ -2618,7 +2619,7 @@
+ 		...(task.model !== undefined ? { model: task.model } : {}),
+ 	}));
+ 	const modelOverrides: (string | undefined)[] = tasks.map((_, i) =>
+-		resolveEffectiveSubagentModel(behaviorOverrides[i]?.model, agentConfigs[i]?.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope }),
++		resolveEffectiveSubagentModel(behaviorOverrides[i]?.model, agentConfigs[i]?.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope, acceptanceRole: agentConfigs[i]?.acceptanceRole }),
+ 	);
+ 
+ 	if (params.clarify === true && ctx.hasUI) {
+@@ -2653,7 +2654,7 @@
+ 		for (let i = 0; i < result.behaviorOverrides.length; i++) {
+ 			const override = result.behaviorOverrides[i];
+ 			if (override?.model !== undefined) {
+-				modelOverrides[i] = resolveEffectiveSubagentModel(override.model, agentConfigs[i]?.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope });
++				modelOverrides[i] = resolveEffectiveSubagentModel(override.model, agentConfigs[i]?.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope, acceptanceRole: agentConfigs[i]?.acceptanceRole });
+ 				behaviorOverrides[i]!.model = override.model;
+ 			}
+ 			if (override?.output !== undefined) behaviorOverrides[i]!.output = override.output;
+@@ -2946,7 +2947,7 @@
+ 		ctx.model,
+ 		availableModels,
+ 		currentProvider,
+-		{ scope: data.modelScope },
++		{ scope: data.modelScope, acceptanceRole: agentConfig.acceptanceRole },
+ 	);
+ 	let skillOverride: string[] | false | undefined = normalizeSkillInput(params.skill);
+ 	const rawOutput = params.output !== undefined ? params.output : agentConfig.output;
+@@ -2983,7 +2984,7 @@
+ 
+ 		task = result.templates[0]!;
+ 		const override = result.behaviorOverrides[0];
+-		if (override?.model !== undefined) modelOverride = resolveEffectiveSubagentModel(override.model, agentConfig.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope });
++		if (override?.model !== undefined) modelOverride = resolveEffectiveSubagentModel(override.model, agentConfig.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope, acceptanceRole: agentConfig.acceptanceRole });
+ 		if (override?.output !== undefined) effectiveOutput = normalizeSingleOutputOverride(override.output, agentConfig.output);
+ 		if (override?.skills !== undefined) skillOverride = override.skills;
+ 
+@@ -3680,12 +3681,14 @@
+ 					ctx.model,
+ 					forkAvailableModels,
+ 					ctx.model?.provider,
++					{ acceptanceRole: agentConfig?.acceptanceRole },
+ 				);
+ 				const candidates = buildModelCandidates(
+ 					primaryModel,
+ 					agentConfig?.fallbackModels,
+ 					forkAvailableModels,
+ 					ctx.model?.provider,
++					{ acceptanceRole: agentConfig?.acceptanceRole },
+ 				);
+ 				forkThinkingRequirements.set(
+ 					index,
+diff -ruN a/src/runs/shared/model-fallback.ts b/src/runs/shared/model-fallback.ts
+--- a/src/runs/shared/model-fallback.ts	1985-10-26 08:15:00.000000000 +0000
++++ b/src/runs/shared/model-fallback.ts	2026-07-30 03:57:28.193130897 +0000
+@@ -1,5 +1,5 @@
+ import type { ModelInfo as AvailableModelInfo } from "../../shared/model-info.ts";
+-import type { Usage } from "../../shared/types.ts";
++import type { AcceptanceRole, Usage } from "../../shared/types.ts";
+ import { checkModelScope, type ModelScopeConfig, type ModelScopeViolation, type ModelSource } from "./model-scope.ts";
+ 
+ export type { AvailableModelInfo };
+@@ -43,6 +43,30 @@
+ 		.replace(/^-|-$/g, "");
+ }
+ 
++function normalizeModelPolicyIdentity(model: string): string {
++	return model
++		.trim()
++		.replace(/:(?:off|minimal|low|medium|high|xhigh|max)$/i, "")
++		.toLowerCase()
++		.replace(/[^a-z0-9]+/g, "-")
++		.replace(/-+/g, "-")
++		.replace(/^-|-$/g, "");
++}
++
++export function isDeepSeekV4FlashModel(model: string | undefined): boolean {
++	if (!model) return false;
++	const compact = normalizeModelPolicyIdentity(model).replace(/-/g, "");
++	return /^deepseek(?:deepseek)?v4flash(?:\d{8})?$/.test(compact);
++}
++
++/** Enforce model restrictions that are tied to a declared acceptance role. */
++export function enforceSubagentModelPolicy(model: string | undefined, acceptanceRole?: AcceptanceRole): string | undefined {
++	if (acceptanceRole === "writer" && isDeepSeekV4FlashModel(model)) {
++		throw new Error("Writer agents cannot use DeepSeek V4 Flash; select Luna or Sol instead.");
++	}
++	return model;
++}
++
+ function isPlausibleDateStamp(year: string, month: string, day: string): boolean {
+ 	const yyyy = Number(year);
+ 	const mm = Number(month);
+@@ -156,6 +180,8 @@
+ }
+ 
+ export interface ResolveSubagentModelOverrideOptions {
++	/** Declared acceptance role used for model safety policy. */
++	acceptanceRole?: AcceptanceRole;
+ 	/** When set with `enforce: true`, out-of-scope models are rejected. */
+ 	scope?: ModelScopeConfig;
+ 	/** Origin of the requested model: explicit caller-supplied (hard error) vs inherited (warn). Defaults to `"inherited"`. */
+@@ -200,6 +226,7 @@
+ 	} else {
+ 		resolved = resolveModelCandidate(explicit, availableModels, preferredProvider);
+ 	}
++	resolved = enforceSubagentModelPolicy(resolved, options?.acceptanceRole);
+ 	if (resolved && options?.scope?.enforce) {
+ 		const source: ModelSource = explicit === undefined ? "inherited" : (options.source ?? "inherited");
+ 		const violation = checkModelScope(resolved, options.scope, source);
+@@ -237,6 +264,8 @@
+ }
+ 
+ export interface BuildModelCandidatesOptions {
++	/** Declared acceptance role used for model safety policy. */
++	acceptanceRole?: AcceptanceRole;
+ 	/** Fallback models are inherited agent config and warn, rather than error, when out of scope. */
+ 	scope?: ModelScopeConfig;
+ 	onWarn?: (violation: ModelScopeViolation) => void;
+@@ -257,6 +286,7 @@
+ 		if (!raw) continue;
+ 		const normalized = resolveModelCandidate(raw.trim(), availableModels, preferredProvider);
+ 		if (!normalized || seen.has(normalized)) continue;
++		enforceSubagentModelPolicy(normalized, options?.acceptanceRole);
+ 		if (index > 0 && options?.scope?.enforce) {
+ 			const violation = checkModelScope(normalized, options.scope, "inherited");
+ 			if (violation) (options.onWarn ?? defaultScopeWarn)(violation);
+diff -ruN a/src/shared/types.ts b/src/shared/types.ts
+--- a/src/shared/types.ts	1985-10-26 08:15:00.000000000 +0000
++++ b/src/shared/types.ts	2026-07-30 03:57:28.194130953 +0000
+@@ -287,6 +287,7 @@
+ 	cwd: string;
+ 	model?: string;
+ 	fallbackModels?: string[];
++	acceptanceRole?: AcceptanceRole;
+ 	thinking?: string;
+ 	tools?: string[];
+ 	extensions?: string[];

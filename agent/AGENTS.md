@@ -30,11 +30,11 @@ Default routing:
 - Parent and ordinary planner:
   `openai-codex/gpt-5.6-luna:high`
 
-- Fast scouts, code mapping, test discovery, bounded experimentation, and
-  bounded implementation:
+- Fast scouts, read-only research/context collection, test discovery, and
+  bounded experimentation (never implementation):
   `deepseek/deepseek-v4-flash:high`
 
-- Ordinary integration and review:
+- Ordinary integration, review, and bounded implementation:
   `openai-codex/gpt-5.6-luna:high`
 
 - Architecture, difficult debugging, research uncertainty, public interfaces,

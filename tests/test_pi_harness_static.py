@@ -2,6 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shlex
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,11 +15,15 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertEqual(settings["defaultThinkingLevel"], "high")
         overrides = settings["subagents"]["agentOverrides"]
         self.assertEqual(overrides["scout"]["model"], "deepseek/deepseek-v4-flash")
-        self.assertEqual(overrides["worker"]["model"], "deepseek/deepseek-v4-flash")
+        self.assertEqual(overrides["worker"]["model"], "openai-codex/gpt-5.6-luna")
         self.assertEqual(overrides["reviewer"]["model"], "openai-codex/gpt-5.6-luna")
         self.assertEqual(overrides["oracle"]["model"], "openai-codex/gpt-5.6-sol")
         self.assertNotIn("advisor", overrides)
         self.assertTrue(all(value["defaultContext"] == "fresh" for value in overrides.values()))
+        worker = (ROOT / "pi/agents/worker.md").read_text()
+        worker_frontmatter = worker.split("---", 2)[1]
+        self.assertIn("model: openai-codex/gpt-5.6-luna", worker_frontmatter)
+        self.assertIn("acceptanceRole: writer", worker_frontmatter)
         config = json.loads((ROOT / "pi/extensions/subagent/config.json").read_text())
         self.assertFalse(config["asyncByDefault"])
         self.assertEqual(config["globalConcurrencyLimit"], 3)
@@ -105,8 +110,65 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("for launcher in pi pi-host pidev pi-tmux-session", installer)
         self.assertIn("--session-id", pidev)
         self.assertIn("tmux new-session", pidev)
+        self.assertIn("-F $'#{window_id}\\t#{window_name}'", pidev)
+        self.assertIn("-F $'#{pane_id}\\t#{pane_index}\\t#{pane_pid}\\t#{pane_current_command}'", pidev)
         self.assertIn('"$self_dir/pi-tmux-session" "$@"', pidev)
         self.assertIn('exec "$self_dir/pi" "$@"', tmux_helper)
+
+    def test_tmux_resurrect_and_continuum_ordering_is_conservative(self):
+        config = (ROOT / "tmux.conf").read_text()
+        self.assertNotIn(":all:", config)
+        self.assertIn("~^[[:space:]]*", config)
+        self.assertIn("/home/j/.local/bin/pidev[[:space:]]+--launch[[:space:]]+--session-id", config)
+        self.assertIn("/home/j/.local/bin/pi-tmux-session[[:space:]]+--session-id", config)
+        self.assertNotIn('~pi.*--session-id', config)
+        self.assertIn("set -g @continuum-restore 'on'", config)
+        self.assertIn("set -g @continuum-save-interval '15'", config)
+        self.assertLess(config.index("catppuccin/tmux"), config.index("tmux-continuum"))
+        self.assertLess(config.index('set -g status-right "#{E:@catppuccin_status_directory}"'), config.index("run '~/.tmux/plugins/tpm/tpm'"))
+        self.assertLess(config.index("run '~/.tmux/plugins/tpm/tpm'"), config.index("tmux-voxtype-status.sh"))
+
+    def test_resurrect_patterns_match_only_known_commands_and_argument_order(self):
+        config = (ROOT / "tmux.conf").read_text()
+        line = next(line for line in config.splitlines() if "@resurrect-processes" in line)
+        value = shlex.split(line)[3]
+        elements = shlex.split(value)
+        patterns = [element[1:] for element in elements if element.startswith("~")]
+        self.assertEqual(len(patterns), 3)
+        self.assertEqual(len([element for element in elements if element.startswith("~")]), 3)
+
+        # tmux-resurrect feeds each ~ entry as one ERE against the complete
+        # command line. Python's equivalent needs POSIX space classes lowered.
+        def matches(command, pattern):
+            lowered = pattern.replace("[^[:space:]]", r"\S").replace("[[:space:]]", r"\s")
+            return re.search(lowered, command) is not None
+
+        known = [
+            ("/home/j/.local/bin/pidev --launch --session-id stable", "pidev"),
+            ("/usr/bin/bash /home/j/.local/bin/pi-tmux-session --session-id stable", "pi-tmux-session"),
+            ("/usr/bin/node /home/j/.local/bin/pi --session-id stable", "pi"),
+        ]
+        for index, (command, _name) in enumerate(known):
+            self.assertTrue(matches(command, patterns[index]), command)
+        unrelated = [
+            "/home/j/bin/compile --launch --session-id stable",
+            "/home/j/bin/rapid --session-id stable",
+            "/home/j/bin/mypidev --launch --session-id stable",
+            "/home/j/bin/pidev --session-id stable",
+            "/home/j/bin/pidev --session-id stable --launch",
+            "/home/j/bin/pidev --launch",
+            "/home/j/bin/pi-tmux-session",
+            "/home/j/bin/pi-tmux-session --name stable",
+            "/home/j/bin/pi --name stable",
+            "/usr/bin/echo /home/j/bin/pidev --launch --session-id stable",
+            "/usr/bin/echo /home/j/bin/pi-tmux-session --session-id stable",
+            "/usr/bin/echo /home/j/bin/pi --session-id stable",
+            "/tmp/pidev --launch --session-id stable",
+            "/tmp/pi-tmux-session --session-id stable",
+            "/tmp/pi --session-id stable",
+        ]
+        for command in unrelated:
+            self.assertFalse(any(matches(command, pattern) for pattern in patterns), command)
 
     def test_btw_and_subagents_task_routes_are_pinned(self):
         btw = (ROOT / "pi/patches/pi-btw-0.4.1-task-routing.patch").read_text()
@@ -117,9 +179,52 @@ class HarnessStaticTests(unittest.TestCase):
         cwd = (ROOT / "pi/patches/pi-subagents-0.35.1-task-cwd.patch").read_text()
         self.assertIn("outside the parent task execution plane", cwd)
 
+    def test_writer_defaults_and_model_policy_are_fail_closed(self):
+        settings = json.loads((ROOT / "pi/settings.json").read_text())
+        for name, override in settings["subagents"]["agentOverrides"].items():
+            agent_path = ROOT / "pi/agents" / f"{name}.md"
+            frontmatter = agent_path.read_text().split("---", 2)[1]
+            if "acceptanceRole: writer" in frontmatter:
+                self.assertNotRegex(override["model"].lower(), r"deepseek[./:_-]*v4[./_-]*flash")
+        package_root = ROOT / "pi/npm/node_modules/pi-subagents"
+        fallback = (package_root / "src/runs/shared/model-fallback.ts").read_text()
+        self.assertIn("enforceSubagentModelPolicy", fallback)
+        self.assertIn("Writer agents cannot use DeepSeek V4 Flash", fallback)
+        for relative in [
+            "src/runs/foreground/execution.ts",
+            "src/runs/foreground/chain-execution.ts",
+            "src/runs/foreground/subagent-executor.ts",
+            "src/runs/background/async-execution.ts",
+            "src/runs/background/subagent-runner.ts",
+            "src/runs/background/async-resume.ts",
+        ]:
+            text = (package_root / relative).read_text()
+            self.assertIn("acceptanceRole", text, relative)
+        script = """
+import { createJiti } from %r;
+const jiti = createJiti(import.meta.url);
+const policy = await jiti.import(%r);
+const reject = (model) => {
+  try { policy.enforceSubagentModelPolicy(model, "writer"); return false; }
+  catch (error) { return /Writer agents cannot use DeepSeek V4 Flash/.test(String(error)); }
+};
+for (const model of ["deepseek/deepseek-v4-flash:high", "DeepSeek/DeepSeek_V4_Flash:MAX", "deepseek-v4-flash", "deepseek/deepseek-v4-flash-20260730:off", "deepseek/deepseek-v4-flash-2026-07-30:high", "DeepSeekV4Flash", "deepseek/deepseekv4flash:high", "DeepSeekV4Flash20260730:max"]) {
+  if (!reject(model)) process.exit(1);
+}
+if (policy.enforceSubagentModelPolicy("deepseek/deepseek-v4-flash:high", "read-only") !== "deepseek/deepseek-v4-flash:high") process.exit(1);
+try { policy.resolveSubagentModelOverride("deepseek/deepseek-v4-flash:high", undefined, [], undefined, { acceptanceRole: "writer" }); process.exit(1); } catch (error) { if (!/Writer agents cannot use DeepSeek V4 Flash/.test(String(error))) process.exit(1); }
+try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, [], undefined, { acceptanceRole: "writer" }); process.exit(1); } catch (error) { if (!/Writer agents cannot use DeepSeek V4 Flash/.test(String(error))) process.exit(1); }
+""" % (str(ROOT / "pi/npm/node_modules/jiti/lib/jiti.mjs"), str(ROOT / "pi/npm/node_modules/pi-subagents/src/runs/shared/model-fallback.ts"))
+        result = __import__("subprocess").run(["node", "--input-type=module", "-e", script], cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        executor = (package_root / "src/runs/foreground/subagent-executor.ts").read_text()
+        self.assertNotIn("{ scope: data.modelScope });", executor)
+        recovery = (package_root / "src/runs/background/async-resume.ts").read_text()
+        self.assertIn('agentConfig.acceptanceRole === "writer" || descriptor.acceptanceRole === "writer"', recovery)
+
     def test_global_agents_hash_and_removed_legacy_orchestrators(self):
         agents = (ROOT / "agent/AGENTS.md").read_bytes()
-        self.assertEqual(hashlib.sha256(agents).hexdigest(), "e733328881865741996ce6342d68a174c1992ded6a17ee62e79cd5e543324c01")
+        self.assertEqual(hashlib.sha256(agents).hexdigest(), "3db9306dacc365af42d531bda1a040538b55f070ec75da7b64b9e5c88cda70f8")
         policy = agents.decode()
         for heading in ["### FAST", "### RIP", "### BUILD", "### MAJOR", "### OFF", "### LIGHT", "### DEEP"]:
             self.assertIn(heading, policy)

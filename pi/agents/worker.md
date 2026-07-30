@@ -4,7 +4,7 @@ description: Implementation agent for normal tasks and approved oracle handoffs
 systemPromptMode: replace
 inheritProjectContext: false
 inheritSkills: false
-model: deepseek/deepseek-v4-flash
+model: openai-codex/gpt-5.6-luna
 thinking: high
 tools: read, write, edit, bash, grep, find, ls, contact_supervisor
 extensions: /home/j/.pi/agent/npm/node_modules/@kjrjay/pi-sandbox/index.ts

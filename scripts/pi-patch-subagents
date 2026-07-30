@@ -5,14 +5,14 @@ agent_dir=${PI_CODING_AGENT_DIR:-"$HOME/.pi/agent"}
 patch_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../pi/patches" && pwd)"
 
 apply_verified_patch() {
-  local label=$1 package_dir=$2 source_file=$3 package_version=$4 expected_before=$5 expected_after=$6 patch_file=$7
+  local label=$1 package_dir=$2 source_file=$3 package_version=$4 expected_before=$5 expected_after=$6 patch_file=$7 compatible_after=${8:-}
   [[ -f "$package_dir/package.json" ]] || { printf '%s: package not installed: %s\n' "$label" "$package_dir" >&2; exit 1; }
   local version actual
   version=$(node -p 'require(process.argv[1]).version' "$package_dir/package.json")
   [[ "$version" == "$package_version" ]] || { printf '%s: unsupported version: %s\n' "$label" "$version" >&2; exit 1; }
   [[ -f "$source_file" ]] || { printf '%s: source missing: %s\n' "$label" "$source_file" >&2; exit 1; }
   actual=$(sha256sum "$source_file" | awk '{print $1}')
-  if [[ "$actual" == "$expected_after" ]]; then
+  if [[ "$actual" == "$expected_after" || ( -n $compatible_after && "$actual" == "$compatible_after" ) ]]; then
     printf '%s: already patched %s\n' "$label" "$actual"
     return
   fi
@@ -64,7 +64,8 @@ apply_verified_patch \
   0.35.1 \
   8ebb9139b989e6776654ef49045ed37ed7edd4e6e0f1f19138e7552c46b3d60f \
   f5804b2ddc61bd5a6f6d4930f70676a5a9c6db288e85eb2215c6dd24b36c5eb6 \
-  "$patch_dir/pi-subagents-0.35.1-resume-acceptance.patch"
+  "$patch_dir/pi-subagents-0.35.1-resume-acceptance.patch" \
+  b3da8caa2777a9f8c3c63794dd53ef05d2e38e26faca1a5cd0f87adb015d9c78
 
 apply_verified_patch \
   pi-subagents-task-worktrees \
@@ -82,7 +83,8 @@ apply_verified_patch \
   0.35.1 \
   bbdc07d40727b6799e56b4236cf10354a1e62b4aff40db1c47e3b56b8021dcbd \
   f382fcf5bdc1bbbc2730ad5c1d37fb4d82b9655a8fc2ccbbb3895e33eb84c37f \
-  "$patch_dir/pi-subagents-0.35.1-task-cwd.patch"
+  "$patch_dir/pi-subagents-0.35.1-task-cwd.patch" \
+  f6365f211cf56c4201454678ef96fe99ac4c55cd058d098d0b60285e4db3c800
 
 apply_verified_patch \
   pi-subagents-skill \
@@ -110,3 +112,30 @@ apply_verified_patch \
   fcc5244d55fb2853175b52f0befdb30debb57048b56c7f5fda5614f7450109f4 \
   825abd8a7eee4efa4b5f1eb0fa1adf210c10a58cdcf6fcb56190777740a8c26a \
   "$patch_dir/pi-sandbox-0.2.0-task-routing.patch"
+
+apply_verified_patch \
+  pi-subagents-model-policy \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/runs/shared/model-fallback.ts" \
+  0.35.1 \
+  2f72f7588409b2115a5e581d349866dd68a1d476d6bb0357b2ee0840ea091d9d \
+  7177f6a09696fa50c40220ce6af482688c291461f4e69a1626cb6c1d3f13fbb1 \
+  "$patch_dir/pi-subagents-0.35.1-model-policy.patch"
+
+verify_model_policy_file() {
+  local relative=$1 expected=$2 path="$agent_dir/npm/node_modules/pi-subagents/$1" actual
+  [[ -f $path ]] || { printf 'pi-subagents-model-policy: source missing: %s\n' "$path" >&2; exit 1; }
+  actual=$(sha256sum "$path" | awk '{print $1}')
+  [[ $actual == "$expected" ]] || {
+    printf 'pi-subagents-model-policy: incomplete patch at %s: %s\n' "$relative" "$actual" >&2
+    exit 1
+  }
+}
+verify_model_policy_file src/runs/background/async-execution.ts b3da8caa2777a9f8c3c63794dd53ef05d2e38e26faca1a5cd0f87adb015d9c78
+verify_model_policy_file src/runs/background/async-resume.ts df29d4b27aedd92d563b15afb1ea383a5a965962580debbb764f0944c8fe2b37
+verify_model_policy_file src/runs/background/subagent-runner.ts 0bb23f0cf27cea7b74d89a528770440992821dfc2fe5bd15aa2ff309d6aea7e9
+verify_model_policy_file src/runs/foreground/chain-execution.ts 0565a3a72250b73ca17a71e0f500f48f7b2bedc2cb14fbed2f2fe1d9b28075c6
+verify_model_policy_file src/runs/foreground/execution.ts c409ea5f40a0cd2bf1954c77ef8e531f2fe160cd24c4e4fcc8c7610ab59d513e
+verify_model_policy_file src/runs/foreground/subagent-executor.ts f6365f211cf56c4201454678ef96fe99ac4c55cd058d098d0b60285e4db3c800
+verify_model_policy_file src/runs/shared/model-fallback.ts 7177f6a09696fa50c40220ce6af482688c291461f4e69a1626cb6c1d3f13fbb1
+verify_model_policy_file src/shared/types.ts 8c817542e4b249a016a9e7554b00bb08e8e3d7e9d8f0766413919fb1ef759175
