@@ -285,11 +285,19 @@ legacy_is_safe() {
 # Read or select the ID only while both locks are held. The JSONL migration is
 # intentionally before UUID generation so an old conversation is reused.
 session_id=""
+requested_session_id=${PI_PIDEV_SESSION_ID:-}
+if [[ -n $requested_session_id && ! $requested_session_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; then
+  fail "invalid host-supplied Pi session ID"
+fi
 if [[ -e $state_file ]]; then
   if [[ ! -r $state_file ]] || ! IFS= read -r session_id < "$state_file"; then
     fail "cannot read state file $state_file"
   fi
   [[ -n $session_id ]] || fail "empty state file $state_file"
+  [[ -z $requested_session_id || $requested_session_id == "$session_id" ]] || fail "host session ID conflicts with existing worktree state"
+fi
+if [[ -z $session_id && -n $requested_session_id ]]; then
+  session_id=$requested_session_id
 fi
 if [[ -z $session_id ]]; then
   encoded_cwd=${cwd#/}
@@ -319,8 +327,14 @@ fi
 
 # Stable worktree/full-agent naming replaces the obsolete daily liaison name.
 pi_cmd=""
+if [[ -n ${PI_PIDEV_WORKSTREAM_ID:-} || -n ${PI_PIDEV_BRIEF_PATH:-} ]]; then
+  [[ ${PI_PIDEV_WORKSTREAM_ID:-} =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || fail "invalid host workstream ID"
+  [[ ${PI_PIDEV_BRIEF_PATH:-} == /* && -f ${PI_PIDEV_BRIEF_PATH:-} && ! -L ${PI_PIDEV_BRIEF_PATH:-} ]] || fail "invalid host brief path"
+  printf -v quoted 'env PI_WORKSTREAM_ID=%q PI_WORKSTREAM_BRIEF_PATH=%q ' "$PI_PIDEV_WORKSTREAM_ID" "$PI_PIDEV_BRIEF_PATH"
+  pi_cmd=$quoted
+fi
 printf -v quoted '%q' "$self_path"
-pi_cmd=$quoted
+pi_cmd+=$quoted
 for argument in --launch --session-id "$session_id" --name "$repo: $worktree — full-agent" "$@"; do
   printf -v quoted ' %q' "$argument"
   pi_cmd+=$quoted
@@ -570,6 +584,10 @@ elif [[ $pi_mode == idle ]]; then
 elif [[ ! -e $state_file ]]; then
   persist_state
 fi
+
+# Focus the exact validated workstream window before changing clients. Window
+# IDs come only from tmux query/create output, never from model input.
+tmux select-window -t "$window_id"
 
 # Locks are not held while switching or attaching to the client.
 eval "exec ${worktree_lock_fd}>&-"

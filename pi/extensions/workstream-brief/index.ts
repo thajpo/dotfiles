@@ -1,0 +1,35 @@
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import fs from "node:fs";
+
+const MARKER = "workstream-brief-seeded-v1";
+const ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+function alreadySeeded(ctx: ExtensionContext, workstreamId: string): boolean {
+  try {
+    return (ctx.sessionManager.getBranch() as unknown as Array<Record<string, unknown>>).some((entry) =>
+      entry.type === "custom" && entry.customType === MARKER &&
+      (entry.data as Record<string, unknown> | undefined)?.workstreamId === workstreamId);
+  } catch {
+    return false;
+  }
+}
+
+export default function workstreamBrief(pi: ExtensionAPI): void {
+  pi.on("session_start", async (_event, ctx) => {
+    const workstreamId = process.env.PI_WORKSTREAM_ID ?? "";
+    const briefPath = process.env.PI_WORKSTREAM_BRIEF_PATH ?? "";
+    if (!workstreamId && !briefPath) return;
+    if (!ID.test(workstreamId) || !briefPath.startsWith("/") || alreadySeeded(ctx, workstreamId)) return;
+    const info = fs.lstatSync(briefPath);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 20 * 1024) {
+      throw new Error("workstream brief is not a bounded regular file");
+    }
+    const brief = fs.readFileSync(briefPath, "utf8");
+    pi.appendEntry(MARKER, { workstreamId, seededAt: new Date().toISOString() });
+    pi.setSessionName(`workstream-${workstreamId}`);
+    pi.sendUserMessage(
+      `Host-assigned workstream brief (supplied once):\n\n${brief}\n\n` +
+      "Begin by stating the received outcome, settled decisions and boundaries, open questions, and first inspection. Do not ask the user to restate the task.",
+    );
+  });
+}

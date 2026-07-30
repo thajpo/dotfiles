@@ -828,6 +828,31 @@ raise SystemExit(2)
             self.assertEqual(len(session_ids), 2)
             self.assertEqual(len(Path(env["FAKE_UUID_LOG"]).read_text().splitlines()), 2)
 
+    def test_pidev_host_workstream_identity_seeds_exact_session_and_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, _, log, state_path, env = make_tmux_fixture(root)
+            repo = make_git_repo(root)
+            brief = root / "brief.md"
+            brief.write_text("# Assigned brief\n")
+            env.update({"PI_PIDEV_SESSION_ID": "ws-abcdef0123456789",
+                        "PI_PIDEV_WORKSTREAM_ID": "assigned-work",
+                        "PI_PIDEV_BRIEF_PATH": str(brief)})
+            result = subprocess.run([str(ROOT / "bin/pidev")], cwd=repo, env=env,
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            _, project, worktree_hash, _ = launcher_ids(repo)
+            state_file = home / ".pi/agent/tmux-sessions" / f"project-{worktree_hash}.session-id"
+            self.assertEqual(state_file.read_text().strip(), "ws-abcdef0123456789")
+            panes = json.loads(state_path.read_text())["sessions"][project]["windows"][0]["panes"]
+            command = next(pane["args"] for pane in panes if pane["command"] == "pi")
+            self.assertIn("PI_WORKSTREAM_ID=assigned-work", command)
+            self.assertIn("PI_WORKSTREAM_BRIEF_PATH=", command)
+            self.assertEqual(command.count("--session-id"), 1)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            window_id = json.loads(state_path.read_text())["sessions"][project]["windows"][0]["id"]
+            self.assertIn(["select-window", "-t", window_id], calls)
+
     def test_pidev_rejects_subagent_launch_bypass_before_tmux(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

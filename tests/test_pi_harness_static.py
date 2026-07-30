@@ -108,15 +108,21 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("pi-secretary-control.py", installer)
         self.assertIn('activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status"', installer)
         self.assertIn("for launcher in pi pi-host pidev pi-tmux-session pisec pi-secretary", installer)
-        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls", "--session-id", "--name"]:
+        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,secretary_record_idea", "--session-id", "--name"]:
             self.assertIn(flag, launcher)
         self.assertEqual(launcher.count("-e \"$"), 2)
         self.assertNotIn("--tools read,grep,find,ls,bash", launcher)
         for forbidden in ["task_packet", "--edit", "--write"]:
             self.assertNotIn(forbidden, launcher)
-        self.assertNotIn("registerTool", extension)
+        self.assertEqual(extension.count("pi.registerTool"), 4)
+        self.assertIn("Current user turn did not authorize", extension)
         self.assertIn("project-status", extension)
         self.assertIn("bind-key -T prefix g", (ROOT / "tmux.conf").read_text())
+        brief_extension = (ROOT / "pi/extensions/workstream-brief/index.ts").read_text()
+        self.assertIn("getBranch", brief_extension)
+        self.assertIn("pi.appendEntry", brief_extension)
+        self.assertIn("pi.sendUserMessage", brief_extension)
+        self.assertLess(brief_extension.index("pi.appendEntry"), brief_extension.index("pi.sendUserMessage"))
 
     def test_pidev_is_installed_as_a_managed_pi_wrapper(self):
         installer = (ROOT / "install.sh").read_text()

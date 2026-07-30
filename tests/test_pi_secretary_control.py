@@ -149,6 +149,36 @@ class SecretaryControlTests(unittest.TestCase):
                          __import__("hashlib").sha256(self.capability.encode()).hexdigest())
         self.assertNotIn(self.capability, (project / "project.json").read_text())
 
+    def test_promote_allocates_stable_runtime_and_launches_with_bounded_environment(self):
+        registered = secretary.register_project(self.source, "promotion-project")
+        output = Path(self.tmp.name) / "pidev-env.json"
+        fake = Path(self.tmp.name) / "fake-pidev"
+        fake.write_text("#!/usr/bin/env python3\nimport json,os,pathlib\npathlib.Path(%r).write_text(json.dumps({k:os.environ.get(k) for k in ['PI_PIDEV_SESSION_ID','PI_PIDEV_WORKSTREAM_ID','PI_PIDEV_BRIEF_PATH']}))\n" % str(output))
+        fake.chmod(0o700)
+        with mock.patch.object(secretary, "_pidev_path", return_value=fake):
+            promoted = secretary.promote_workstream(registered["projectId"], "Promoted", "Goal and boundaries", "feature")
+        self.assertRegex(promoted["piSessionId"], r"^ws-[0-9a-f]{48}$")
+        self.assertTrue(promoted["tmuxSession"].startswith("pi-source-"))
+        launched = json.loads(output.read_text())
+        self.assertEqual(launched["PI_PIDEV_SESSION_ID"], promoted["piSessionId"])
+        self.assertEqual(launched["PI_PIDEV_WORKSTREAM_ID"], promoted["workstreamId"])
+        self.assertTrue(Path(launched["PI_PIDEV_BRIEF_PATH"]).is_file())
+        opened = secretary.open_workstream(self.source, self.capability, promoted["workstreamId"])
+        self.assertEqual(opened["piSessionId"], promoted["piSessionId"])
+
+    def test_failed_initial_launch_preserves_durable_workstream_for_reopen(self):
+        registered = secretary.register_project(self.source, "failed-launch")
+        fake = Path(self.tmp.name) / "failing-pidev"
+        fake.write_text("#!/bin/sh\nexit 17\n")
+        fake.chmod(0o700)
+        with mock.patch.object(secretary, "_pidev_path", return_value=fake):
+            with self.assertRaisesRegex(secretary.SecretaryError, "workstream launch failed"):
+                secretary.promote_workstream(registered["projectId"], "Survives", "Durable intent", "feature")
+        workstreams = secretary.list_workstreams(self.source, self.capability)
+        self.assertEqual(len(workstreams), 1)
+        self.assertTrue(Path(workstreams[0]["workspace"]).is_dir())
+        self.assertEqual(len(secretary.list_briefs(self.source, self.capability)), 1)
+
     def test_two_workstreams_reference_one_brief_and_dirty_source_survives(self):
         brief = self._brief("Design", "bounded text")
         (self.source / "dirty").write_text("human change\n")

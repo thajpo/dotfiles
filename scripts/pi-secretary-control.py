@@ -272,7 +272,7 @@ def _capability_path(root: Path, project_id: str) -> Path:
 
 
 def _foundation(project: Path) -> None:
-    for name in ("briefs", "workstreams", "events", "operations", "operations/facts"):
+    for name in ("briefs", "workstreams", "workstream-runtime", "events", "operations", "operations/facts"):
         _ensure_dir(project / name)
     inbox = project / "events/inbox.jsonl"
     if inbox.exists() or inbox.is_symlink():
@@ -700,6 +700,41 @@ def _workstream_path(project: Path, workstream_id: str) -> Path:
     return project / "workstreams" / f"{_id(workstream_id, 'workstream id')}.json"
 
 
+def _workstream_runtime_path(project: Path, workstream_id: str) -> Path:
+    return project / "workstream-runtime" / f"{_id(workstream_id, 'workstream id')}.json"
+
+
+def _workstream_runtime(project: Path, repo: Path, record: dict[str, Any]) -> dict[str, Any]:
+    path = _workstream_runtime_path(project, record["workstreamId"])
+    fields = {"schemaVersion", "workstreamId", "piSessionId", "tmuxSession", "tmuxWindow", "seededAt"}
+    if path.exists() or path.is_symlink():
+        value = _read_json(path, fields, required=fields)
+        if (value.get("schemaVersion") != 1 or value.get("workstreamId") != record["workstreamId"] or
+                not isinstance(value.get("piSessionId"), str) or
+                not SESSION_RE.fullmatch(value["piSessionId"]) or
+                not isinstance(value.get("tmuxSession"), str) or
+                not re.fullmatch(r"[A-Za-z0-9_-]{1,300}", value["tmuxSession"]) or
+                not isinstance(value.get("tmuxWindow"), str) or
+                not re.fullmatch(r"[A-Za-z0-9_-]{1,300}", value["tmuxWindow"]) or
+                (value.get("seededAt") is not None and not isinstance(value.get("seededAt"), str))):
+            raise SecretaryError("malformed workstream runtime record")
+        if value["seededAt"] is not None:
+            _timestamp(value["seededAt"], "seededAt")
+        return value
+    workspace = Path(record["workspace"]).resolve(strict=True)
+    common = _git_path(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    repo_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-") or "repo"
+    worktree_name = re.sub(r"[^A-Za-z0-9_-]+", "-", workspace.name).strip("-") or "worktree"
+    common_hash = hashlib.sha256(str(common).encode()).hexdigest()
+    worktree_hash = hashlib.sha256(str(workspace).encode()).hexdigest()
+    value = {"schemaVersion": 1, "workstreamId": record["workstreamId"],
+             "piSessionId": "ws-" + secrets.token_hex(24),
+             "tmuxSession": f"pi-{repo_name}-{common_hash[:12]}",
+             "tmuxWindow": f"w-{worktree_name}-{worktree_hash[:12]}", "seededAt": None}
+    _atomic(path, json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+    return value
+
+
 def _workstream_id(title: str, role: str, brief_id: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "workstream"
     slug = slug[:32].strip("-") or "workstream"
@@ -874,15 +909,18 @@ def create_workstream(repository: str | Path, capability: str, title: str, role:
                 raise SecretaryError("created worktree failed verification")
             _ensure_dir(record_path.parent)
             _atomic(record_path, json.dumps(workstream_record, sort_keys=True, separators=(",", ":")) + "\n")
+            runtime = _workstream_runtime(project, repo, workstream_record)
             _append_fact_locked(project, "workstream-created", identity)
         except Exception:
             with contextlib.suppress(OSError):
                 record_path.unlink()
+            with contextlib.suppress(OSError):
+                _workstream_runtime_path(project, identity).unlink()
             _cleanup_git_resources(repo, workspace, branch, branch_oid=oid,
                                    branch_created=branch_created,
                                    worktree_created=worktree_created)
             raise
-    return {"projectId": project.name, **workstream_record, "currentOid": oid}
+    return {"projectId": project.name, **workstream_record, **runtime, "currentOid": oid}
 
 
 def _validate_workstream_record(path: Path, project: Path, repo: Path,
@@ -945,7 +983,8 @@ def open_workstream(repository: str | Path, capability: str, workstream_id: str)
     _, project, record, repo = _project_context(repository, capability)
     validated = _validate_workstream_record(_workstream_path(project, workstream_id), project, repo,
                                             record["objectFormat"], record["gitCommonDir"])
-    return {"projectId": project.name, **validated}
+    runtime = _workstream_runtime(project, repo, validated)
+    return {"projectId": project.name, **validated, **runtime}
 
 
 def list_workstreams(repository: str | Path, capability: str) -> list[dict[str, Any]]:
@@ -960,8 +999,66 @@ def list_workstreams(repository: str | Path, capability: str) -> list[dict[str, 
             raise SecretaryError("unexpected workstream record")
         validated = _validate_workstream_record(entry, project, repo, record["objectFormat"],
                                                  record["gitCommonDir"])
-        result.append({"projectId": project.name, **validated})
+        runtime = _workstream_runtime(project, repo, validated)
+        result.append({"projectId": project.name, **validated, **runtime})
     return result
+
+
+def _pidev_path() -> Path:
+    candidates = [Path(__file__).resolve().parents[1] / "bin" / "pidev",
+                  Path.home() / ".local" / "bin" / "pidev"]
+    for candidate in candidates:
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if (info.st_uid == os.getuid() and stat.S_ISREG(info.st_mode) and
+                not stat.S_ISLNK(info.st_mode) and not (info.st_mode & 0o022) and
+                info.st_mode & stat.S_IXUSR):
+            return candidate
+    raise SecretaryError("managed pidev launcher is unavailable")
+
+
+def launch_workstream(project_id: str, workstream_id: str) -> dict[str, Any]:
+    info = launch_info(project_id, internal=True)
+    repo = Path(info["primaryRepository"])
+    record = open_workstream(repo, info["capability"], workstream_id)
+    project = _record_dir(_state_root(), project_id)
+    brief_path = _brief_path(project, record["briefId"])
+    _safe_lstat(brief_path, directory=False)
+    environment = _env()
+    for name in ("TMUX", "TERM", "COLORTERM", "PI_CODING_AGENT_DIR"):
+        if os.environ.get(name):
+            environment[name] = os.environ[name]
+    environment.update({"PI_PIDEV_SESSION_ID": record["piSessionId"],
+                        "PI_PIDEV_WORKSTREAM_ID": workstream_id,
+                        "PI_PIDEV_BRIEF_PATH": str(brief_path)})
+    result = subprocess.run([str(_pidev_path())], cwd=record["workspace"], env=environment,
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode:
+        raise SecretaryError(f"workstream launch failed: {(result.stderr or result.stdout).strip()[:300]}")
+    return record
+
+
+def record_idea(project_id: str, title: str, brief_text: str) -> dict[str, Any]:
+    info = launch_info(project_id, internal=True)
+    return create_brief(info["primaryRepository"], info["capability"], title, brief_text)
+
+
+def promote_workstream(project_id: str, title: str, brief_text: str, role: str,
+                       brief_id: str | None = None, workstream_id: str | None = None) -> dict[str, Any]:
+    info = launch_info(project_id, internal=True)
+    repo = Path(info["primaryRepository"])
+    capability = info["capability"]
+    if brief_id is None:
+        brief = create_brief(repo, capability, title, brief_text)
+        brief_id = brief["briefId"]
+    else:
+        read_brief(repo, capability, brief_id)
+    record = create_workstream(repo, capability, title, role, brief_id,
+                               workstream_id=workstream_id)
+    launch_workstream(project_id, record["workstreamId"])
+    return record
 
 
 # --- CLI ---
@@ -987,6 +1084,13 @@ def _cli() -> int:
     p.add_argument("brief_id"); p.add_argument("--target-ref", default="HEAD"); p.add_argument("--workstream-id")
     p = sub.add_parser("workstream-open"); p.add_argument("workstream_id")
     sub.add_parser("workstream-list")
+    p = sub.add_parser("record-idea"); p.add_argument("--project-id", required=True)
+    p.add_argument("--title", required=True); p.add_argument("--brief", required=True)
+    p = sub.add_parser("promote"); p.add_argument("--project-id", required=True)
+    p.add_argument("--title", required=True); p.add_argument("--brief", required=True)
+    p.add_argument("--role", required=True); p.add_argument("--brief-id"); p.add_argument("--workstream-id")
+    p = sub.add_parser("focus-workstream"); p.add_argument("--project-id", required=True); p.add_argument("--workstream-id", required=True)
+    p = sub.add_parser("project-workstreams"); p.add_argument("--project-id", required=True)
     args = parser.parse_args()
     try:
         if args.command == "init":
@@ -1017,8 +1121,18 @@ def _cli() -> int:
                                        args.brief_id, args.target_ref, args.workstream_id)
         elif args.command == "workstream-open":
             result = open_workstream(args.repository, args.capability, args.workstream_id)
-        else:
+        elif args.command == "workstream-list":
             result = list_workstreams(args.repository, args.capability)
+        elif args.command == "record-idea":
+            result = record_idea(args.project_id, args.title, args.brief)
+        elif args.command == "promote":
+            result = promote_workstream(args.project_id, args.title, args.brief, args.role,
+                                        args.brief_id, args.workstream_id)
+        elif args.command == "focus-workstream":
+            result = launch_workstream(args.project_id, args.workstream_id)
+        else:
+            info = launch_info(args.project_id, internal=True)
+            result = list_workstreams(info["primaryRepository"], info["capability"])
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
     except SecretaryError as error:
