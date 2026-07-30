@@ -39,6 +39,8 @@ MAX_TITLE = 200
 MAX_ROLE = 80
 SUPPORTED_OBJECT_FORMATS = {"sha1": 40, "sha256": 64}
 WORKSTREAM_ROLES = {"feature", "research", "analysis", "review", "integration"}
+GIT_READ_OPERATIONS = {"status", "log", "diff", "show", "branch", "rev-parse", "remote", "tag", "worktree"}
+GIT_READ_BLOCKED_ARGS = ("-c", "--config", "--config-env", "--exec-path", "--git-dir", "--work-tree", "-C", "--output", "--ext-diff", "--textconv", "--no-index")
 PROJECT_FIELDS = {
     "schemaVersion", "projectId", "gitCommonDir", "gitCommonDevice", "gitCommonInode",
     "objectFormat", "capabilityHash",
@@ -481,6 +483,40 @@ def status(repository: str | Path, capability: str | None = None) -> dict[str, A
         return {"projectId": project_id, "initialized": False}
     _project_context(repo, capability)
     return {"projectId": project_id, "initialized": True}
+
+
+def git_read(project_id: str, operation: str, git_args: list[str]) -> dict[str, Any]:
+    """Run one bounded, read-only Git operation in the registered repository."""
+    if operation not in GIT_READ_OPERATIONS:
+        raise SecretaryError("Git operation is not read-only or not supported")
+    if not isinstance(git_args, list):
+        raise SecretaryError("invalid Git arguments")
+    if git_args[:1] == ["--"]:
+        git_args = git_args[1:]
+    if len(git_args) > 32:
+        raise SecretaryError("too many Git arguments")
+    for value in git_args:
+        if not isinstance(value, str) or len(value) > 512 or any(ord(c) < 32 for c in value):
+            raise SecretaryError("invalid Git argument")
+        if value in GIT_READ_BLOCKED_ARGS or any(value.startswith(f"{prefix}=") for prefix in GIT_READ_BLOCKED_ARGS):
+            raise SecretaryError("Git configuration and repository overrides are not allowed")
+        if value in {"--exit-code", "--quiet", "--no-optional-locks", "-d", "-D", "--delete", "--force"}:
+            raise SecretaryError("Git argument is not supported")
+    if operation == "worktree" and (not git_args or git_args[0] != "list"):
+        raise SecretaryError("only git worktree list is supported")
+    info = launch_info(project_id)
+    repo = Path(info["primaryRepository"])
+    environment = _env()
+    environment.update({"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0"})
+    result = subprocess.run(["git", operation, *git_args], cwd=str(repo), text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=environment)
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise SecretaryError(f"git {operation} failed: {detail[:500]}")
+    if len(result.stdout.encode()) > MAX_JSON or len(result.stderr.encode()) > MAX_JSON:
+        raise SecretaryError("Git output is too large")
+    return {"projectId": project_id, "operation": operation, "args": git_args,
+            "stdout": result.stdout, "stderr": result.stderr}
 
 
 @contextlib.contextmanager
@@ -1654,6 +1690,8 @@ def _cli() -> int:
     p = sub.add_parser("launch-info"); p.add_argument("--project-id", required=True)
     p.add_argument("--internal-launch", action="store_true")
     sub.add_parser("status")
+    p = sub.add_parser("git-read"); p.add_argument("--project-id", required=True)
+    p.add_argument("--operation", required=True); p.add_argument("git_args", nargs=argparse.REMAINDER)
     p = sub.add_parser("brief-create"); p.add_argument("title"); p.add_argument("text")
     p = sub.add_parser("brief-read"); p.add_argument("brief_id")
     sub.add_parser("brief-list")
@@ -1701,6 +1739,8 @@ def _cli() -> int:
             result = launch_info(args.project_id, internal=args.internal_launch)
         elif args.command == "status":
             result = status(args.repository, args.capability)
+        elif args.command == "git-read":
+            result = git_read(args.project_id, args.operation, args.git_args)
         elif args.command == "brief-create":
             result = create_brief(args.repository, args.capability, args.title, args.text)
         elif args.command == "brief-read":

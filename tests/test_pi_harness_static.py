@@ -108,13 +108,13 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("pi-secretary-control.py", installer)
         self.assertIn('activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status"', installer)
         self.assertIn("for launcher in pi pi-host pidev pi-tmux-session pisec pi-secretary", installer)
-        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,secretary_record_idea", "--session-id", "--name"]:
+        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,secretary_git,secretary_record_idea", "--session-id", "--name"]:
             self.assertIn(flag, launcher)
-        self.assertEqual(launcher.count("-e \"$"), 2)
+        self.assertEqual(launcher.count("-e \"$"), 1)
         self.assertNotIn("--tools read,grep,find,ls,bash", launcher)
         for forbidden in ["task_packet", "--edit", "--write"]:
             self.assertNotIn(forbidden, launcher)
-        self.assertEqual(extension.count("pi.registerTool"), 10)
+        self.assertEqual(extension.count("pi.registerTool"), 11)
         self.assertIn("Current user turn did not authorize", extension)
         self.assertIn("fast-forward-only landing", extension)
         self.assertIn("Refuses dirty, live, moved, uncertain, or unlanded", extension)

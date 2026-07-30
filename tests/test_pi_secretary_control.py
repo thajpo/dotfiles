@@ -107,6 +107,16 @@ class SecretaryControlTests(unittest.TestCase):
         self.assertNotIn("secretarySessionId", project_record)
         self.assertTrue((state / "registry" / f"{self.initial['projectId']}.json").is_file())
 
+    def test_secretary_git_read_is_bounded_and_read_only(self):
+        registered = secretary.register_project(self.source, "git-project")
+        result = secretary.git_read(registered["projectId"], "status", [])
+        self.assertEqual(result["operation"], "status")
+        self.assertIn("On branch", result["stdout"])
+        with self.assertRaisesRegex(secretary.SecretaryError, "supported"):
+            secretary.git_read(registered["projectId"], "worktree", ["add", "/tmp/unsafe"])
+        with self.assertRaises(secretary.SecretaryError):
+            secretary.git_read(registered["projectId"], "diff", ["--output=/tmp/unsafe"])
+
     def test_concurrent_duplicate_alias_registration_fails_once(self):
         other = repo(Path(self.tmp.name), "other-repository")
         barrier = threading.Barrier(2)

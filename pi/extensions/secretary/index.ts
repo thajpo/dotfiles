@@ -87,7 +87,7 @@ export default function secretary(pi: ExtensionAPI): void {
       systemPrompt: event.systemPrompt + `\n\nYou are the persistent secretary for project ${alias} (project ID ${projectId}).\n` +
         "Switchboard boundary: inspect project evidence, record bounded ideas, and create/open peer full agents only after the current natural-language user turn explicitly authorizes it. " +
         "Apply this boundary over any skill suggestion to fan out: never use subagents. You are not a coding agent and cannot modify repository files, Git, or run shell commands. " +
-        "A promoted full agent owns implementation, its task_packet, direct technical discussion, and headless subagents. Never fabricate a user turn or relay general agent chat.\n\n" +
+        "A promoted full agent owns implementation, its task_packet, direct technical discussion, and headless subagents. Never fabricate a user turn or relay general agent chat. Use secretary_git for bounded read-only Git inspection; never claim Git is unavailable when that tool can answer.\n\n" +
         "## Project-status skill\n" + projectStatusSkill() +
         "\n\nUse only the read allowlist and secretary semantic tools. User affirmation such as 'yes' is sufficient authorization; never ask for a second form or confirmation.",
     };
@@ -100,6 +100,22 @@ export default function secretary(pi: ExtensionAPI): void {
     return result.stdout.trim();
   };
 
+  pi.registerTool({
+    name: "secretary_git", label: "Read Git",
+    description: "Run a bounded read-only Git operation in this registered project. This cannot modify the repository.",
+    parameters: Type.Object({
+      operation: Type.Union([
+        Type.Literal("status"), Type.Literal("log"), Type.Literal("diff"), Type.Literal("show"),
+        Type.Literal("branch"), Type.Literal("rev-parse"), Type.Literal("remote"), Type.Literal("tag"), Type.Literal("worktree"),
+      ]),
+      args: Type.Optional(Type.Array(Type.String({ maxLength: 512 }), { maxItems: 32 })),
+    }),
+    async execute(_id, params, signal) {
+      const { projectId } = requiredEnvironment();
+      const text = await invoke(["git-read", "--project-id", projectId, "--operation", params.operation, "--", ...(params.args ?? [])], signal);
+      return { content: [{ type: "text", text }], details: {} };
+    },
+  });
   pi.registerTool({
     name: "secretary_record_idea", label: "Record idea",
     description: "Record a bounded idea after the user explicitly asks to save, record, or park it.",

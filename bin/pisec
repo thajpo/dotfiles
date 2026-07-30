@@ -10,7 +10,14 @@ dotfiles_dir=$(realpath "$self_dir/..")
 control="$dotfiles_dir/scripts/pi-secretary-control.py"
 if [[ -f "$HOME/.local/share/pi/control/pi-secretary-control.py" ]]; then control="$HOME/.local/share/pi/control/pi-secretary-control.py"; fi
 
-usage() { printf '%s\n' 'usage: pisec [register --alias ALIAS [REPOSITORY] | list | launch-info PROJECT_ID | open]'; }
+declare -a default_aliases=(vla-lens csv-agent vla-infra SleepyDreamyV3)
+usage() {
+  printf '%s\n' 'usage: pisec [register --alias ALIAS [REPOSITORY] | list | launch-info PROJECT_ID | open]'
+  printf '%s\n' '       pisec                 (open the default four projects)'
+  printf '%s\n' '       pisec activate ALIAS [ALIAS ...]'
+  printf '%s\n' '       pisec swap ACTIVE_ALIAS INACTIVE_ALIAS'
+  printf '%s\n' '       each projects-N window contains at most two side-by-side secretary panes'
+}
 
 registry_json() { /usr/bin/python3 "$control" registry-list; }
 registry_rows() {
@@ -27,7 +34,10 @@ print(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)).deco
 PY
 }
 
-case "${1:-}" in
+action=${1:-default}
+declare -a requested_aliases=()
+swap_old=""; swap_new=""
+case "$action" in
   register)
     shift; alias=""; repository="."
     while (( $# )); do
@@ -50,8 +60,21 @@ case "${1:-}" in
     [[ $# -eq 2 && "$2" =~ ^[0-9a-f]{64}$ ]] || { usage >&2; exit 2; }
     exec /usr/bin/python3 "$control" launch-info --project-id "$2"
     ;;
+  default)
+    [[ $# -eq 0 ]] || { usage >&2; exit 2; }
+    requested_aliases=("${default_aliases[@]}")
+    ;;
   open|launch)
     [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+    ;;
+  activate|use)
+    shift
+    (( $# >= 1 )) || { usage >&2; exit 2; }
+    requested_aliases=("$@")
+    ;;
+  swap)
+    [[ $# -eq 3 ]] || { usage >&2; exit 2; }
+    swap_old=$2; swap_new=$3
     ;;
   "")
     [[ $# -eq 0 ]] || { usage >&2; exit 2; }
@@ -82,30 +105,26 @@ flock -x "$lock_fd"
 fail() { printf 'pisec: %s\n' "$1" >&2; exit 1; }
 
 session=pisec
-window_name=projects
 self_launch="$self_dir/pi-secretary"
-# Query commands distinguish tmux observation failure from a normal miss.
+# Each projects-N window is a small, predictable two-pane side-by-side group.
 tmux_has() { tmux has-session -t "=$session" >/dev/null 2>&1; }
-if tmux_has; then session_exists=1; else rc=$?; [[ $rc -eq 1 ]] || fail 'cannot query pisec session'; session_exists=0; fi
 window_rows() { tmux list-windows -t "=$session" -F $'#{window_id}\t#{window_name}' 2>/dev/null; }
 pane_rows() { tmux list-panes -t "$1" -F $'#{pane_id}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_title}' 2>/dev/null; }
-
-if (( ! session_exists )); then
-  window_id=$(tmux new-session -d -P -F '#{window_id}' -s "$session" -n "$window_name" -c "$HOME" 'exec sh') || fail 'cannot create pisec session'
-  [[ "$window_id" =~ ^@ ]] || fail 'tmux returned an invalid projects window id'
-  newly_created=1
-else
-  newly_created=0
+declare -a window_ids=() window_names=()
+if tmux_has; then
+  session_exists=1
   windows=$(window_rows) || fail 'cannot query pisec windows'
-  window_id=""; window_count=0
   while IFS=$'\t' read -r wid name; do
     [[ -n "$wid" ]] || continue
-    window_count=$((window_count + 1))
-    [[ "$name" == "$window_name" ]] && { window_id=$wid; }
+    [[ "$name" == projects || "$name" =~ ^projects-[1-9][0-9]*$ ]] || fail 'pisec session contains an unexpected window; recreate the pisec session'
+    window_ids+=("$wid"); window_names+=("$name")
   done <<< "$windows"
-  if (( window_count != 1 )) || [[ -z $window_id ]]; then
-    fail 'pisec session does not contain exactly one projects window'
-  fi
+  (( ${#window_ids[@]} > 0 )) || fail 'pisec session has no project windows'
+else
+  session_exists=0
+  window_id=$(tmux new-session -d -P -F '#{window_id}' -s "$session" -n projects-1 -c "$HOME" 'exec sh') || fail 'cannot create pisec session'
+  [[ "$window_id" =~ ^@ ]] || fail 'tmux returned an invalid projects window id'
+  window_ids+=("$window_id"); window_names+=(projects-1)
 fi
 
 # Exact launcher/process proof. A shell wrapper is accepted only when its next
@@ -123,13 +142,22 @@ launcher_project() {
   printf '%s\n' "${argv[$((index + 3))]}"
 }
 descendant_has_session() {
-  local parent=$1 wanted=$2 args children child rc
+  local parent=$1 wanted_id=$2 wanted_session=$3 args children child env_values rc
   if args=$(ps -o args= -p "$parent" 2>/dev/null); then :; else return 2; fi
-  [[ " $args " == *" --session-id $wanted "* ]] && return 0
+  [[ " $args " == *" --session-id $wanted_session "* ]] && return 0
+  # Pi may rewrite its argv to just `pi` after startup. The launcher path and
+  # project ID are already exact-checked; retain the read-only environment as
+  # the process identity proof when the session flag is no longer observable.
+  if [[ -r "/proc/$parent/environ" ]] && env_values=$(tr '\0' '\n' < "/proc/$parent/environ"); then
+    if grep -Fxq "PI_SECRETARY_PROJECT_ID=$wanted_id" <<< "$env_values" &&
+       grep -Fxq 'PI_SECRETARY_READ_ONLY=1' <<< "$env_values"; then
+      return 0
+    fi
+  fi
   if children=$(pgrep -P "$parent" 2>/dev/null); then :; else rc=$?; [[ $rc -eq 1 ]] && return 1; return 2; fi
   while read -r child; do
     [[ -n $child ]] || continue
-    if descendant_has_session "$child" "$wanted"; then return 0; else rc=$?; [[ $rc -eq 1 ]] || return 2; fi
+    if descendant_has_session "$child" "$wanted_id" "$wanted_session"; then return 0; else rc=$?; [[ $rc -eq 1 ]] || return 2; fi
   done <<< "$children"
   return 1
 }
@@ -138,7 +166,7 @@ process_is_secretary() {
   if args=$(ps -o args= -p "$parent" 2>/dev/null); then :; else return 2; fi
   if found=$(launcher_project "$args"); then
     [[ $found == "$wanted_id" ]] || return 1
-    descendant_has_session "$parent" "$wanted_session"
+    descendant_has_session "$parent" "$wanted_id" "$wanted_session"
     return $?
   fi
   if children=$(pgrep -P "$parent" 2>/dev/null); then :; else rc=$?; [[ $rc -eq 1 ]] && return 1; return 2; fi
@@ -172,75 +200,131 @@ pane_idle_shell() {
   if children=$(pgrep -P "$pid" 2>/dev/null); then [[ -z "$children" ]] && return 0; return 1; else rc=$?; [[ $rc -eq 1 ]] && return 0; return 2; fi
 }
 
-panes=$(pane_rows "$window_id") || fail 'cannot query projects panes'
-declare -a pane_ids=() pane_pids=() pane_commands=() pane_titles=()
-while IFS=$'\t' read -r pane_id pane_index pane_pid pane_command pane_title; do
-  [[ -n "$pane_id" ]] || continue
-  pane_ids+=("$pane_id"); pane_pids+=("$pane_pid"); pane_commands+=("$pane_command"); pane_titles+=("$pane_title")
-done <<< "$panes"
-(( ${#pane_ids[@]} > 0 )) || fail 'projects window has no panes'
-(( ${#pane_ids[@]} <= project_count )) || fail 'unknown extra pane in projects window'
-
-# Map live processes first; pane titles are labels only and may be changed by a
-# restored TUI. Idle panes may be repaired by an exact unique alias title.
-declare -a mapped=()
+# Validate every existing pane before rebuilding. Live process identity is
+# authoritative; idle shells are allowed as placeholders during a restore.
+declare -a pane_ids=() pane_pids=() pane_commands=() pane_titles=() pane_window_ids=()
+declare -a mapped=() live_indices=()
 for _id in "${ids[@]}"; do mapped+=(0); done
-for i in "${!pane_ids[@]}"; do
-  matched=-1
-  for j in "${!ids[@]}"; do
-    if process_is_secretary "${pane_pids[$i]}" "${ids[$j]}" "${session_ids[$j]}"; then
-      (( matched == -1 )) || fail 'pane matches multiple secretary records'
-      matched=$j
+for window_id in "${window_ids[@]}"; do
+  panes=$(pane_rows "$window_id") || fail 'cannot query projects panes'
+  window_pane_count=0
+  while IFS=$'\t' read -r pane_id pane_index pane_pid pane_command pane_title; do
+    [[ -n "$pane_id" ]] || continue
+    window_pane_count=$((window_pane_count + 1))
+    pane_ids+=("$pane_id"); pane_pids+=("$pane_pid"); pane_commands+=("$pane_command")
+    pane_titles+=("$pane_title"); pane_window_ids+=("$window_id")
+    matched=-1
+    for j in "${!ids[@]}"; do
+      if process_is_secretary "$pane_pid" "${ids[$j]}" "${session_ids[$j]}"; then
+        (( matched == -1 )) || fail 'pane matches multiple secretary records'
+        matched=$j
+      else
+        rc=$?
+        (( rc == 1 )) || fail 'cannot inspect secretary pane process'
+      fi
+    done
+    if (( matched >= 0 )); then
+      (( mapped[$matched] == 0 )) || fail 'duplicate live secretary process'
+      mapped[$matched]=1; live_indices+=("$matched")
+      continue
+    fi
+    if process_is_any_secretary "$pane_pid"; then
+      fail 'pane runs an unregistered secretary process'
     else
       rc=$?
-      (( rc == 1 )) || fail 'cannot inspect secretary pane process'
+      (( rc == 1 )) || fail 'cannot inspect pane process'
+    fi
+    if pane_idle_shell "$pane_command" "$pane_pid"; then :; else
+      rc=$?; (( rc == 1 )) && fail 'missing secretary pane is not idle'; fail 'cannot inspect idle pane'
+    fi
+  done <<< "$panes"
+  (( window_pane_count > 0 )) || fail 'projects window has no panes'
+done
+
+# Resolve the desired active set. The order supplied to activate is also the
+# window/pane order, making rearrangement explicit and easy.
+declare -a target_indices=() target_flags=()
+for _id in "${ids[@]}"; do target_flags+=(0); done
+alias_index() {
+  local wanted=$1 j
+  for j in "${!aliases[@]}"; do
+    [[ "${aliases[$j]}" == "$wanted" ]] && { printf '%s\n' "$j"; return 0; }
+  done
+  return 1
+}
+if (( ${#requested_aliases[@]} > 0 )); then
+  for wanted in "${requested_aliases[@]}"; do
+    found=$(alias_index "$wanted") || fail "unknown project alias: $wanted"
+    (( target_flags[$found] == 0 )) || fail "project alias listed twice: $wanted"
+    target_flags[$found]=1; target_indices+=("$found")
+  done
+elif [[ "$action" == swap ]]; then
+  old_index=$(alias_index "$swap_old") || fail "unknown project alias: $swap_old"
+  new_index=$(alias_index "$swap_new") || fail "unknown project alias: $swap_new"
+  (( old_index != new_index )) || fail 'swap requires two different project aliases'
+  old_live=0; new_live=0
+  for j in "${live_indices[@]}"; do
+    [[ "$j" == "$old_index" ]] && old_live=1
+    [[ "$j" == "$new_index" ]] && new_live=1
+    if [[ "$j" == "$old_index" ]]; then target_indices+=("$new_index"); target_flags[$new_index]=1
+    else target_indices+=("$j"); target_flags[$j]=1
     fi
   done
-  if (( matched >= 0 )); then
-    (( mapped[$matched] == 0 )) || fail 'duplicate live secretary process'
-    mapped[$matched]=1
-    tmux select-pane -t "${pane_ids[$i]}" -T "${aliases[$matched]}" || fail 'cannot title secretary pane'
-    continue
-  fi
-  if process_is_any_secretary "${pane_pids[$i]}"; then
-    fail 'pane runs an unregistered secretary process'
+  (( old_live == 1 )) || fail "project is not active: $swap_old"
+  (( new_live == 0 )) || fail "project is already active: $swap_new"
+else
+  if (( ${#live_indices[@]} > 0 )); then
+    for j in "${live_indices[@]}"; do target_indices+=("$j"); target_flags[$j]=1; done
   else
-    rc=$?
-    (( rc == 1 )) || fail 'cannot inspect pane process'
-  fi
-  alias_match=-1
-  for j in "${!ids[@]}"; do
-    [[ "${pane_titles[$i]}" == "${aliases[$j]}" ]] || continue
-    (( alias_match == -1 )) || fail 'pane title matches multiple projects'
-    alias_match=$j
-  done
-  if (( alias_match < 0 )); then
-    (( newly_created == 1 && ${#pane_ids[@]} == 1 )) || fail 'unknown pane state in projects window'
+    for wanted in "${default_aliases[@]}"; do
+      found=$(alias_index "$wanted") || continue
+      (( target_flags[$found] == 0 )) || continue
+      target_flags[$found]=1; target_indices+=("$found")
+    done
     for j in "${!ids[@]}"; do
-      (( mapped[$j] == 0 )) || continue
-      alias_match=$j
-      break
+      (( target_flags[$j] == 0 )) || continue
+      target_flags[$j]=1; target_indices+=("$j")
     done
   fi
-  (( alias_match >= 0 && mapped[$alias_match] == 0 )) || fail 'duplicate or missing secretary pane mapping'
-  if pane_idle_shell "${pane_commands[$i]}" "${pane_pids[$i]}"; then :; else
-    rc=$?; (( rc == 1 )) && fail 'missing secretary pane is not idle'; fail 'cannot inspect idle pane'
-  fi
-  command=$(secretary_command "${ids[$alias_match]}")
-  tmux select-pane -t "${pane_ids[$i]}" -T "${aliases[$alias_match]}" || fail 'cannot title secretary pane'
-  tmux send-keys -t "${pane_ids[$i]}" "$command" C-m || fail 'cannot start secretary pane'
-  mapped[$alias_match]=1
-done
-for j in "${!ids[@]}"; do
-  (( mapped[$j] == 1 )) && continue
-  new_pane=$(tmux split-window -d -P -F '#{pane_id}' -t "$window_id" -c "$HOME" 'exec sh') || fail 'cannot create secretary pane'
-  [[ "$new_pane" =~ ^% ]] || fail 'tmux returned an invalid secretary pane id'
-  tmux select-pane -t "$new_pane" -T "${aliases[$j]}" || fail 'cannot title secretary pane'
-  command=$(secretary_command "${ids[$j]}")
-  tmux send-keys -t "$new_pane" "$command" C-m || fail 'cannot start secretary pane'
-done
-tmux select-layout -t "$window_id" tiled || fail 'cannot tile projects window'
+fi
+target_count=${#target_indices[@]}
+(( target_count > 0 )) || fail 'no active projects selected'
 
-if [[ "${1:-open}" == open || -z "${1:-}" ]]; then
-  if [[ -n "${TMUX:-}" ]]; then exec tmux switch-client -t "=$session:$window_id"; else exec tmux attach-session -t "=$session:$window_id"; fi
+# Rebuild the pisec session into two-pane windows. Pi sessions are persistent
+# on disk, so this safely rearranges panes without losing secretary history.
+tmux kill-session -t "=$session" || fail 'cannot rebuild pisec session'
+window_count=$(( (target_count + 1) / 2 ))
+declare -a rebuilt_windows=()
+for ((w=1; w<=window_count; w++)); do
+  window_name="projects-$w"
+  if (( w == 1 )); then
+    rebuilt=$(tmux new-session -d -P -F '#{window_id}' -s "$session" -n "$window_name" -c "$HOME" 'exec sh') || fail 'cannot create pisec session'
+  else
+    rebuilt=$(tmux new-window -d -P -F '#{window_id}' -t "=$session" -n "$window_name" -c "$HOME" 'exec sh') || fail 'cannot create pisec window'
+  fi
+  [[ "$rebuilt" =~ ^@ ]] || fail 'tmux returned an invalid projects window id'
+  rebuilt_windows+=("$rebuilt")
+  first_pane=""
+  while IFS=$'\t' read -r pane_id _rest; do
+    [[ -n "$pane_id" ]] && { first_pane=$pane_id; break; }
+  done < <(tmux list-panes -t "$rebuilt" -F $'#{pane_id}\t#{pane_index}')
+  [[ "$first_pane" =~ ^% ]] || fail 'tmux returned no initial project pane'
+  for slot in 0 1; do
+    target_position=$(( (w - 1) * 2 + slot ))
+    (( target_position < target_count )) || break
+    if (( slot == 0 )); then
+      pane_target=$first_pane
+    else
+      pane_target=$(tmux split-window -h -d -P -F '#{pane_id}' -t "$rebuilt" -c "$HOME" 'exec sh') || fail 'cannot create secretary pane'
+      [[ "$pane_target" =~ ^% ]] || fail 'tmux returned an invalid secretary pane id'
+    fi
+    tmux select-pane -t "$pane_target" -T "${aliases[${target_indices[$target_position]}]}" || fail 'cannot title secretary pane'
+    command=$(secretary_command "${ids[${target_indices[$target_position]}]}")
+    tmux send-keys -t "$pane_target" "$command" C-m || fail 'cannot start secretary pane'
+  done
+  tmux select-layout -t "$rebuilt" even-horizontal || fail 'cannot arrange projects window'
+done
+
+if [[ "$action" == default || "$action" == open || "$action" == "" ]]; then
+  if [[ -n "${TMUX:-}" ]]; then exec tmux switch-client -t "=$session:${rebuilt_windows[0]}"; else exec tmux attach-session -t "=$session:${rebuilt_windows[0]}"; fi
 fi

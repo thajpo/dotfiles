@@ -205,6 +205,7 @@ threshold is `-55 dBFS`. Override calibration with
 - One shared execution plane for parent, subagents, and pi-btw
 - Explicit unsandboxed `pi-host` maintenance launcher
 - `pidev` is the managed Pi development launcher and keeps stable project sessions for tmux-resurrect
+- `pisec` opens the default four secretary projects (`vla-lens`, `csv-agent`, `vla-infra`, `SleepyDreamyV3`) and arranges any active set into two side-by-side panes per tmux window; use `pisec activate ALIAS ...` to rearrange/select projects or `pisec swap OLD_ALIAS NEW_ALIAS` to replace one without re-registering projects
 - Installs to `~/.pi/agent` without tracking credentials, sessions, or runtime state
 
 ### Tools installed
