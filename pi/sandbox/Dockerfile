@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
-# Pinned amd64 Node 22 image; Debian slim avoids a second Node/npm stack.
-FROM node:22-bookworm-slim@sha256:8607a9064d4a571140998ae9e52a3b3fcf9cff361d04642d5971e6cd76d39e27
+# Pinned multi-architecture Node 22 image; Debian slim avoids a second
+# Node/npm stack while Docker resolves the native Linux platform.
+FROM node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
 
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
