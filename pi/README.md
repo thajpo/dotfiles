@@ -40,7 +40,9 @@ resource without receiving host repository metadata.
 
 A clean protected checkout receives a linked `pi/<session>` worktree below the
 configured worktree root. A dirty protected checkout fails without stashing,
-copying, resetting, or discarding anything.
+copying, resetting, or discarding anything, except for the exact configured
+control-plane repository, which stays trusted-live so repairs cannot deadlock
+behind the dirty checkout they are meant to repair.
 
 ### Isolated
 

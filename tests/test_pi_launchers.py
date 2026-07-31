@@ -262,6 +262,62 @@ class LauncherTests(unittest.TestCase):
             self.assertTrue(Path(invocation["env"]["PI_TASK_ROUTE_FILE"]).is_file())
             self.assertNotIn("hijacked", result.stderr)
 
+    def test_installed_launchers_use_control_plane_helper_when_repo_path_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            installed = home / ".local/bin"
+            control = home / ".local/share/pi/control"
+            core = home / ".local/share/pi/core/node_modules/.bin"
+            installed.mkdir(parents=True)
+            control.mkdir(parents=True)
+            core.mkdir(parents=True)
+            output = root / "pi-output.json"
+            fake_pi = core / "pi"
+            fake_pi.write_text("""#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+Path(os.environ["FAKE_PI_OUTPUT"]).write_text(json.dumps(sys.argv[1:]))
+""")
+            fake_pi.chmod(0o755)
+            helper = control / "pi-workspace.py"
+            helper.write_text("""#!/usr/bin/env python3
+import os
+import sys
+if sys.argv[1] != "resolve-pi":
+    raise SystemExit(2)
+print(os.environ["FAKE_PI"])
+""")
+            helper.chmod(0o755)
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(home),
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "FAKE_PI": str(fake_pi),
+                "FAKE_PI_OUTPUT": str(output),
+            })
+            for key in list(env):
+                if key.startswith("PI_TASK_") or key.startswith("PI_SUBAGENT_"):
+                    env.pop(key)
+
+            for name, arguments in (("pi", ["--help"]), ("pi-host", ["--help"])):
+                launcher = installed / name
+                launcher.write_text((ROOT / "bin" / name).read_text())
+                launcher.chmod(0o755)
+                result = subprocess.run(
+                    [str(launcher), *arguments], cwd=home, env=env, text=True, capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, f"{name}: {result.stderr}")
+                self.assertNotIn(".local/scripts/pi-workspace.py", result.stderr)
+                invocation = json.loads(output.read_text())
+                if name == "pi":
+                    self.assertEqual(invocation, arguments)
+                else:
+                    for flag in ["--no-context-files", "--no-extensions", "--no-skills", "--no-prompt-templates", "--help"]:
+                        self.assertIn(flag, invocation)
+
     def test_workspace_and_trust_selector_flags_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, repo, _, env = setup_home(Path(tmp))

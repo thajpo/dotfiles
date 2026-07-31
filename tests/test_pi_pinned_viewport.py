@@ -31,6 +31,18 @@ if (!isMouseInput(up) || !isMouseInput(up + down) || isMouseInput("plain")) thro
 if (stripMouseInput(`a${{up}}b${{down}}`) !== "ab") throw new Error("mixed input stripping");
 if (parseWheelDirection(up + up + down) !== 1) throw new Error("batched wheel");
 if (parseWheelDirection("\\x1b[<66;10;4M") !== 0) throw new Error("horizontal wheel");
+let copied = "";
+const browse = new PinnedConversationViewport(tui, conversation, controls, (text) => {{ copied = text; }});
+browse.render(80);
+browse.enterBrowseMode();
+browse.handleBrowseInput("k");
+browse.handleBrowseInput("v");
+browse.handleBrowseInput("k");
+browse.handleBrowseInput("y");
+if (copied !== "c7\\nc8") throw new Error(`browse yank: ${{JSON.stringify(copied)}}`);
+if (!browse.render(80).some((line) => line.includes("\\x1b[7m"))) throw new Error("browse cursor highlight");
+browse.handleBrowseInput("i");
+if (browse.isBrowsing()) throw new Error("browse exit");
 """
         result = subprocess.run(
             ["node", "--input-type=module", "-e", script],
@@ -41,6 +53,10 @@ if (parseWheelDirection("\\x1b[<66;10;4M") !== 0) throw new Error("horizontal wh
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_core_patch_is_versioned_and_installed_transactionally(self):
+        settings = (ROOT / "pi/settings.json").read_text()
+        package = (ROOT / "pi/npm/package.json").read_text()
+        self.assertNotIn("@tifan/pi-fixed-editor", settings)
+        self.assertNotIn("@tifan/pi-fixed-editor", package)
         installer = (ROOT / "install.sh").read_text()
         patcher = (ROOT / "scripts/pi-patch-core").read_text()
         patch = (ROOT / "pi/patches/pi-coding-agent-0.82.1-pinned-editor.patch").read_text()
@@ -52,6 +68,9 @@ if (parseWheelDirection("\\x1b[<66;10;4M") !== 0) throw new Error("horizontal wh
         self.assertIn("stripMouseInput", patch)
         self.assertIn("conversationViewportContainer.addChild(this.widgetContainerBelow)", patch)
         self.assertIn("pinnedControlsContainer.addChild(this.editorContainer)", patch)
+        self.assertIn("isBrowsing", patch)
+        self.assertIn("handleBrowseInput", patch)
+        self.assertIn("copyToClipboard", patch)
         self.assertIn("MOUSE_TRACKING_ENABLE_SEQUENCE", patch)
 
 

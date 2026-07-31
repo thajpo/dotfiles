@@ -45,7 +45,7 @@ def write_policy(home: Path, repo: Path, *, trusted=True, isolated=False, contro
         "worktreeRoot": str(home / ".local/share/pi/worktrees"),
     }
     target = home / ".config/pi/repository-policy.json"
-    target.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(policy))
     target.chmod(0o600)
     return target
@@ -145,6 +145,9 @@ class WorkspacePreparationTests(unittest.TestCase):
     def test_protected_dirty_checkout_is_refused_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
             home, repo = self.prepare_home(Path(tmp))
+            # This is an ordinary trusted repository, not the harness control
+            # plane. Dirty protected checkouts must still fail closed.
+            write_policy(home, repo, control=False)
             (repo / "untracked.txt").write_text("human work\n")
             before = git(repo, "status", "--porcelain=v1", "--untracked-files=all")
             with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
@@ -152,6 +155,17 @@ class WorkspacePreparationTests(unittest.TestCase):
                     ws.prepare(repo, os.getpid())
             self.assertEqual(git(repo, "status", "--porcelain=v1", "--untracked-files=all"), before)
             self.assertFalse((home / ".local/share/pi/worktrees/repo").exists())
+
+    def test_dirty_control_plane_checkout_stays_live_for_repair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, repo = self.prepare_home(Path(tmp))
+            (repo / "launcher-fix.txt").write_text("in progress\n")
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                prepared = ws.prepare(repo, os.getpid())
+            self.assertEqual(Path(prepared["worktree"]), repo)
+            self.assertEqual(prepared["mode"], "trusted-live")
+            self.assertTrue(prepared["controlPlane"])
+            self.assertEqual(git(repo, "status", "--porcelain=v1", "--untracked-files=all"), "?? launcher-fix.txt")
 
     def test_protected_clean_checkout_creates_linked_task_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:

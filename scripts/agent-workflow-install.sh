@@ -34,8 +34,9 @@ mkdir -p "$DOTFILES_DIR/skills" "$HOME/.config/opencode" "$HOME/.codex"
 link_file "$DOTFILES_DIR/skills" "$HOME/.skills"
 link_file "$HOME/.skills" "$HOME/.config/opencode/skills"
 link_file "$HOME/.skills" "$HOME/.codex/skills"
-mkdir -p "$HOME/.agents/skills"
-link_file "$DOTFILES_DIR/skills/project-status" "$HOME/.agents/skills/project-status"
+# Do not populate ~/.agents/skills: Pi scans that global Codex-compatible path
+# too, so duplicating project-status there creates a name collision. The
+# shared ~/.codex/skills link above already exposes it to Codex.
 
 if [[ $# -ne 0 ]]; then
   printf 'usage: %s\n' "$0" >&2

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Deterministic entry point for booting the Pi tmux workspaces.
+set -euo pipefail
+
+if (( EUID == 0 )); then
+  printf 'pi-start: refusing to run as root\n' >&2
+  exit 1
+fi
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+personal="$HOME/.local/bin/pi-personal"
+pisec="$HOME/.local/bin/pisec"
+pidev="$HOME/.local/bin/pidev"
+[[ -x "$personal" ]] || personal="$self_dir/pi-personal"
+[[ -x "$pisec" ]] || pisec="$self_dir/pisec"
+[[ -x "$pidev" ]] || pidev="$self_dir/pidev"
+
+usage() {
+  printf '%s\n' \
+    'usage: pi-start [personal|secretary|project [DIR]|host|all|help]' \
+    '       default: start tmux, ensure pi-personal, and attach to it' >&2
+}
+
+command -v tmux >/dev/null 2>&1 || { printf 'pi-start: tmux is required\n' >&2; exit 127; }
+
+action=${1:-personal}
+case "$action" in
+  personal|secretary|project|host|all|help) ;;
+  *) usage; exit 2 ;;
+esac
+
+if [[ "$action" == help ]]; then
+  exec "$self_dir/pi-help-custom"
+fi
+
+# Creating a detached main session starts the tmux server and loads ~/.tmux.conf
+# without stealing the caller's terminal. The personal and secretary sessions
+# remain separate, so switching never destroys the shell session.
+if tmux has-session -t =main 2>/dev/null; then
+  :
+else
+  rc=$?
+  [[ $rc -eq 1 ]] || { printf 'pi-start: cannot query tmux sessions\n' >&2; exit 1; }
+  tmux new-session -d -s main -n shell -c "$HOME" 'exec bash' || {
+    printf 'pi-start: cannot create the main tmux session\n' >&2
+    exit 1
+  }
+fi
+
+case "$action" in
+  personal)
+    "$personal" --ensure
+    ;;
+  secretary)
+    exec "$pisec"
+    ;;
+  project)
+    directory=${2:-$PWD}
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    [[ -d "$directory" ]] || { printf 'pi-start: missing project directory: %s\n' "$directory" >&2; exit 1; }
+    cd -- "$directory"
+    exec "$pidev"
+    ;;
+  host|all)
+    "$personal" --ensure
+    if [[ "$action" == all ]]; then
+      exec "$pisec"
+    fi
+    ;;
+esac
+
+if [[ "$action" == host ]]; then
+  host_pane=$(tmux list-panes -t =pi-personal:personal -F '#{pane_id}\t#{@pi_personal_role}' 2>/dev/null | awk -F '\t' '$2 == "pi-host" { print $1; exit }')
+  [[ -n "$host_pane" ]] || { printf 'pi-start: pi-host pane was not found\n' >&2; exit 1; }
+  tmux select-pane -t "$host_pane"
+fi
+
+if [[ -n ${TMUX:-} ]]; then
+  exec tmux switch-client -t =pi-personal:personal
+else
+  exec tmux attach-session -t =pi-personal:personal
+fi

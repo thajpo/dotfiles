@@ -464,7 +464,11 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
     worktree = repository
     starting_status = git_output(repository, "status", "--porcelain=v1", "--untracked-files=all")
     protected = branch in policy["protectedBranches"]
-    if not read_only and mode == "trusted-live" and (protected or not branch):
+    # The exact control-plane repository is the repair surface for this
+    # harness. Refusing its dirty protected checkout would prevent Pi from
+    # repairing the launcher/config that is already being edited. Ordinary
+    # protected repositories retain the clean linked-worktree boundary.
+    if not read_only and mode == "trusted-live" and (protected or not branch) and not (control_plane and starting_status):
         worktree, branch = create_linked_worktree(
             repository,
             pathlib.Path(policy["worktreeRoot"]),

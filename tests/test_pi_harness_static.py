@@ -122,6 +122,7 @@ class HarnessStaticTests(unittest.TestCase):
             "GIT_CONFIG_GLOBAL=/run/pi/GIT_CONFIG_GLOBAL",
             "GIT_CONFIG_NOSYSTEM=1",
             "must have exactly one read-only Git identity",
+            "--no-same-owner",
         ]:
             self.assertIn(evidence, patch)
         self.assertIn("candidatePrefix", patch)
@@ -155,11 +156,14 @@ class HarnessStaticTests(unittest.TestCase):
         launcher = (ROOT / "bin/pi-secretary").read_text()
         extension = (ROOT / "pi/extensions/secretary/index.ts").read_text()
         self.assertIn("pi-secretary-control.py", installer)
-        self.assertIn('activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status"', installer)
-        self.assertIn("for launcher in pi pi-host pidev pi-tmux-session pisec pi-personal pi-secretary", installer)
+        self.assertIn('skill_rollback_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pi/rollback/skills"', installer)
+        self.assertIn('activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status" "$skill_rollback_dir"', installer)
+        self.assertIn('rollback_dir="${3:-$(dirname "$target")}"', installer)
+        self.assertIn("for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary", installer)
         for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,subagent,secretary_git,secretary_record_idea", "--session-id", "--name"]:
             self.assertIn(flag, launcher)
-        self.assertEqual(launcher.count("-e \"$"), 2)
+        self.assertEqual(launcher.count("-e \"$"), 3)
+        self.assertIn('fast_mode_extension="$agent_dir/extensions/fast-mode/index.ts"', launcher)
         self.assertNotIn("--tools read,grep,find,ls,bash", launcher)
         for forbidden in ["task_packet", "--edit", "--write"]:
             self.assertNotIn(forbidden, launcher)
@@ -192,6 +196,9 @@ class HarnessStaticTests(unittest.TestCase):
         receipt_extension = (ROOT / "pi/extensions/review-receipt/index.ts").read_text()
         self.assertEqual(receipt_extension.count("pi.registerTool"), 1)
         self.assertIn("PI_REVIEW_CANDIDATE_OID", receipt_extension)
+        self.assertIn("PI_REVIEW_CAPABILITY", receipt_extension)
+        self.assertIn("reviewAssignment", receipt_extension)
+        self.assertIn("if (!assigned) return;", receipt_extension)
         self.assertLess(brief_extension.index("pi.appendEntry"), brief_extension.index("pi.sendUserMessage"))
 
     def test_pidev_is_installed_as_a_managed_pi_wrapper(self):
@@ -200,13 +207,33 @@ class HarnessStaticTests(unittest.TestCase):
         tmux_helper = (ROOT / "bin/pi-tmux-session").read_text()
         self.assertTrue((ROOT / "bin/pidev").stat().st_mode & 0o111)
         self.assertTrue((ROOT / "bin/pi-tmux-session").stat().st_mode & 0o111)
-        self.assertIn("for launcher in pi pi-host pidev pi-tmux-session", installer)
+        self.assertTrue((ROOT / "bin/pi-start").stat().st_mode & 0o111)
+        self.assertTrue((ROOT / "bin/pi-help-custom").stat().st_mode & 0o111)
+        self.assertIn("for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session", installer)
         self.assertIn("--session-id", pidev)
         self.assertIn("tmux new-session", pidev)
         self.assertIn("-F $'#{window_id}\\t#{window_name}'", pidev)
         self.assertIn("-F $'#{pane_id}\\t#{pane_index}\\t#{pane_pid}\\t#{pane_current_command}'", pidev)
         self.assertIn('"$self_dir/pi-tmux-session" "$@"', pidev)
-        self.assertIn('exec "$self_dir/pi" "$@"', tmux_helper)
+        self.assertIn('"$self_dir/pi" "$@"', tmux_helper)
+        self.assertNotIn('exec "$self_dir/pi" "$@"', tmux_helper)
+
+    def test_tmux_workspace_clients_release_repair_locks_before_attach(self):
+        personal = (ROOT / "bin/pi-personal").read_text()
+        secretary = (ROOT / "bin/pisec").read_text()
+        personal_release = 'eval "exec ${personal_lock_fd}>&-"'
+        secretary_release = 'eval "exec ${lock_fd}>&-"'
+        self.assertIn(personal_release, personal)
+        self.assertIn(secretary_release, secretary)
+        self.assertLess(personal.index(personal_release), personal.index("exec tmux switch-client"))
+        self.assertLess(secretary.index(secretary_release), secretary.index("exec tmux switch-client"))
+
+    def test_fast_mode_uses_openai_priority_service_tier(self):
+        extension = (ROOT / "pi/extensions/fast-mode/index.ts").read_text()
+        self.assertIn('pi.registerCommand("fast"', extension)
+        self.assertIn('service_tier: "priority"', extension)
+        self.assertIn('OPENAI_PROVIDERS', extension)
+        self.assertIn('Usage: /fast [on|off|status]', extension)
 
     def test_tmux_resurrect_and_continuum_ordering_is_conservative(self):
         config = (ROOT / "tmux.conf").read_text()
@@ -227,8 +254,8 @@ class HarnessStaticTests(unittest.TestCase):
         value = shlex.split(line)[3]
         elements = shlex.split(value)
         patterns = [element[1:] for element in elements if element.startswith("~")]
-        self.assertEqual(len(patterns), 4)
-        self.assertEqual(len([element for element in elements if element.startswith("~")]), 4)
+        self.assertEqual(len(patterns), 5)
+        self.assertEqual(len([element for element in elements if element.startswith("~")]), 5)
 
         # tmux-resurrect feeds each ~ entry as one ERE against the complete
         # command line. Python's equivalent needs POSIX space classes lowered.
@@ -238,9 +265,10 @@ class HarnessStaticTests(unittest.TestCase):
 
         known = [
             ("/home/j/.local/bin/pidev --launch --session-id stable", "pidev"),
-            ("/usr/bin/bash /home/j/.local/bin/pi-tmux-session --session-id stable", "pi-tmux-session"),
-            ("/usr/bin/bash /home/j/.local/bin/pi-host --session-dir /tmp/pi-host-sessions --session-id stable", "pi-host"),
+            ("bash /home/j/.local/bin/pi-tmux-session --session-id stable", "pi-tmux-session"),
+            ("bash /home/j/.local/bin/pi-host --session-dir /tmp/pi-host-sessions --session-id stable", "pi-host"),
             ("/usr/bin/node /home/j/.local/bin/pi --session-id stable", "pi"),
+            ("bash /home/j/.local/bin/pi-secretary --internal-launch --project-id " + "a" * 64, "pi-secretary"),
         ]
         for index, (command, _name) in enumerate(known):
             self.assertTrue(matches(command, patterns[index]), command)

@@ -341,5 +341,8 @@ for k in "${!pending_panes[@]}"; do
 done
 
 if [[ "$action" == default || "$action" == open || "$action" == "" ]]; then
+  # The attached tmux client must not inherit the grid repair lock. Otherwise
+  # a later activation blocks for the entire lifetime of that client.
+  eval "exec ${lock_fd}>&-"
   if [[ -n "${TMUX:-}" ]]; then exec tmux switch-client -t "=$session:${rebuilt_windows[0]}"; else exec tmux attach-session -t "=$session:${rebuilt_windows[0]}"; fi
 fi

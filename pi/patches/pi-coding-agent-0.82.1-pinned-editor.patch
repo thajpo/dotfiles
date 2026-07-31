@@ -19,17 +19,25 @@ diff -uNr a/dist/modes/interactive/interactive-mode.js b/dist/modes/interactive/
      defaultEditor;
      editor;
      editorComponentFactory;
-@@ -280,6 +284,9 @@
+@@ -280,6 +284,17 @@
          this.chatContainer = new Container();
          this.pendingMessagesContainer = new Container();
          this.statusContainer = new Container();
 +        this.conversationViewportContainer = new Container();
 +        this.pinnedControlsContainer = new Container();
-+        this.pinnedConversationViewport = new PinnedConversationViewport(this.ui, this.conversationViewportContainer, this.pinnedControlsContainer);
++        this.pinnedConversationViewport = new PinnedConversationViewport(this.ui, this.conversationViewportContainer, this.pinnedControlsContainer, async (text) => {
++            try {
++                await copyToClipboard(text);
++                this.showStatus("Copied conversation selection");
++            }
++            catch (error) {
++                this.showError(error instanceof Error ? error.message : String(error));
++            }
++        });
          this.widgetContainerAbove = new Container();
          this.widgetContainerBelow = new Container();
          this.keybindings = KeybindingsManager.create();
-@@ -479,19 +486,36 @@
+@@ -479,19 +494,47 @@
                  : "";
              console.log(theme.fg("dim", `Model scope: ${modelList}${cycleHint}`));
          }
@@ -74,10 +82,29 @@ diff -uNr a/dist/modes/interactive/interactive-mode.js b/dist/modes/interactive/
 +            return remainingInput ? { data: remainingInput } : { consume: true };
 +        });
 +        this.signalCleanupHandlers.push(removePinnedScrollInput);
++        const removePinnedBrowseInput = this.ui.addInputListener((data) => {
++            if (!this.pinnedConversationViewport.isBrowsing() && data === "\x07") {
++                this.pinnedConversationViewport.enterBrowseMode();
++                return { consume: true };
++            }
++            if (!this.pinnedConversationViewport.isBrowsing())
++                return undefined;
++            this.pinnedConversationViewport.handleBrowseInput(data);
++            return { consume: true };
++        });
++        this.signalCleanupHandlers.push(removePinnedBrowseInput);
          this.setupKeyHandlers();
          this.setupEditorSubmitHandler();
          // Start the UI before initializing extensions so session_start handlers can use interactive dialogs
-diff -uNr a/node_modules/@earendil-works/pi-tui/dist/terminal.js b/node_modules/@earendil-works/pi-tui/dist/terminal.js
+@@ -2267,6 +2310,7 @@
+             // Normal message submission
+             // First, move any pending bash components to chat
+             this.flushPendingBashComponents();
++            this.pinnedConversationViewport?.scrollToLatest();
+             if (this.onInputCallback) {
+                 this.onInputCallback(text);
+             }
++diff -uNr a/node_modules/@earendil-works/pi-tui/dist/terminal.js b/node_modules/@earendil-works/pi-tui/dist/terminal.js
 --- a/node_modules/@earendil-works/pi-tui/dist/terminal.js	2026-07-30 20:22:46.281316236 -0400
 +++ b/node_modules/@earendil-works/pi-tui/dist/terminal.js	2026-07-30 20:22:46.296317065 -0400
 @@ -9,6 +9,8 @@

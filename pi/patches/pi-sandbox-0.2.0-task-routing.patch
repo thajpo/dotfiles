@@ -542,6 +542,15 @@
  	}
  
  	private async gitRepoRoot(): Promise<string | undefined> {
+@@ -1090,7 +1112,7 @@
+ 				stdio: ["ignore", "pipe", "pipe"],
+ 				env: tarEnv(),
+ 			});
+-			const dest = spawn(this.config.runtime, ["exec", "-i", "-u", "root", this.containerName!, "tar", "xf", "-", "-C", repoRoot], {
++			const dest = spawn(this.config.runtime, ["exec", "-i", "-u", "root", this.containerName!, "tar", "--no-same-owner", "xf", "-", "-C", repoRoot], {
+ 				stdio: ["pipe", "ignore", "pipe"],
+ 			});
+ 			let err = "";
 @@ -1170,78 +1192,33 @@
  	}
  
@@ -887,6 +896,15 @@
  				} else {
  					throw new Error(`${state.commitTarget} sandbox container is out of sync with ${state.sandboxRef}; preserve or inspect the container before retrying`);
  				}
+@@ -1516,7 +1598,7 @@
+ 		if (!this.containerName) throw new Error("Sandbox container is not running");
+ 		await new Promise<void>((resolve, reject) => {
+ 			const source = spawn("tar", ["cf", "-", "-C", sourceDir, "."], { stdio: ["ignore", "pipe", "pipe"], env: tarEnv() });
+-			const dest = spawn(this.config.runtime, ["exec", "-i", "-u", "root", this.containerName!, "tar", "xf", "-", "-C", targetDir], {
++			const dest = spawn(this.config.runtime, ["exec", "-i", "-u", "root", this.containerName!, "tar", "--no-same-owner", "xf", "-", "-C", targetDir], {
+ 				stdio: ["pipe", "ignore", "pipe"],
+ 			});
+ 			let err = "";
 @@ -1572,22 +1654,33 @@
  			return;
  		}

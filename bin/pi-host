@@ -17,6 +17,13 @@ printf '%s\n%s\n' \
 self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 dotfiles_dir=$(realpath "$self_dir/..")
 helper="$dotfiles_dir/scripts/pi-workspace.py"
+if [[ ! -f "$helper" ]]; then
+  helper="$HOME/.local/share/pi/control/pi-workspace.py"
+fi
+[[ -f "$helper" && -x "$helper" ]] || {
+  printf 'pi-host: workspace control helper is missing: %s\n' "$helper" >&2
+  exit 1
+}
 # pi-host is a sibling of the normal wrapper; exclude both from resolution.
 real_pi=$($helper resolve-pi --self "$dotfiles_dir/bin/pi" --cwd "$PWD")
 

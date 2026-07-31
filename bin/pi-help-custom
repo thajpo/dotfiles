@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cat <<'HELP'
+Pi workspace quick reference
+============================
+
+Start from no tmux sessions:
+  pi-start                 Start tmux, ensure pi-personal, and attach to it.
+  pi-start secretary       Start/open the secretary grid and attach to it.
+  pi-start project [DIR]   Open a project workspace (DIR defaults to $PWD).
+  pi-start host            Open pi-personal and select its explicit pi-host pane.
+  pi-start all              Start pi-personal and the secretary grid.
+
+Run Pi directly:
+  cd REPOSITORY && pi       Normal policy-controlled coding session.
+  pi-host                   Explicit unsandboxed host-maintenance session.
+
+Project tmux workspaces:
+  cd REPOSITORY && pidev    Neovim on the left, Pi on the right.
+  pidev --help              Show the managed project-launcher help.
+
+Tmux sessions and switching:
+  Ctrl-a p                  Switch to pi-personal.
+  Ctrl-a g                  Switch to pisec (if it is running).
+  Ctrl-a \                  Toggle the previous tmux session.
+  tmux ls                   List sessions.
+  tmux attach -t NAME      Attach to a named session.
+
+Secretary projects:
+  pisec                     Open the default registered projects.
+  pisec activate ALIAS ... Replace the active project set.
+  pisec swap OLD NEW       Replace one active project without changing order.
+  pisec list                Print the registered project records.
+
+Recovery:
+  pi-start personal         Recreate missing personal panes and attach there.
+  pi-personal --ensure     Repair personal panes without switching clients.
+  pisec                     Rebuild the secretary grid from the live registry.
+
+The ordinary pi launcher owns workspace selection and sandbox policy. Do not
+pass sandbox/trust flags to it; use pi-host only when unsandboxed host access is
+intentional.
+HELP

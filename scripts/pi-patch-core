@@ -15,10 +15,10 @@ viewport_source="$repo_root/pi/core/pinned-conversation-viewport.mjs"
 patch_file="$repo_root/pi/patches/pi-coding-agent-0.82.1-pinned-editor.patch"
 
 before_interactive=45f9fb6925b22738f230a4c4b4ffc4aaa79d9bffdda6305a44e23645adac282b
-after_interactive=c974be78beb5b8fa7ab0e18da0646899a59c8fac5af09adafd647096af794770
+after_interactive=a7a15eaad6ce097f3c164d9c63dc30be9aebe83bdd91c32a56a3a97ad1754f30
 before_terminal=131a0b0f2f4e90ef282b927e16df56fbe390e727db4a57f90d73801bceb0f37c
 after_terminal=85bf4f05c8c956cb452fcb1605e70dfc65f8e939801cd23a999c5fd5583653d9
-viewport_hash=ebab3a0b5cc110ebe3a634538ef84d5549bd0020a07b422c9df69838b3125270
+viewport_hash=73abd100cd546326fc74e5fc8e4df2183713f61d16e5a586b514c476260caeb5
 
 hash_file() { [[ -f $1 ]] && sha256sum "$1" | awk '{print $1}' || printf missing; }
 [[ -f "$package_dir/package.json" ]] || exit 1

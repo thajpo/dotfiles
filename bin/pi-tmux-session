@@ -1,7 +1,36 @@
 #!/usr/bin/env bash
-# Keep this wrapper as a child process so tmux-resurrect captures the exact
-# --session-id command line. Run the managed policy wrapper, not PATH lookup.
+# Stable Pi entry point for tmux and tmux-resurrect.  The task route is still
+# created afresh for each process, but the conversation store is keyed by the
+# launcher session ID rather than by a transient protected worktree path.
 set -euo pipefail
 
 self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-exec "$self_dir/pi" "$@"
+agent_dir=${PI_CODING_AGENT_DIR:-"$HOME/.pi/agent"}
+session_id=""
+for ((index=1; index <= $#; index++)); do
+  case "${!index}" in
+    --session-id)
+      next=$((index + 1))
+      [[ $next -le $# && -z "$session_id" ]] || { printf 'pi-tmux-session: --session-id is required exactly once\n' >&2; exit 2; }
+      session_id=${!next}
+      ;;
+    --session-dir|--session-dir=*)
+      printf 'pi-tmux-session: --session-dir is launcher-owned\n' >&2
+      exit 2
+      ;;
+  esac
+done
+[[ "$session_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || {
+  printf 'pi-tmux-session: invalid --session-id\n' >&2
+  exit 2
+}
+
+session_dir="$agent_dir/sessions/tmux/$session_id"
+mkdir -p -m 700 "$session_dir"
+chmod 700 "$session_dir"
+# Keep this wrapper as a child process so tmux-resurrect captures the exact
+# --session-id command line. Do not exec through it: replacing this process
+# with `pi` makes resurrect save only the rewritten `pi` argv. The old direct
+# form was `"$self_dir/pi" "$@"`; the private session directory is now added
+# explicitly so a restored worktree can find the same conversation.
+"$self_dir/pi" --session-dir "$session_dir" "$@"

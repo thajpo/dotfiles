@@ -52,11 +52,11 @@ class ProjectStatusSkillTests(unittest.TestCase):
         self.assertIn("$project-status", metadata)
         self.assertNotIn("TODO", metadata)
 
-    def test_installer_links_only_project_status_into_existing_agents_tree(self):
+    def test_installer_keeps_shared_skills_out_of_pi_agents_tree(self):
         installer = (ROOT / "scripts/agent-workflow-install.sh").read_text()
-        self.assertIn('mkdir -p "$HOME/.agents/skills"', installer)
-        self.assertIn('link_file "$DOTFILES_DIR/skills/project-status" "$HOME/.agents/skills/project-status"', installer)
         self.assertIn('link_file "$DOTFILES_DIR/skills" "$HOME/.skills"', installer)
+        self.assertNotIn('mkdir -p "$HOME/.agents/skills"', installer)
+        self.assertNotIn('link_file "$DOTFILES_DIR/skills/project-status" "$HOME/.agents/skills/project-status"', installer)
         self.assertNotIn('rm -rf "$HOME/.agents/skills"', installer)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -76,8 +76,7 @@ class ProjectStatusSkillTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             target = home / ".agents/skills/project-status"
-            self.assertTrue(target.is_symlink())
-            self.assertEqual(target.resolve(), (ROOT / "skills/project-status").resolve())
+            self.assertFalse(target.exists())
             self.assertEqual(marker.read_text(), "keep\n")
 
 

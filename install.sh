@@ -149,7 +149,7 @@ ln -s "$SCRIPT_DIR/agent/AGENTS.md" "$STAGING_DIR/control/AGENTS.md"
 install -m 755 "$SCRIPT_DIR/scripts/pi-workspace.py" "$STAGING_DIR/control/pi-workspace.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-control.py" "$STAGING_DIR/control/pi-secretary-control.py"
 cp -a "$SCRIPT_DIR/skills/project-status" "$STAGING_DIR/control/project-status-skill"
-for launcher in pi pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent; do
+for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent; do
     install -m 755 "$SCRIPT_DIR/bin/$launcher" "$STAGING_DIR/control/$launcher"
 done
 python3 - "$STAGING_DIR/control/pi" "$STAGING_DIR/control/pi-host" <<'PY'
@@ -174,9 +174,12 @@ honor_pending_signal() {
     [ "$pending" = 0 ] || exit "$pending"
 }
 activate_path() {
-    local source=$1 target=$2 backup=""
+    local source=$1 target=$2 rollback_dir="${3:-$(dirname "$target")}" backup=""
     mkdir -p "$(dirname "$target")"
-    if [ -e "$target" ] || [ -L "$target" ]; then backup="$target.rollback.$INSTALL_TIMESTAMP"; fi
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        mkdir -p "$rollback_dir"
+        backup="$rollback_dir/$(basename "$target").rollback.$INSTALL_TIMESTAMP"
+    fi
     # INT/TERM are deferred until mutation and rollback bookkeeping agree.
     if [ -n "$backup" ]; then
         mv "$target" "$backup"
@@ -208,8 +211,9 @@ done
 for tree in extensions agents prompts themes; do activate_path "$STAGING_DIR/control/$tree" "$PI_CONFIG_DIR/$tree"; done
 activate_path "$STAGING_DIR/control/pi-workspace.py" "$HOME/.local/share/pi/control/pi-workspace.py"
 activate_path "$STAGING_DIR/control/pi-secretary-control.py" "$HOME/.local/share/pi/control/pi-secretary-control.py"
-activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status"
-for launcher in pi pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent; do
+skill_rollback_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pi/rollback/skills"
+activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status" "$skill_rollback_dir"
+for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent; do
     activate_path "$STAGING_DIR/control/$launcher" "$HOME/.local/bin/$launcher"
 done
 
@@ -309,4 +313,5 @@ fi
 
 echo ""
 echo "Done! Run 'source ~/.bashrc' or open a new terminal."
-echo "Then start tmux with: tmux new -s <session-name>"
+echo "Next: run 'pi-start all' to start the personal workspace and secretary grid."
+echo "If pi-start is not on PATH yet: '$HOME/.local/bin/pi-start all'"
