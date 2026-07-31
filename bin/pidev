@@ -57,7 +57,7 @@ if [[ ${1:-} == --launch ]]; then
   launch_status=$?
   set -e
   if [[ -n ${PI_WORKSTREAM_CONTROL:-} && -n ${PI_WORKSTREAM_ID:-} ]]; then
-    /usr/bin/python3 "$PI_WORKSTREAM_CONTROL" process-exit --workspace "$PWD" --exit-code "$launch_status" >/dev/null 2>&1 ||
+    python3 "$PI_WORKSTREAM_CONTROL" process-exit --workspace "$PWD" --exit-code "$launch_status" >/dev/null 2>&1 ||
       printf 'pidev: warning: could not record full-agent process exit\n' >&2
   fi
   exit "$launch_status"
@@ -94,7 +94,14 @@ repo=$(sanitize "$(basename -- "$repo_root")" repo)
 worktree=$(sanitize "$(basename -- "$cwd")" worktree)
 
 sha256_path() {
-  printf '%s' "$1" | sha256sum | awk '{print $1}'
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  else
+    printf 'pidev: no SHA-256 utility found\n' >&2
+    exit 1
+  fi
 }
 worktree_hash=$(sha256_path "$cwd")
 common_hash=$worktree_hash
@@ -125,15 +132,33 @@ worktree_lock="$state_dir/worktree-${worktree_hash}.lock"
 : > "$project_lock"
 : > "$worktree_lock"
 chmod 600 "$project_lock" "$worktree_lock"
-exec {project_lock_fd}>"$project_lock"
-exec {worktree_lock_fd}>"$worktree_lock"
-flock -x "$project_lock_fd"
-flock -x "$worktree_lock_fd"
-
 fail() {
   printf 'pidev: %s\n' "$1" >&2
   exit 1
 }
+lock_dirs=()
+release_lock_dirs() {
+  local lock_dir
+  for lock_dir in "${lock_dirs[@]}"; do
+    rmdir "$lock_dir" 2>/dev/null || :
+  done
+}
+trap release_lock_dirs EXIT
+project_lock_fd=8
+worktree_lock_fd=9
+exec 8>"$project_lock"
+exec 9>"$worktree_lock"
+if command -v flock >/dev/null 2>&1; then
+  flock -x "$project_lock_fd"
+  flock -x "$worktree_lock_fd"
+else
+  project_lock_dir="${project_lock}.d"
+  worktree_lock_dir="${worktree_lock}.d"
+  mkdir "$project_lock_dir" || fail "project lock is already held: $project_lock"
+  lock_dirs+=("$project_lock_dir")
+  mkdir "$worktree_lock_dir" || fail "worktree lock is already held: $worktree_lock"
+  lock_dirs+=("$worktree_lock_dir")
+fi
 
 # Query helpers intentionally do not suppress failures. An empty result is a
 # valid result only when tmux itself reported success.
@@ -342,10 +367,23 @@ if [[ -z $session_id ]]; then
   pi_session_dir="$agent_dir/sessions/--${encoded_cwd}--"
   latest_session=""
   if [[ -d $pi_session_dir ]]; then
-    if ! session_candidates=$(find "$pi_session_dir" -maxdepth 1 -type f -name '*.jsonl' -printf '%T@ %p\n'); then
+    if ! latest_session=$(python3 - "$pi_session_dir" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+candidates = []
+for path in root.glob("*.jsonl"):
+    try:
+        candidates.append((path.stat().st_mtime, path))
+    except OSError:
+        pass
+if candidates:
+    print(max(candidates, key=lambda item: item[0])[1])
+PY
+    ); then
       fail "cannot inspect Pi sessions in $pi_session_dir"
     fi
-    latest_session=$(printf '%s\n' "$session_candidates" | sort -nr | head -n1 | cut -d' ' -f2-)
   fi
   if [[ -n $latest_session ]]; then
     if ! session_id=$(sed -n '1s/.*"id"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' "$latest_session"); then

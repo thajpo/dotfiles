@@ -7,4 +7,4 @@ Before reporting "done":
 - `lint` passes
 - `test` passes
 - latest requested user instructions in PR are addressed
-- post-push `Agent Update` comment is present
+- post-push `Agent Update` is reflected in the primary rolling update comment

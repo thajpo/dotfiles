@@ -62,7 +62,7 @@ Activation is intentionally not part of an ordinary coding-container run:
 
 ```bash
 pi-host
-cd /home/j/dotfiles
+cd "$HOME/dotfiles"
 ./install.sh
 ```
 
@@ -89,8 +89,8 @@ permissions and repository cleanliness:
 
 ```bash
 find ~/.pi/agent/sessions -path '*/workflow-artifacts/context-*.json' -print
-find ~/.pi/agent/sessions -path '*/workflow-artifacts' -type d -printf '%m %p\n'
-find ~/.pi/agent/sessions -path '*/workflow-artifacts/*.json' -type f -printf '%m %p\n'
+find ~/.pi/agent/sessions -path '*/workflow-artifacts' -type d -print
+find ~/.pi/agent/sessions -path '*/workflow-artifacts/*.json' -type f -print
 git status --short --untracked-files=all
 find . -maxdepth 3 \( -name .pi-subagents -o -path '*/.agent/tasks' \) -print
 ```

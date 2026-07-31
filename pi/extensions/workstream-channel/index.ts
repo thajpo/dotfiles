@@ -41,7 +41,7 @@ export default function workstreamChannel(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, signal, _update, ctx) {
       const current = identity(ctx);
-      const result = await pi.exec("/usr/bin/python3", [controlPath(), "notify",
+      const result = await pi.exec("python3", [controlPath(), "notify",
         "--project-id", current.projectId, "--workstream-id", current.workstreamId,
         "--kind", params.kind, "--summary", params.summary, "--details", params.details ?? ""],
         { signal, timeout: 30_000 });

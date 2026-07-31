@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import pwd
 import re
 import secrets
@@ -50,7 +51,7 @@ def run(command: list[str], cwd: pathlib.Path | None = None, check: bool = True)
         stderr=subprocess.PIPE,
         check=False,
         env={
-            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PATH": "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin",
             "HOME": str(pathlib.Path.home()),
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
@@ -287,6 +288,9 @@ def safe_command_path(name: str, *, exclude: list[pathlib.Path] | None = None) -
     home = pathlib.Path.home().resolve()
     allowed = [
         pathlib.Path("/usr/bin"),
+        pathlib.Path("/usr/sbin"),
+        pathlib.Path("/opt/homebrew/bin"),
+        pathlib.Path("/opt/homebrew/sbin"),
         pathlib.Path("/usr/local/bin"),
         home / ".nvm",
         home / ".npm-global",
@@ -378,7 +382,7 @@ def gpu_description() -> str:
 
 
 def host_context(route: dict[str, Any], pi_executable: pathlib.Path | None) -> str:
-    os_release = "unavailable"
+    os_release = platform.platform()
     try:
         values: dict[str, str] = {}
         for line in pathlib.Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
@@ -388,7 +392,7 @@ def host_context(route: dict[str, Any], pi_executable: pathlib.Path | None) -> s
         os_release = values.get("PRETTY_NAME", values.get("NAME", "unavailable"))
     except OSError:
         pass
-    cpu = "unavailable"
+    cpu = platform.processor() or platform.machine() or "unavailable"
     try:
         for line in pathlib.Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
             if line.lower().startswith("model name"):
@@ -403,6 +407,10 @@ def host_context(route: dict[str, Any], pi_executable: pathlib.Path | None) -> s
             ram = f"{int(match.group(1)) // 1024} MiB"
     except OSError:
         pass
+    if ram == "unavailable" and platform.system() == "Darwin":
+        total_bytes = first_line(["/usr/sbin/sysctl", "-n", "hw.memsize"])
+        if total_bytes.isdigit():
+            ram = f"{int(total_bytes) // (1024 * 1024)} MiB"
     gpu = gpu_description()
     disk = shutil.disk_usage(route["worktree"])
     shell = pwd.getpwuid(os.getuid()).pw_shell

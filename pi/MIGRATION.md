@@ -13,7 +13,7 @@
 - Final global `AGENTS.md` SHA-256:
   `74c99dc419b64a3976f77320e5ceb335c37340b3e45a71d7ce09125ed7c26d5b`.
   Installation links `~/.pi/agent/AGENTS.md` to
-  `/home/j/dotfiles/agent/AGENTS.md`; project-specific context files are not
+  `$HOME/dotfiles/agent/AGENTS.md`; project-specific context files are not
   changed.
 
 ## Phase-0 inventory
@@ -120,7 +120,7 @@ Activation is control-plane work:
 
 ```bash
 pi-host
-cd /home/j/dotfiles
+cd "$HOME/dotfiles"
 ./install.sh
 ```
 
@@ -130,7 +130,7 @@ Rollback source and reinstall the previous pins:
 
 ```bash
 pi-host
-cd /home/j/dotfiles
+cd "$HOME/dotfiles"
 git switch --detach refs/heads/rollback/pi-harness-pre-trusted-live-20260729
 ./install.sh
 ```
@@ -158,7 +158,7 @@ git branch --list 'pi/*' 'pi-sandbox/*'
 Remove a completed candidate only by its exact recorded path and branch:
 
 ```bash
-git worktree remove /home/j/.local/share/pi/worktrees/<repo>/<task>
+git worktree remove "$HOME/.local/share/pi/worktrees/<repo>/<task>"
 git branch -d pi/<task-or-session>
 ```
 

@@ -27,6 +27,18 @@ Single entrypoint for execution: consume a ready/issued item or existing PR and 
 - `$pr-scope-guard` (file-touch scope enforcement)
 - `$ci-baseline` (ensure/verify `lint` + `test` checks)
 
+## Branch/Worktree Targeting (Mandatory First)
+- Before any review, code edits, or test runs, resolve the target issue/PR and switch to its issue-scoped branch/worktree.
+- Never continue execution on a different branch/worktree even if files appear relevant.
+- If branch/worktree resolution fails, stop as `blocked` and ask one explicit unblock question.
+
+## Markdown Policy Enforcement
+- Enforce markdown policy defined by `$lean-flow`.
+- Non-ML repos: only `README.md`, `AGENTS.md`, `current.md` are allowed by default.
+- ML repos: require `experiments.md`; prefer migration from `research*.md`.
+- If out-of-policy markdown changes appear, stop as blocked unless explicit user approval exists.
+- If approved exception exists, ensure it is logged in `AGENTS.md` with date + scope.
+
 ## Required Feedback Ingestion
 Read all channels before each implementation round:
 - @mentions / direct agent requests in PR conversation
@@ -44,13 +56,13 @@ Use `references/pr-feedback-sources.md` commands/APIs.
 
 ## Iteration Loop
 1. Resolve work item to issue + PR (create issue/PR if needed).
-2. Ensure one issue -> one branch -> one worktree mapping.
+2. Ensure one issue -> one branch -> one worktree mapping and switch into that context.
 3. Verify current branch/worktree maps to the issue; if mismatch, stop as `blocked`.
 4. Build blocker/task list from unresolved feedback.
 5. Implement fixes without expanding issue scope.
 6. Run `lint` and `test`.
 7. Commit and push branch updates.
-8. Post or update `Agent Update` PR status (required format).
+8. Post or update the rolling `Agent Update` PR status.
 
 ## Execution Defaults
 - Commit + push are expected default steps during `$pr-iterate`.
@@ -59,7 +71,7 @@ Use `references/pr-feedback-sources.md` commands/APIs.
 
 ## Merge Boundary
 - `$pr-iterate` drives to merge-ready state.
-- Never ask or decide to merge the PR; user/reviewer owns merge decision.
+- Never ask or decide to merge the PR; user/reviewer owns the merge decision.
 
 ## Completion Gates
 - Do not declare completion while unresolved blocking feedback remains.
@@ -68,13 +80,14 @@ Use `references/pr-feedback-sources.md` commands/APIs.
 - Do not declare completion without ingestion evidence for all required channels.
 
 ## Required PR Status Update After Every Push
-- Keep one primary `Agent Update` status comment per PR when possible.
+- Keep one primary rolling `Agent Update` status comment per PR when possible.
 - On first push: create the `Agent Update` comment.
 - On subsequent pushes: edit/update the same comment instead of posting a new long comment.
-- Post a new comment only when there is a major phase change (e.g., blocked -> unblocked, ready-for-review, or scope/risk escalation).
-- Keep updates concise: include counts, decisions, and next actions; never paste full test logs.
-- If tests fail, include only failing test identifiers and short error summary.
-- Follow template in `references/agent-update-template.md`.
+- Post a new comment only for a major phase change or targeted reviewer reply.
+- Keep updates concise: include counts, decisions, next actions, and remaining risks; never paste full test logs.
+- Do not restate manual approval evidence or approver metadata in PR comments.
+- If tests fail, include only failing test identifiers and a short error summary.
+- Follow `references/agent-update-template.md`.
 
 ## Guardrails
 - No out-of-scope file touches without explicit user approval.

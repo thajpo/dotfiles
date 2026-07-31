@@ -4,6 +4,17 @@ set -euo pipefail
 agent_dir=${PI_CODING_AGENT_DIR:-"$HOME/.pi/agent"}
 patch_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../pi/patches" && pwd)"
 
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    printf 'pi-subagents: no SHA-256 utility found\n' >&2
+    return 1
+  fi
+}
+
 apply_verified_patch() {
   local label=$1 package_dir=$2 source_file=$3 package_version=$4 expected_before=$5 expected_after=$6 patch_file=$7 compatible_after=${8:-}
   [[ -f "$package_dir/package.json" ]] || { printf '%s: package not installed: %s\n' "$label" "$package_dir" >&2; exit 1; }
@@ -11,7 +22,7 @@ apply_verified_patch() {
   version=$(node -p 'require(process.argv[1]).version' "$package_dir/package.json")
   [[ "$version" == "$package_version" ]] || { printf '%s: unsupported version: %s\n' "$label" "$version" >&2; exit 1; }
   [[ -f "$source_file" ]] || { printf '%s: source missing: %s\n' "$label" "$source_file" >&2; exit 1; }
-  actual=$(sha256sum "$source_file" | awk '{print $1}')
+  actual=$(hash_file "$source_file")
   if [[ "$actual" == "$expected_after" || ( -n $compatible_after && "$actual" == "$compatible_after" ) ]]; then
     printf '%s: already patched %s\n' "$label" "$actual"
     return
@@ -22,7 +33,7 @@ apply_verified_patch() {
     exit 1
   }
   ( cd "$package_dir" && patch --batch --forward -p1 < "$patch_file" )
-  actual=$(sha256sum "$source_file" | awk '{print $1}')
+  actual=$(hash_file "$source_file")
   [[ "$actual" == "$expected_after" ]] || {
     printf '%s: patched source hash mismatch: %s\n' "$label" "$actual" >&2
     exit 1
@@ -134,7 +145,7 @@ apply_verified_patch \
 verify_model_policy_file() {
   local relative=$1 expected=$2 path="$agent_dir/npm/node_modules/pi-subagents/$1" actual
   [[ -f $path ]] || { printf 'pi-subagents-model-policy: source missing: %s\n' "$path" >&2; exit 1; }
-  actual=$(sha256sum "$path" | awk '{print $1}')
+  actual=$(hash_file "$path")
   [[ $actual == "$expected" ]] || {
     printf 'pi-subagents-model-policy: incomplete patch at %s: %s\n' "$relative" "$actual" >&2
     exit 1

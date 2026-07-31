@@ -20,7 +20,17 @@ before_terminal=131a0b0f2f4e90ef282b927e16df56fbe390e727db4a57f90d73801bceb0f37c
 after_terminal=85bf4f05c8c956cb452fcb1605e70dfc65f8e939801cd23a999c5fd5583653d9
 viewport_hash=73abd100cd546326fc74e5fc8e4df2183713f61d16e5a586b514c476260caeb5
 
-hash_file() { [[ -f $1 ]] && sha256sum "$1" | awk '{print $1}' || printf missing; }
+hash_file() {
+  [[ -f $1 ]] || { printf missing; return; }
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    printf 'pi-core: no SHA-256 utility found\n' >&2
+    return 1
+  fi
+}
 [[ -f "$package_dir/package.json" ]] || exit 1
 version=$(node -p 'require(process.argv[1]).version' "$package_dir/package.json")
 [[ $version == 0.82.1 ]] || { [[ $mode == check ]] && exit 1; printf 'pi-core: unsupported version: %s\n' "$version" >&2; exit 1; }

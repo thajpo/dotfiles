@@ -2,6 +2,16 @@
 # Persistent four-pane personal Pi workspace, separate from the secretary grid.
 set -euo pipefail
 
+if (( BASH_VERSINFO[0] < 4 )); then
+  for bash_candidate in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [[ -x "$bash_candidate" ]] && "$bash_candidate" -c '(( BASH_VERSINFO[0] >= 4 ))' 2>/dev/null; then
+      exec "$bash_candidate" "$0" "$@"
+    fi
+  done
+  printf 'pi-personal: Bash 4 or newer is required; install Homebrew bash on macOS\n' >&2
+  exit 1
+fi
+
 if (( EUID == 0 )); then printf 'pi-personal: refusing to run as root\n' >&2; exit 1; fi
 if [[ -n "${PI_SUBAGENT_CHILD:-}${PI_TASK_ROUTE_FILE:-}" ]]; then
   printf 'pi-personal: refusing nested or subagent invocation\n' >&2
@@ -30,12 +40,23 @@ command -v tmux >/dev/null 2>&1 || { printf 'pi-personal: tmux is required\n' >&
 state_root=${XDG_RUNTIME_DIR:-$HOME/.local/state}/pi
 mkdir -p -m 700 "$state_root"
 lock="$state_root/personal.lock"
-exec {personal_lock_fd}>"$lock"
+personal_lock_fd=9
+exec 9>"$lock"
 chmod 600 "$lock"
-flock -x "$personal_lock_fd"
+personal_lock_dir=""
+release_personal_lock() {
+  [[ -n "$personal_lock_dir" ]] && rmdir "$personal_lock_dir" 2>/dev/null || :
+}
+trap release_personal_lock EXIT
+if command -v flock >/dev/null 2>&1; then
+  flock -x "$personal_lock_fd"
+else
+  personal_lock_dir="${lock}.d"
+  mkdir "$personal_lock_dir" || { printf 'pi-personal: workspace lock is already held\n' >&2; exit 1; }
+fi
 
-mlre_dir="$HOME/Projects/mlre-transition"
-financials_dir="$HOME/Projects/investing/investment-os"
+mlre_dir=${PI_PERSONAL_MLRE_DIR:-"$HOME/Projects/mlre-transition"}
+financials_dir=${PI_PERSONAL_FINANCIALS_DIR:-"$HOME/Projects/investing/investment-os"}
 for directory in "$mlre_dir" "$financials_dir" "$dotfiles_dir"; do
   [[ -d "$directory" ]] || { printf 'pi-personal: missing directory: %s\n' "$directory" >&2; exit 1; }
 done
@@ -67,6 +88,8 @@ pane_process_has_session() {
   if [[ "$args" == *" --session-id $wanted "* || "$args" == *" --session-id $wanted"* ]]; then return 0; fi
   if [[ -r "/proc/$parent/environ" ]] && env_values=$(tr '\0' '\n' < "/proc/$parent/environ" 2>/dev/null); then
     grep -Fxq "PI_SESSION_ID=$wanted" <<< "$env_values" && return 0
+  elif env_values=$(ps eww -p "$parent" -o command= 2>/dev/null); then
+    [[ "$env_values" =~ (^|[[:space:]])PI_SESSION_ID=$wanted([[:space:]]|$) ]] && return 0
   fi
   if children=$(pgrep -P "$parent" 2>/dev/null); then :; else
     rc=$?
@@ -235,6 +258,8 @@ if (( ensure_only == 0 )); then
   # descriptor open would block every later --ensure invocation until the
   # client exits.
   eval "exec ${personal_lock_fd}>&-"
+  release_personal_lock
+  trap - EXIT
   if [[ -n "${TMUX:-}" ]]; then
     exec tmux switch-client -t "=$session:$window"
   else

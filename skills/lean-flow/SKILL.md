@@ -1,136 +1,86 @@
 ---
 name: lean-flow
-description: "Turn a discussed feature into a concise GitHub issue and, only when implementation is imminent, a temporary implementation plan that is absorbed into the PR and deleted before merge. Use when the user invokes $lean-flow, asks to make a feature ready to implement, or asks to convert planning notes into issues/specs without maintaining a planning tracker."
+description: "Chat-first planning workflow for Brainstormed -> Specd -> ready in current.md, with strict markdown approval evidence before execution."
 ---
 
 # Lean Flow
 
-## Purpose
+## Goal
+Keep planning explicit and minimal, then hand off to GitHub issue/PR execution without ambiguity.
 
-Keep planning useful to a human reviewer without creating a second project
-management system in Markdown.
+## Canonical Planning File
+- Default: `current.md`.
+- Mode is repo-level and fixed.
+- Do not switch planning modes inside the same repo.
 
-Use this lifecycle:
+## Markdown Governance (Source of Truth)
+- This skill is the canonical owner of markdown workflow policy.
+- Non-ML default allowed markdown files: `README.md`, `AGENTS.md`, `current.md`.
+- ML repos must include monolithic `experiments.md` as experiment tracker.
+- Prefer migration from `research*.md` to `experiments.md` (preserve history, then remove legacy file when approved).
+- Extra markdown files require explicit user approval and must be logged in `AGENTS.md` with date + scope.
+- ML detection:
+  - Primary signal: ML dependencies/files (for example `torch`/`tensorflow`/`jax`, training configs, experiment artifacts).
+  - During initialization, ask the user to confirm ML/non-ML when signals are ambiguous.
 
-```text
-chat -> GitHub issue -> optional temporary plan -> PR -> merged code and docs
-```
-
-Do not create or maintain `current.md`, brainstorm registries, status mirrors,
-or `Brainstormed`/`Specd` state machines.
-
-## Core Rules
-
-- Keep uncommitted ideas in chat unless they are worth remembering.
-- Create one issue for one independently reviewable feature.
-- Do not create a backlog of speculative issues without the user's request.
-- Treat the issue as the planning document by default.
-- Add a temporary repository plan only when imminent implementation needs more
-  detail than the issue can comfortably hold.
-- Delete a temporary plan before merge after its decisions and evidence are in
-  the PR description.
-- Keep durable documentation only for current behavior, architecture contracts,
-  operational guidance, and research evidence.
-- Prefer short prose and bullets. Avoid tables and process jargon.
+## Required Sections
+- `Institutional Knowledge`
+- `Beliefs`
+- `Brainstormed`
+- `Specd`
 
 ## Workflow
+1. Brainstormed
+- Capture ideas only; no implementation.
 
-### 1. Discuss
+2. Specd (draft/in_progress)
+- Convert selected ideas to concrete contracts.
+- Promotion is move-not-copy: remove promoted item from `Brainstormed`.
 
-Clarify the problem, desired outcome, important tradeoffs, and what is out of
-scope in chat. Do not write planning files during exploration.
+3. Ready
+- Requires full schema and markdown approval evidence.
+- Chat-only approval is never enough.
+- Execution starts by invoking `$pr-iterate` on the ready item.
 
-If the user is only exploring, stop here.
+## Spec Contract Schema (required before `ready`)
+- `title`
+- `status` (`draft|in_progress|ready|issued`)
+- `user intent`
+- `behavior change`
+- `surfaces touched`
+- `file touch scope` (allowed files/globs only)
+- `estimated diff size` (S/M/L + rationale)
+- `acceptance tests` (fail-first + regression)
+- `edge cases`
+- `non-goals`
+- `risks and rollback trigger`
+- `overlap analysis`
+- `manual approval evidence`:
+  - approver identity
+  - approval date
+  - explicit scope approved
+  - unresolved blockers: none
 
-### 2. Create A Short Issue
+## Authority Switch
+- Pre-issue: planning contract in `current.md` is source of truth.
+- Post-issue: issue body is implementation contract source of truth.
+- Post-PR: PR thread/review feedback is iteration source of truth.
+- Manual approval evidence remains a pre-PR readiness artifact and should not be repeated in PR update comments.
+- If conflict exists, latest explicit user instruction in PR context wins.
 
-Create an issue only when the idea should survive the conversation or is likely
-to be implemented.
+## Routing
+- Use `$spec-gate` for interrogation/readiness checks.
+- User-facing execution handoff is `$pr-iterate`.
+- `$pr-iterate` handles issue creation/compaction, worktree lifecycle, scope guard, and PR feedback loop via internal helpers.
 
-Use this small structure:
+## Guardrails
+- Never implement from `Brainstormed`.
+- Never mark `ready` without full schema + markdown approval evidence.
+- Never implement without a linked issue.
+- Never batch multiple ready items into one issue.
+- Never touch files outside `file touch scope` without explicit user approval.
+- Never prune tracker lines before merge.
 
-```markdown
-## Problem
-Why this matters in one short paragraph.
-
-## Outcome
-What should be true when the work is done.
-
-## Acceptance
-- [ ] Observable result one
-- [ ] Observable result two
-
-## Testing
-- [ ] Relevant automated or end-to-end proof
-
-## Out of scope
-- Explicit boundary, only when needed
-```
-
-Keep implementation guesses out unless they resolve a real architecture choice.
-
-### 3. Make It Ready To Implement
-
-When the user chooses the feature for implementation, expand the issue with the
-minimum decisions needed to code safely:
-
-- chosen behavior and architecture;
-- acceptance criteria;
-- testing and evidence;
-- meaningful risks, migration, or rollback concerns;
-- explicit non-goals when scope could drift.
-
-The expanded issue is normally the complete implementation plan.
-
-Create a temporary plan file on the feature branch only when the design is too
-large for a readable issue. Typical reasons are a cross-cutting architecture
-decision, a migration/rollout sequence, or repo-local diagrams and pseudocode
-needed during implementation. Keep it focused on decisions, not a narrated
-coding itinerary.
-
-Explicit user approval in chat is enough to begin unless repository policy
-requires stronger evidence. Do not invent an approval ceremony.
-
-### 4. Implement Through One PR
-
-Link the issue, isolate the branch/worktree, implement the accepted scope, and
-validate in proportion to risk.
-
-Once the PR exists, use its description and review thread as the active record.
-Do not synchronize the same plan across an issue, tracker, plan file, and PR.
-
-### 5. Finish And Delete Temporary Planning
-
-Before merge:
-
-- move the useful problem statement, decisions, tradeoffs, and validation into
-  the PR description;
-- delete any temporary plan file in the same PR;
-- update durable docs only where actual system truth changed;
-- leave research results and negative evidence intact.
-
-After merge, close the issue. The PR, code, tests, and durable docs are the
-record; no planning tombstone is required.
-
-## Authority
-
-- Before an issue exists: the latest explicit chat decision wins.
-- Before a PR exists: the issue is the implementation contract.
-- After a PR exists: the PR description and review thread are authoritative.
-- After merge: code, tests, and durable documentation are authoritative.
-
-When sources disagree, update the current authority instead of maintaining
-parallel copies.
-
-## Scope Judgment
-
-- Feature or risky refactor: issue first, then implement.
-- Small obvious fix: a direct focused PR is acceptable when the user asks for
-  the fix and no product decision is hidden.
-- Large feature: split only at independently testable and reviewable boundaries.
-- Related steps that cannot deliver value independently belong in one issue.
-
-When work may need splitting, tell the user how many issues and temporary specs
-you recommend and why. Skip that ceremony for an obviously single feature.
-Draft in chat unless the user explicitly asks to create or publish the issue;
-an explicit create/publish request is sufficient authority to proceed.
+## References
+- `references/issue-template.md`
+- `references/tracker-lifecycle.md`

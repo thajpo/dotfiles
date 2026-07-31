@@ -1,4 +1,15 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+if (( BASH_VERSINFO[0] < 4 )); then
+    for bash_candidate in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        if [[ -x "$bash_candidate" ]] && "$bash_candidate" -c '(( BASH_VERSINFO[0] >= 4 ))' 2>/dev/null; then
+            exec "$bash_candidate" "$0" "$@"
+        fi
+    done
+    echo "This installer requires Bash 4 or newer (macOS: install Homebrew bash and put it first on PATH)." >&2
+    exit 1
+fi
+
 set -eEuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,18 +89,23 @@ trap 'exit 143' TERM
 CORE_REINSTALL=0
 if [ ! -x "$PI_CORE_BIN" ] || [ "$("$PI_CORE_BIN" --version 2>/dev/null || true)" != "$PI_VERSION" ]; then
     CORE_REINSTALL=1
-elif [ -L "$PI_CORE_DIR" ] || find "$PI_CORE_DIR" -xdev ! -type l \( -perm /022 -o \( ! -uid "$(id -u)" ! -uid 0 \) \) -print -quit | grep -q . ||
+elif [ -L "$PI_CORE_DIR" ] ||
      ! python3 - "$PI_CORE_DIR" <<'PY'
 from pathlib import Path
+import os
 import sys
+
 root = Path(sys.argv[1]).resolve(strict=True)
-for entry in root.rglob("*"):
-    if not entry.is_symlink():
-        continue
+uid = os.getuid()
+for entry in (root, *root.rglob("*")):
     try:
-        target = entry.resolve(strict=True)
-        target.relative_to(root)
+        if entry.is_symlink():
+            entry.resolve(strict=True).relative_to(root)
+            continue
+        info = entry.stat()
     except (OSError, ValueError):
+        raise SystemExit(1)
+    if info.st_mode & 0o022 or info.st_uid not in {uid, 0}:
         raise SystemExit(1)
 raise SystemExit(0)
 PY
@@ -136,7 +152,20 @@ if [ -e "$POLICY_PATH" ] || [ -L "$POLICY_PATH" ]; then
     install -m 600 "$POLICY_PATH" "$POLICY_STAGING"
     echo "Staging the existing repository policy unchanged: $POLICY_PATH"
 else
-    install -m 600 "$SCRIPT_DIR/pi/repository-policy.json" "$POLICY_STAGING"
+    python3 - "$SCRIPT_DIR/pi/repository-policy.json" "$POLICY_STAGING" "$SCRIPT_DIR" "$HOME/.local/share/pi/worktrees" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+source, destination, repository, worktree_root = map(Path, sys.argv[1:])
+policy = json.loads(source.read_text(encoding="utf-8"))
+repository = str(repository.resolve())
+policy["trustedRoots"] = [repository]
+policy["controlPlaneRepositories"] = [repository]
+policy["worktreeRoot"] = str(worktree_root.expanduser())
+Path(destination).write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
+PY
+    chmod 600 "$POLICY_STAGING"
 fi
 "$SCRIPT_DIR/scripts/pi-workspace.py" validate-policy "$POLICY_STAGING" >/dev/null
 
@@ -145,6 +174,15 @@ for config in settings.json pi-chrome-devtools.json pi-plan-mode.json pi-statusl
     install -m 600 "$SCRIPT_DIR/pi/$config" "$STAGING_DIR/control/$config"
 done
 for tree in extensions agents prompts themes; do cp -a "$SCRIPT_DIR/pi/$tree" "$STAGING_DIR/control/$tree"; done
+python3 - "$STAGING_DIR/control/agents" "$PI_CONFIG_DIR" <<'PY'
+from pathlib import Path
+import sys
+
+agents_dir = Path(sys.argv[1])
+agent_dir = sys.argv[2]
+for path in agents_dir.glob("*.md"):
+    path.write_text(path.read_text(encoding="utf-8").replace("__PI_AGENT_DIR__", agent_dir), encoding="utf-8")
+PY
 ln -s "$SCRIPT_DIR/agent/AGENTS.md" "$STAGING_DIR/control/AGENTS.md"
 install -m 755 "$SCRIPT_DIR/scripts/pi-workspace.py" "$STAGING_DIR/control/pi-workspace.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-control.py" "$STAGING_DIR/control/pi-secretary-control.py"
@@ -174,7 +212,8 @@ honor_pending_signal() {
     [ "$pending" = 0 ] || exit "$pending"
 }
 activate_path() {
-    local source=$1 target=$2 rollback_dir="${3:-$(dirname "$target")}" backup=""
+    local source=$1 target=$2 rollback_dir backup=""
+    rollback_dir=${3:-$(dirname "$target")}
     mkdir -p "$(dirname "$target")"
     if [ -e "$target" ] || [ -L "$target" ]; then
         mkdir -p "$rollback_dir"
@@ -240,13 +279,16 @@ echo "Installing tmux config..."
 backup_and_link "$SCRIPT_DIR/tmux.conf" "$HOME/.tmux.conf"
 echo "Linked tmux.conf to ~/.tmux.conf"
 
+backup_and_link "$SCRIPT_DIR/scripts/tmux-copy.sh" "$HOME/.local/bin/tmux-copy"
+backup_and_link "$SCRIPT_DIR/scripts/tmux-voxtype-status.sh" "$HOME/.local/bin/tmux-voxtype-status"
+
 if [ -f gitmux.conf ]; then
     backup_and_link "$SCRIPT_DIR/gitmux.conf" "$HOME/.gitmux.conf"
     echo "Linked gitmux.conf to ~/.gitmux.conf"
 fi
 
 # Install the Voxtype microphone-signal watchdog when Voxtype is present.
-if command -v voxtype &> /dev/null && [ -f systemd/user/voxtype-mic-watchdog.service ]; then
+if command -v voxtype &> /dev/null && command -v systemctl &> /dev/null && [ -f systemd/user/voxtype-mic-watchdog.service ]; then
     backup_and_link "$SCRIPT_DIR/systemd/user/voxtype-mic-watchdog.service" "$HOME/.config/systemd/user/voxtype-mic-watchdog.service"
     systemctl --user daemon-reload
     systemctl --user enable --now voxtype-mic-watchdog.service
@@ -278,9 +320,37 @@ echo "Installing tmux plugins..."
 if ! command -v gitmux &> /dev/null; then
     echo "Installing gitmux..."
     mkdir -p ~/.local/bin
-    curl -sL https://github.com/arl/gitmux/releases/download/v0.11.5/gitmux_v0.11.5_linux_amd64.tar.gz | tar xz -C ~/.local/bin
-    if ! grep -q '.local/bin' ~/.bashrc 2>/dev/null; then
-        echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    case "$(uname -s)" in
+        Darwin)
+            if command -v brew &> /dev/null; then
+                brew install gitmux
+            else
+                case "$(uname -m)" in
+                    arm64|aarch64) gitmux_arch=arm64 ;;
+                    x86_64|amd64) gitmux_arch=amd64 ;;
+                    *) echo "Unsupported macOS architecture for gitmux: $(uname -m)" >&2; exit 1 ;;
+                esac
+                curl -fsSL "https://github.com/arl/gitmux/releases/download/v0.11.5/gitmux_v0.11.5_macOS_${gitmux_arch}.tar.gz" | tar xz -C ~/.local/bin
+            fi
+            ;;
+        Linux)
+            case "$(uname -m)" in
+                arm64|aarch64) gitmux_arch=arm64 ;;
+                x86_64|amd64) gitmux_arch=amd64 ;;
+                i386|i686) gitmux_arch=386 ;;
+                *) echo "Unsupported Linux architecture for gitmux: $(uname -m)" >&2; exit 1 ;;
+            esac
+            curl -fsSL "https://github.com/arl/gitmux/releases/download/v0.11.5/gitmux_v0.11.5_linux_${gitmux_arch}.tar.gz" | tar xz -C ~/.local/bin
+            ;;
+        *) echo "Unsupported operating system for gitmux: $(uname -s)" >&2; exit 1 ;;
+    esac
+    shell_name=$(basename "${SHELL:-bash}")
+    case "$shell_name" in
+        zsh) startup_file="$HOME/.zshrc" ;;
+        *) startup_file="$HOME/.bashrc" ;;
+    esac
+    if ! grep -Fq '.local/bin' "$startup_file" 2>/dev/null; then
+        printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$startup_file"
     fi
     echo "Installed gitmux to ~/.local/bin"
 fi
@@ -297,12 +367,15 @@ if ! command -v direnv &> /dev/null; then
     fi
 fi
 
-# Add direnv hook to bashrc if not present
-if ! grep -q "direnv hook bash" ~/.bashrc 2>/dev/null; then
-    echo "" >> ~/.bashrc
-    echo "# direnv - auto-activate venvs when entering directories" >> ~/.bashrc
-    echo 'eval "$(direnv hook bash)"' >> ~/.bashrc
-    echo "Added direnv hook to ~/.bashrc"
+# Add the direnv hook to the user's active shell startup file if not present.
+shell_name=$(basename "${SHELL:-bash}")
+case "$shell_name" in
+    zsh) startup_file="$HOME/.zshrc"; direnv_hook='eval "$(direnv hook zsh)"' ;;
+    *) startup_file="$HOME/.bashrc"; direnv_hook='eval "$(direnv hook bash)"' ;;
+esac
+if ! grep -Fq "direnv hook $shell_name" "$startup_file" 2>/dev/null; then
+    printf '\n# direnv - auto-activate venvs when entering directories\n%s\n' "$direnv_hook" >> "$startup_file"
+    echo "Added direnv hook to $startup_file"
 fi
 
 # Reload tmux config if tmux is running
@@ -312,6 +385,6 @@ if tmux info &> /dev/null; then
 fi
 
 echo ""
-echo "Done! Run 'source ~/.bashrc' or open a new terminal."
+echo "Done! Open a new terminal or source your shell startup file."
 echo "Next: run 'pi-start all' to start the personal workspace and secretary grid."
 echo "If pi-start is not on PATH yet: '$HOME/.local/bin/pi-start all'"

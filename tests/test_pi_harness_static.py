@@ -150,6 +150,9 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("ROLLBACK_REF=refs/heads/rollback/pi-harness-pre-trusted-live-20260729", installer)
         self.assertIn("Refusing to replace mismatched rollback ref", installer)
         self.assertIn("Existing Pi core has unsafe ownership or writable modes", installer)
+        self.assertIn("uname -s", installer)
+        self.assertIn("brew install gitmux", installer)
+        self.assertIn("__PI_AGENT_DIR__", installer)
 
     def test_secretary_slice_is_installed_and_mechanically_read_only(self):
         installer = (ROOT / "install.sh").read_text()
@@ -158,7 +161,8 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("pi-secretary-control.py", installer)
         self.assertIn('skill_rollback_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pi/rollback/skills"', installer)
         self.assertIn('activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status" "$skill_rollback_dir"', installer)
-        self.assertIn('rollback_dir="${3:-$(dirname "$target")}"', installer)
+        self.assertIn('local source=$1 target=$2 rollback_dir backup=""', installer)
+        self.assertIn('rollback_dir=${3:-$(dirname "$target")}', installer)
         self.assertIn("for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary", installer)
         for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,subagent,secretary_git,secretary_record_idea", "--session-id", "--name"]:
             self.assertIn(flag, launcher)
@@ -239,14 +243,14 @@ class HarnessStaticTests(unittest.TestCase):
         config = (ROOT / "tmux.conf").read_text()
         self.assertNotIn(":all:", config)
         self.assertIn("~^[[:space:]]*", config)
-        self.assertIn("/home/j/.local/bin/pidev[[:space:]]+--launch[[:space:]]+--session-id", config)
-        self.assertIn("/home/j/.local/bin/pi-tmux-session[[:space:]]+--session-id", config)
+        self.assertIn(r"[^[:space:]]*/\.local/bin/pidev[[:space:]]+--launch[[:space:]]+--session-id", config)
+        self.assertIn(r"[^[:space:]]*/\.local/bin/pi-tmux-session[[:space:]]+--session-id", config)
         self.assertNotIn('~pi.*--session-id', config)
         self.assertIn("set -g @continuum-restore 'on'", config)
         self.assertIn("set -g @continuum-save-interval '15'", config)
         self.assertLess(config.index("catppuccin/tmux"), config.index("tmux-continuum"))
         self.assertLess(config.index('set -g status-right "#{E:@catppuccin_status_directory}"'), config.index("run '~/.tmux/plugins/tpm/tpm'"))
-        self.assertLess(config.index("run '~/.tmux/plugins/tpm/tpm'"), config.index("tmux-voxtype-status.sh"))
+        self.assertLess(config.index("run '~/.tmux/plugins/tpm/tpm'"), config.index("tmux-voxtype-status"))
 
     def test_resurrect_patterns_match_only_known_commands_and_argument_order(self):
         config = (ROOT / "tmux.conf").read_text()
@@ -375,7 +379,7 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
             self.assertIn("defaultContext: fresh", frontmatter, path.name)
             self.assertIn("inheritProjectContext: false", frontmatter, path.name)
             self.assertIn("inheritSkills: false", frontmatter, path.name)
-            self.assertIn("subagentOnlyExtensions: /home/j/.pi/agent/extensions/workflow-state/index.ts", frontmatter, path.name)
+            self.assertIn("subagentOnlyExtensions: __PI_AGENT_DIR__/extensions/workflow-state/index.ts", frontmatter, path.name)
             tools = re.search(r"^tools: (.+)$", frontmatter, re.MULTILINE).group(1).split(", ")
             if path.stem == "worker":
                 self.assertIn("write", tools)

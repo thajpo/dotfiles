@@ -51,7 +51,7 @@ export default function reviewReceipt(pi: ExtensionAPI): void {
       summary: Type.String({ maxLength: 1000 }), findings: Type.String({ maxLength: 16384 }) }),
     async execute(_id, params, signal) {
       const assigned = environment();
-      const result = await pi.exec("/usr/bin/python3", [assigned.control, "review-submit", "--project-id", assigned.projectId,
+      const result = await pi.exec("python3", [assigned.control, "review-submit", "--project-id", assigned.projectId,
         "--request-id", assigned.requestId, "--verdict", params.verdict, "--summary", params.summary, "--findings", params.findings],
         { signal, timeout: 30_000 });
       if (result.code !== 0) throw new Error((result.stderr || result.stdout || "receipt rejected").trim());

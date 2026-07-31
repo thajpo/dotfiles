@@ -106,7 +106,7 @@ export default function secretary(pi: ExtensionAPI): void {
 
   const invoke = async (args: string[], signal: AbortSignal) => {
     const { control } = requiredEnvironment();
-    const result = await pi.exec("/usr/bin/python3", [control, ...args], { signal, timeout: 120_000 });
+    const result = await pi.exec("python3", [control, ...args], { signal, timeout: 120_000 });
     if (result.code !== 0) throw new Error((result.stderr || result.stdout || "secretary operation failed").trim());
     return result.stdout.trim();
   };

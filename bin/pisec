@@ -3,6 +3,16 @@
 # field is ever used as a tmux command or target.
 set -euo pipefail
 
+if (( BASH_VERSINFO[0] < 4 )); then
+  for bash_candidate in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [[ -x "$bash_candidate" ]] && "$bash_candidate" -c '(( BASH_VERSINFO[0] >= 4 ))' 2>/dev/null; then
+      exec "$bash_candidate" "$0" "$@"
+    fi
+  done
+  printf 'pisec: Bash 4 or newer is required; install Homebrew bash on macOS\n' >&2
+  exit 1
+fi
+
 if (( EUID == 0 )); then printf 'pisec: refusing to run as root\n' >&2; exit 1; fi
 if [[ -n "${PI_SUBAGENT_CHILD:-}${PI_TASK_ROUTE_FILE:-}" ]]; then printf 'pisec: refusing nested or subagent invocation\n' >&2; exit 2; fi
 self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -19,16 +29,16 @@ usage() {
   printf '%s\n' '       each projects-N window contains at most two side-by-side secretary panes'
 }
 
-registry_json() { /usr/bin/python3 "$control" registry-list; }
+registry_json() { python3 "$control" registry-list; }
 registry_rows() {
-  /usr/bin/python3 -c '
+  python3 -c '
 import base64, json, sys
 for item in json.load(sys.stdin):
     values = [item[k] for k in ("projectId", "alias", "primaryRepository", "secretarySessionId")]
     print("\t".join(base64.urlsafe_b64encode(v.encode()).decode() for v in values))
 ' <<<"$(registry_json)"
 }
-decode() { /usr/bin/python3 - "$1" <<'PY'
+decode() { python3 - "$1" <<'PY'
 import base64, sys
 print(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)).decode(), end="")
 PY
@@ -49,7 +59,7 @@ case "$action" in
       esac
     done
     [[ -n "$alias" ]] || { usage >&2; exit 2; }
-    exec /usr/bin/python3 "$control" --repository "$repository" register --alias "$alias"
+    exec python3 "$control" --repository "$repository" register --alias "$alias"
     ;;
   list)
     [[ $# -eq 1 ]] || { usage >&2; exit 2; }
@@ -58,7 +68,7 @@ case "$action" in
     ;;
   launch-info)
     [[ $# -eq 2 && "$2" =~ ^[0-9a-f]{64}$ ]] || { usage >&2; exit 2; }
-    exec /usr/bin/python3 "$control" launch-info --project-id "$2"
+    exec python3 "$control" launch-info --project-id "$2"
     ;;
   default)
     [[ $# -eq 0 ]] || { usage >&2; exit 2; }
@@ -100,8 +110,19 @@ mkdir -p -m 700 "$state_root"
 chmod 700 "$state_root"
 lock="$state_root/pisec-grid.lock"
 : > "$lock"; chmod 600 "$lock"
-exec {lock_fd}>"$lock"
-flock -x "$lock_fd"
+lock_fd=9
+exec 9>"$lock"
+lock_dir=""
+release_grid_lock() {
+  [[ -n "$lock_dir" ]] && rmdir "$lock_dir" 2>/dev/null || :
+}
+trap release_grid_lock EXIT
+if command -v flock >/dev/null 2>&1; then
+  flock -x "$lock_fd"
+else
+  lock_dir="${lock}.d"
+  mkdir "$lock_dir" || { printf 'pisec: workspace lock is already held\n' >&2; exit 1; }
+fi
 fail() { printf 'pisec: %s\n' "$1" >&2; exit 1; }
 
 session=pisec
@@ -151,6 +172,11 @@ descendant_has_session() {
   if [[ -r "/proc/$parent/environ" ]] && env_values=$(tr '\0' '\n' < "/proc/$parent/environ"); then
     if grep -Fxq "PI_SECRETARY_PROJECT_ID=$wanted_id" <<< "$env_values" &&
        grep -Fxq 'PI_SECRETARY_READ_ONLY=1' <<< "$env_values"; then
+      return 0
+    fi
+  elif env_values=$(ps eww -p "$parent" -o command= 2>/dev/null); then
+    if [[ "$env_values" =~ (^|[[:space:]])PI_SECRETARY_PROJECT_ID=$wanted_id([[:space:]]|$) &&
+          "$env_values" =~ (^|[[:space:]])PI_SECRETARY_READ_ONLY=1([[:space:]]|$) ]]; then
       return 0
     fi
   fi
@@ -344,5 +370,7 @@ if [[ "$action" == default || "$action" == open || "$action" == "" ]]; then
   # The attached tmux client must not inherit the grid repair lock. Otherwise
   # a later activation blocks for the entire lifetime of that client.
   eval "exec ${lock_fd}>&-"
+  release_grid_lock
+  trap - EXIT
   if [[ -n "${TMUX:-}" ]]; then exec tmux switch-client -t "=$session:${rebuilt_windows[0]}"; else exec tmux attach-session -t "=$session:${rebuilt_windows[0]}"; fi
 fi

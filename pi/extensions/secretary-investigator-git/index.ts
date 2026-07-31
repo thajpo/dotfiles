@@ -29,7 +29,7 @@ export default function secretaryInvestigatorGit(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, signal) {
       const { projectId, control } = environment();
-      const result = await pi.exec("/usr/bin/python3", [
+      const result = await pi.exec("python3", [
         control, "git-read", "--project-id", projectId, "--operation", params.operation, "--", ...(params.args ?? []),
       ], { signal, timeout: 120_000 });
       if (result.code !== 0) throw new Error((result.stderr || result.stdout || "secretary Git inspection failed").trim());

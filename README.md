@@ -50,12 +50,12 @@ cat > ~/dotfiles/scripts/dotfiles-sync.sh <<'EOF'
 set -euo pipefail
 
 REPO_DIR="$HOME/dotfiles"
-LOCK_FILE="/tmp/dotfiles-sync.lock"
+LOCK_DIR="/tmp/dotfiles-sync.lockdir"
 
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   exit 0
 fi
+trap 'rmdir "$LOCK_DIR"' EXIT
 
 cd "$REPO_DIR"
 git pull --rebase --autostash origin master
@@ -135,7 +135,7 @@ launchctl unload ~/Library/LaunchAgents/com.user.dotfiles-sync.plist 2>/dev/null
 launchctl load ~/Library/LaunchAgents/com.user.dotfiles-sync.plist
 ```
 
-Note: macOS may not have `flock` by default. If needed, install `flock` (`brew install flock`) or remove the lock block from the script.
+The checked-in sync script uses a portable `mkdir` lock, so the same approach works on Linux and macOS.
 
 ## Agent Engineering Workflow
 

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+node_bin_dir=$(CDPATH= cd -- "$(dirname -- "$(command -v node)")" && pwd)
 [[ -d "$root/pi/npm/node_modules" ]] || npm ci --prefix "$root/pi/npm" --legacy-peer-deps --no-audit --no-fund
 
 temporary=$(mktemp -d)
@@ -22,15 +23,16 @@ prepare_home() {
   cp -a "$core_fixture" "$home/.local/share/pi/core"
   printf 'old-settings\n' > "$home/.pi/agent/settings.json"
   printf 'old-npm\n' > "$home/.pi/agent/npm/sentinel"
-  python3 - "$home/.config/pi/repository-policy.json" "$case_root/worktrees" <<'PY'
+  python3 - "$home/.config/pi/repository-policy.json" "$case_root/worktrees" "$root" <<'PY'
 from pathlib import Path
 import json, sys
+repository = str(Path(sys.argv[3]).resolve())
 Path(sys.argv[1]).write_text(json.dumps({
     "version": 1,
     "defaultMode": "isolated",
-    "trustedRoots": ["/home/j/dotfiles"],
+    "trustedRoots": [repository],
     "isolatedRoots": [],
-    "controlPlaneRepositories": ["/home/j/dotfiles"],
+    "controlPlaneRepositories": [repository],
     "protectedBranches": ["main", "master"],
     "worktreeRoot": sys.argv[2],
 }))
@@ -83,7 +85,7 @@ if [ "${PI_TEST_MV_FAIL:-0}" = 1 ] && [ ! -e "$PI_TEST_INTERRUPT_MARKER" ]; then
     */settings.json.rollback.*) : > "$PI_TEST_INTERRUPT_MARKER"; exit 42 ;;
   esac
 fi
-/usr/bin/mv "$@"
+/bin/mv "$@"
 if [ "${PI_TEST_INTERRUPT:-0}" = 1 ] && [ ! -e "$PI_TEST_INTERRUPT_MARKER" ]; then
   case "${PI_TEST_INTERRUPT_MATCH:-target}:$destination" in
     backup:*/settings.json.rollback.*|target:*/settings.json)
@@ -116,7 +118,7 @@ failure_case=$temporary/failure
 prepare_home "$failure_case"
 printf 'block launcher directory\n' > "$failure_case/home/.local/bin"
 set +e
-HOME="$failure_case/home" PATH="$failure_case/bin:/usr/local/bin:/usr/bin:/bin" \
+HOME="$failure_case/home" PATH="$failure_case/bin:$node_bin_dir:/usr/local/bin:/usr/bin:/bin" \
   PI_HARNESS_ONLY=1 PI_TEST_DOCKER_LOG="$failure_case/docker.log" \
   "$root/install.sh" >"$failure_case/stdout" 2>"$failure_case/stderr"
 failure_status=$?
@@ -129,7 +131,7 @@ signal_case=$temporary/signal
 prepare_home "$signal_case"
 mkdir -p "$signal_case/home/.local/bin"
 set +e
-HOME="$signal_case/home" PATH="$signal_case/bin:/usr/local/bin:/usr/bin:/bin" \
+HOME="$signal_case/home" PATH="$signal_case/bin:$node_bin_dir:/usr/local/bin:/usr/bin:/bin" \
   PI_HARNESS_ONLY=1 PI_TEST_DOCKER_LOG="$signal_case/docker.log" PI_TEST_INTERRUPT=1 \
   PI_TEST_INTERRUPT_MATCH=backup PI_TEST_INTERRUPT_MARKER="$signal_case/interrupted" "$root/install.sh" >"$signal_case/stdout" 2>"$signal_case/stderr"
 signal_status=$?
@@ -141,7 +143,7 @@ backup_failure_case=$temporary/backup-failure
 prepare_home "$backup_failure_case"
 mkdir -p "$backup_failure_case/home/.local/bin"
 set +e
-HOME="$backup_failure_case/home" PATH="$backup_failure_case/bin:/usr/local/bin:/usr/bin:/bin" \
+HOME="$backup_failure_case/home" PATH="$backup_failure_case/bin:$node_bin_dir:/usr/local/bin:/usr/bin:/bin" \
   PI_HARNESS_ONLY=1 PI_TEST_DOCKER_LOG="$backup_failure_case/docker.log" PI_TEST_MV_FAIL=1 \
   PI_TEST_INTERRUPT_MARKER="$backup_failure_case/failed" "$root/install.sh" \
   >"$backup_failure_case/stdout" 2>"$backup_failure_case/stderr"
@@ -154,7 +156,7 @@ image_failure_case=$temporary/image-failure
 prepare_home "$image_failure_case"
 mkdir -p "$image_failure_case/home/.local/bin"
 set +e
-HOME="$image_failure_case/home" PATH="$image_failure_case/bin:/usr/local/bin:/usr/bin:/bin" \
+HOME="$image_failure_case/home" PATH="$image_failure_case/bin:$node_bin_dir:/usr/local/bin:/usr/bin:/bin" \
   PI_HARNESS_ONLY=1 PI_TEST_DOCKER_LOG="$image_failure_case/docker.log" PI_TEST_DOCKER_FAIL=1 \
   "$root/install.sh" >"$image_failure_case/stdout" 2>"$image_failure_case/stderr"
 image_failure_status=$?
@@ -167,7 +169,7 @@ image_signal_case=$temporary/image-signal
 prepare_home "$image_signal_case"
 mkdir -p "$image_signal_case/home/.local/bin"
 set +e
-HOME="$image_signal_case/home" PATH="$image_signal_case/bin:/usr/local/bin:/usr/bin:/bin" \
+HOME="$image_signal_case/home" PATH="$image_signal_case/bin:$node_bin_dir:/usr/local/bin:/usr/bin:/bin" \
   PI_HARNESS_ONLY=1 PI_TEST_DOCKER_LOG="$image_signal_case/docker.log" PI_TEST_DOCKER_INTERRUPT=1 \
   PI_TEST_INTERRUPT_MARKER="$image_signal_case/interrupted" "$root/install.sh" \
   >"$image_signal_case/stdout" 2>"$image_signal_case/stderr"
@@ -180,10 +182,18 @@ unsafe_core_case=$temporary/unsafe-core
 prepare_home "$unsafe_core_case"
 mkdir -p "$unsafe_core_case/home/.local/bin"
 chmod g+w "$unsafe_core_case/home/.local/share/pi/core/node_modules/.bin/pi"
-HOME="$unsafe_core_case/home" PATH="$unsafe_core_case/bin:/usr/local/bin:/usr/bin:/bin" \
+HOME="$unsafe_core_case/home" PATH="$unsafe_core_case/bin:$node_bin_dir:/usr/local/bin:/usr/bin:/bin" \
   PI_HARNESS_ONLY=1 PI_TEST_DOCKER_LOG="$unsafe_core_case/docker.log" \
   "$root/install.sh" >"$unsafe_core_case/stdout" 2>"$unsafe_core_case/stderr"
-test ! -n "$(find "$unsafe_core_case/home/.local/share/pi/core" ! -type l -perm /022 -print -quit)"
+python3 - "$unsafe_core_case/home/.local/share/pi/core" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+for entry in (root, *root.rglob("*")):
+    if not entry.is_symlink() and entry.stat().st_mode & 0o022:
+        raise SystemExit(1)
+PY
 grep -Fq 'Existing Pi core has unsafe ownership or writable modes' "$unsafe_core_case/stderr"
 
 printf 'PASS installer transaction rollback, signal handling, and core hardening\n'

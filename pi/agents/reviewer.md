@@ -7,8 +7,8 @@ inheritSkills: false
 model: openai-codex/gpt-5.6-luna
 thinking: xhigh
 tools: read, bash, grep, find, ls, contact_supervisor
-extensions: /home/j/.pi/agent/npm/node_modules/@kjrjay/pi-sandbox/index.ts
-subagentOnlyExtensions: /home/j/.pi/agent/extensions/workflow-state/index.ts
+extensions: __PI_AGENT_DIR__/npm/node_modules/@kjrjay/pi-sandbox/index.ts
+subagentOnlyExtensions: __PI_AGENT_DIR__/extensions/workflow-state/index.ts
 defaultContext: fresh
 acceptanceRole: read-only
 ---
