@@ -43,10 +43,11 @@ Default routing:
 Use Sol because consequential uncertainty remains, not merely because the task
 is large.
 
-Use Sol because consequential uncertainty remains, not merely because the task
-is large.
-
-Use pi-subagents as the coding-agent orchestrator.
+Use pi-subagents as the coding-agent orchestrator. Keep delegation lightweight:
+the parent chooses the number and shape of investigators from the task rather
+than satisfying a fixed fanout recipe. Read-only investigation shares the
+current task workspace; create separate Git worktrees only for independent
+mutable attempts that actually need isolation.
 
 Keep pi-btw available for side questions. Its context remains separate until a
 result is deliberately injected.

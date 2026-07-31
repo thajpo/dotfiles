@@ -35,9 +35,49 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("acceptanceRole: writer", worker_frontmatter)
         config = json.loads((ROOT / "pi/extensions/subagent/config.json").read_text())
         self.assertFalse(config["asyncByDefault"])
-        self.assertEqual(config["globalConcurrencyLimit"], 3)
-        self.assertEqual(config["parallel"]["maxTasks"], 3)
+        self.assertNotIn("globalConcurrencyLimit", config)
+        self.assertEqual(config["parallel"]["maxTasks"], 0)
+        self.assertEqual(config["maxSubagentSpawnsPerSession"], 0)
         self.assertEqual(config["maxSubagentDepth"], 1)
+
+    def test_secretary_investigators_are_mechanically_read_only(self):
+        wrapper = (ROOT / "pi/extensions/secretary-subagents/index.ts").read_text()
+        self.assertIn('const SAFE_ACTIONS = new Set(["list", "doctor"]);', wrapper)
+        self.assertIn('params.action && !SAFE_ACTIONS.has(params.action)', wrapper)
+        self.assertIn('discoverAgents(cwd, scope).agents.filter(isReadOnlyAgent)', wrapper)
+        self.assertIn('const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "secretary_git", "contact_supervisor"]', wrapper)
+        self.assertIn('subagentOnlyExtensions: [gitExtension]', wrapper)
+        self.assertIn('extensions: []', wrapper)
+        self.assertIn('mcpDirectTools: []', wrapper)
+        self.assertIn('memory: undefined', wrapper)
+        self.assertIn('inheritProjectContext: false', wrapper)
+        self.assertIn('params.worktree === true', wrapper)
+        self.assertIn('async: false', wrapper)
+        self.assertIn('artifacts: false', wrapper)
+        self.assertIn('output: false', wrapper)
+        self.assertIn('worktree: false', wrapper)
+        self.assertIn('level: "none"', wrapper)
+
+        secretary = (ROOT / "pi/extensions/secretary/index.ts").read_text()
+        self.assertIn('if (process.env.PI_SECRETARY_READ_ONLY !== "1") return;', secretary)
+        self.assertIn('if (process.env.PI_SECRETARY_READ_ONLY !== "1") return;', wrapper)
+        git_tool = (ROOT / "pi/extensions/secretary-investigator-git/index.ts").read_text()
+        self.assertIn('if (process.env.PI_SECRETARY_READ_ONLY !== "1") return;', git_tool)
+        self.assertIn('name: "secretary_git"', git_tool)
+        self.assertIn('PI_SECRETARY_READ_ONLY', git_tool)
+        self.assertIn('"git-read"', git_tool)
+        self.assertNotIn('name: "bash"', git_tool)
+
+        agents = [
+            path for path in (ROOT / "pi/agents").glob("*.md")
+            if "acceptanceRole: read-only" in path.read_text()
+        ]
+        self.assertTrue(agents)
+        for path in agents:
+            tools = re.search(r"^tools: (.+)$", path.read_text(), re.MULTILINE).group(1).split(", ")
+            self.assertNotIn("edit", tools, path.name)
+            self.assertNotIn("write", tools, path.name)
+            self.assertNotIn("subagent", tools, path.name)
 
     def test_only_isolated_publication_configuration_remains(self):
         config = json.loads((ROOT / "pi/extensions/pi-sandbox.json").read_text())
@@ -116,10 +156,10 @@ class HarnessStaticTests(unittest.TestCase):
         extension = (ROOT / "pi/extensions/secretary/index.ts").read_text()
         self.assertIn("pi-secretary-control.py", installer)
         self.assertIn('activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status"', installer)
-        self.assertIn("for launcher in pi pi-host pidev pi-tmux-session pisec pi-secretary", installer)
-        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,secretary_git,secretary_record_idea", "--session-id", "--name"]:
+        self.assertIn("for launcher in pi pi-host pidev pi-tmux-session pisec pi-personal pi-secretary", installer)
+        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,subagent,secretary_git,secretary_record_idea", "--session-id", "--name"]:
             self.assertIn(flag, launcher)
-        self.assertEqual(launcher.count("-e \"$"), 1)
+        self.assertEqual(launcher.count("-e \"$"), 2)
         self.assertNotIn("--tools read,grep,find,ls,bash", launcher)
         for forbidden in ["task_packet", "--edit", "--write"]:
             self.assertNotIn(forbidden, launcher)
@@ -130,7 +170,13 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("fast-forward-only landing", extension)
         self.assertIn("Refuses dirty, live, moved, uncertain, or unlanded", extension)
         self.assertIn("project-status", extension)
+        secretary_subagents = (ROOT / "pi/extensions/secretary-subagents/index.ts").read_text()
+        self.assertIn('name: "subagent"', secretary_subagents)
+        self.assertIn("Number.MAX_SAFE_INTEGER", secretary_subagents)
+        self.assertIn("requestsWorktree", secretary_subagents)
+        self.assertIn("isReadOnlyAgent", secretary_subagents)
         self.assertIn("bind-key -T prefix g", (ROOT / "tmux.conf").read_text())
+        self.assertIn("pi-personal", (ROOT / "tmux.conf").read_text())
         brief_extension = (ROOT / "pi/extensions/workstream-brief/index.ts").read_text()
         self.assertIn("getBranch", brief_extension)
         self.assertIn("pi.appendEntry", brief_extension)
@@ -181,8 +227,8 @@ class HarnessStaticTests(unittest.TestCase):
         value = shlex.split(line)[3]
         elements = shlex.split(value)
         patterns = [element[1:] for element in elements if element.startswith("~")]
-        self.assertEqual(len(patterns), 3)
-        self.assertEqual(len([element for element in elements if element.startswith("~")]), 3)
+        self.assertEqual(len(patterns), 4)
+        self.assertEqual(len([element for element in elements if element.startswith("~")]), 4)
 
         # tmux-resurrect feeds each ~ entry as one ERE against the complete
         # command line. Python's equivalent needs POSIX space classes lowered.
@@ -193,6 +239,7 @@ class HarnessStaticTests(unittest.TestCase):
         known = [
             ("/home/j/.local/bin/pidev --launch --session-id stable", "pidev"),
             ("/usr/bin/bash /home/j/.local/bin/pi-tmux-session --session-id stable", "pi-tmux-session"),
+            ("/usr/bin/bash /home/j/.local/bin/pi-host --session-dir /tmp/pi-host-sessions --session-id stable", "pi-host"),
             ("/usr/bin/node /home/j/.local/bin/pi --session-id stable", "pi"),
         ]
         for index, (command, _name) in enumerate(known):
@@ -206,6 +253,9 @@ class HarnessStaticTests(unittest.TestCase):
             "/home/j/bin/pidev --launch",
             "/home/j/bin/pi-tmux-session",
             "/home/j/bin/pi-tmux-session --name stable",
+            "/home/j/.local/bin/pi-host --session-dir /tmp/pi-host-sessions",
+            "/home/j/.local/bin/pi-host --session-id stable --session-dir /tmp/pi-host-sessions",
+            "/home/j/.local/bin/pi-host --session-dir /tmp/pi-host-sessions --name stable",
             "/home/j/bin/pi --name stable",
             "/usr/bin/echo /home/j/bin/pidev --launch --session-id stable",
             "/usr/bin/echo /home/j/bin/pi-tmux-session --session-id stable",
@@ -268,10 +318,12 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
         self.assertNotIn("{ scope: data.modelScope });", executor)
         recovery = (package_root / "src/runs/background/async-resume.ts").read_text()
         self.assertIn('agentConfig.acceptanceRole === "writer" || descriptor.acceptanceRole === "writer"', recovery)
+        shared_types = (package_root / "src/shared/types.ts").read_text()
+        self.assertIn("return Number.POSITIVE_INFINITY", shared_types)
 
     def test_global_agents_hash_and_removed_legacy_orchestrators(self):
         agents = (ROOT / "agent/AGENTS.md").read_bytes()
-        self.assertEqual(hashlib.sha256(agents).hexdigest(), "50d08656662704ea0a476d501e122eebae11a47a5514d707c1514d25b5e7c5ff")
+        self.assertEqual(hashlib.sha256(agents).hexdigest(), "a1a05beaba72227212237e00bbb0c793cb926d2e31f752b59243bf5caaef74aa")
         policy = agents.decode()
         for heading in ["### FAST", "### RIP", "### BUILD", "### MAJOR", "### OFF", "### LIGHT", "### DEEP"]:
             self.assertIn(heading, policy)

@@ -291,6 +291,44 @@ class LauncherTests(unittest.TestCase):
             self.assertTrue(session_dir.is_dir())
             self.assertEqual(invocation["env"], {})
 
+    def test_pi_host_accepts_only_stable_host_maintenance_session_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, _, output, env = setup_home(Path(tmp))
+            session_dir = home / ".pi/agent/sessions/host-maintenance/pi-personal-host"
+            result = subprocess.run(
+                [str(ROOT / "bin/pi-host"), "--session-dir", str(session_dir), "--session-id", "personal-host"],
+                cwd=home, env=env, text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads(output.read_text())["args"]
+            self.assertEqual(args.count("--session-dir"), 1)
+            self.assertEqual(Path(args[args.index("--session-dir") + 1]), session_dir)
+            self.assertIn("personal-host", args)
+
+            rejected = subprocess.run(
+                [str(ROOT / "bin/pi-host"), "--session-dir", str(home / "outside")],
+                cwd=home, env=env, text=True, capture_output=True,
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("host-maintenance session root", rejected.stderr)
+
+            nested = subprocess.run(
+                [str(ROOT / "bin/pi-host"), "--session-dir", str(session_dir / "nested")],
+                cwd=home, env=env, text=True, capture_output=True,
+            )
+            self.assertEqual(nested.returncode, 2)
+
+            outside = home / "outside-session"
+            outside.mkdir()
+            linked = session_dir.parent / "linked"
+            linked.symlink_to(outside, target_is_directory=True)
+            symlinked = subprocess.run(
+                [str(ROOT / "bin/pi-host"), "--session-dir", str(linked)],
+                cwd=home, env=env, text=True, capture_output=True,
+            )
+            self.assertEqual(symlinked.returncode, 2)
+            self.assertIn("cannot be a symlink", symlinked.stderr)
+
     def test_pi_host_refuses_nested_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             home, _, _, env = setup_home(Path(tmp))

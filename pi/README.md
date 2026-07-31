@@ -67,8 +67,12 @@ falls back to it.
 One normal task has one route, workspace, branch, and container. Parent,
 scouts, worker, reviewers, and BTW share it. Child context style does not alter
 the execution plane. Children cannot publish or remove the task container.
+Investigator count is selected from the task rather than a fixed fanout recipe;
+report-only parallelism does not create Git worktrees. Secretary investigators
+run in the foreground with only read/search and bounded read-only Git tools;
+they inherit neither shell/write tools nor ordinary extensions.
 
-Explicit independent candidates receive linked worktrees, branches, and
+Explicit independent mutable candidates receive linked worktrees, branches, and
 containers. They must commit before comparison; candidate worktrees and branches
 remain until explicitly removed.
 

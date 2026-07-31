@@ -117,6 +117,46 @@ class SecretaryControlTests(unittest.TestCase):
         with self.assertRaises(secretary.SecretaryError):
             secretary.git_read(registered["projectId"], "diff", ["--output=/tmp/unsafe"])
 
+        marker = Path(self.tmp.name) / "git-helper-ran"
+        helper = Path(self.tmp.name) / "git-helper"
+        helper.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+        helper.chmod(0o755)
+        git(self.source, "config", "core.fsmonitor", str(helper))
+        git(self.source, "config", "diff.external", str(helper))
+        (self.source / "tracked").write_text("changed\n")
+        diff = secretary.git_read(registered["projectId"], "diff", [])
+        self.assertIn("changed", diff["stdout"])
+        secretary.git_read(registered["projectId"], "status", [])
+        self.assertFalse(marker.exists(), "repository-configured helper was executed")
+
+        before = {
+            "branches": git(self.source, "branch", "--format=%(refname)"),
+            "tags": git(self.source, "tag", "--list"),
+            "remotes": git(self.source, "remote", "-v"),
+        }
+        for operation, args in [
+            ("branch", ["new-branch"]),
+            ("branch", ["--delete", "main"]),
+            ("tag", ["new-tag"]),
+            ("tag", ["--delete", "old-tag"]),
+            ("remote", ["add", "unsafe", "https://example.invalid/repo"]),
+            ("remote", ["set-url", "origin", "https://example.invalid/repo"]),
+        ]:
+            with self.subTest(operation=operation, args=args):
+                if operation in {"branch", "tag"} and args[0] not in {"--delete"}:
+                    # Bare values are harmless patterns because the controller
+                    # forces --list; they must not create refs.
+                    secretary.git_read(registered["projectId"], operation, args)
+                else:
+                    with self.assertRaises(secretary.SecretaryError):
+                        secretary.git_read(registered["projectId"], operation, args)
+        after = {
+            "branches": git(self.source, "branch", "--format=%(refname)"),
+            "tags": git(self.source, "tag", "--list"),
+            "remotes": git(self.source, "remote", "-v"),
+        }
+        self.assertEqual(after, before)
+
     def test_concurrent_duplicate_alias_registration_fails_once(self):
         other = repo(Path(self.tmp.name), "other-repository")
         barrier = threading.Barrier(2)

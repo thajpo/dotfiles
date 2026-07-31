@@ -201,11 +201,13 @@ threshold is `-55 dBFS`. Override calibration with
 
 ### Pi
 - Reproducible Pi CLI and exact extension package pins with verified patches
+- Pi keeps the prompt editor and footer pinned while mouse-wheel scrolling through conversation history, so drafts remain editable while reading earlier responses
 - Deterministic trusted-live/isolated repository policy and hardened Docker task containers
 - One shared execution plane for parent, subagents, and pi-btw
 - Explicit unsandboxed `pi-host` maintenance launcher
 - `pidev` is the managed Pi development launcher and keeps stable project sessions for tmux-resurrect
-- `pisec` opens the default three secretary projects (`vla-lens`, `csv-agent`, `SleepyDreamyV3`); with an odd active count it gives the first project its own window and puts the remaining projects into two side-by-side panes; use `pisec activate ALIAS ...` to rearrange/select projects or `pisec swap OLD_ALIAS NEW_ALIAS` to replace one without re-registering projects
+- `pisec` opens the default three secretary projects (`vla-lens`, `csv-agent`, `SleepyDreamyV3`); secretaries may fan out to any useful number of existing read-only investigator agents without creating Git worktrees, while implementation still requires an explicit full workstream; with an odd active count `pisec` gives the first project its own window and puts the remaining projects into two side-by-side panes; use `pisec activate ALIAS ...` or `pisec swap OLD_ALIAS NEW_ALIAS` to change the active set
+- `pi-personal` maintains a separate four-pane session for `mlre-transition`, the financial workbook (`investing/investment-os`), dotfiles, and an explicit `pi-host` session; tmux ensures it on startup and `Ctrl-a p` switches to it
 - Installs to `~/.pi/agent` without tracking credentials, sessions, or runtime state
 
 ### Tools installed
@@ -220,6 +222,7 @@ threshold is `-55 dBFS`. Override calibration with
 | `Ctrl-a \|` | Split vertical |
 | `Ctrl-a _` | Split horizontal |
 | `Ctrl-a \` | Toggle last session |
+| `Ctrl-a p` | Switch to `pi-personal` |
 | `Ctrl-a s` | List sessions |
 | `Ctrl-a $` | Rename session |
 | `Ctrl-a ,` | Rename window |

@@ -122,6 +122,15 @@ apply_verified_patch \
   7177f6a09696fa50c40220ce6af482688c291461f4e69a1626cb6c1d3f13fbb1 \
   "$patch_dir/pi-subagents-0.35.1-model-policy.patch"
 
+apply_verified_patch \
+  pi-subagents-unbounded-parallel \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/shared/types.ts" \
+  0.35.1 \
+  8c817542e4b249a016a9e7554b00bb08e8e3d7e9d8f0766413919fb1ef759175 \
+  ca2a7fe28ec231d93a6a1662382c4b44d061c6124ff178df526a2093835f5407 \
+  "$patch_dir/pi-subagents-0.35.1-unbounded-parallel.patch"
+
 verify_model_policy_file() {
   local relative=$1 expected=$2 path="$agent_dir/npm/node_modules/pi-subagents/$1" actual
   [[ -f $path ]] || { printf 'pi-subagents-model-policy: source missing: %s\n' "$path" >&2; exit 1; }
@@ -138,4 +147,4 @@ verify_model_policy_file src/runs/foreground/chain-execution.ts 0565a3a72250b73c
 verify_model_policy_file src/runs/foreground/execution.ts c409ea5f40a0cd2bf1954c77ef8e531f2fe160cd24c4e4fcc8c7610ab59d513e
 verify_model_policy_file src/runs/foreground/subagent-executor.ts f6365f211cf56c4201454678ef96fe99ac4c55cd058d098d0b60285e4db3c800
 verify_model_policy_file src/runs/shared/model-fallback.ts 7177f6a09696fa50c40220ce6af482688c291461f4e69a1626cb6c1d3f13fbb1
-verify_model_policy_file src/shared/types.ts 8c817542e4b249a016a9e7554b00bb08e8e3d7e9d8f0766413919fb1ef759175
+verify_model_policy_file src/shared/types.ts ca2a7fe28ec231d93a6a1662382c4b44d061c6124ff178df526a2093835f5407

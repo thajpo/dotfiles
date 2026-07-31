@@ -41,6 +41,17 @@ SUPPORTED_OBJECT_FORMATS = {"sha1": 40, "sha256": 64}
 WORKSTREAM_ROLES = {"feature", "research", "analysis", "review", "integration"}
 GIT_READ_OPERATIONS = {"status", "log", "diff", "show", "branch", "rev-parse", "remote", "tag", "worktree"}
 GIT_READ_BLOCKED_ARGS = ("-c", "--config", "--config-env", "--exec-path", "--git-dir", "--work-tree", "-C", "--output", "--ext-diff", "--textconv", "--no-index")
+GIT_BRANCH_READ_FLAGS = {
+    "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--no-abbrev",
+    "--column", "--no-column", "-i", "--ignore-case", "--contains", "--no-contains",
+    "--merged", "--no-merged", "--points-at", "--list",
+}
+GIT_BRANCH_READ_PREFIXES = ("--contains=", "--no-contains=", "--merged=", "--no-merged=", "--points-at=", "--sort=", "--format=", "--color=", "--column=", "--abbrev=")
+GIT_TAG_READ_FLAGS = {
+    "-l", "--list", "--column", "--no-column", "-i", "--ignore-case", "--contains",
+    "--no-contains", "--merged", "--no-merged", "--points-at",
+}
+GIT_TAG_READ_PREFIXES = ("--contains=", "--no-contains=", "--merged=", "--no-merged=", "--points-at=", "--sort=", "--format=", "--color=", "--column=")
 PROJECT_FIELDS = {
     "schemaVersion", "projectId", "gitCommonDir", "gitCommonDevice", "gitCommonInode",
     "objectFormat", "capabilityHash",
@@ -485,6 +496,40 @@ def status(repository: str | Path, capability: str | None = None) -> dict[str, A
     return {"projectId": project_id, "initialized": True}
 
 
+def _git_read_command_args(operation: str, git_args: list[str]) -> list[str]:
+    """Constrain multi-mode Git subcommands to listing/query forms only."""
+    if operation == "branch":
+        for value in git_args:
+            if value.startswith("-") and value not in GIT_BRANCH_READ_FLAGS and not value.startswith(GIT_BRANCH_READ_PREFIXES):
+                raise SecretaryError("git branch option is not a read-only listing option")
+        return ["--list", *git_args]
+    if operation == "tag":
+        for value in git_args:
+            numbered_lines = re.fullmatch(r"-n\d*", value) is not None
+            if value.startswith("-") and not numbered_lines and value not in GIT_TAG_READ_FLAGS and not value.startswith(GIT_TAG_READ_PREFIXES):
+                raise SecretaryError("git tag option is not a read-only listing option")
+        return ["--list", *git_args]
+    if operation == "remote":
+        if not git_args or all(value in {"-v", "--verbose"} for value in git_args):
+            return git_args
+        if git_args[0] == "get-url" and len(git_args) >= 2:
+            options = git_args[1:-1]
+            if all(value in {"--all", "--push"} for value in options) and not git_args[-1].startswith("-"):
+                return git_args
+        if git_args[0] == "show" and len(git_args) in {2, 3}:
+            name = git_args[-1]
+            if not name.startswith("-") and (len(git_args) == 2 or git_args[1] == "-n"):
+                return ["show", "-n", name]
+        raise SecretaryError("git remote operation is not a read-only local query")
+    if operation == "worktree":
+        if not git_args or git_args[0] != "list" or any(
+                value not in {"--porcelain", "-z", "-v", "--verbose"} for value in git_args[1:]):
+            raise SecretaryError("only git worktree list is supported")
+    if operation in {"diff", "log", "show"}:
+        return ["--no-ext-diff", "--no-textconv", *git_args]
+    return git_args
+
+
 def git_read(project_id: str, operation: str, git_args: list[str]) -> dict[str, Any]:
     """Run one bounded, read-only Git operation in the registered repository."""
     if operation not in GIT_READ_OPERATIONS:
@@ -502,13 +547,17 @@ def git_read(project_id: str, operation: str, git_args: list[str]) -> dict[str, 
             raise SecretaryError("Git configuration and repository overrides are not allowed")
         if value in {"--exit-code", "--quiet", "--no-optional-locks", "-d", "-D", "--delete", "--force"}:
             raise SecretaryError("Git argument is not supported")
-    if operation == "worktree" and (not git_args or git_args[0] != "list"):
-        raise SecretaryError("only git worktree list is supported")
+    command_args = _git_read_command_args(operation, git_args)
     info = launch_info(project_id)
     repo = Path(info["primaryRepository"])
     environment = _env()
-    environment.update({"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0"})
-    result = subprocess.run(["git", operation, *git_args], cwd=str(repo), text=True,
+    environment.update({"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat", "PAGER": "cat"})
+    command = [
+        "git", "--no-pager", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+        "-c", "gpg.program=/bin/false", "-c", "gpg.ssh.program=/bin/false",
+        operation, *command_args,
+    ]
+    result = subprocess.run(command, cwd=str(repo), text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=environment)
     if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"

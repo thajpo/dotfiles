@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode=apply
+if [[ ${1:-} == --check ]]; then mode=check; shift; fi
+(( $# == 0 )) || { printf 'usage: pi-patch-core [--check]\n' >&2; exit 2; }
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+core_dir=${PI_CORE_DIR:-"$HOME/.local/share/pi/core"}
+package_dir="$core_dir/node_modules/@earendil-works/pi-coding-agent"
+interactive="$package_dir/dist/modes/interactive/interactive-mode.js"
+terminal="$package_dir/node_modules/@earendil-works/pi-tui/dist/terminal.js"
+viewport="$package_dir/dist/modes/interactive/pinned-conversation-viewport.mjs"
+viewport_source="$repo_root/pi/core/pinned-conversation-viewport.mjs"
+patch_file="$repo_root/pi/patches/pi-coding-agent-0.82.1-pinned-editor.patch"
+
+before_interactive=45f9fb6925b22738f230a4c4b4ffc4aaa79d9bffdda6305a44e23645adac282b
+after_interactive=c974be78beb5b8fa7ab0e18da0646899a59c8fac5af09adafd647096af794770
+before_terminal=131a0b0f2f4e90ef282b927e16df56fbe390e727db4a57f90d73801bceb0f37c
+after_terminal=85bf4f05c8c956cb452fcb1605e70dfc65f8e939801cd23a999c5fd5583653d9
+viewport_hash=ebab3a0b5cc110ebe3a634538ef84d5549bd0020a07b422c9df69838b3125270
+
+hash_file() { [[ -f $1 ]] && sha256sum "$1" | awk '{print $1}' || printf missing; }
+[[ -f "$package_dir/package.json" ]] || exit 1
+version=$(node -p 'require(process.argv[1]).version' "$package_dir/package.json")
+[[ $version == 0.82.1 ]] || { [[ $mode == check ]] && exit 1; printf 'pi-core: unsupported version: %s\n' "$version" >&2; exit 1; }
+
+actual_interactive=$(hash_file "$interactive")
+actual_terminal=$(hash_file "$terminal")
+actual_viewport=$(hash_file "$viewport")
+if [[ $actual_interactive == "$after_interactive" && $actual_terminal == "$after_terminal" && $actual_viewport == "$viewport_hash" ]]; then
+  [[ $mode == check ]] || printf 'pi-core: pinned editor already applied %s\n' "$after_interactive"
+  exit 0
+fi
+[[ $mode == apply ]] || exit 1
+[[ $actual_interactive == "$before_interactive" && $actual_terminal == "$before_terminal" ]] || {
+  printf 'pi-core: unexpected source hashes: interactive=%s terminal=%s\n' "$actual_interactive" "$actual_terminal" >&2
+  exit 1
+}
+[[ $actual_viewport == missing || $actual_viewport == "$viewport_hash" ]] || {
+  printf 'pi-core: unexpected pinned viewport hash: %s\n' "$actual_viewport" >&2
+  exit 1
+}
+[[ $(hash_file "$viewport_source") == "$viewport_hash" ]] || { printf 'pi-core: pinned viewport source hash mismatch\n' >&2; exit 1; }
+
+( cd "$package_dir" && patch --batch --forward -p1 < "$patch_file" )
+install -m 644 "$viewport_source" "$viewport"
+actual_interactive=$(hash_file "$interactive")
+actual_terminal=$(hash_file "$terminal")
+actual_viewport=$(hash_file "$viewport")
+[[ $actual_interactive == "$after_interactive" && $actual_terminal == "$after_terminal" && $actual_viewport == "$viewport_hash" ]] || {
+  printf 'pi-core: patched source hash mismatch: interactive=%s terminal=%s viewport=%s\n' "$actual_interactive" "$actual_terminal" "$actual_viewport" >&2
+  exit 1
+}
+printf 'pi-core: applied pinned editor patch %s\n' "$after_interactive"

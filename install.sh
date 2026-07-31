@@ -78,8 +78,26 @@ trap 'exit 143' TERM
 CORE_REINSTALL=0
 if [ ! -x "$PI_CORE_BIN" ] || [ "$("$PI_CORE_BIN" --version 2>/dev/null || true)" != "$PI_VERSION" ]; then
     CORE_REINSTALL=1
-elif [ -L "$PI_CORE_DIR" ] || find "$PI_CORE_DIR" -xdev \( -perm /022 -o \( ! -uid "$(id -u)" ! -uid 0 \) \) -print -quit | grep -q .; then
-    echo "Existing Pi core has unsafe ownership or writable modes; staging a clean replacement" >&2
+elif [ -L "$PI_CORE_DIR" ] || find "$PI_CORE_DIR" -xdev ! -type l \( -perm /022 -o \( ! -uid "$(id -u)" ! -uid 0 \) \) -print -quit | grep -q . ||
+     ! python3 - "$PI_CORE_DIR" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1]).resolve(strict=True)
+for entry in root.rglob("*"):
+    if not entry.is_symlink():
+        continue
+    try:
+        target = entry.resolve(strict=True)
+        target.relative_to(root)
+    except (OSError, ValueError):
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+then
+    echo "Existing Pi core has unsafe ownership or writable modes, or escaping symlinks; staging a clean replacement" >&2
+    CORE_REINSTALL=1
+elif ! PI_CORE_DIR="$PI_CORE_DIR" "$SCRIPT_DIR/scripts/pi-patch-core" --check; then
+    echo "Existing Pi core does not include the pinned-editor patch; staging a clean replacement" >&2
     CORE_REINSTALL=1
 fi
 if [ "$CORE_REINSTALL" = 1 ]; then
@@ -92,6 +110,7 @@ if [ "$CORE_REINSTALL" = 1 ]; then
         echo "Dedicated Pi CLI version verification failed" >&2
         exit 1
     }
+    PI_CORE_DIR="$CORE_STAGING" "$SCRIPT_DIR/scripts/pi-patch-core"
     chmod -R go-w "$CORE_STAGING"
 fi
 
@@ -130,7 +149,7 @@ ln -s "$SCRIPT_DIR/agent/AGENTS.md" "$STAGING_DIR/control/AGENTS.md"
 install -m 755 "$SCRIPT_DIR/scripts/pi-workspace.py" "$STAGING_DIR/control/pi-workspace.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-control.py" "$STAGING_DIR/control/pi-secretary-control.py"
 cp -a "$SCRIPT_DIR/skills/project-status" "$STAGING_DIR/control/project-status-skill"
-for launcher in pi pi-host pidev pi-tmux-session pisec pi-secretary pi-review-agent; do
+for launcher in pi pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent; do
     install -m 755 "$SCRIPT_DIR/bin/$launcher" "$STAGING_DIR/control/$launcher"
 done
 python3 - "$STAGING_DIR/control/pi" "$STAGING_DIR/control/pi-host" <<'PY'
@@ -190,7 +209,7 @@ for tree in extensions agents prompts themes; do activate_path "$STAGING_DIR/con
 activate_path "$STAGING_DIR/control/pi-workspace.py" "$HOME/.local/share/pi/control/pi-workspace.py"
 activate_path "$STAGING_DIR/control/pi-secretary-control.py" "$HOME/.local/share/pi/control/pi-secretary-control.py"
 activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status"
-for launcher in pi pi-host pidev pi-tmux-session pisec pi-secretary pi-review-agent; do
+for launcher in pi pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent; do
     activate_path "$STAGING_DIR/control/$launcher" "$HOME/.local/bin/$launcher"
 done
 

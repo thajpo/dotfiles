@@ -1,0 +1,115 @@
+diff -uNr a/dist/modes/interactive/interactive-mode.js b/dist/modes/interactive/interactive-mode.js
+--- a/dist/modes/interactive/interactive-mode.js	2026-07-30 20:22:46.279316126 -0400
++++ b/dist/modes/interactive/interactive-mode.js	2026-07-30 20:22:46.296317065 -0400
+@@ -41,6 +41,7 @@
+ import { BranchSummaryMessageComponent } from "./components/branch-summary-message.js";
+ import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.js";
+ import { CustomEditor } from "./components/custom-editor.js";
++import { PinnedConversationViewport, parseWheelDirection, stripMouseInput } from "./pinned-conversation-viewport.mjs";
+ import { CustomEntryComponent } from "./components/custom-entry.js";
+ import { CustomMessageComponent } from "./components/custom-message.js";
+ import { DaxnutsComponent } from "./components/daxnuts.js";
+@@ -168,6 +169,9 @@
+     chatContainer;
+     pendingMessagesContainer;
+     statusContainer;
++    conversationViewportContainer;
++    pinnedControlsContainer;
++    pinnedConversationViewport;
+     defaultEditor;
+     editor;
+     editorComponentFactory;
+@@ -280,6 +284,9 @@
+         this.chatContainer = new Container();
+         this.pendingMessagesContainer = new Container();
+         this.statusContainer = new Container();
++        this.conversationViewportContainer = new Container();
++        this.pinnedControlsContainer = new Container();
++        this.pinnedConversationViewport = new PinnedConversationViewport(this.ui, this.conversationViewportContainer, this.pinnedControlsContainer);
+         this.widgetContainerAbove = new Container();
+         this.widgetContainerBelow = new Container();
+         this.keybindings = KeybindingsManager.create();
+@@ -479,19 +486,36 @@
+                 : "";
+             console.log(theme.fg("dim", `Model scope: ${modelList}${cycleHint}`));
+         }
+-        // Add header container as first child. Populate it after applying theme settings.
+-        // Keep loaded resources before chat so restored session messages never precede them.
+-        this.ui.addChild(this.headerContainer);
+-        this.ui.addChild(this.loadedResourcesContainer);
+-        this.ui.addChild(this.chatContainer);
+-        this.ui.addChild(this.pendingMessagesContainer);
+-        this.ui.addChild(this.statusContainer);
++        // The conversation scrolls inside an application-owned viewport. Keep
++        // controls in a separate bottom region so the prompt remains usable while
++        // reading earlier messages.
++        this.conversationViewportContainer.addChild(this.headerContainer);
++        this.conversationViewportContainer.addChild(this.loadedResourcesContainer);
++        this.conversationViewportContainer.addChild(this.chatContainer);
++        this.conversationViewportContainer.addChild(this.pendingMessagesContainer);
++        this.conversationViewportContainer.addChild(this.statusContainer);
+         this.renderWidgets(); // Initialize with default spacer
+-        this.ui.addChild(this.widgetContainerAbove);
+-        this.ui.addChild(this.editorContainer);
+-        this.ui.addChild(this.widgetContainerBelow);
+-        this.ui.addChild(this.footer);
++        this.conversationViewportContainer.addChild(this.widgetContainerAbove);
++        this.conversationViewportContainer.addChild(this.widgetContainerBelow);
++        this.pinnedControlsContainer.addChild(this.editorContainer);
++        this.pinnedControlsContainer.addChild(this.footer);
++        this.ui.addChild(this.pinnedConversationViewport);
+         this.ui.setFocus(this.editor);
++        const removePinnedScrollInput = this.ui.addInputListener((data) => {
++            const remainingInput = stripMouseInput(data);
++            if (remainingInput === data)
++                return undefined;
++            const direction = parseWheelDirection(data);
++            if (direction !== 0) {
++                const page = Math.max(3, Math.floor(this.ui.terminal.rows / 6));
++                this.pinnedConversationViewport.scrollBy(direction * page);
++            }
++            // Mouse clicks remain pane-selection/terminal concerns; never paste
++            // their escape sequences into the focused prompt editor. Preserve
++            // any ordinary key data delivered in the same stdin chunk.
++            return remainingInput ? { data: remainingInput } : { consume: true };
++        });
++        this.signalCleanupHandlers.push(removePinnedScrollInput);
+         this.setupKeyHandlers();
+         this.setupEditorSubmitHandler();
+         // Start the UI before initializing extensions so session_start handlers can use interactive dialogs
+diff -uNr a/node_modules/@earendil-works/pi-tui/dist/terminal.js b/node_modules/@earendil-works/pi-tui/dist/terminal.js
+--- a/node_modules/@earendil-works/pi-tui/dist/terminal.js	2026-07-30 20:22:46.281316236 -0400
++++ b/node_modules/@earendil-works/pi-tui/dist/terminal.js	2026-07-30 20:22:46.296317065 -0400
+@@ -9,6 +9,8 @@
+ const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
+ const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
+ const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
++const MOUSE_TRACKING_ENABLE_SEQUENCE = "\x1b[?1000h\x1b[?1006h";
++const MOUSE_TRACKING_DISABLE_SEQUENCE = "\x1b[?1000l\x1b[?1006l";
+ const APPLE_TERMINAL_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u";
+ const DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS = 7;
+ const KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS = 150;
+@@ -81,8 +83,10 @@
+         }
+         process.stdin.setEncoding("utf8");
+         process.stdin.resume();
+-        // Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
+-        process.stdout.write("\x1b[?2004h");
++        // Enable bracketed paste and SGR mouse reporting. Mouse reporting lets
++        // the TUI own conversation scrolling instead of losing editor focus to
++        // terminal/tmux copy-mode scrollback.
++        process.stdout.write(`\x1b[?2004h${MOUSE_TRACKING_ENABLE_SEQUENCE}`);
+         // Set up resize handler immediately
+         process.stdout.on("resize", this.resizeHandler);
+         // Refresh terminal dimensions - they may be stale after suspend/resume
+@@ -323,8 +327,8 @@
+         if (this.clearProgressInterval()) {
+             process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+         }
+-        // Disable bracketed paste mode
+-        process.stdout.write("\x1b[?2004l");
++        // Restore terminal input modes enabled by start().
++        process.stdout.write(`\x1b[?2004l${MOUSE_TRACKING_DISABLE_SEQUENCE}`);
+         const shouldDisableKittyProtocol = this.keyboardProtocolPushed || this._kittyProtocolActive;
+         this.clearKeyboardProtocolNegotiationBuffer();
+         // Disable Kitty keyboard protocol if not already done by drainInput()

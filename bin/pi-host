@@ -20,6 +20,26 @@ helper="$dotfiles_dir/scripts/pi-workspace.py"
 # pi-host is a sibling of the normal wrapper; exclude both from resolution.
 real_pi=$($helper resolve-pi --self "$dotfiles_dir/bin/pi" --cwd "$PWD")
 
+requested_session_dir=""
+declare -a forwarded_args=()
+while (( $# )); do
+  case "$1" in
+    --session-dir)
+      [[ $# -ge 2 && -z "$requested_session_dir" ]] || { printf 'pi-host: invalid --session-dir\n' >&2; exit 2; }
+      requested_session_dir=$2
+      shift 2
+      ;;
+    --session-dir=*)
+      printf 'pi-host: use --session-dir PATH\n' >&2
+      exit 2
+      ;;
+    *)
+      forwarded_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
 while IFS='=' read -r name _; do
   case "$name" in
     PI_TASK_*|PI_SUBAGENT_*|PI_SESSION_*|PI_PROVIDER|PI_MODEL|PI_REASONING_LEVEL|PI_CODING_AGENT_SESSION_DIR)
@@ -29,13 +49,38 @@ while IFS='=' read -r name _; do
 done < <(env)
 
 session_id=$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import secrets; print(secrets.token_hex(8))')
-session_dir="$HOME/.pi/agent/sessions/host-maintenance/$session_id"
+agent_dir=${PI_CODING_AGENT_DIR:-"$HOME/.pi/agent"}
+session_root="$agent_dir/sessions/host-maintenance"
+mkdir -p -m 700 "$session_root"
+[[ -d "$session_root" && ! -L "$session_root" ]] || {
+  printf 'pi-host: unsafe host-maintenance session root\n' >&2
+  exit 2
+}
+chmod 700 "$session_root"
+if [[ -n "$requested_session_dir" ]]; then
+  session_name=${requested_session_dir#"$session_root/"}
+  [[ "$requested_session_dir" == "$session_root/$session_name" &&
+     "$session_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ &&
+     "$session_name" != . && "$session_name" != .. ]] || {
+    printf 'pi-host: session directory must be one safe child under the host-maintenance session root\n' >&2
+    exit 2
+  }
+  session_dir="$session_root/$session_name"
+  [[ ! -L "$session_dir" ]] || { printf 'pi-host: session directory cannot be a symlink\n' >&2; exit 2; }
+  session_id=$session_name
+else
+  session_dir="$session_root/$session_id"
+fi
 mkdir -p -m 700 "$session_dir"
-exec "$real_pi" \
+[[ -d "$session_dir" && ! -L "$session_dir" ]] || { printf 'pi-host: unsafe session directory\n' >&2; exit 2; }
+chmod 700 "$session_dir"
+# Keep this wrapper process visible to tmux-resurrect when a managed personal
+# pane launches it beneath a waiting shell.
+"$real_pi" \
   --no-context-files \
   --no-extensions \
   --no-skills \
   --no-prompt-templates \
   --session-dir "$session_dir" \
   --name "host-maintenance-$session_id" \
-  "$@"
+  "${forwarded_args[@]}"

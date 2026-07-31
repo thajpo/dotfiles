@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# Persistent four-pane personal Pi workspace, separate from the secretary grid.
+set -euo pipefail
+
+if (( EUID == 0 )); then printf 'pi-personal: refusing to run as root\n' >&2; exit 1; fi
+if [[ -n "${PI_SUBAGENT_CHILD:-}${PI_TASK_ROUTE_FILE:-}" ]]; then
+  printf 'pi-personal: refusing nested or subagent invocation\n' >&2
+  exit 2
+fi
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+dotfiles_dir=${PI_PERSONAL_DOTFILES_DIR:-"$HOME/dotfiles"}
+session=pi-personal
+window=personal
+action=${1:-open}
+case "$action" in
+  --ensure|ensure) [[ $# -eq 1 ]] || exit 2 ; ensure_only=1 ;;
+  open|launch) [[ $# -eq 1 ]] || exit 2 ; ensure_only=0 ;;
+  *)
+    printf '%s\n' 'usage: pi-personal [open|launch|--ensure]' >&2
+    exit 2
+    ;;
+esac
+
+command -v tmux >/dev/null 2>&1 || { printf 'pi-personal: tmux is required\n' >&2; exit 127; }
+
+mlre_dir="$HOME/Projects/mlre-transition"
+financials_dir="$HOME/Projects/investing/investment-os"
+for directory in "$mlre_dir" "$financials_dir" "$dotfiles_dir"; do
+  [[ -d "$directory" ]] || { printf 'pi-personal: missing directory: %s\n' "$directory" >&2; exit 1; }
+done
+
+pi_tmux="$HOME/.local/bin/pi-tmux-session"
+pi_host="$HOME/.local/bin/pi-host"
+[[ -x "$pi_tmux" ]] || pi_tmux="$self_dir/pi-tmux-session"
+[[ -x "$pi_host" ]] || pi_host="$self_dir/pi-host"
+[[ -x "$pi_tmux" && -x "$pi_host" ]] || { printf 'pi-personal: required launchers are missing\n' >&2; exit 1; }
+
+# Keep host-mode history in a stable private session directory so tmux-resurrect
+# can reopen the same host conversation instead of creating a timestamped one.
+host_session_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/sessions/host-maintenance/pi-personal-host"
+
+labels=(mlre-transition financials dotfiles pi-host)
+directories=("$mlre_dir" "$financials_dir" "$dotfiles_dir" "$HOME")
+session_ids=(personal-mlre-transition personal-financials personal-dotfiles personal-host)
+workspace_paths=(
+  "$(git -C "$mlre_dir" rev-parse --show-toplevel 2>/dev/null || realpath "$mlre_dir")"
+  "$(git -C "$financials_dir" rev-parse --show-toplevel 2>/dev/null || realpath "$financials_dir")"
+  "$(git -C "$dotfiles_dir" rev-parse --show-toplevel 2>/dev/null || realpath "$dotfiles_dir")"
+  "$(realpath "$HOME")"
+)
+
+shell_quote() { printf '%q' "$1"; }
+launch_command() {
+  local index=$1
+  if (( index == 3 )); then
+    # Keep both wrapper shells present so tmux-resurrect can recognize the
+    # tightly allowlisted pi-host command and restore this exact session.
+    printf '%s --session-dir %s --session-id %s; status=$?; exit "$status"' \
+      "$(shell_quote "$pi_host")" "$(shell_quote "$host_session_dir")" "$(shell_quote "${session_ids[$index]}")"
+  else
+    printf 'exec %s --session-id %s' \
+      "$(shell_quote "$pi_tmux")" "$(shell_quote "${session_ids[$index]}")"
+  fi
+}
+
+window_rows() { tmux list-windows -t "=$session" -F $'#{window_id}\t#{window_name}'; }
+pane_rows() { tmux list-panes -t "$1" -F '#{pane_id}|#{pane_title}|#{pane_dead}|#{@pi_personal_role}|#{pane_current_path}|#{pane_start_command}'; }
+configure_pane() {
+  local pane_id=$1 role=$2
+  tmux set-option -p -t "$pane_id" remain-on-exit on || exit 1
+  tmux set-option -p -t "$pane_id" @pi_personal_role "$role" || exit 1
+  tmux select-pane -t "$pane_id" -T "$role" || exit 1
+}
+
+if tmux has-session -t "=$session" 2>/dev/null; then
+  mapfile -t windows < <(window_rows)
+  (( ${#windows[@]} == 1 )) || { printf 'pi-personal: unexpected window layout\n' >&2; exit 1; }
+  IFS=$'\t' read -r window_id window_name < <(printf '%s\n' "${windows[0]}")
+  [[ "$window_name" == "$window" ]] || { printf 'pi-personal: unexpected window name\n' >&2; exit 1; }
+else
+  window_id=$(tmux new-session -d -P -F '#{window_id}' -s "$session" -n "$window" -c "${directories[0]}" "$(launch_command 0)") || {
+    printf 'pi-personal: cannot create session\n' >&2
+    exit 1
+  }
+  [[ "$window_id" =~ ^@ ]] || { printf 'pi-personal: invalid tmux window id\n' >&2; exit 1; }
+  mapfile -t initial_panes < <(tmux list-panes -t "$window_id" -F '#{pane_id}')
+  (( ${#initial_panes[@]} == 1 )) || { printf 'pi-personal: invalid initial pane count\n' >&2; exit 1; }
+  first_pane=${initial_panes[0]}
+  [[ "$first_pane" =~ ^% ]] || { printf 'pi-personal: invalid initial pane id\n' >&2; exit 1; }
+  configure_pane "$first_pane" "${labels[0]}"
+fi
+
+tmux set-option -w -t "$window_id" pane-border-status top || exit 1
+tmux set-option -w -t "$window_id" pane-border-format ' #{@pi_personal_role} ' || exit 1
+
+mapfile -t panes < <(pane_rows "$window_id")
+(( ${#panes[@]} <= 4 )) || { printf 'pi-personal: unexpected pane layout\n' >&2; exit 1; }
+declare -A pane_for_role=() dead_for_role=()
+for pane_row in "${panes[@]}"; do
+  IFS='|' read -r pane_id pane_title pane_dead pane_role pane_path pane_command <<< "$pane_row"
+  [[ "$pane_id" =~ ^% && "$pane_dead" =~ ^[01]$ ]] || { printf 'pi-personal: invalid pane state\n' >&2; exit 1; }
+  if [[ -n "$pane_role" ]]; then
+    valid_role=0
+    for candidate in "${labels[@]}"; do [[ "$pane_role" == "$candidate" ]] && valid_role=1; done
+    (( valid_role == 1 )) || { printf 'pi-personal: unknown managed pane role: %s\n' "$pane_role" >&2; exit 1; }
+    [[ -z "${pane_for_role[$pane_role]+set}" ]] || { printf 'pi-personal: duplicate pane role: %s\n' "$pane_role" >&2; exit 1; }
+  else
+    pane_role=""
+    for candidate in "${labels[@]}"; do
+      if [[ "$pane_title" == "$candidate" && -z "${pane_for_role[$candidate]+set}" ]]; then pane_role=$candidate; break; fi
+    done
+    if [[ -z "$pane_role" ]]; then
+      for index in "${!labels[@]}"; do
+        candidate=${labels[$index]}
+        if [[ "$pane_command" == *"${session_ids[$index]}"* && -z "${pane_for_role[$candidate]+set}" ]]; then pane_role=$candidate; break; fi
+      done
+    fi
+    if [[ -z "$pane_role" ]]; then
+      for index in "${!labels[@]}"; do
+        candidate=${labels[$index]}
+        if [[ "$pane_path" == "${workspace_paths[$index]}" && -z "${pane_for_role[$candidate]+set}" ]]; then pane_role=$candidate; break; fi
+      done
+    fi
+    if [[ -z "$pane_role" ]]; then
+      for candidate in "${labels[@]}"; do
+        if [[ -z "${pane_for_role[$candidate]+set}" ]]; then pane_role=$candidate; break; fi
+      done
+    fi
+  fi
+  [[ -n "$pane_role" ]] || { printf 'pi-personal: cannot assign pane role\n' >&2; exit 1; }
+  pane_for_role[$pane_role]=$pane_id
+  dead_for_role[$pane_role]=$pane_dead
+done
+
+# Reanimate dead retained panes and add exactly the missing roles. Role metadata,
+# rather than pane position, makes this safe after partial exits or resurrection.
+for index in "${!labels[@]}"; do
+  role=${labels[$index]}
+  if [[ -n "${pane_for_role[$role]+set}" ]]; then
+    pane_id=${pane_for_role[$role]}
+    configure_pane "$pane_id" "$role"
+    if [[ ${dead_for_role[$role]} == 1 ]]; then
+      tmux respawn-pane -k -t "$pane_id" -c "${directories[$index]}" "$(launch_command "$index")" || {
+        printf 'pi-personal: cannot respawn %s pane\n' "$role" >&2
+        exit 1
+      }
+      configure_pane "$pane_id" "$role"
+    fi
+  else
+    pane_id=$(tmux split-window -h -d -P -F '#{pane_id}' -t "$window_id" -c "${directories[$index]}" "$(launch_command "$index")") || {
+      printf 'pi-personal: cannot create %s pane\n' "$role" >&2
+      exit 1
+    }
+    [[ "$pane_id" =~ ^% ]] || { printf 'pi-personal: invalid tmux pane id\n' >&2; exit 1; }
+    configure_pane "$pane_id" "$role"
+  fi
+done
+
+tmux select-layout -t "$window_id" tiled || { printf 'pi-personal: cannot arrange panes\n' >&2; exit 1; }
+
+if (( ensure_only == 0 )); then
+  if [[ -n "${TMUX:-}" ]]; then
+    exec tmux switch-client -t "=$session:$window"
+  else
+    exec tmux attach-session -t "=$session:$window"
+  fi
+fi

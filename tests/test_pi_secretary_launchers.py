@@ -59,6 +59,8 @@ class SecretaryLauncherTests(unittest.TestCase):
             for path in [
                 agent_dir / "npm/node_modules/@kjrjay/pi-sandbox/index.ts",
                 agent_dir / "extensions/secretary/index.ts",
+                agent_dir / "extensions/secretary-subagents/index.ts",
+                agent_dir / "extensions/secretary-investigator-git/index.ts",
                 agent_dir / "skills/project-status/SKILL.md",
             ]:
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,10 +89,10 @@ pathlib.Path(os.environ['FAKE_PI_OUTPUT']).write_text(json.dumps({
             self.assertEqual(invocation["cwd"], str(repos[0]))
             args = invocation["args"]
             self.assertEqual(args[args.index("--tools") + 1],
-                             "read,grep,find,ls,secretary_git,secretary_record_idea,secretary_create_workstream,secretary_open_workstream,secretary_list_workstreams,secretary_list_attention,secretary_acknowledge_attention,secretary_create_reviewer,secretary_land_reviewed,secretary_create_integration,secretary_cleanup_workstream")
+                             "read,grep,find,ls,subagent,secretary_git,secretary_record_idea,secretary_create_workstream,secretary_open_workstream,secretary_list_workstreams,secretary_list_attention,secretary_acknowledge_attention,secretary_create_reviewer,secretary_land_reviewed,secretary_create_integration,secretary_cleanup_workstream")
             for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--session-id"]:
                 self.assertIn(flag, args)
-            self.assertEqual(args.count("-e"), 1)
+            self.assertEqual(args.count("-e"), 2)
             self.assertNotIn("bash", args[args.index("--tools") + 1])
             self.assertEqual(invocation["secretary"]["PI_SECRETARY_READ_ONLY"], "1")
             self.assertEqual(invocation["secretary"]["PI_SECRETARY_PROJECT_ID"], records[0]["projectId"])

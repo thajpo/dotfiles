@@ -7,15 +7,19 @@ root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 temporary=$(mktemp -d)
 cleanup() { rm -rf "$temporary"; }
 trap cleanup EXIT
+core_fixture="$temporary/core-fixture"
+npm install --prefix "$core_fixture" --no-save --no-package-lock --no-audit --no-fund \
+  @earendil-works/pi-coding-agent@0.82.1 >/dev/null
+PI_CORE_DIR="$core_fixture" "$root/scripts/pi-patch-core" >/dev/null
+chmod -R go-w "$core_fixture"
 
 prepare_home() {
   local case_root=$1
   local home=$case_root/home
   local fake=$case_root/bin
-  mkdir -p "$home/.local/share/pi/core/node_modules/.bin" "$home/.config/pi" \
+  mkdir -p "$home/.local/share/pi" "$home/.config/pi" \
     "$home/.pi/agent/npm" "$case_root/worktrees" "$fake"
-  printf '#!/bin/sh\necho 0.82.1\n' > "$home/.local/share/pi/core/node_modules/.bin/pi"
-  chmod 755 "$home/.local/share/pi/core/node_modules/.bin/pi"
+  cp -a "$core_fixture" "$home/.local/share/pi/core"
   printf 'old-settings\n' > "$home/.pi/agent/settings.json"
   printf 'old-npm\n' > "$home/.pi/agent/npm/sentinel"
   python3 - "$home/.config/pi/repository-policy.json" "$case_root/worktrees" <<'PY'
@@ -66,9 +70,7 @@ done
 [ -n "\$prefix" ]
 rm -rf "\$prefix/node_modules"
 if [ "\$mode" = install ]; then
-  mkdir -p "\$prefix/node_modules/.bin"
-  printf '#!/bin/sh\\necho 0.82.1\\n' > "\$prefix/node_modules/.bin/pi"
-  chmod 755 "\$prefix/node_modules/.bin/pi"
+  cp -a "$core_fixture/node_modules" "\$prefix/node_modules"
 else
   cp -a "$root/pi/npm/node_modules" "\$prefix/node_modules"
 fi
@@ -181,7 +183,7 @@ chmod g+w "$unsafe_core_case/home/.local/share/pi/core/node_modules/.bin/pi"
 HOME="$unsafe_core_case/home" PATH="$unsafe_core_case/bin:/usr/local/bin:/usr/bin:/bin" \
   PI_HARNESS_ONLY=1 PI_TEST_DOCKER_LOG="$unsafe_core_case/docker.log" \
   "$root/install.sh" >"$unsafe_core_case/stdout" 2>"$unsafe_core_case/stderr"
-test ! -n "$(find "$unsafe_core_case/home/.local/share/pi/core" -perm /022 -print -quit)"
+test ! -n "$(find "$unsafe_core_case/home/.local/share/pi/core" ! -type l -perm /022 -print -quit)"
 grep -Fq 'Existing Pi core has unsafe ownership or writable modes' "$unsafe_core_case/stderr"
 
 printf 'PASS installer transaction rollback, signal handling, and core hardening\n'

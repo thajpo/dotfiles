@@ -3,11 +3,9 @@
   "asyncByDefault": false,
   "asyncWidget": true,
   "defaultSessionDir": "~/.pi/agent/sessions/subagent/",
-  "globalConcurrencyLimit": 3,
-  "maxSubagentSpawnsPerSession": 30,
+  "maxSubagentSpawnsPerSession": 0,
   "parallel": {
-    "maxTasks": 3,
-    "concurrency": 3
+    "maxTasks": 0
   },
   "maxSubagentDepth": 1,
   "intercomBridge": {

@@ -79,6 +79,8 @@ function consume(kind: Authorization): void {
 }
 
 export default function secretary(pi: ExtensionAPI): void {
+  // Installed globally but active only under the fixed secretary launcher.
+  if (process.env.PI_SECRETARY_READ_ONLY !== "1") return;
   pi.on("input", (event) => {
     updateAuthorization(event.text, event.source);
     return { action: "continue" };
@@ -95,8 +97,8 @@ export default function secretary(pi: ExtensionAPI): void {
     return {
       systemPrompt: event.systemPrompt + `\n\nYou are the persistent secretary for project ${alias} (project ID ${projectId}).\n` +
         "Switchboard boundary: inspect project evidence, record bounded ideas, and create/open peer full agents only after the current natural-language user turn explicitly authorizes it. Natural-language requests to log, note, capture, document, save, record, or park guidance count as record authorization; do not require the user to repeat a particular keyword. " +
-        "Apply this boundary over any skill suggestion to fan out: never use subagents. You are not a coding agent and cannot modify repository files, Git, or run shell commands. " +
-        "A promoted full agent owns implementation, its task_packet, direct technical discussion, and headless subagents. Never fabricate a user turn or relay general agent chat. Use secretary_git for bounded read-only Git inspection; never claim Git is unavailable when that tool can answer.\n\n" +
+        "You may use the subagent tool for read-only investigation when parallel or specialized inspection would improve the answer. Choose the number and shape of investigators according to the work rather than following a fixed fanout recipe; use their existing report formats and synthesize the results. Investigation never needs a Git worktree. " +
+        "You are not a coding agent and cannot modify repository files, Git, or run shell commands. A promoted full agent owns implementation, its task_packet, and direct technical discussion. Never fabricate a user turn or relay general agent chat. Use secretary_git for bounded read-only Git inspection; never claim Git is unavailable when that tool can answer.\n\n" +
         "## Project-status skill\n" + projectStatusSkill() +
         "\n\nUse only the read allowlist and secretary semantic tools. User affirmation such as 'yes' is sufficient authorization; never ask for a second form or confirmation.",
     };
