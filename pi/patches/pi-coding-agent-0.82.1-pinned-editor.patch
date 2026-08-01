@@ -1,6 +1,15 @@
 diff -uNr a/dist/modes/interactive/interactive-mode.js b/dist/modes/interactive/interactive-mode.js
 --- a/dist/modes/interactive/interactive-mode.js	2026-07-30 20:22:46.279316126 -0400
 +++ b/dist/modes/interactive/interactive-mode.js	2026-07-30 20:22:46.296317065 -0400
+@@ -6,7 +6,7 @@
+ import * as fs from "node:fs";
+ import * as os from "node:os";
+ import * as path from "node:path";
+-import { CombinedAutocompleteProvider, Container, fuzzyFilter, getCapabilities, hyperlink, Markdown, matchesKey, ProcessTerminal, Spacer, setKeybindings, Text, TruncatedText, TUI, visibleWidth, } from "@earendil-works/pi-tui";
++import { CombinedAutocompleteProvider, Container, fuzzyFilter, getCapabilities, hyperlink, isKeyRelease, Markdown, matchesKey, ProcessTerminal, Spacer, setKeybindings, Text, TruncatedText, TUI, visibleWidth, } from "@earendil-works/pi-tui";
+ import chalk from "chalk";
+ import { spawn, spawnSync } from "child_process";
+ import { APP_NAME, APP_TITLE, CONFIG_DIR_NAME, getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, getShareViewerUrl, VERSION, } from "../../config.js";
 @@ -41,6 +41,7 @@
  import { BranchSummaryMessageComponent } from "./components/branch-summary-message.js";
  import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.js";
@@ -37,7 +46,7 @@ diff -uNr a/dist/modes/interactive/interactive-mode.js b/dist/modes/interactive/
          this.widgetContainerAbove = new Container();
          this.widgetContainerBelow = new Container();
          this.keybindings = KeybindingsManager.create();
-@@ -479,19 +494,47 @@
+@@ -479,19 +494,58 @@
                  : "";
              console.log(theme.fg("dim", `Model scope: ${modelList}${cycleHint}`));
          }
@@ -83,13 +92,24 @@ diff -uNr a/dist/modes/interactive/interactive-mode.js b/dist/modes/interactive/
 +        });
 +        this.signalCleanupHandlers.push(removePinnedScrollInput);
 +        const removePinnedBrowseInput = this.ui.addInputListener((data) => {
-+            if (!this.pinnedConversationViewport.isBrowsing() && data === "\x07") {
++            if (isKeyRelease(data))
++                return this.pinnedConversationViewport.isBrowsing() ? { consume: true } : undefined;
++            const normalizedData = [
++                ["ctrl+g", "\x07"], ["escape", "\x1b"], ["ctrl+c", "\x03"],
++                ["ctrl+d", "\x04"], ["ctrl+u", "\x15"],
++                ["pageUp", "\x1b[5~"], ["pageDown", "\x1b[6~"],
++                ["up", "\x1b[A"], ["down", "\x1b[B"],
++                ["shift+g", "G"], ["shift+y", "Y"],
++                ["g", "g"], ["j", "j"], ["k", "k"], ["q", "q"],
++                ["i", "i"], ["v", "v"], ["y", "y"],
++            ].find(([key]) => matchesKey(data, key))?.[1] ?? data;
++            if (!this.pinnedConversationViewport.isBrowsing() && normalizedData === "\x07") {
 +                this.pinnedConversationViewport.enterBrowseMode();
 +                return { consume: true };
 +            }
 +            if (!this.pinnedConversationViewport.isBrowsing())
 +                return undefined;
-+            this.pinnedConversationViewport.handleBrowseInput(data);
++            this.pinnedConversationViewport.handleBrowseInput(normalizedData);
 +            return { consume: true };
 +        });
 +        this.signalCleanupHandlers.push(removePinnedBrowseInput);

@@ -1,0 +1,103 @@
+diff -uNr a/index.ts b/index.ts
+--- a/index.ts	2026-07-31 22:12:08
++++ b/index.ts	2026-07-31 22:12:42
+@@ -1112,7 +1112,7 @@
+ 				stdio: ["ignore", "pipe", "pipe"],
+ 				env: tarEnv(),
+ 			});
+-			const dest = spawn(this.config.runtime, ["exec", "-i", "-u", "root", this.containerName!, "tar", "--no-same-owner", "-xf", "-", "-C", repoRoot], {
++			const dest = spawn(this.config.runtime, ["exec", "-i", this.containerName!, "tar", "--no-same-owner", "-xf", "-", "-C", repoRoot], {
+ 				stdio: ["pipe", "ignore", "pipe"],
+ 			});
+ 			let err = "";
+@@ -1165,11 +1165,11 @@
+ 			const stalePaths = previousPaths.filter((relativePath) => !currentPaths.has(relativePath) && !trackedInSandbox.has(relativePath));
+ 			for (let offset = 0; offset < stalePaths.length; offset += 200) {
+ 				await this.runtimeExecChecked([
+-					"exec", "-u", "root", "-w", state.repoRoot, this.containerName, "rm", "-f", "--", ...stalePaths.slice(offset, offset + 200),
++					"exec", "-w", state.repoRoot, this.containerName, "rm", "-f", "--", ...stalePaths.slice(offset, offset + 200),
+ 				], { timeoutMs: 30_000 });
+ 			}
+ 			if (count > 0) await this.copyListedHostFilesToContainer(listPath, state.repoRoot);
+-			await this.runtimeExecChecked(["exec", "-u", "root", this.containerName, "mkdir", "-p", path.posix.join(toPosix(state.repoRoot), ".git/info")]);
++			await this.runtimeExecChecked(["exec", this.containerName, "mkdir", "-p", path.posix.join(toPosix(state.repoRoot), ".git/info")]);
+ 			await this.runtimeExecChecked(["cp", listPath, `${this.containerName}:${metadataPath}`], { timeoutMs: 30_000 });
+ 
+ 			const patterns = this.config.hostUntrackedFiles === "copy"
+@@ -1185,7 +1185,7 @@
+ 				"",
+ 			].join("\n");
+ 			await this.runtimeExecChecked([
+-				"exec", "-i", "-u", "root", "-w", state.repoRoot, this.containerName, "sh", "-c",
++				"exec", "-i", "-w", state.repoRoot, this.containerName, "sh", "-c",
+ 				"mkdir -p .git/info; touch .git/info/exclude; awk '/^# BEGIN pi sandbox host untracked files$/{skip=1;next} /^# END pi sandbox host untracked files$/{skip=0;next} !skip{print}' .git/info/exclude > .git/info/exclude.pi-tmp; cat >> .git/info/exclude.pi-tmp; mv .git/info/exclude.pi-tmp .git/info/exclude",
+ 			], { input: excludeText, timeoutMs: 30_000 });
+ 		} finally {
+@@ -1432,7 +1432,11 @@
+ 		if (!dockerConfig || !hostConfig || dockerConfig.User !== uidGid) {
+ 			throw new Error(`Existing container ${name} has an unexpected user; expected ${uidGid}`);
+ 		}
+-		if ((hostConfig.CapAdd?.length ?? 0) !== 0) throw new Error(`Existing container ${name} adds Linux capabilities`);
++		const expectedCapabilities = route.mode === "isolated" ? ["CAP_CHOWN"] : [];
++		const actualCapabilities = hostConfig.CapAdd ?? [];
++		if (actualCapabilities.length !== expectedCapabilities.length || actualCapabilities.some((capability, index) => capability !== expectedCapabilities[index])) {
++			throw new Error(`Existing container ${name} has unexpected Linux capabilities`);
++		}
+ 		if (hostConfig.CapDrop?.length !== 1 || hostConfig.CapDrop[0] !== "ALL") throw new Error(`Existing container ${name} is missing required --cap-drop ALL`);
+ 		if (hostConfig.SecurityOpt?.length !== 1 || hostConfig.SecurityOpt[0] !== "no-new-privileges:true") throw new Error(`Existing container ${name} has unexpected security options`);
+ 		if (hostConfig.Privileged) throw new Error(`Existing container ${name} must not run as privileged`);
+@@ -1532,7 +1536,8 @@
+ 		const identity = (await this.runtimeExecChecked(["exec", this.containerName, "sh", "-c", "printf '%s:%s' \"$(id -u)\" \"$(id -g)\""])).stdout
+ 			.toString()
+ 			.trim();
+-		await this.runtimeExecChecked(["exec", "-u", "root", this.containerName, "mkdir", "-p", state.repoRoot, "/tmp/pi-home"]);
++		await this.runtimeExecChecked(["exec", "-u", "root", this.containerName, "mkdir", "-p", state.repoRoot]);
++		await this.runtimeExecChecked(["exec", "-u", "root", this.containerName, "chown", identity || "0:0", state.repoRoot]);
+ 		let reseedExistingWorkspace = false;
+ 		if (await this.containerHasGitRepo(state.repoRoot)) {
+ 			const hostHead = await this.hostSandboxHead(state);
+@@ -1552,15 +1557,15 @@
+ 			}
+ 			if (!reseedExistingWorkspace) {
+ 				await this.applyGitRefUntrackedFiles(state);
+-				await this.runtimeExecChecked(["exec", "-u", "root", this.containerName, "chown", "-R", identity || "0:0", state.repoRoot, "/tmp/pi-home"]);
+-				await this.runtimeExecChecked(["exec", "-u", "root", this.containerName, "chmod", "u+rwx", state.repoRoot, "/tmp/pi-home"]);
+ 				return;
+ 			}
+ 		}
+ 
+ 		await this.ensureCleanHostTrackedFiles();
+-		await this.runtimeExecChecked(["exec", "-u", "root", this.containerName, "rm", "-rf", state.repoRoot]);
+-		await this.runtimeExecChecked(["exec", "-u", "root", this.containerName, "mkdir", "-p", state.repoRoot, "/tmp/pi-home"]);
++		await this.runtimeExecChecked([
++			"exec", "-w", state.repoRoot, this.containerName, "sh", "-c",
++			"chmod -R u+rwX . && find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +",
++		], { timeoutMs: 5 * 60 * 1000 });
+ 		const temp = await mkdtemp(path.join(tmpdir(), "pi-sandbox-gitref-"));
+ 		try {
+ 			const cloneDir = path.join(temp, "repo");
+@@ -1592,15 +1597,13 @@
+ 		} finally {
+ 			await rm(temp, { recursive: true, force: true });
+ 		}
+-		await this.runtimeExecChecked(["exec", "-u", "root", this.containerName, "chown", "-R", identity || "0:0", state.repoRoot, "/tmp/pi-home"]);
+-		await this.runtimeExecChecked(["exec", "-u", "root", this.containerName, "chmod", "u+rwx", state.repoRoot, "/tmp/pi-home"]);
+ 	}
+ 
+ 	private async copyDirectoryToContainer(sourceDir: string, targetDir: string) {
+ 		if (!this.containerName) throw new Error("Sandbox container is not running");
+ 		await new Promise<void>((resolve, reject) => {
+ 			const source = spawn("tar", ["cf", "-", "-C", sourceDir, "."], { stdio: ["ignore", "pipe", "pipe"], env: tarEnv() });
+-			const dest = spawn(this.config.runtime, ["exec", "-i", "-u", "root", this.containerName!, "tar", "--no-same-owner", "-xf", "-", "-C", targetDir], {
++			const dest = spawn(this.config.runtime, ["exec", "-i", this.containerName!, "tar", "--no-same-owner", "-xf", "-", "-C", targetDir], {
+ 				stdio: ["pipe", "ignore", "pipe"],
+ 			});
+ 			let err = "";
+@@ -1669,6 +1672,7 @@
+ 				? [
+ 					"--user", `${route.uid}:${route.gid}`,
+ 					"--cap-drop", "ALL",
++					...(route.mode === "isolated" ? ["--cap-add", "CHOWN"] : []),
+ 					"--security-opt", "no-new-privileges:true",
+ 					"--tmpfs", `/tmp/pi-home:rw,nosuid,nodev,mode=0700,uid=${route.uid},gid=${route.gid}`,
+ 				]

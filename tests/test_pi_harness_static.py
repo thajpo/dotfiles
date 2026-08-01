@@ -89,6 +89,7 @@ class HarnessStaticTests(unittest.TestCase):
 
     def test_sandbox_patch_contains_required_boundaries(self):
         patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-task-routing.patch").read_text()
+        ownership_patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-user-workspace.patch").read_text()
         for evidence in [
             "Missing host-owned Pi task route",
             "Task route workspace mismatch",
@@ -137,6 +138,26 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertNotIn("fastForwardCurrentBranch", added_source)
         self.assertNotIn('target === "current"', added_source)
         self.assertIn("candidateNote", added_source)
+        for evidence in [
+            'route.mode === "isolated" ? ["CAP_CHOWN"] : []',
+            'route.mode === "isolated" ? ["--cap-add", "CHOWN"] : []',
+            '"chown", identity || "0:0", state.repoRoot',
+            'spawn(this.config.runtime, ["exec", "-i", this.containerName!',
+            'chmod -R u+rwX .',
+        ]:
+            self.assertIn(evidence, ownership_patch)
+        added_lines = "\n".join(
+            line[1:]
+            for line in ownership_patch.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        )
+        self.assertNotIn('"chown", "-R"', added_lines)
+        self.assertNotIn('state.repoRoot, "/tmp/pi-home"', added_lines)
+        installer = (ROOT / "scripts/pi-patch-subagents").read_text()
+        self.assertIn("pi-sandbox-0.2.0-user-workspace.patch", installer)
+        integration = (ROOT / "tests/pi-docker-isolated-ownership.sh").read_text()
+        self.assertIn("--cap-add CHOWN", integration)
+        self.assertIn("repeated tool-call execution", integration)
 
     def test_installer_is_fail_closed_and_rollback_protected(self):
         installer = (ROOT / "install.sh").read_text()
