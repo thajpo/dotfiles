@@ -551,6 +551,15 @@
  				stdio: ["pipe", "ignore", "pipe"],
  			});
  			let err = "";
+@@ -1104,6 +1126,8 @@
+			};
+			source.stderr.on("data", (data) => (err += data.toString()));
+			dest.stderr.on("data", (data) => (err += data.toString()));
++			source.stdout.on("error", reject);
++			dest.stdin.on("error", reject);
+			source.on("error", reject);
+			dest.on("error", reject);
+			source.on("close", (code) => { sourceCode = code; done(); });
 @@ -1170,78 +1192,33 @@
  	}
  
@@ -905,6 +914,15 @@
  				stdio: ["pipe", "ignore", "pipe"],
  			});
  			let err = "";
+@@ -1530,6 +1612,8 @@
+			};
+			source.stderr.on("data", (d) => (err += d.toString()));
+			dest.stderr.on("data", (d) => (err += d.toString()));
++			source.stdout.on("error", reject);
++			dest.stdin.on("error", reject);
+			source.on("error", reject);
+			dest.on("error", reject);
+			source.on("close", (code) => {
 @@ -1572,22 +1654,33 @@
  			return;
  		}

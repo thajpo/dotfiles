@@ -104,16 +104,17 @@ diff -uNr a/dist/modes/interactive/interactive-mode.js b/dist/modes/interactive/
              if (this.onInputCallback) {
                  this.onInputCallback(text);
              }
-@@ -2983,6 +2983,14 @@
+@@ -2983,6 +2983,15 @@
          // Restore the terminal before the process dies on any uncaught throw.
          // Without this, an unhandled exception from extension code (or anywhere
          // in pi) leaves the terminal in raw mode with no cursor.
 -        const uncaughtExceptionHandler = (error) => this.uncaughtCrash(error);
 +        const uncaughtExceptionHandler = (error) => {
 +            // A late write can surface EPIPE outside stdout/stderr's error event
-+            // path. Treat it as terminal loss, not as an extension crash.
++            // path. Use the normal best-effort terminal cleanup path so keyboard
++            // protocols are restored before the shell regains control.
 +            if (isDeadTerminalError(error)) {
-+                this.emergencyTerminalExit();
++                this.uncaughtCrash(error);
 +                return;
 +            }
 +            this.uncaughtCrash(error);

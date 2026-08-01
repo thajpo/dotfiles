@@ -123,6 +123,8 @@ class HarnessStaticTests(unittest.TestCase):
             "GIT_CONFIG_NOSYSTEM=1",
             "must have exactly one read-only Git identity",
             "--no-same-owner",
+            'source.stdout.on("error", reject)',
+            'dest.stdin.on("error", reject)',
         ]:
             self.assertIn(evidence, patch)
         self.assertIn("candidatePrefix", patch)
