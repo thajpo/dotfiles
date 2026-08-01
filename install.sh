@@ -19,6 +19,7 @@ DOTFILES_MACHINE_ID="${DOTFILES_MACHINE:-}"
 if [ -z "$DOTFILES_MACHINE_ID" ]; then
     case "$(uname -s):$(uname -m)" in
         Darwin:arm64|Darwin:aarch64) DOTFILES_MACHINE_ID=macos-arm64 ;;
+        Linux:x86_64|Linux:amd64) DOTFILES_MACHINE_ID=linux-x86_64 ;;
         *) DOTFILES_MACHINE_ID="" ;;
     esac
 fi

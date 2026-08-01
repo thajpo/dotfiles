@@ -215,16 +215,21 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("brew install gitmux", installer)
         self.assertIn("__PI_AGENT_DIR__", installer)
 
-    def test_machine_profile_is_selected_and_installed(self):
+    def test_machine_profiles_are_selected_and_installed(self):
         installer = (ROOT / "install.sh").read_text()
-        profile = (ROOT / "machines/macos-arm64.env").read_text()
+        mac_profile = (ROOT / "machines/macos-arm64.env").read_text()
+        linux_profile = (ROOT / "machines/linux-x86_64.env").read_text()
         self.assertIn("Darwin:arm64|Darwin:aarch64", installer)
+        self.assertIn("Linux:x86_64|Linux:amd64", installer)
         self.assertIn('DOTFILES_MACHINE_ID=macos-arm64', installer)
+        self.assertIn('DOTFILES_MACHINE_ID=linux-x86_64', linux_profile)
         self.assertIn('MACHINE_CONFIG_PATH="$MACHINE_CONFIG_DIR/machine.env"', installer)
         self.assertIn('activate_path "$STAGING_DIR/control/machine.env" "$MACHINE_CONFIG_PATH"', installer)
-        self.assertIn("PI_PERSONAL_MLRE_DIR", profile)
-        self.assertIn("PI_PERSONAL_FINANCIALS_DIR", profile)
-        self.assertIn("PI_PERSONAL_DOTFILES_DIR", profile)
+        for profile in (mac_profile, linux_profile):
+            self.assertIn("PI_PERSONAL_MLRE_DIR", profile)
+            self.assertIn("PI_PERSONAL_FINANCIALS_DIR", profile)
+            self.assertIn("PI_PERSONAL_DOTFILES_DIR", profile)
+        self.assertIn('PI_TRUSTED_PROJECT_ROOTS="${HOME}/Projects"', linux_profile)
 
     def test_secretary_slice_is_installed_and_mechanically_read_only(self):
         installer = (ROOT / "install.sh").read_text()

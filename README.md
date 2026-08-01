@@ -15,9 +15,9 @@ pi-start all
 `~/.local/bin` is not on `PATH` yet, run `~/.local/bin/pi-start all` instead.
 
 Machine-specific non-secret settings live in `machines/`. On Apple Silicon
-macOS, `install.sh` selects `machines/macos-arm64.env` and installs it as
-`~/.config/dotfiles/machine.env`; this is where the Pi personal project paths
-are defined. Linux profiles are intentionally deferred for now.
+macOS and Linux x86_64, `install.sh` selects the matching profile and installs
+it as `~/.config/dotfiles/machine.env`; this is where the Pi personal project
+paths and trusted project roots are defined.
 
 ## Shared CLI Skills + Dotfiles Auto-Sync
 

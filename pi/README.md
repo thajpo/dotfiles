@@ -16,10 +16,11 @@ state remain outside Git.
 
 ## Platform contract
 
-The machine profile owns host paths and trust. On this Mac, `~/projects` is
-trusted-live by policy, while the task still executes in Linux Docker. Trust
-means that the assigned worktree may be mounted read/write; it does not permit
-Pi or a model to execute arbitrary host commands.
+The machine profile owns host paths and trust. The macOS profile trusts
+`~/projects`; the Linux x86_64 profile trusts `~/Projects`. In both cases the
+task still executes in Linux Docker. Trust means that the assigned worktree may
+be mounted read/write; it does not permit Pi or a model to execute arbitrary
+host commands.
 
 The route records both `executionTarget: linux-container` and the detected
 container platform. There is deliberately no implicit macOS fallback. MLX or

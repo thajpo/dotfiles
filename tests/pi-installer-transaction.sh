@@ -19,7 +19,7 @@ prepare_home() {
   local home=$case_root/home
   local fake=$case_root/bin
   mkdir -p "$home/.local/share/pi" "$home/.config/pi" \
-    "$home/.pi/agent/npm" "$case_root/worktrees" "$fake"
+    "$home/Projects" "$home/.pi/agent/npm" "$case_root/worktrees" "$fake"
   cp -a "$core_fixture" "$home/.local/share/pi/core"
   printf 'old-settings\n' > "$home/.pi/agent/settings.json"
   printf 'old-npm\n' > "$home/.pi/agent/npm/sentinel"
