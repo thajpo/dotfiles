@@ -7,6 +7,9 @@
   `refs/heads/rollback/pi-harness-pre-trusted-live-20260729`
 - Existing `pi-sandbox/*`, recovery refs, commits, and containers are not deleted
   by this migration.
+- Existing native macOS `.venv` directories are not copied into Linux tasks.
+  Python dependency environments are keyed by exact project manifests and
+  locked into Docker images when the graph is manifest-only.
 - This change was prepared in the pre-existing isolated Pi container. Host
   activation and Docker boundary tests therefore remain an explicit `pi-host`
   step.
@@ -42,7 +45,8 @@ Observed before modification:
 - Fail-closed tool routing and disabled host-side acceptance commands.
 - `pi-btw` and its sandbox proxy design.
 - Private clone, bundle validation, checkpoint import, and isolated branches.
-- Docker loopback port publication and no host gateway/environment pass-through.
+- Docker loopback port publication remains opt-in; the default is no published
+  port and no host gateway/environment pass-through.
 - `scripts/pi-verify-change`.
 
 ### REWORK
@@ -146,6 +150,19 @@ Before rollback, preserve task branches/worktrees and isolated branches needed
 for review. Do not remove them automatically.
 
 ## Explicit cleanup
+
+Pi-owned Docker resources now carry labels for task owner identity, runtime
+environment key, skill manifest, and cache scope. Review a dry run first:
+
+```bash
+pi-sandbox-gc
+pi-sandbox-gc --apply
+```
+
+The apply mode is deliberately conservative: dead trusted-live tasks can be
+removed, while dead isolated tasks remain unless their checkpoint/recovery
+state is explicitly marked clean. Unlabeled containers, images, volumes, and
+global Docker build cache are never pruned.
 
 Inspect before removing anything:
 

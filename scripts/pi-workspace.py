@@ -24,6 +24,7 @@ from typing import Any
 POLICY_PATH = pathlib.Path("~/.config/pi/repository-policy.json")
 DEFAULT_WORKTREE_ROOT = pathlib.Path("~/.local/share/pi/worktrees")
 DEFAULT_IMAGE = "pi-tool-sandbox:node22-bookworm-20260728"
+DEFAULT_RUNTIME_HELPER = pathlib.Path("~/.local/share/pi/control/pi-runtime.py")
 ROUTE_ENV = "PI_TASK_ROUTE_FILE"
 CAPABILITY_ENV = "PI_TASK_ROUTE_CAPABILITY"
 ALLOWED_POLICY_KEYS = {
@@ -226,9 +227,29 @@ def repository_root(cwd: pathlib.Path) -> pathlib.Path:
 def process_start_ticks(pid: int) -> str:
     try:
         fields = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
-        return fields[21]
+        return f"linux:{fields[21]}"
     except (OSError, IndexError):
+        if platform.system() == "Darwin":
+            try:
+                result = subprocess.run(
+                    ["/bin/ps", "-p", str(pid), "-o", "lstart="],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except OSError:
+                return "unavailable"
+            value = result.stdout.strip()
+            if value:
+                return f"darwin:{value}"
         return "unavailable"
+
+
+def container_platform() -> str:
+    result = run(["docker", "info", "--format", "{{.OSType}}/{{.Architecture}}"], check=False)
+    value = result.stdout.strip()
+    return value if value.startswith("linux/") else "linux/unknown"
 
 
 def task_id() -> str:
@@ -497,7 +518,7 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
     write_git_identity_config(git_config_path, identity_name, identity_email)
     git_config_path = git_config_path.resolve(strict=True)
     route: dict[str, Any] = {
-        "version": 1,
+        "version": 2,
         "task": session,
         "session": session,
         "mode": mode,
@@ -514,6 +535,11 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
         "uid": os.getuid(),
         "gid": os.getgid(),
         "image": DEFAULT_IMAGE,
+        "executionTarget": "linux-container",
+        "hostPlatform": f"{platform.system().lower()}/{platform.machine().lower()}",
+        "containerPlatform": container_platform(),
+        "runtimeProvider": "uv",
+        "runtimeHelper": str(pathlib.Path(os.path.expanduser(str(DEFAULT_RUNTIME_HELPER)))),
         "worktreeRoot": policy["worktreeRoot"],
         "hostContext": str(context_path),
         "gitConfig": str(git_config_path),

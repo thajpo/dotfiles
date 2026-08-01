@@ -2,12 +2,12 @@
   "runtime": "docker",
   "image": "pi-tool-sandbox:node22-bookworm-20260728",
   "checkpointFrequency": "agent",
-  "dockerPortMode": "dynamic",
+  "dockerPortMode": "disabled",
   "dockerPortRange": "8000-8010",
   "hostGateway": "",
   "hostUntrackedFiles": "ignore",
   "gitCloneDepth": 0,
-  "installDeps": "never",
+  "installDeps": "auto",
   "lifecycle": "remove",
   "passEnv": []
 }

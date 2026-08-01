@@ -176,7 +176,7 @@ class WorkspacePreparationTests(unittest.TestCase):
             route = json.loads(Path(prepared["route"]).read_text())
             task = Path(prepared["worktree"])
             self.assertNotEqual(task, repo)
-            self.assertTrue(str(task).startswith(str(home / ".local/share/pi/worktrees")))
+            self.assertTrue(task.is_relative_to((home / ".local/share/pi/worktrees").resolve()))
             self.assertRegex(route["branch"], r"^pi/")
             self.assertEqual(git(repo, "branch", "--show-current"), "main")
             self.assertEqual(git(repo, "rev-parse", "HEAD"), original_head)

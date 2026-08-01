@@ -86,6 +86,20 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertEqual(config["hostUntrackedFiles"], "ignore")
         self.assertEqual(config["checkpointFrequency"], "agent")
         self.assertEqual(config["lifecycle"], "remove")
+        self.assertEqual(config["dockerPortMode"], "disabled")
+        self.assertEqual(config["installDeps"], "auto")
+
+    def test_platform_and_runtime_contracts_are_explicit(self):
+        profile = (ROOT / "machines/macos-arm64.env").read_text()
+        runtime = (ROOT / "scripts/pi-runtime.py").read_text()
+        dockerfile = (ROOT / "pi/sandbox/Dockerfile").read_text()
+        sandbox = (ROOT / "pi/patches/pi-sandbox-0.2.0-runtime-contract.patch").read_text()
+        self.assertIn('PI_TRUSTED_PROJECT_ROOTS="${HOME}/projects"', profile)
+        self.assertIn("manifest-only build context", runtime)
+        self.assertIn("uv==${UV_VERSION}", dockerfile)
+        self.assertIn("executionTarget", sandbox)
+        self.assertIn("skill-resource", sandbox)
+        self.assertIn("environment-key", sandbox)
 
     def test_sandbox_patch_contains_required_boundaries(self):
         patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-task-routing.patch").read_text()
@@ -155,9 +169,20 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertNotIn('state.repoRoot, "/tmp/pi-home"', added_lines)
         installer = (ROOT / "scripts/pi-patch-subagents").read_text()
         self.assertIn("pi-sandbox-0.2.0-user-workspace.patch", installer)
+        self.assertIn("pi-sandbox-0.2.0-runtime-contract.patch", installer)
+        self.assertIn("pi-runtime.py", installer)
+        self.assertIn("pi-sandbox-gc.py", installer)
+        self.assertIn("PI_TRUSTED_PROJECT_ROOTS", installer)
         integration = (ROOT / "tests/pi-docker-isolated-ownership.sh").read_text()
         self.assertIn("--cap-add CHOWN", integration)
         self.assertIn("repeated tool-call execution", integration)
+        runtime_integration = (ROOT / "tests/pi-docker-runtime-cache.sh").read_text()
+        self.assertIn("environmentKey", runtime_integration)
+        self.assertIn("native-host-sentinel", runtime_integration)
+        gc = (ROOT / "scripts/pi-sandbox-gc.py").read_text()
+        self.assertIn('docker system prune', (ROOT / "pi/README.md").read_text())
+        self.assertIn("--apply", gc)
+        self.assertIn("pi.container-sandbox.managed", gc)
 
     def test_installer_is_fail_closed_and_rollback_protected(self):
         installer = (ROOT / "install.sh").read_text()
@@ -197,7 +222,7 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status" "$skill_rollback_dir"', installer)
         self.assertIn('local source=$1 target=$2 rollback_dir backup=""', installer)
         self.assertIn('rollback_dir=${3:-$(dirname "$target")}', installer)
-        self.assertIn("for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary", installer)
+        self.assertIn("pi-sandbox-gc", installer)
         for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,subagent,secretary_git,secretary_record_idea", "--session-id", "--name"]:
             self.assertIn(flag, launcher)
         self.assertEqual(launcher.count("-e \"$"), 3)

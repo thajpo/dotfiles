@@ -171,18 +171,87 @@ if [ -e "$POLICY_PATH" ] || [ -L "$POLICY_PATH" ]; then
         echo "Refusing unsafe existing repository policy: $POLICY_PATH" >&2
         exit 1
     }
-    install -m 600 "$POLICY_PATH" "$POLICY_STAGING"
-    echo "Staging the existing repository policy unchanged: $POLICY_PATH"
-else
-    python3 - "$SCRIPT_DIR/pi/repository-policy.json" "$POLICY_STAGING" "$SCRIPT_DIR" "$HOME/.local/share/pi/worktrees" <<'PY'
+python3 - "$POLICY_PATH" "$POLICY_STAGING" "$SCRIPT_DIR" "$HOME/.local/share/pi/worktrees" "$MACHINE_PROFILE" <<'PY'
 import json
+import os
 from pathlib import Path
 import sys
 
-source, destination, repository, worktree_root = map(Path, sys.argv[1:])
+source, destination, repository, worktree_root = map(Path, sys.argv[1:5])
+machine_profile = Path(sys.argv[5]) if sys.argv[5] else None
+
+def machine_values(path):
+    values = {}
+    if not path:
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise SystemExit(f"invalid machine profile line: {line}")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key not in {"PI_TRUSTED_PROJECT_ROOTS"}:
+            continue
+        value = value.strip().strip('"').strip("'").replace("${HOME}", str(Path.home()))
+        values[key] = [item for item in value.split(os.pathsep) if item]
+    return values
+
+policy = json.loads(source.read_text(encoding="utf-8"))
+if not isinstance(policy, dict):
+    raise SystemExit("repository policy must be a JSON object")
+policy.setdefault("version", 1)
+policy.setdefault("defaultMode", "isolated")
+policy.setdefault("trustedRoots", [])
+policy.setdefault("isolatedRoots", [])
+policy.setdefault("controlPlaneRepositories", [])
+policy.setdefault("protectedBranches", ["main", "master"])
+policy.setdefault("worktreeRoot", str(worktree_root.expanduser()))
+if policy["version"] != 1 or policy["defaultMode"] != "isolated":
+    raise SystemExit("repository policy must remain version 1 with defaultMode isolated")
+
+def canonical(value):
+    expanded = Path(os.path.expanduser(value))
+    if not expanded.is_absolute():
+        raise SystemExit(f"policy path is not absolute after expansion: {value}")
+    return str(expanded.resolve(strict=True))
+
+repository = str(repository.resolve(strict=True))
+trusted = [canonical(item) for item in policy["trustedRoots"]]
+for item in machine_values(machine_profile).get("PI_TRUSTED_PROJECT_ROOTS", []):
+    resolved = canonical(item)
+    if resolved not in trusted:
+        trusted.append(resolved)
+policy["trustedRoots"] = trusted
+policy["isolatedRoots"] = [canonical(item) for item in policy["isolatedRoots"]]
+policy["controlPlaneRepositories"] = [canonical(item) for item in policy["controlPlaneRepositories"]]
+policy["controlPlaneRepositories"] = list(dict.fromkeys([repository, *policy["controlPlaneRepositories"]]))
+policy["worktreeRoot"] = str(Path(os.path.expanduser(policy["worktreeRoot"])).resolve())
+Path(destination).write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
+Path(destination).chmod(0o600)
+PY
+    echo "Staging the existing repository policy with machine trusted roots: $POLICY_PATH"
+else
+    python3 - "$SCRIPT_DIR/pi/repository-policy.json" "$POLICY_STAGING" "$SCRIPT_DIR" "$HOME/.local/share/pi/worktrees" "$MACHINE_PROFILE" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+source, destination, repository, worktree_root = map(Path, sys.argv[1:5])
+machine_profile = Path(sys.argv[5]) if sys.argv[5] else None
 policy = json.loads(source.read_text(encoding="utf-8"))
 repository = str(repository.resolve())
 policy["trustedRoots"] = [repository]
+if machine_profile:
+    for line in machine_profile.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("PI_TRUSTED_PROJECT_ROOTS="):
+            for item in line.split("=", 1)[1].strip().strip('"').strip("'").replace("${HOME}", str(Path.home())).split(os.pathsep):
+                if item:
+                    policy["trustedRoots"].append(str(Path(os.path.expanduser(item)).resolve()))
+policy["trustedRoots"] = list(dict.fromkeys(policy["trustedRoots"]))
 policy["controlPlaneRepositories"] = [repository]
 policy["worktreeRoot"] = str(worktree_root.expanduser())
 Path(destination).write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
@@ -210,9 +279,11 @@ for path in agents_dir.glob("*.md"):
 PY
 ln -s "$SCRIPT_DIR/agent/AGENTS.md" "$STAGING_DIR/control/AGENTS.md"
 install -m 755 "$SCRIPT_DIR/scripts/pi-workspace.py" "$STAGING_DIR/control/pi-workspace.py"
+install -m 755 "$SCRIPT_DIR/scripts/pi-runtime.py" "$STAGING_DIR/control/pi-runtime.py"
+install -m 755 "$SCRIPT_DIR/scripts/pi-sandbox-gc.py" "$STAGING_DIR/control/pi-sandbox-gc.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-control.py" "$STAGING_DIR/control/pi-secretary-control.py"
 cp -a "$SCRIPT_DIR/skills/project-status" "$STAGING_DIR/control/project-status-skill"
-for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent; do
+for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent pi-sandbox-gc; do
     install -m 755 "$SCRIPT_DIR/bin/$launcher" "$STAGING_DIR/control/$launcher"
 done
 python3 - "$STAGING_DIR/control/pi" "$STAGING_DIR/control/pi-host" <<'PY'
@@ -274,6 +345,8 @@ for config in settings.json pi-chrome-devtools.json pi-plan-mode.json pi-statusl
 done
 for tree in extensions agents prompts themes; do activate_path "$STAGING_DIR/control/$tree" "$PI_CONFIG_DIR/$tree"; done
 activate_path "$STAGING_DIR/control/pi-workspace.py" "$HOME/.local/share/pi/control/pi-workspace.py"
+activate_path "$STAGING_DIR/control/pi-runtime.py" "$HOME/.local/share/pi/control/pi-runtime.py"
+activate_path "$STAGING_DIR/control/pi-sandbox-gc.py" "$HOME/.local/share/pi/control/pi-sandbox-gc.py"
 activate_path "$STAGING_DIR/control/pi-secretary-control.py" "$HOME/.local/share/pi/control/pi-secretary-control.py"
 if [ -n "$MACHINE_PROFILE" ]; then
     mkdir -p -m 700 "$MACHINE_CONFIG_DIR"
@@ -282,7 +355,7 @@ if [ -n "$MACHINE_PROFILE" ]; then
 fi
 skill_rollback_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pi/rollback/skills"
 activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status" "$skill_rollback_dir"
-for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent; do
+for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent pi-sandbox-gc; do
     activate_path "$STAGING_DIR/control/$launcher" "$HOME/.local/bin/$launcher"
 done
 

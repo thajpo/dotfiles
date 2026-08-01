@@ -1,0 +1,452 @@
+--- a/index.ts
++++ b/index.ts
+@@ -76,7 +76,7 @@
+ type WorkspaceMode = "trusted-live" | "isolated";
+ 
+ interface TaskRoute {
+-	version: 1;
++	version: 2;
+ 	task: string;
+ 	session: string;
+ 	mode: WorkspaceMode;
+@@ -92,6 +92,11 @@
+ 	uid: number;
+ 	gid: number;
+ 	image: string;
++	executionTarget: "linux-container";
++	hostPlatform: string;
++	containerPlatform: string;
++	runtimeProvider: "uv";
++	runtimeHelper: string;
+ 	worktreeRoot: string;
+ 	hostContext: string;
+ 	gitConfig: string;
+@@ -199,6 +204,18 @@
+ 	lifecycle: LifecycleMode;
+ 	passEnv: string[];
+ 	review: ReviewConfig;
++}
++
++interface RuntimeInfo {
++	provider: string;
++	mode: "derived-image" | "task-local";
++	reason: string;
++	image: string;
++	environmentKey: string;
++	manifestHash?: string;
++	platform?: string;
++	baseImage?: string;
++	baseId?: string;
+ }
+ 
+ const DEFAULT_IMAGE = "pi-tool-sandbox:latest";
+@@ -206,7 +223,7 @@
+ const FALLBACK_COMMIT_PREFIX = "pi sandbox";
+ const DEFAULT_CAPTURE_BYTES = 16 * 1024 * 1024;
+ const PACKAGE_CACHE_ROOT = "/var/cache/pi-packages";
+-const PACKAGE_CACHE_VOLUME = "pi-package-cache-v1";
++const PACKAGE_CACHE_VOLUME = "pi-package-cache-v2";
+ const TASK_ROUTE_ENV = "PI_TASK_ROUTE_FILE";
+ const TASK_CAPABILITY_ENV = "PI_TASK_ROUTE_CAPABILITY";
+ const PACKAGE_CACHE_ENV: Record<string, string> = {
+@@ -220,7 +237,7 @@
+ const DEFAULT_CONFIG: SandboxConfig = {
+ 	runtime: "docker",
+ 	image: DEFAULT_IMAGE,
+-	dockerPortMode: "dynamic",
++	dockerPortMode: "disabled",
+ 	dockerPortRange: "8000-8010",
+ 	hostGateway: "",
+ 	target: "sandbox",
+@@ -331,8 +348,13 @@
+ 
+ function processStartTicks(pid: number): string {
+ 	try {
+-		return readFileSync(`/proc/${pid}/stat`, "utf8").split(/\s+/)[21] ?? "unavailable";
++		return `linux:${readFileSync(`/proc/${pid}/stat`, "utf8").split(/\s+/)[21] ?? "unavailable"}`;
+ 	} catch {
++		if (process.platform === "darwin") {
++			const result = spawnSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" });
++			const value = typeof result.stdout === "string" ? result.stdout.trim() : "";
++			if (result.status === 0 && value) return `darwin:${value}`;
++		}
+ 		return "unavailable";
+ 	}
+ }
+@@ -386,10 +408,17 @@
+ 	const requiredStrings: Array<keyof TaskRoute> = [
+ 		"task", "session", "mode", "repository", "worktree", "branch", "startingOid", "gitCommonDir", "gitDir",
+ 		"container", "ownerStartTicks", "image", "worktreeRoot", "hostContext", "gitConfig", "policyHash", "capabilityHash",
++		"executionTarget", "hostPlatform", "containerPlatform", "runtimeProvider", "runtimeHelper",
+ 	];
+-	if (route.version !== 1 || requiredStrings.some((key) => typeof route[key] !== "string" || !route[key])) {
++	if (route.version !== 2 || requiredStrings.some((key) => typeof route[key] !== "string" || !route[key])) {
+ 		throw new Error("Malformed Pi task route");
+ 	}
++	if (route.executionTarget !== "linux-container" || route.runtimeProvider !== "uv") {
++		throw new Error("Pi task route requests an unsupported execution target or runtime provider");
++	}
++	if (!/^linux\/[A-Za-z0-9._-]+$/.test(route.containerPlatform!) || !path.isAbsolute(route.runtimeHelper!)) {
++		throw new Error("Malformed Pi task runtime contract");
++	}
+ 	if (route.mode !== "trusted-live" && route.mode !== "isolated") throw new Error("Invalid Pi task route mode");
+ 	if (!Number.isSafeInteger(route.ownerPid) || !Number.isSafeInteger(route.uid) || !Number.isSafeInteger(route.gid) || route.parentOwned !== true) {
+ 		throw new Error("Malformed Pi task route ownership");
+@@ -928,6 +957,8 @@
+ 	private gitRefState: GitRefState | undefined;
+ 	private pendingRebase: PendingRebase | undefined;
+ 	private preflightError: string | undefined;
++	private runtimeInfo: RuntimeInfo | undefined;
++	private routePath: string | undefined;
+ 	private checkpointTail: Promise<unknown> = Promise.resolve();
+ 
+ 	constructor(private readonly pi: ExtensionAPI) {}
+@@ -950,6 +981,10 @@
+ 
+ 	getConfig() {
+ 		return this.config;
++	}
++
++	getRuntimeInfo() {
++		return this.runtimeInfo;
+ 	}
+ 
+ 	getMode(): WorkspaceMode {
+@@ -979,10 +1014,12 @@
+ 	}
+ 
+ 	configure(ctx: ExtensionContext) {
++		this.routePath = process.env[TASK_ROUTE_ENV];
+ 		this.route = routeForCwd(requireTaskRoute(), ctx.cwd);
+ 		this.cwd = ctx.cwd;
+ 		this.config = loadConfig(ctx.cwd, false, this.pi);
+ 		this.config.image = this.route.image;
++		this.runtimeInfo = undefined;
+ 		this.enabled = true;
+ 	}
+ 
+@@ -997,22 +1034,58 @@
+ 	private envArgs(): string[] {
+ 		const args: string[] = [];
+ 		for (const [key, value] of Object.entries(PACKAGE_CACHE_ENV)) args.push("-e", `${key}=${value}`);
++		for (const [key, value] of Object.entries(this.runtimeEnvironment())) args.push("-e", `${key}=${value}`);
+ 		for (const key of this.config.passEnv) {
+ 			const value = process.env[key];
+ 			if (value !== undefined) args.push("-e", `${key}=${value}`);
+ 		}
+ 		return args;
++	}
++
++	private runtimeEnvironment(): Record<string, string> {
++		const environmentPath = this.runtimeInfo?.mode === "derived-image" ? "/opt/pi/env" : "/opt/pi/task-env";
++		return {
++			VIRTUAL_ENV: environmentPath,
++			UV_PROJECT_ENVIRONMENT: environmentPath,
++			PATH: `${environmentPath}/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
++		};
+ 	}
+ 
+ 	private packageCacheHostRoot(): string {
+ 		const route = this.getRoute();
+-		const identity = createHash("sha256").update(route.mode === "isolated" ? route.task : route.repository).digest("hex").slice(0, 16);
+-		return `${PACKAGE_CACHE_VOLUME}-${route.mode === "isolated" ? "task" : "repo"}-${identity}`;
++		const environmentKey = this.runtimeInfo?.environmentKey;
++		const identity = environmentKey && environmentKey !== "task-local"
++			? environmentKey
++			: createHash("sha256").update(route.mode === "isolated" ? route.task : route.repository).digest("hex");
++		const scope = environmentKey && environmentKey !== "task-local" ? "env" : route.mode === "isolated" ? "task" : "repo";
++		return `${PACKAGE_CACHE_VOLUME}-${scope}-${identity.slice(0, 32)}`;
+ 	}
+ 
+ 	private async ensurePackageCacheDirectories() {
+-		// Docker creates the named volume. It is initialized inside the task
+-		// container and never exposes a general host cache path.
++		if (this.config.runtime !== "docker") return;
++		const name = this.packageCacheHostRoot();
++		const labels = {
++			"pi.package-cache.managed": "true",
++			"pi.package-cache.scope": this.runtimeInfo?.environmentKey && this.runtimeInfo.environmentKey !== "task-local"
++				? "environment"
++				: this.getRoute().mode === "isolated" ? "task" : "repo",
++			"pi.package-cache.environment-key": this.runtimeInfo?.environmentKey ?? "task-local",
++		};
++		const inspected = await this.runtimeExec(["volume", "inspect", name], { timeoutMs: 30_000 });
++		if (inspected.code !== 0) {
++			await this.runtimeExecChecked([
++				"volume", "create",
++				...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]),
++				name,
++			], { timeoutMs: 30_000 });
++			return;
++		}
++		let parsed: unknown;
++		try { parsed = JSON.parse(inspected.stdout.toString()); } catch { throw new Error(`Invalid package-cache volume metadata: ${name}`); }
++		const item = (Array.isArray(parsed) ? parsed[0] : parsed) as { Name?: string; Labels?: Record<string, string> } | undefined;
++		if (!item || item.Name !== name || Object.entries(labels).some(([key, value]) => item.Labels?.[key] !== value)) {
++			throw new Error(`Package-cache volume ${name} is not owned by this Pi runtime contract; preserve or remove it before retrying`);
++		}
+ 	}
+ 
+ 	private async gitRepoRoot(): Promise<string | undefined> {
+@@ -1303,6 +1376,35 @@
+ 		}
+ 	}
+ 
++	private async prepareRuntimeImage(ctx?: ExtensionContext) {
++		if (this.runtimeInfo) return;
++		const route = this.getRoute();
++		if (route.executionTarget !== "linux-container") throw new Error("Pi has no host execution fallback; this task requires a Linux container");
++		if (!this.routePath) throw new Error("Pi task route path is unavailable for runtime preparation");
++		const result = await run("python3", [route.runtimeHelper, "prepare", "--route", this.routePath], {
++			timeoutMs: 30 * 60 * 1000,
++			maxCaptureBytes: 2 * 1024 * 1024,
++		});
++		if (result.code !== 0) {
++			throw new Error(result.stderr.toString().trim() || `runtime preparation exited with ${result.code}`);
++		}
++		let parsed: unknown;
++		try { parsed = JSON.parse(result.stdout.toString()); } catch { throw new Error("Runtime preparation returned invalid JSON"); }
++		if (!parsed || typeof parsed !== "object") throw new Error("Runtime preparation returned invalid metadata");
++		const info = parsed as Partial<RuntimeInfo>;
++		if ((info.mode !== "derived-image" && info.mode !== "task-local") || typeof info.image !== "string" || typeof info.environmentKey !== "string") {
++			throw new Error("Runtime preparation returned an incomplete environment contract");
++		}
++		this.runtimeInfo = info as RuntimeInfo;
++		this.config.image = this.runtimeInfo.image;
++		ctx?.ui.notify(
++			this.runtimeInfo.mode === "derived-image"
++				? `Linux runtime ready: uv environment ${this.runtimeInfo.environmentKey.slice(0, 12)} (shared immutable image)`
++				: `Linux runtime using task-local environment: ${this.runtimeInfo.reason}`,
++			"info",
++		);
++	}
++
+ 	private async containerExists(name: string): Promise<boolean> {
+ 		return (await this.runtimeExec(["inspect", name], { timeoutMs: 10_000 })).code === 0;
+ 	}
+@@ -1310,7 +1412,14 @@
+ 	private reusableContainerConfig(): Record<string, unknown> {
+ 		const route = this.getRoute();
+ 		const config: Record<string, unknown> = {
++			executionTarget: route.executionTarget,
++			containerPlatform: route.containerPlatform,
++			baseImage: route.image,
+ 			image: this.config.image,
++			skillManifest: this.skillManifestHash(),
++			runtimeProvider: this.runtimeInfo?.provider ?? route.runtimeProvider,
++			runtimeMode: this.runtimeInfo?.mode ?? "pending",
++			environmentKey: this.runtimeInfo?.environmentKey ?? "pending",
+ 			packageCache: this.packageCacheHostRoot(),
+ 			mode: route.mode,
+ 			worktree: route.worktree,
+@@ -1337,6 +1446,11 @@
+ 			"pi.container-sandbox.target": this.getMode(),
+ 			"pi.container-sandbox.task": this.getRoute().task,
+ 			"pi.container-sandbox.owner": String(this.getRoute().ownerPid),
++			"pi.container-sandbox.owner-identity": createHash("sha256").update(this.getRoute().ownerStartTicks).digest("hex").slice(0, 16),
++			"pi.container-sandbox.execution-target": this.getRoute().executionTarget,
++			"pi.container-sandbox.runtime-provider": this.runtimeInfo?.provider ?? this.getRoute().runtimeProvider,
++			"pi.container-sandbox.environment-key": this.runtimeInfo?.environmentKey ?? "pending",
++			"pi.container-sandbox.skill-manifest": this.skillManifestHash(),
+ 			"pi.container-sandbox.ref": createHash("sha256").update(state.sandboxRef).digest("hex").slice(0, 16),
+ 			"pi.container-sandbox.config": createHash("sha256")
+ 				.update(JSON.stringify(this.reusableContainerConfig()))
+@@ -1353,6 +1467,47 @@
+ 			if (!sources.some((source) => containedPath(source, candidate))) sources.push(candidate);
+ 		}
+ 		return uniq(sources);
++	}
++
++	private skillBindSources(): string[] {
++		const roots = [
++			path.join(getAgentDir(), "skills"),
++			path.join(this.cwd, ".pi", "skills"),
++			path.join(getAgentDir(), "npm", "node_modules"),
++		];
++		const files: string[] = [];
++		for (const root of roots) {
++			if (!existsSync(root)) continue;
++			const result = spawnSync("find", [root, "-type", "f", "-name", "SKILL.md", "-print"], { encoding: "utf8" });
++			if (result.status !== 0 || typeof result.stdout !== "string") continue;
++			files.push(...result.stdout.split("\n").filter(Boolean));
++		}
++		const directories = files.map((file) => path.dirname(file)).filter((directory) => {
++			try {
++				const canonical = realpathSync(directory);
++				return canonical === directory && lstatSync(directory).isDirectory();
++			} catch {
++				return false;
++			}
++		});
++		return uniq(directories.map((directory) => realpathSync(directory)));
++	}
++
++	private skillManifestHash(): string {
++		const digest = createHash("sha256");
++		for (const directory of this.skillBindSources().sort()) {
++			digest.update(directory);
++			const result = spawnSync("find", [directory, "-type", "f", "-print"], { encoding: "utf8" });
++			for (const file of (typeof result.stdout === "string" ? result.stdout.split("\n").filter(Boolean).sort() : [])) {
++				try {
++					digest.update(file);
++					digest.update(readFileSync(file));
++				} catch {
++					digest.update("unreadable");
++				}
++			}
++		}
++		return digest.digest("hex").slice(0, 32);
+ 	}
+ 
+ 	private trustedBindArgs(): string[] {
+@@ -1361,6 +1516,12 @@
+ 		]);
+ 	}
+ 
++	private skillBindArgs(): string[] {
++		return this.skillBindSources().flatMap((source) => [
++			"--mount", `type=bind,src=${source},dst=${source},readonly=true,bind-propagation=rprivate`,
++		]);
++	}
++
+ 	private async inspectContainer(name: string): Promise<ContainerInspectData> {
+ 		const inspected = await this.runtimeExecChecked(["inspect", name], { timeoutMs: 30_000, maxCaptureBytes: 2 * 1024 * 1024 });
+ 		if (inspected.stdoutTruncated) throw new Error(`Container metadata is too large to validate: ${name}`);
+@@ -1397,6 +1558,7 @@
+ 		const route = this.getRoute();
+ 		const bindMounts = mounts.filter((mount) => (mount.type ?? mount.Type) === "bind");
+ 		const expectedBinds = this.trustedBindSources().map((source) => path.resolve(source));
++		const expectedSkillBinds = this.skillBindSources().map((source) => path.resolve(source));
+ 		const contextSource = path.resolve(route.hostContext);
+ 		const gitConfigSource = path.resolve(route.gitConfig);
+ 		for (const mount of bindMounts) {
+@@ -1407,11 +1569,13 @@
+ 				if (destination !== "/run/pi/HOST_CONTEXT.md" || mount.RW !== false) throw new Error(`Existing sandbox container ${name} has an unsafe host-context mount`);
+ 			} else if (source === gitConfigSource) {
+ 				if (destination !== "/run/pi/GIT_CONFIG_GLOBAL" || mount.RW !== false) throw new Error(`Existing sandbox container ${name} has an unsafe Git-identity mount`);
++			} else if (expectedSkillBinds.includes(source)) {
++				if (destination !== source || mount.RW !== false) throw new Error(`Existing sandbox container ${name} has an unsafe skill-resource mount ${source}`);
+ 			} else if (!expectedBinds.includes(source) || destination !== source || mount.RW !== true) {
+ 				throw new Error(`Existing sandbox container ${name} exposes unexpected host bind ${source} -> ${destination}`);
+ 			}
+ 		}
+-		if (bindMounts.length !== expectedBinds.length + 2) throw new Error(`Existing sandbox container ${name} has an unexpected bind-mount count`);
++		if (bindMounts.length !== expectedBinds.length + expectedSkillBinds.length + 2) throw new Error(`Existing sandbox container ${name} has an unexpected bind-mount count`);
+ 		if (bindMounts.filter((mount) => path.resolve(String(mount.source ?? mount.Source ?? "")) === contextSource).length !== 1) throw new Error(`Existing sandbox container ${name} must have exactly one read-only host context`);
+ 		if (bindMounts.filter((mount) => path.resolve(String(mount.source ?? mount.Source ?? "")) === gitConfigSource).length !== 1) throw new Error(`Existing sandbox container ${name} must have exactly one read-only Git identity`);
+ 		const allowedTmpfsMount = (mount: ContainerInspectMount) => (mount.type ?? mount.Type) === "tmpfs" && (mount.destination ?? mount.Destination) === "/tmp/pi-home";
+@@ -1419,6 +1583,9 @@
+ 		for (const source of expectedBinds) {
+ 			if (!bindMounts.some((mount) => path.resolve(String(mount.source ?? mount.Source ?? "")) === source)) throw new Error(`Existing sandbox container ${name} is missing trusted-live bind ${source}`);
+ 		}
++		for (const source of expectedSkillBinds) {
++			if (!bindMounts.some((mount) => path.resolve(String(mount.source ?? mount.Source ?? "")) === source)) throw new Error(`Existing sandbox container ${name} is missing skill-resource bind ${source}`);
++		}
+ 		const labels = (appleConfig?.labels ?? dockerConfig?.Labels ?? item?.Labels ?? {}) as Record<string, string>;
+ 		if (labels["pi.container-sandbox.managed"] !== "true") throw new Error(`Existing container ${name} is not owned by the Pi task harness`);
+ 		for (const [key, expected] of Object.entries(this.containerLabels(state))) {
+@@ -1455,7 +1622,14 @@
+ 		if (!tmpfsOptions.has("mode=0700") && !tmpfsOptions.has("mode=700")) throw new Error(`Existing container ${name} has unsafe /tmp/pi-home mode`);
+ 		if (Object.keys(tmpfs).length !== 1) throw new Error(`Existing container ${name} has unexpected tmpfs mounts`);
+ 
+-		const requiredEnvironment = { HOME: "/tmp/pi-home", CI: "1", GIT_CONFIG_GLOBAL: "/run/pi/GIT_CONFIG_GLOBAL", GIT_CONFIG_NOSYSTEM: "1", ...PACKAGE_CACHE_ENV };
++		const requiredEnvironment = {
++			HOME: "/tmp/pi-home",
++			CI: "1",
++			GIT_CONFIG_GLOBAL: "/run/pi/GIT_CONFIG_GLOBAL",
++			GIT_CONFIG_NOSYSTEM: "1",
++			...PACKAGE_CACHE_ENV,
++			...this.runtimeEnvironment(),
++		};
+ 		const allowedEnvironment = new Set([...Object.keys(requiredEnvironment), "LANG", "LC_ALL", "PATH", "NODE_VERSION", "YARN_VERSION"]);
+ 		const environmentEntries = (dockerConfig.Env ?? []).map((entry): [string, string] => {
+ 			const boundary = entry.indexOf("=");
+@@ -1642,6 +1816,7 @@
+ 
+ 	private async createContainer(ctx?: ExtensionContext) {
+ 		await this.ensureRuntime();
++		await this.prepareRuntimeImage(ctx);
+ 		await this.ensurePackageCacheDirectories();
+ 
+ 		const state = await this.ensureGitRefState(ctx);
+@@ -1681,6 +1856,7 @@
+ 				? ["--add-host", `${this.config.hostGateway}:host-gateway`]
+ 				: []),
+ 			...this.trustedBindArgs(),
++			...this.skillBindArgs(),
+ 			"--mount", `type=bind,src=${route.hostContext},dst=/run/pi/HOST_CONTEXT.md,readonly=true,bind-propagation=rprivate`,
+ 			"--mount", `type=bind,src=${route.gitConfig},dst=/run/pi/GIT_CONFIG_GLOBAL,readonly=true,bind-propagation=rprivate`,
+ 			"--mount", `type=volume,src=${this.packageCacheHostRoot()},dst=${PACKAGE_CACHE_ROOT}`,
+@@ -1689,6 +1865,7 @@
+ 			"-e", "GIT_CONFIG_GLOBAL=/run/pi/GIT_CONFIG_GLOBAL",
+ 			"-e", "GIT_CONFIG_NOSYSTEM=1",
+ 			...Object.entries(PACKAGE_CACHE_ENV).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
++			...Object.entries(this.runtimeEnvironment()).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
+ 			this.config.image,
+ 			"sleep",
+ 			"infinity",
+@@ -1724,8 +1901,10 @@
+ 		if (this.depsInstalled || !this.containerName) return;
+ 		this.depsInstalled = true;
+ 		ctx?.ui.notify("Sandbox dependency bootstrap started", "info");
++		const runtimeMode = this.runtimeInfo?.mode ?? "task-local";
+ 		const script = `set -e
+-if [ -f package-lock.json ]; then
++		mkdir -p "$UV_PROJECT_ENVIRONMENT"
++	if [ -f package-lock.json ]; then
+   npm ci
+ elif [ -f pnpm-lock.yaml ]; then
+   corepack enable && pnpm install --frozen-lockfile
+@@ -1736,8 +1915,8 @@
+ elif [ -f package.json ]; then
+   npm install
+ fi
+-if [ -f uv.lock ]; then
+-  uv sync --frozen
++	if [ -f uv.lock ] && [ "${runtimeMode}" = "task-local" ]; then
++	  uv sync --frozen
+ elif [ -f requirements.txt ]; then
+   python3 -m pip install -r requirements.txt || python3 -m pip install --break-system-packages -r requirements.txt
+ fi
+@@ -2518,6 +2697,7 @@
+ 	configure(ctx: ExtensionContext) { this.engine.configure(ctx); }
+ 	isEnabled() { return this.engine.isEnabled(); }
+ 	getConfig() { return this.engine.getConfig(); }
++	getRuntimeInfo() { return this.engine.getRuntimeInfo(); }
+ 	getMode() { return this.engine.getMode(); }
+ 	getRoute() { return this.engine.getRoute(); }
+ 	getGitRefState() { return this.engine.getGitRefState(); }
+@@ -3321,8 +3501,9 @@
+ 			if (["checkpoint", "review", "rebase", "rebase-abort", "stop"].includes(command)) await ctx.waitForIdle();
+ 
+ 			switch (command) {
+-				case "status": {
+-					const config = sandbox.workspace.getConfig();
++					case "status": {
++						const config = sandbox.workspace.getConfig();
++						const runtimeInfo = sandbox.workspace.getRuntimeInfo();
+ 					const target = parseTarget(config.target, "target");
+ 					const gitRefState = sandbox.workspace.getGitRefState();
+ 					const targetLock = sandbox.workspace.getTargetLockStatus();
+@@ -3330,8 +3511,10 @@
+ 					ctx.ui.notify(
+ 						[
+ 							`Container workspace: ${sandbox.workspace.isEnabled() ? sandbox.workspace.getMode() : "unavailable"}`,
+-							`Runtime: ${config.runtime}`,
+-							`Image: ${config.image}`,
++								`Runtime: ${config.runtime}`,
++								`Execution target: ${sandbox.workspace.getRoute().executionTarget} (${sandbox.workspace.getRoute().containerPlatform})`,
++								`Image: ${config.image}`,
++								`Dependency environment: ${runtimeInfo ? `${runtimeInfo.provider}/${runtimeInfo.mode} (${runtimeInfo.environmentKey.slice(0, 16)})` : "pending"}`,
+ 							`Docker port mode: ${config.runtime === "docker" ? config.dockerPortMode : "(not applicable)"}`,
+ 							`Docker container port range: ${config.runtime === "docker" && config.dockerPortMode !== "disabled" ? config.dockerPortRange : "(not published)"}`,
+ 							`Docker host mappings: ${config.runtime === "docker" ? dockerPorts || (config.dockerPortMode === "disabled" ? "(disabled)" : "(available after container starts)") : "(not applicable)"}`,
+@@ -3347,7 +3530,7 @@
+ 							`Active container: ${sandbox.lifecycle.getName() ?? "not started"}`,
+ 							`Install deps: ${config.installDeps}`,
+ 							`Container lifecycle: ${config.lifecycle}`,
+-							`Package cache mount: ${config.runtime} bind ${path.join(getAgentDir(), "cache", "container-sandbox", "packages")} -> ${PACKAGE_CACHE_ROOT}`,
++								`Package cache volume: ${PACKAGE_CACHE_VOLUME} scoped by task or dependency environment -> ${PACKAGE_CACHE_ROOT}`,
+ 							`Rebase pending: ${sandbox.workspace.hasPendingRebase()}`,
+ 							`Review model: ${config.review.model || "(current session model)"}`,
+ 							`Review thinking: ${config.review.thinkingLevel}`,

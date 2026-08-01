@@ -47,16 +47,25 @@ gitconfig=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["git
 git -C "$repo" config --unset-all user.name
 git -C "$repo" config --unset-all user.email
 uid=$(id -u); gid=$(id -g)
+host_owner() {
+  stat -c %u:%g "$1" 2>/dev/null || stat -f %u:%g "$1"
+}
 container="pi-harness-integration-$$"
 mounts=(--mount "type=bind,src=$worktree,dst=$worktree,bind-propagation=rprivate")
 case "$common" in "$worktree"/*) ;; *) mounts+=(--mount "type=bind,src=$common,dst=$common,bind-propagation=rprivate");; esac
 case "$gitdir" in "$worktree"/*|"$common"/*) ;; *) mounts+=(--mount "type=bind,src=$gitdir,dst=$gitdir,bind-propagation=rprivate");; esac
-volume="pi-integration-cache-$$"
-publish=()
-for port in $(seq 8000 8010); do publish+=(--publish "127.0.0.1::$port"); done
-docker create --name "$container" --user "$uid:$gid" --cap-drop ALL --security-opt no-new-privileges:true \
+volume="pi-package-cache-v2-integration-$$"
+docker volume create \
+  --label pi.package-cache.managed=true \
+  --label pi.package-cache.scope=repo \
+  --label pi.package-cache.environment-key=task-local \
+  "$volume" >/dev/null
+docker create --name "$container" \
+  --label pi.container-sandbox.managed=true \
+  --label pi.container-sandbox.target=trusted-live \
+  --user "$uid:$gid" --cap-drop ALL --security-opt no-new-privileges:true \
   --tmpfs "/tmp/pi-home:rw,nosuid,nodev,mode=0700,uid=$uid,gid=$gid" \
-  "${publish[@]}" "${mounts[@]}" \
+  "${mounts[@]}" \
   --mount "type=bind,src=$context,dst=/run/pi/HOST_CONTEXT.md,readonly=true,bind-propagation=rprivate" \
   --mount "type=bind,src=$gitconfig,dst=/run/pi/GIT_CONFIG_GLOBAL,readonly=true,bind-propagation=rprivate" \
   --mount "type=volume,src=$volume,dst=/var/cache/pi-packages" \
@@ -68,6 +77,9 @@ docker create --name "$container" --user "$uid:$gid" --cap-drop ALL --security-o
   -e BUN_INSTALL_CACHE_DIR=/var/cache/pi-packages/bun \
   -e PIP_CACHE_DIR=/var/cache/pi-packages/pip \
   -e UV_CACHE_DIR=/var/cache/pi-packages/uv \
+  -e VIRTUAL_ENV=/opt/pi/task-env \
+  -e UV_PROJECT_ENVIRONMENT=/opt/pi/task-env \
+  -e PATH=/opt/pi/task-env/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   pi-tool-sandbox:node22-bookworm-20260728 sleep infinity >/dev/null
 docker start "$container" >/dev/null
 
@@ -75,7 +87,7 @@ printf 'host\n' > "$worktree/host-visible.txt"
 docker exec -w "$worktree" "$container" test -f host-visible.txt
 docker exec -w "$worktree" "$container" sh -c 'printf "container\n" > container-visible.txt'
 test "$(cat "$worktree/container-visible.txt")" = container
-test "$(stat -c %u:%g "$worktree/container-visible.txt")" = "$uid:$gid"
+test "$(host_owner "$worktree/container-visible.txt")" = "$uid:$gid"
 test "$(docker exec "$container" sh -c 'id -u; id -g' | paste -sd: -)" = "$uid:$gid"
 docker exec "$container" test ! -e /var/run/docker.sock
 docker exec "$container" test ! -e "$root/host-home-sentinel"
@@ -139,12 +151,14 @@ expected_env = {
     "BUN_INSTALL_CACHE_DIR": "/var/cache/pi-packages/bun",
     "PIP_CACHE_DIR": "/var/cache/pi-packages/pip",
     "UV_CACHE_DIR": "/var/cache/pi-packages/uv",
+    "VIRTUAL_ENV": "/opt/pi/task-env",
+    "UV_PROJECT_ENVIRONMENT": "/opt/pi/task-env",
+    "PATH": "/opt/pi/task-env/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 }
 environment_entries = [entry.split("=", 1) for entry in config["Env"]]
 environment = dict(environment_entries)
 assert len(environment_entries) == len(environment)
 assert all(environment.get(key) == value for key, value in expected_env.items())
-assert set(host["PortBindings"]) == {f"{port}/tcp" for port in range(8000, 8011)}
-assert all(bindings == [{"HostIp": "127.0.0.1", "HostPort": ""}] for bindings in host["PortBindings"].values())
+assert host.get("PortBindings") in ({}, None)
 PY
-printf 'PASS trusted-live Docker mount, ownership, and boundary integration\n'
+printf 'PASS trusted-live Docker mount, ownership, no-port default, and boundary integration\n'

@@ -9,10 +9,33 @@ This directory contains the reproducible, non-secret Pi harness:
 - model/agent definitions, prompts, theme, and UI configuration;
 - hash-verified compatibility patches;
 - the source policy installed as `~/.config/pi/repository-policy.json`;
-- the hardened task image and migration/rollback record.
+- the hardened Linux task image, lock-derived runtime images, and migration/rollback record.
 
 Secrets, auth, sessions, runtime routes, generated host context, and live policy
 state remain outside Git.
+
+## Platform contract
+
+The machine profile owns host paths and trust. On this Mac, `~/projects` is
+trusted-live by policy, while the task still executes in Linux Docker. Trust
+means that the assigned worktree may be mounted read/write; it does not permit
+Pi or a model to execute arbitrary host commands.
+
+The route records both `executionTarget: linux-container` and the detected
+container platform. There is deliberately no implicit macOS fallback. MLX or
+other host-only workloads fail closed until a separate, explicitly selected
+host backend is implemented.
+
+Python projects with an exact `pyproject.toml` plus `uv.lock` receive a shared,
+immutable image keyed by the manifests, base image, uv version, and Linux
+platform. The task container owns only its writable upper layer and cache
+volume. A project or worktree dependency change creates a new key; it never
+mutates an image already used by another task. Workspace/path dependencies and
+projects without the lock pair use a task-local environment at
+`/opt/pi/task-env`, still inside Linux Docker and never the host `.venv`.
+
+Active `SKILL.md` directories are mounted read-only at their original absolute
+paths so the model can load them without exposing the host home directory.
 
 ## Workspace modes
 
@@ -37,6 +60,11 @@ read-only and selected with `GIT_CONFIG_GLOBAL`, so ordinary commits work
 without exposing credential helpers, signing keys, includes, URL rewrites, or
 the host Git configuration. Isolated tasks receive the same minimal identity
 resource without receiving host repository metadata.
+
+Docker development ports are disabled by default. A project may opt into
+loopback-only dynamic or fixed publication in its machine-controlled sandbox
+configuration; stale Pi containers are then eligible for the labeled cleanup
+command below.
 
 A clean protected checkout receives a linked `pi/<session>` worktree below the
 configured worktree root. A dirty protected checkout fails without stashing,
@@ -120,3 +148,22 @@ preserves the host policy, and links `pi` plus `pi-host`. Run it only after
 review from explicit host mode. Restarting Pi is the activation boundary.
 
 See `MIGRATION.md` for classification, hashes, limitations, cleanup, and rollback.
+
+## Resource cleanup
+
+Inspect Pi-owned containers, derived images, and cache volumes without deleting:
+
+```bash
+pi-sandbox-gc
+```
+
+Apply only the printed, label-scoped retention policy after review:
+
+```bash
+pi-sandbox-gc --apply
+```
+
+The command never runs `docker system prune`, never touches unlabeled Docker
+resources, retains unproven isolated task state for recovery, and uses a
+30-day image/volume retention window while keeping the two newest runtime
+images per project group.

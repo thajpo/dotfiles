@@ -14,6 +14,8 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 node --test tests/workflow-state.test.mjs
 NODE_PATH="$PWD/pi/npm/node_modules" node --test tests/workflow-state-extension.test.mjs
 ./tests/run-candidate-tests.sh
+python3 scripts/pi-runtime.py --help
+pi-sandbox-gc
 ./scripts/pi-verify-change \
   --base <reviewed-base> \
   --allow 'README.md' \
