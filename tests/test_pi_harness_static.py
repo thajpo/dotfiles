@@ -122,7 +122,7 @@ class HarnessStaticTests(unittest.TestCase):
             "GIT_CONFIG_GLOBAL=/run/pi/GIT_CONFIG_GLOBAL",
             "GIT_CONFIG_NOSYSTEM=1",
             "must have exactly one read-only Git identity",
-            "--no-same-owner",
+            '"--no-same-owner", "-xf", "-"',
             'source.stdout.on("error", reject)',
             'dest.stdin.on("error", reject)',
         ]:

@@ -547,7 +547,7 @@
  				env: tarEnv(),
  			});
 -			const dest = spawn(this.config.runtime, ["exec", "-i", "-u", "root", this.containerName!, "tar", "xf", "-", "-C", repoRoot], {
-+			const dest = spawn(this.config.runtime, ["exec", "-i", "-u", "root", this.containerName!, "tar", "--no-same-owner", "xf", "-", "-C", repoRoot], {
++			const dest = spawn(this.config.runtime, ["exec", "-i", "-u", "root", this.containerName!, "tar", "--no-same-owner", "-xf", "-", "-C", repoRoot], {
  				stdio: ["pipe", "ignore", "pipe"],
  			});
  			let err = "";
@@ -910,7 +910,7 @@
  		await new Promise<void>((resolve, reject) => {
  			const source = spawn("tar", ["cf", "-", "-C", sourceDir, "."], { stdio: ["ignore", "pipe", "pipe"], env: tarEnv() });
 -			const dest = spawn(this.config.runtime, ["exec", "-i", "-u", "root", this.containerName!, "tar", "xf", "-", "-C", targetDir], {
-+			const dest = spawn(this.config.runtime, ["exec", "-i", "-u", "root", this.containerName!, "tar", "--no-same-owner", "xf", "-", "-C", targetDir], {
++			const dest = spawn(this.config.runtime, ["exec", "-i", "-u", "root", this.containerName!, "tar", "--no-same-owner", "-xf", "-", "-C", targetDir], {
  				stdio: ["pipe", "ignore", "pipe"],
  			});
  			let err = "";
