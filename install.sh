@@ -15,6 +15,28 @@ set -eEuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+DOTFILES_MACHINE_ID="${DOTFILES_MACHINE:-}"
+if [ -z "$DOTFILES_MACHINE_ID" ]; then
+    case "$(uname -s):$(uname -m)" in
+        Darwin:arm64|Darwin:aarch64) DOTFILES_MACHINE_ID=macos-arm64 ;;
+        *) DOTFILES_MACHINE_ID="" ;;
+    esac
+fi
+MACHINE_PROFILE=""
+MACHINE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles"
+MACHINE_CONFIG_PATH="$MACHINE_CONFIG_DIR/machine.env"
+if [ -n "$DOTFILES_MACHINE_ID" ]; then
+    [[ "$DOTFILES_MACHINE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+        echo "Unsupported machine profile name: $DOTFILES_MACHINE_ID" >&2
+        exit 1
+    }
+    MACHINE_PROFILE="$SCRIPT_DIR/machines/$DOTFILES_MACHINE_ID.env"
+    [ -f "$MACHINE_PROFILE" ] && [ ! -L "$MACHINE_PROFILE" ] || {
+        echo "Machine profile is missing or unsafe: $MACHINE_PROFILE" >&2
+        exit 1
+    }
+fi
+
 echo "Installing Pi configuration..."
 PI_CONFIG_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 PI_VERSION="$(cat "$SCRIPT_DIR/pi/PI_VERSION")"
@@ -173,6 +195,9 @@ fi
 for config in settings.json pi-chrome-devtools.json pi-plan-mode.json pi-statusline.json pr-review.json; do
     install -m 600 "$SCRIPT_DIR/pi/$config" "$STAGING_DIR/control/$config"
 done
+if [ -n "$MACHINE_PROFILE" ]; then
+    install -m 600 "$MACHINE_PROFILE" "$STAGING_DIR/control/machine.env"
+fi
 for tree in extensions agents prompts themes; do cp -a "$SCRIPT_DIR/pi/$tree" "$STAGING_DIR/control/$tree"; done
 python3 - "$STAGING_DIR/control/agents" "$PI_CONFIG_DIR" <<'PY'
 from pathlib import Path
@@ -250,6 +275,11 @@ done
 for tree in extensions agents prompts themes; do activate_path "$STAGING_DIR/control/$tree" "$PI_CONFIG_DIR/$tree"; done
 activate_path "$STAGING_DIR/control/pi-workspace.py" "$HOME/.local/share/pi/control/pi-workspace.py"
 activate_path "$STAGING_DIR/control/pi-secretary-control.py" "$HOME/.local/share/pi/control/pi-secretary-control.py"
+if [ -n "$MACHINE_PROFILE" ]; then
+    mkdir -p -m 700 "$MACHINE_CONFIG_DIR"
+    chmod 700 "$MACHINE_CONFIG_DIR"
+    activate_path "$STAGING_DIR/control/machine.env" "$MACHINE_CONFIG_PATH"
+fi
 skill_rollback_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pi/rollback/skills"
 activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status" "$skill_rollback_dir"
 for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent; do
@@ -267,6 +297,7 @@ DOCKER_STAGING_IMAGE=""
 rm -rf "$STAGING_DIR"
 STAGING_DIR=""
 echo "Installed Pi ${PI_VERSION} configuration and deterministic launchers"
+[ -z "$MACHINE_PROFILE" ] || echo "Installed machine profile: $DOTFILES_MACHINE_ID"
 
 if [ "${PI_HARNESS_ONLY:-0}" = "1" ]; then
     echo "Pi harness installation complete (host-only scope)"

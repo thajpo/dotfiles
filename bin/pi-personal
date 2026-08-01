@@ -19,6 +19,22 @@ if [[ -n "${PI_SUBAGENT_CHILD:-}${PI_TASK_ROUTE_FILE:-}" ]]; then
 fi
 
 self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+machine_config=${DOTFILES_MACHINE_CONFIG:-"${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/machine.env"}
+if [[ -f "$machine_config" ]]; then
+  # shellcheck disable=SC1090
+  source "$machine_config"
+fi
+
+case "$(uname -s):$(uname -m)" in
+  Darwin:arm64|Darwin:aarch64)
+    if [[ -z "${PI_PERSONAL_MLRE_DIR:-}" ||
+      -z "${PI_PERSONAL_FINANCIALS_DIR:-}" || -z "${PI_PERSONAL_DOTFILES_DIR:-}" ]]; then
+      printf 'pi-personal: incomplete macOS machine profile: %s\n' "$machine_config" >&2
+      exit 1
+    fi
+    ;;
+esac
+
 dotfiles_dir=${PI_PERSONAL_DOTFILES_DIR:-"$HOME/dotfiles"}
 session=pi-personal
 window=personal

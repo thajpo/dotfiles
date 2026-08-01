@@ -18,8 +18,14 @@ class PiPersonalTests(unittest.TestCase):
                 home / "Projects/investing/investment-os",
                 home / "dotfiles",
                 home / ".local/bin",
+                home / ".config/dotfiles",
             ]:
                 directory.mkdir(parents=True, exist_ok=True)
+            (home / ".config/dotfiles/machine.env").write_text(
+                'PI_PERSONAL_MLRE_DIR="${HOME}/Projects/mlre-transition"\n'
+                'PI_PERSONAL_FINANCIALS_DIR="${HOME}/Projects/investing/investment-os"\n'
+                'PI_PERSONAL_DOTFILES_DIR="${HOME}/dotfiles"\n'
+            )
             for launcher in ["pi-tmux-session", "pi-host"]:
                 path = home / ".local/bin" / launcher
                 path.write_text("#!/bin/sh\nexit 0\n")

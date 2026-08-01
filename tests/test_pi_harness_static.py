@@ -154,6 +154,17 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("brew install gitmux", installer)
         self.assertIn("__PI_AGENT_DIR__", installer)
 
+    def test_machine_profile_is_selected_and_installed(self):
+        installer = (ROOT / "install.sh").read_text()
+        profile = (ROOT / "machines/macos-arm64.env").read_text()
+        self.assertIn("Darwin:arm64|Darwin:aarch64", installer)
+        self.assertIn('DOTFILES_MACHINE_ID=macos-arm64', installer)
+        self.assertIn('MACHINE_CONFIG_PATH="$MACHINE_CONFIG_DIR/machine.env"', installer)
+        self.assertIn('activate_path "$STAGING_DIR/control/machine.env" "$MACHINE_CONFIG_PATH"', installer)
+        self.assertIn("PI_PERSONAL_MLRE_DIR", profile)
+        self.assertIn("PI_PERSONAL_FINANCIALS_DIR", profile)
+        self.assertIn("PI_PERSONAL_DOTFILES_DIR", profile)
+
     def test_secretary_slice_is_installed_and_mechanically_read_only(self):
         installer = (ROOT / "install.sh").read_text()
         launcher = (ROOT / "bin/pi-secretary").read_text()

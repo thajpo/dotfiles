@@ -14,6 +14,11 @@ pi-start all
 `pi-start all` boots tmux, the personal workspace, and the secretary grid. If
 `~/.local/bin` is not on `PATH` yet, run `~/.local/bin/pi-start all` instead.
 
+Machine-specific non-secret settings live in `machines/`. On Apple Silicon
+macOS, `install.sh` selects `machines/macos-arm64.env` and installs it as
+`~/.config/dotfiles/machine.env`; this is where the Pi personal project paths
+are defined. Linux profiles are intentionally deferred for now.
+
 ## Shared CLI Skills + Dotfiles Auto-Sync
 
 This repo can track shared skills for both Codex and OpenCode by using one
