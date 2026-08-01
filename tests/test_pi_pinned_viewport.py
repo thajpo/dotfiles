@@ -72,6 +72,8 @@ if (browse.isBrowsing()) throw new Error("browse exit");
         self.assertIn("handleBrowseInput", patch)
         self.assertIn("copyToClipboard", patch)
         self.assertIn("MOUSE_TRACKING_ENABLE_SEQUENCE", patch)
+        self.assertIn("late write can surface EPIPE", patch)
+        self.assertIn("this.emergencyTerminalExit();", patch)
 
 
 if __name__ == "__main__":

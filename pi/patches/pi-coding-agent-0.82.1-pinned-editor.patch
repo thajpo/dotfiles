@@ -104,6 +104,22 @@ diff -uNr a/dist/modes/interactive/interactive-mode.js b/dist/modes/interactive/
              if (this.onInputCallback) {
                  this.onInputCallback(text);
              }
+@@ -2983,6 +2983,14 @@
+         // Restore the terminal before the process dies on any uncaught throw.
+         // Without this, an unhandled exception from extension code (or anywhere
+         // in pi) leaves the terminal in raw mode with no cursor.
+-        const uncaughtExceptionHandler = (error) => this.uncaughtCrash(error);
++        const uncaughtExceptionHandler = (error) => {
++            // A late write can surface EPIPE outside stdout/stderr's error event
++            // path. Treat it as terminal loss, not as an extension crash.
++            if (isDeadTerminalError(error)) {
++                this.emergencyTerminalExit();
++                return;
++            }
++            this.uncaughtCrash(error);
++        };
+         process.prependListener("uncaughtException", uncaughtExceptionHandler);
+         this.signalCleanupHandlers.push(() => process.off("uncaughtException", uncaughtExceptionHandler));
 +diff -uNr a/node_modules/@earendil-works/pi-tui/dist/terminal.js b/node_modules/@earendil-works/pi-tui/dist/terminal.js
 --- a/node_modules/@earendil-works/pi-tui/dist/terminal.js	2026-07-30 20:22:46.281316236 -0400
 +++ b/node_modules/@earendil-works/pi-tui/dist/terminal.js	2026-07-30 20:22:46.296317065 -0400
