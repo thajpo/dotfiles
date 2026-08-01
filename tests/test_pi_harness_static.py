@@ -13,19 +13,31 @@ class HarnessStaticTests(unittest.TestCase):
         settings = json.loads((ROOT / "pi/settings.json").read_text())
         self.assertEqual(settings["defaultModel"], "gpt-5.6-luna")
         self.assertEqual(settings["defaultThinkingLevel"], "xhigh")
+        self.assertEqual(settings["enabledModels"], [
+            "openai-codex/gpt-5.6-luna:xhigh",
+            "openai-codex/gpt-5.6-luna:max",
+            "openai-codex/gpt-5.6-sol:high",
+            "deepseek/deepseek-v4-flash-0731:high",
+        ])
+        self.assertEqual(settings["subagents"]["defaultModel"], "openai-codex/gpt-5.6-luna:xhigh")
+        self.assertEqual(settings["subagents"]["modelScope"]["allow"], [
+            "openai-codex/gpt-5.6-luna",
+            "openai-codex/gpt-5.6-sol",
+            "deepseek/deepseek-v4-flash-0731",
+        ])
         overrides = settings["subagents"]["agentOverrides"]
         self.assertEqual(overrides["scout"]["model"], "openai-codex/gpt-5.6-luna")
-        self.assertEqual(overrides["scout"]["thinking"], "high")
+        self.assertEqual(overrides["scout"]["thinking"], "xhigh")
         self.assertEqual(overrides["worker"]["model"], "openai-codex/gpt-5.6-luna")
         self.assertEqual(overrides["worker"]["thinking"], "max")
-        self.assertEqual(overrides["reviewer"]["model"], "openai-codex/gpt-5.6-luna")
-        self.assertEqual(overrides["reviewer"]["thinking"], "xhigh")
+        self.assertEqual(overrides["reviewer"]["model"], "openai-codex/gpt-5.6-sol")
+        self.assertEqual(overrides["reviewer"]["thinking"], "high")
         self.assertEqual(overrides["oracle"]["model"], "openai-codex/gpt-5.6-sol")
         review = json.loads((ROOT / "pi/pr-review.json").read_text())
         self.assertEqual(review["tiers"], {
             "light": "openai-codex/gpt-5.6-luna:xhigh",
             "medium": "openai-codex/gpt-5.6-luna:max",
-            "heavy": "openai-codex/gpt-5.6-sol:xhigh",
+            "heavy": "openai-codex/gpt-5.6-sol:high",
         })
         self.assertNotIn("advisor", overrides)
         self.assertTrue(all(value["defaultContext"] == "fresh" for value in overrides.values()))
@@ -170,9 +182,10 @@ class HarnessStaticTests(unittest.TestCase):
         installer = (ROOT / "scripts/pi-patch-subagents").read_text()
         self.assertIn("pi-sandbox-0.2.0-user-workspace.patch", installer)
         self.assertIn("pi-sandbox-0.2.0-runtime-contract.patch", installer)
-        self.assertIn("pi-runtime.py", installer)
-        self.assertIn("pi-sandbox-gc.py", installer)
-        self.assertIn("PI_TRUSTED_PROJECT_ROOTS", installer)
+        install_script = (ROOT / "install.sh").read_text()
+        self.assertIn("pi-runtime.py", install_script)
+        self.assertIn("pi-sandbox-gc.py", install_script)
+        self.assertIn("PI_TRUSTED_PROJECT_ROOTS", install_script)
         integration = (ROOT / "tests/pi-docker-isolated-ownership.sh").read_text()
         self.assertIn("--cap-add CHOWN", integration)
         self.assertIn("repeated tool-call execution", integration)
@@ -396,7 +409,7 @@ const reject = (model) => {
   try { policy.enforceSubagentModelPolicy(model, "writer"); return false; }
   catch (error) { return /Writer agents cannot use DeepSeek V4 Flash/.test(String(error)); }
 };
-for (const model of ["deepseek/deepseek-v4-flash:high", "DeepSeek/DeepSeek_V4_Flash:MAX", "deepseek-v4-flash", "deepseek/deepseek-v4-flash-20260730:off", "deepseek/deepseek-v4-flash-2026-07-30:high", "DeepSeekV4Flash", "deepseek/deepseekv4flash:high", "DeepSeekV4Flash20260730:max"]) {
+for (const model of ["deepseek/deepseek-v4-flash:high", "deepseek/deepseek-v4-flash-0731:high", "DeepSeek/DeepSeek_V4_Flash:MAX", "deepseek-v4-flash", "deepseek/deepseek-v4-flash-20260730:off", "deepseek/deepseek-v4-flash-2026-07-30:high", "DeepSeekV4Flash", "deepseek/deepseekv4flash:high", "DeepSeekV4Flash20260730:max"]) {
   if (!reject(model)) process.exit(1);
 }
 if (policy.enforceSubagentModelPolicy("deepseek/deepseek-v4-flash:high", "read-only") !== "deepseek/deepseek-v4-flash:high") process.exit(1);
@@ -414,7 +427,7 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
 
     def test_global_agents_hash_and_removed_legacy_orchestrators(self):
         agents = (ROOT / "agent/AGENTS.md").read_bytes()
-        self.assertEqual(hashlib.sha256(agents).hexdigest(), "a1a05beaba72227212237e00bbb0c793cb926d2e31f752b59243bf5caaef74aa")
+        self.assertEqual(hashlib.sha256(agents).hexdigest(), "3de93909e6d1929622bad92482cc8c5fd9ddb2518c0c7f472c31d91cc8d6a2ba")
         policy = agents.decode()
         for heading in ["### FAST", "### RIP", "### BUILD", "### MAJOR", "### OFF", "### LIGHT", "### DEEP"]:
             self.assertIn(heading, policy)

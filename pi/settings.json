@@ -5,15 +5,10 @@
   "defaultModel": "gpt-5.6-luna",
   "defaultThinkingLevel": "xhigh",
   "enabledModels": [
-    "openai-codex/gpt-5.6-luna:high",
     "openai-codex/gpt-5.6-luna:xhigh",
     "openai-codex/gpt-5.6-luna:max",
     "openai-codex/gpt-5.6-sol:high",
-    "openai-codex/gpt-5.6-sol:xhigh",
-    "openai-codex/gpt-5.6-sol:max",
-    "openai-codex/gpt-5.6-terra:high",
-    "deepseek/deepseek-v4-flash:high",
-    "deepseek/deepseek-v4-pro:high"
+    "deepseek/deepseek-v4-flash-0731:high"
   ],
   "defaultProjectTrust": "never",
   "enableInstallTelemetry": false,
@@ -57,26 +52,24 @@
     }
   },
   "subagents": {
-    "defaultModel": "openai-codex/gpt-5.6-luna:high",
+    "defaultModel": "openai-codex/gpt-5.6-luna:xhigh",
     "modelScope": {
       "enforce": true,
       "allow": [
         "openai-codex/gpt-5.6-luna",
         "openai-codex/gpt-5.6-sol",
-        "openai-codex/gpt-5.6-terra",
-        "deepseek/deepseek-v4-flash",
-        "deepseek/deepseek-v4-pro"
+        "deepseek/deepseek-v4-flash-0731"
       ]
     },
     "agentOverrides": {
       "context-builder": {
         "model": "openai-codex/gpt-5.6-luna",
-        "thinking": "high",
+        "thinking": "xhigh",
         "defaultContext": "fresh"
       },
       "delegate": {
         "model": "openai-codex/gpt-5.6-luna",
-        "thinking": "high",
+        "thinking": "xhigh",
         "defaultContext": "fresh"
       },
       "oracle": {
@@ -86,22 +79,22 @@
       },
       "planner": {
         "model": "openai-codex/gpt-5.6-luna",
-        "thinking": "high",
+        "thinking": "xhigh",
         "defaultContext": "fresh"
       },
       "researcher": {
         "model": "openai-codex/gpt-5.6-luna",
-        "thinking": "high",
+        "thinking": "xhigh",
         "defaultContext": "fresh"
       },
       "reviewer": {
-        "model": "openai-codex/gpt-5.6-luna",
-        "thinking": "xhigh",
+        "model": "openai-codex/gpt-5.6-sol",
+        "thinking": "high",
         "defaultContext": "fresh"
       },
       "scout": {
         "model": "openai-codex/gpt-5.6-luna",
-        "thinking": "high",
+        "thinking": "xhigh",
         "defaultContext": "fresh"
       },
       "worker": {

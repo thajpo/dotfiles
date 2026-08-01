@@ -150,7 +150,7 @@ apply_verified_patch \
   "$agent_dir/npm/node_modules/pi-subagents/src/runs/shared/model-fallback.ts" \
   0.35.1 \
   2f72f7588409b2115a5e581d349866dd68a1d476d6bb0357b2ee0840ea091d9d \
-  7177f6a09696fa50c40220ce6af482688c291461f4e69a1626cb6c1d3f13fbb1 \
+  4eea20bba866f28359b59cf143476800771e4f5a27cbe0db5249dafa91f92ebf \
   "$patch_dir/pi-subagents-0.35.1-model-policy.patch"
 
 apply_verified_patch \
@@ -177,5 +177,5 @@ verify_model_policy_file src/runs/background/subagent-runner.ts 0bb23f0cf27cea7b
 verify_model_policy_file src/runs/foreground/chain-execution.ts 0565a3a72250b73ca17a71e0f500f48f7b2bedc2cb14fbed2f2fe1d9b28075c6
 verify_model_policy_file src/runs/foreground/execution.ts c409ea5f40a0cd2bf1954c77ef8e531f2fe160cd24c4e4fcc8c7610ab59d513e
 verify_model_policy_file src/runs/foreground/subagent-executor.ts f6365f211cf56c4201454678ef96fe99ac4c55cd058d098d0b60285e4db3c800
-verify_model_policy_file src/runs/shared/model-fallback.ts 7177f6a09696fa50c40220ce6af482688c291461f4e69a1626cb6c1d3f13fbb1
+verify_model_policy_file src/runs/shared/model-fallback.ts 4eea20bba866f28359b59cf143476800771e4f5a27cbe0db5249dafa91f92ebf
 verify_model_policy_file src/shared/types.ts ca2a7fe28ec231d93a6a1662382c4b44d061c6124ff178df526a2093835f5407

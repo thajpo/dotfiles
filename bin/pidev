@@ -154,10 +154,21 @@ if command -v flock >/dev/null 2>&1; then
 else
   project_lock_dir="${project_lock}.d"
   worktree_lock_dir="${worktree_lock}.d"
-  mkdir "$project_lock_dir" || fail "project lock is already held: $project_lock"
-  lock_dirs+=("$project_lock_dir")
-  mkdir "$worktree_lock_dir" || fail "worktree lock is already held: $worktree_lock"
-  lock_dirs+=("$worktree_lock_dir")
+  acquire_lock_dir() {
+    local lock_dir=$1 attempt
+    for attempt in $(seq 1 1000); do
+      if mkdir "$lock_dir" 2>/dev/null; then
+        lock_dirs+=("$lock_dir")
+        return 0
+      fi
+      sleep 0.01
+    done
+    fail "lock acquisition timed out: ${lock_dir%.d}"
+  }
+  # macOS does not ship the Linux `flock` utility. Wait briefly for a sibling
+  # launcher instead of treating normal concurrent startup as a stale lock.
+  acquire_lock_dir "$project_lock_dir"
+  acquire_lock_dir "$worktree_lock_dir"
 fi
 
 # Query helpers intentionally do not suppress failures. An empty result is a
@@ -682,6 +693,10 @@ tmux select-window -t "$window_id"
 # Locks are not held while switching or attaching to the client.
 eval "exec ${worktree_lock_fd}>&-"
 eval "exec ${project_lock_fd}>&-"
+# The macOS directory-lock fallback is not released by closing file
+# descriptors, and `exec` bypasses the shell EXIT trap. Release it explicitly
+# before handing control to tmux.
+release_lock_dirs
 if [[ -n ${TMUX:-} ]]; then
   exec tmux switch-client -t "=$project_session"
 else

@@ -242,7 +242,7 @@ diff -ruN a/src/runs/shared/model-fallback.ts b/src/runs/shared/model-fallback.t
 +export function isDeepSeekV4FlashModel(model: string | undefined): boolean {
 +	if (!model) return false;
 +	const compact = normalizeModelPolicyIdentity(model).replace(/-/g, "");
-+	return /^deepseek(?:deepseek)?v4flash(?:\d{8})?$/.test(compact);
++	return /^deepseek(?:deepseek)?v4flash(?:(?:\d{4})|(?:\d{8}))?$/.test(compact);
 +}
 +
 +/** Enforce model restrictions that are tied to a declared acceptance role. */

@@ -34,11 +34,11 @@ Default routing:
   `openai-codex/gpt-5.6-luna:xhigh`
 
 - Secretary and read-only investigation/context collection:
-  `openai-codex/gpt-5.6-luna:high` (secretary itself uses xhigh)
+  `openai-codex/gpt-5.6-luna:xhigh`
 
 - Reviewer tiers by circumstance:
   light `openai-codex/gpt-5.6-luna:xhigh`, medium `openai-codex/gpt-5.6-luna:max`,
-  heavy/high-risk `openai-codex/gpt-5.6-sol:xhigh`
+  heavy/high-risk `openai-codex/gpt-5.6-sol:high`
 
 Use Sol because consequential uncertainty remains, not merely because the task
 is large.
