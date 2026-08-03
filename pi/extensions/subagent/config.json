@@ -1,13 +1,20 @@
 {
   "toolDescriptionMode": "compact",
-  "asyncByDefault": false,
-  "asyncWidget": true,
+  "asyncByDefault": true,
+  "asyncWidget": false,
+  "forceTopLevelAsync": true,
+  "fleetView": false,
+  "artifactDir": "session",
+  "completionVisibility": "hidden-success",
+  "waitTool": {
+    "enabled": false
+  },
   "defaultSessionDir": "~/.pi/agent/sessions/subagent/",
   "maxSubagentSpawnsPerSession": 0,
   "parallel": {
     "maxTasks": 0
   },
-  "maxSubagentDepth": 1,
+  "maxSubagentDepth": 2,
   "intercomBridge": {
     "mode": "always"
   }

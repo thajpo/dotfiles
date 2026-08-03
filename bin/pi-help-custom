@@ -11,10 +11,32 @@ Start from no tmux sessions:
   pi-start project [DIR]   Open a project workspace (DIR defaults to $PWD).
   pi-start host            Open pi-personal and select its explicit pi-host pane.
   pi-start all              Start pi-personal and the secretary grid.
+  pi-restart                Kill all tmux sessions, then run pi-start all.
+
+Help and restart:
+  pi --help-custom           Show this guide from any shell.
+  pi-start help              Show this guide through the managed launcher.
+  pi-restart                 Kill all tmux sessions and boot pi-start all.
 
 Run Pi directly:
-  cd REPOSITORY && pi       Normal policy-controlled coding session.
+  cd REPOSITORY && pi       Normal policy-controlled durable root session.
   pi-host                   Explicit unsandboxed host-maintenance session.
+  pi-root-session migrate --dry-run
+                            Inspect legacy root-session migration.
+  pi-root-session migrate  Copy selected histories into stable roots.
+  pi-root-session cleanup --repository PATH
+                            Review stale worktrees before explicit cleanup.
+
+In Pi:
+  /goal <objective>          Continue the same goal until completion or a bound.
+  /goal status|pause|resume  Inspect or control the active goal.
+  /goal clear                Remove the active goal.
+  /goal --tokens 100k ...    Add a provider-token budget to a goal.
+  Enter while busy           Steer the current run (after the current tool batch).
+  Alt-Enter while busy       Queue a follow-up after the run settles.
+  /fast on|off|status        Toggle OpenAI priority service tier.
+  /subagents-doctor          Inspect subagent discovery and runtime routing.
+  Ctrl-g                     Browse conversation history without losing the prompt.
 
 Project tmux workspaces:
   cd REPOSITORY && pidev    Neovim on the left, Pi on the right.
@@ -28,15 +50,18 @@ Tmux sessions and switching:
   tmux attach -t NAME      Attach to a named session.
 
 Secretary projects:
-  pisec                     Open the default registered projects.
+  pisec                     Open the default projects without restarting live panes.
   pisec activate ALIAS ... Replace the active project set.
   pisec swap OLD NEW       Replace one active project without changing order.
   pisec list                Print the registered project records.
+  pi-secretary-stats        Summarize secretary session/run time and token usage.
+  /subagents-fleet          Explicitly inspect private child runs.
 
 Recovery:
+  pi-restart                Replace every tmux workspace with a fresh Pi grid.
   pi-start personal         Recreate missing personal panes and attach there.
-  pi-personal --ensure     Repair personal panes without switching clients.
-  pisec                     Rebuild the secretary grid from the live registry.
+  pi-personal --ensure     Repair personal two-pane windows without switching clients.
+  pisec launch              Repair/rebuild the secretary grid when panes are idle.
 
 The ordinary pi launcher owns workspace selection and sandbox policy. Do not
 pass sandbox/trust flags to it; use pi-host only when unsandboxed host access is

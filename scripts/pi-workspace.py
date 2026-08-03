@@ -497,7 +497,12 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
     # harness. Refusing its dirty protected checkout would prevent Pi from
     # repairing the launcher/config that is already being edited. Ordinary
     # protected repositories retain the clean linked-worktree boundary.
-    if not read_only and mode == "trusted-live" and (protected or not branch) and not (control_plane and starting_status):
+    # A durable root launcher has already selected the conversation workspace.
+    # Never replace it with a fresh linked worktree merely because the selected
+    # checkout is dirty; preserving uncommitted root work is more important than
+    # silently losing it during route preparation.
+    root_workspace_selected = bool(os.environ.get("PI_ROOT_SESSION_FILE"))
+    if not read_only and not root_workspace_selected and mode == "trusted-live" and (protected or not branch) and not (control_plane and starting_status):
         worktree, branch = create_linked_worktree(
             repository,
             pathlib.Path(policy["worktreeRoot"]),

@@ -257,7 +257,11 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             invocation = json.loads(output.read_text())
             self.assertEqual(invocation["cwd"], str(repo.resolve()))
-            self.assertEqual(invocation["args"], ["hello"])
+            args = invocation["args"]
+            self.assertEqual(args[-1], "hello")
+            self.assertIn("--session-dir", args)
+            self.assertIn("--session", args)
+            self.assertTrue(Path(args[args.index("--session") + 1]).is_file())
             self.assertEqual(invocation["env"]["PI_TASK_MODE"], "trusted-live")
             self.assertTrue(Path(invocation["env"]["PI_TASK_ROUTE_FILE"]).is_file())
             self.assertNotIn("hijacked", result.stderr)
@@ -331,7 +335,9 @@ print(os.environ["FAKE_PI"])
             _, repo, output, env = setup_home(Path(tmp))
             result = subprocess.run([str(ROOT / "bin/pi"), "--", "--sandbox-target=current"], cwd=repo, env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(output.read_text())["args"], ["--", "--sandbox-target=current"])
+            args = json.loads(output.read_text())["args"]
+            self.assertEqual(args[-2:], ["--", "--sandbox-target=current"])
+            self.assertIn("--session", args)
 
     def test_pi_host_banner_fresh_session_and_disabled_resources(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -880,6 +886,7 @@ raise SystemExit(2)
             root = Path(tmp)
             home, _, _, state_path, env = make_tmux_fixture(root)
             repo = make_git_repo(root)
+            env["PI_LAUNCHER_FORCE_DIRECTORY_LOCK"] = "1"
             first = subprocess.Popen([str(ROOT / "bin/pidev")], cwd=repo, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             second = subprocess.Popen([str(ROOT / "bin/pidev")], cwd=repo, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             first_out, first_err = first.communicate(timeout=10)
@@ -902,6 +909,7 @@ raise SystemExit(2)
             root = Path(tmp)
             home, _, _, state_path, env = make_tmux_fixture(root)
             repo = make_git_repo(root)
+            env["PI_LAUNCHER_FORCE_DIRECTORY_LOCK"] = "1"
             linked = root / "linked"
             git(repo, "worktree", "add", "-b", "linked", str(linked))
             launches = [subprocess.Popen([str(ROOT / "bin/pidev")], cwd=path, env=env,

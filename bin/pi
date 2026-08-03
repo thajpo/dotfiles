@@ -21,7 +21,6 @@ fi
   printf 'pi: workspace control helper is missing: %s\n' "$helper" >&2
   exit 1
 }
-
 for argument in "$@"; do
   [[ "$argument" == "--" ]] && break
   case "$argument" in
@@ -42,6 +41,136 @@ case "${1:-}" in
     exec "$real_pi" "$@"
     ;;
 esac
+root_helper="$dotfiles_dir/scripts/pi-root-session.py"
+if [[ ! -f "$root_helper" ]]; then
+  root_helper="$HOME/.local/share/pi/control/pi-root-session.py"
+fi
+[[ -f "$root_helper" && -x "$root_helper" ]] || {
+  printf 'pi: durable root-session helper is missing: %s\n' "$root_helper" >&2
+  exit 1
+}
+export PI_ROOT_SESSION_HELPER="$root_helper"
+export PI_ROOT_PROFILE="${PI_ROOT_PROFILE:-root}"
+
+# A normal root is a durable conversation, not a cwd-derived session. The
+# helper allocates (or looks up) the exact JSONL and stable worktree before the
+# sandbox route is created. Managed launchers may still pass an exact --session
+# path; those invocations are never reinterpreted here.
+root_args=("$@")
+root_session_file=""
+root_session_dir=""
+root_worktree=""
+root_managed=${PI_ROOT_SESSION_MANAGED:-0}
+has_explicit_session=0
+has_explicit_session_dir=0
+has_fork=0
+has_no_session=0
+has_resume=0
+has_continue=0
+requested_root_id="${PI_ROOT_CONVERSATION_ID:-}"
+for ((index = 0; index < $#; index++)); do
+  argument=${root_args[$index]}
+  case "$argument" in
+    --session|--session=*) has_explicit_session=1 ;;
+    --fork|--fork=*) has_fork=1 ;;
+    --session-dir) has_explicit_session_dir=1 ;;
+    --session-dir=*) has_explicit_session_dir=1 ;;
+    --no-session) has_no_session=1 ;;
+    --resume) has_resume=1 ;;
+    --continue) has_continue=1 ;;
+    --session-id)
+      (( index + 1 < $# )) || { printf 'pi: --session-id requires a value\n' >&2; exit 2; }
+      [[ -z "$requested_root_id" ]] || { printf 'pi: duplicate root conversation id\n' >&2; exit 2; }
+      requested_root_id=${root_args[$((index + 1))]}
+      index=$((index + 1))
+      ;;
+  esac
+done
+if [[ "$root_managed" != 1 && "$has_explicit_session" == 0 && "$has_fork" == 0 && "$has_explicit_session_dir" == 0 && "$has_no_session" == 0 ]]; then
+  root_info=""
+  if [[ "$has_resume" == 1 ]]; then
+    root_session_dir=$($root_helper --agent-dir "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" session-dir | python3 -c 'import json,sys; print(json.load(sys.stdin)["sessionDir"])')
+    root_args=(--session-dir "$root_session_dir" "${root_args[@]}")
+  else
+    if [[ "$has_continue" == 1 ]]; then
+      root_info=$($root_helper --agent-dir "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" latest --cwd "$PWD" 2>/dev/null || true)
+    fi
+    if [[ -z "$root_info" ]]; then
+      if [[ -z "$requested_root_id" ]]; then
+        requested_root_id="root-$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
+      fi
+      root_info=$($root_helper --agent-dir "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" ensure \
+        --conversation-id "$requested_root_id" \
+        --profile "${PI_ROOT_PROFILE:-root}" \
+        --cwd "$PWD") || exit $?
+    fi
+    eval "$(python3 - "$root_info" <<'PY'
+import json, shlex, sys
+value = json.loads(sys.argv[1])
+for source, target in (("sessionFile", "root_session_file"), ("sessionDir", "root_session_dir"), ("worktree", "root_worktree")):
+    item = value.get(source)
+    if not isinstance(item, str) or not item.startswith('/'):
+        raise SystemExit(f"invalid durable root field: {source}")
+    print(f"{target}={shlex.quote(item)}")
+PY
+)"
+    filtered_args=()
+    skip_next=0
+    for argument in "${root_args[@]}"; do
+      if (( skip_next )); then skip_next=0; continue; fi
+      if [[ "$argument" == --session-id ]]; then skip_next=1; continue; fi
+      filtered_args+=("$argument")
+    done
+    cd "$root_worktree"
+    export PI_ROOT_SESSION_FILE="$root_session_file"
+    root_args=(--session-dir "$root_session_dir" --session "$root_session_file" "${filtered_args[@]}")
+  fi
+fi
+
+if [[ "$has_fork" == 1 && "$has_explicit_session_dir" == 0 ]]; then
+  root_session_dir=$($root_helper --agent-dir "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" session-dir | python3 -c 'import json,sys; print(json.load(sys.stdin)["sessionDir"])')
+  root_args=(--session-dir "$root_session_dir" "${root_args[@]}")
+fi
+
+# Explicit root paths are also trusted as exact identities. This covers a
+# copied resume command or a launcher invoked from a different cwd without
+# falling back to Pi's cwd-based session-id resolver.
+if [[ -z "$root_session_file" && "$has_explicit_session" == 1 ]]; then
+  explicit_session_path=""
+  for ((index = 0; index < ${#root_args[@]}; index++)); do
+    case "${root_args[$index]}" in
+      --session)
+        (( index + 1 < ${#root_args[@]} )) || { printf 'pi: --session requires a path\n' >&2; exit 2; }
+        explicit_session_path=${root_args[$((index + 1))]}
+        index=$((index + 1))
+        ;;
+      --session=*) explicit_session_path=${root_args[$index]#--session=} ;;
+    esac
+  done
+  if [[ -n "$explicit_session_path" && "$explicit_session_path" == /* && -f "$explicit_session_path" ]]; then
+    explicit_session_path=$(realpath "$explicit_session_path")
+    root_session_dir=$($root_helper --agent-dir "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" session-dir | python3 -c 'import json,sys; print(json.load(sys.stdin)["sessionDir"])')
+    if [[ "$(dirname -- "$explicit_session_path")" == "$root_session_dir" ]]; then
+      root_session_file="$explicit_session_path"
+      root_worktree=$(python3 - "$root_session_file" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    header = json.loads(next(line for line in stream if line.strip()))
+value = header.get("cwd")
+if not isinstance(value, str) or not value.startswith('/'):
+    raise SystemExit("root session header has no absolute cwd")
+print(value)
+PY
+)
+      [[ -d "$root_worktree" ]] || { printf 'pi: durable root worktree is missing: %s\n' "$root_worktree" >&2; exit 1; }
+      cd "$root_worktree"
+      export PI_ROOT_SESSION_FILE="$root_session_file"
+      if [[ "$has_explicit_session_dir" == 0 ]]; then
+        root_args=(--session-dir "$root_session_dir" "${root_args[@]}")
+      fi
+    fi
+  fi
+fi
 
 prepared=$($helper prepare --cwd "$PWD" --owner-pid "$$" --pi-executable "$real_pi")
 eval "$(python3 - "$prepared" <<'PY'
@@ -65,4 +194,4 @@ if [[ "$PI_TASK_POLICY_VALID" != "True" && "$PI_TASK_POLICY_VALID" != "true" ]];
   printf 'Pi repository policy was unavailable or invalid; fail-closed isolated mode selected.\n' >&2
 fi
 cd "$PI_TASK_WORKTREE"
-exec "$real_pi" "$@"
+exec "$real_pi" "${root_args[@]}"

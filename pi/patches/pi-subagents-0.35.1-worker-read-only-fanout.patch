@@ -1,0 +1,118 @@
+--- a/src/extension/fanout-child.ts
++++ b/src/extension/fanout-child.ts
+@@ -6,7 +6,7 @@
+ import { getArtifactsDir } from "../shared/artifacts.ts";
+ import { createSubagentExecutor, type SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
+ import { resolveWaitToolConfig } from "../runs/background/wait-config.ts";
+-import { SUBAGENT_CHILD_ENV, SUBAGENT_FANOUT_CHILD_ENV } from "../runs/shared/pi-args.ts";
++import { SUBAGENT_CHILD_AGENT_ENV, SUBAGENT_CHILD_ENV, SUBAGENT_FANOUT_CHILD_ENV } from "../runs/shared/pi-args.ts";
+ import { readNestedControlRequests, resolveNestedRouteFromEnv, writeNestedControlResult } from "../runs/shared/nested-events.ts";
+ import { deliverSubagentIntercomMessageEvent } from "../intercom/result-intercom.ts";
+ import { resolveSubagentIntercomTarget } from "../intercom/intercom-bridge.ts";
+@@ -27,6 +27,74 @@
+ 	return p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
+ }
+ 
++const WORKER_READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "contact_supervisor"];
++const WORKER_READ_ONLY_ACCEPTANCE = { level: "none" as const, reason: "worker read-only fanout" };
++
++function workerReadOnlyFanout(): boolean {
++	return process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim() === "worker";
++}
++
++function isReadOnlyAgent(agent: { acceptanceRole?: string; tools?: string[] }): boolean {
++	return agent.acceptanceRole === "read-only" && Array.isArray(agent.tools) &&
++		!agent.tools.some((tool) => tool === "edit" || tool === "write" || tool === "subagent");
++}
++
++function hardenWorkerReadOnlyAgent<T extends { tools?: string[] }>(agent: T): T {
++	return {
++		...agent,
++		tools: WORKER_READ_ONLY_TOOLS.filter((tool) => tool !== "contact_supervisor" || agent.tools?.includes(tool)),
++		mcpDirectTools: [],
++		extensions: [],
++		subagentOnlyExtensions: [],
++		inheritProjectContext: false,
++		inheritSkills: false,
++		output: undefined,
++		defaultReads: undefined,
++		defaultProgress: false,
++		defaultTimeoutMs: undefined,
++		defaultTurnBudget: undefined,
++		toolBudget: undefined,
++		memory: undefined,
++		interactive: false,
++		completionGuard: false,
++	} as T;
++}
++
++function readOnlyFanoutTask<T extends Record<string, unknown>>(task: T): T {
++	return {
++		...task,
++		worktree: false,
++		output: false,
++		outputMode: undefined,
++		acceptance: WORKER_READ_ONLY_ACCEPTANCE,
++	};
++}
++
++function hardenWorkerReadOnlyParams(params: SubagentParamsLike): SubagentParamsLike {
++	if (!workerReadOnlyFanout()) return params;
++	const chain = params.chain?.map((step) => {
++		const hardened = readOnlyFanoutTask(step as unknown as Record<string, unknown>);
++		if (Array.isArray(step.parallel)) {
++			hardened.parallel = step.parallel.map((task) => readOnlyFanoutTask(task as unknown as Record<string, unknown>));
++		} else if (step.parallel) {
++			hardened.parallel = readOnlyFanoutTask(step.parallel as unknown as Record<string, unknown>);
++		}
++		return hardened;
++	});
++	return {
++		...params,
++		async: true,
++		clarify: false,
++		artifacts: false,
++		output: false,
++		outputMode: undefined,
++		worktree: false,
++		acceptance: WORKER_READ_ONLY_ACCEPTANCE,
++		tasks: params.tasks?.map((task) => readOnlyFanoutTask(task as unknown as Record<string, unknown>)),
++		chain,
++	} as SubagentParamsLike;
++}
++
+ function createChildSafeState(): SubagentState {
+ 	return {
+ 		baseCwd: "",
+@@ -151,7 +219,14 @@
+ 		tempArtifactsDir: getArtifactsDir(null),
+ 		getSubagentSessionRoot,
+ 		expandTilde,
+-		discoverAgents,
++		discoverAgents(cwd, scope) {
++			const discovered = discoverAgents(cwd, scope);
++			if (!workerReadOnlyFanout()) return discovered;
++			return {
++				...discovered,
++				agents: discovered.agents.filter(isReadOnlyAgent).map(hardenWorkerReadOnlyAgent),
++			};
++		},
+ 		allowMutatingManagementActions: false,
+ 	});
+ 
+@@ -165,7 +240,14 @@
+ 		].join("\n"),
+ 		parameters: SubagentParams,
+ 		execute(id, params, signal, onUpdate, ctx) {
+-			return executor.execute(id, params as SubagentParamsLike, signal, onUpdate, ctx);
++			if (workerReadOnlyFanout() && (params.chainDir || params.sessionDir || params.share === true || params.dir)) {
++				return Promise.resolve({
++					content: [{ type: "text", text: "Worker fanout cannot select persistence, sharing, or arbitrary run destinations." }],
++					isError: true,
++					details: { mode: "management", results: [] },
++				});
++			}
++			return executor.execute(id, hardenWorkerReadOnlyParams(params as SubagentParamsLike), signal, onUpdate, ctx);
+ 		},
+ 	};
+ 

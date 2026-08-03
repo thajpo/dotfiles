@@ -158,6 +158,7 @@ STAGING_DIR=$(mktemp -d "$PI_CONFIG_DIR/.install.XXXXXX")
 mkdir -p "$STAGING_DIR/npm" "$STAGING_DIR/control"
 cp "$SCRIPT_DIR/pi/npm/package.json" "$SCRIPT_DIR/pi/npm/package-lock.json" "$STAGING_DIR/npm/"
 npm ci --prefix "$STAGING_DIR/npm" --legacy-peer-deps --no-audit --no-fund
+install -m 600 "$SCRIPT_DIR/pi/pi-image-tools.json" "$STAGING_DIR/npm/node_modules/pi-image-tools/config.json"
 PI_CODING_AGENT_DIR="$STAGING_DIR" "$SCRIPT_DIR/scripts/pi-patch-subagents"
 
 DOCKER_STAGING_IMAGE="pi-tool-sandbox:staging-$$"
@@ -262,9 +263,32 @@ fi
 "$SCRIPT_DIR/scripts/pi-workspace.py" validate-policy "$POLICY_STAGING" >/dev/null
 
 # Prepare every host control-plane file before changing the active generation.
-for config in settings.json pi-chrome-devtools.json pi-plan-mode.json pi-statusline.json pr-review.json; do
+for config in settings.json keybindings.json pi-goal.json pi-chrome-devtools.json pi-plan-mode.json pi-statusline.json pr-review.json; do
     install -m 600 "$SCRIPT_DIR/pi/$config" "$STAGING_DIR/control/$config"
 done
+# Preserve user keybindings while making the image-paste ownership decision
+# deterministic. The Pi built-in binding is the only key we intentionally
+# override; extension-specific shortcuts remain user-editable.
+python3 - "$STAGING_DIR/control/keybindings.json" "$PI_CONFIG_DIR/keybindings.json" <<'PY'
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+staged, existing = map(Path, sys.argv[1:])
+value = json.loads(staged.read_text(encoding="utf-8"))
+if existing.exists() or existing.is_symlink():
+    info = existing.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise SystemExit(f"unsafe existing keybindings: {existing}")
+    current = json.loads(existing.read_text(encoding="utf-8"))
+    if not isinstance(current, dict):
+        raise SystemExit(f"existing keybindings must be an object: {existing}")
+    current.update(value)
+    value = current
+staged.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+staged.chmod(0o600)
+PY
 if [ -n "$MACHINE_PROFILE" ]; then
     install -m 600 "$MACHINE_PROFILE" "$STAGING_DIR/control/machine.env"
 fi
@@ -283,8 +307,10 @@ install -m 755 "$SCRIPT_DIR/scripts/pi-workspace.py" "$STAGING_DIR/control/pi-wo
 install -m 755 "$SCRIPT_DIR/scripts/pi-runtime.py" "$STAGING_DIR/control/pi-runtime.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-sandbox-gc.py" "$STAGING_DIR/control/pi-sandbox-gc.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-control.py" "$STAGING_DIR/control/pi-secretary-control.py"
+install -m 755 "$SCRIPT_DIR/scripts/pi-root-session.py" "$STAGING_DIR/control/pi-root-session.py"
+install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-stats.py" "$STAGING_DIR/control/pi-secretary-stats.py"
 cp -a "$SCRIPT_DIR/skills/project-status" "$STAGING_DIR/control/project-status-skill"
-for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent pi-sandbox-gc; do
+for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-root-session pi-secretary-stats pi-review-agent pi-sandbox-gc pi-restart; do
     install -m 755 "$SCRIPT_DIR/bin/$launcher" "$STAGING_DIR/control/$launcher"
 done
 python3 - "$STAGING_DIR/control/pi" "$STAGING_DIR/control/pi-host" <<'PY'
@@ -295,6 +321,9 @@ for name in sys.argv[1:]:
     text = path.read_text().replace(
         'helper="$dotfiles_dir/scripts/pi-workspace.py"',
         'helper="$HOME/.local/share/pi/control/pi-workspace.py"',
+    ).replace(
+        'root_helper="$dotfiles_dir/scripts/pi-root-session.py"',
+        'root_helper="$HOME/.local/share/pi/control/pi-root-session.py"',
     )
     path.write_text(text)
     path.chmod(0o755)
@@ -341,7 +370,7 @@ honor_pending_signal
 activate_path "$POLICY_STAGING" "$POLICY_PATH"
 POLICY_STAGING=""
 activate_path "$STAGING_DIR/npm" "$PI_CONFIG_DIR/npm"
-for config in settings.json pi-chrome-devtools.json pi-plan-mode.json pi-statusline.json pr-review.json AGENTS.md; do
+for config in settings.json keybindings.json pi-goal.json pi-chrome-devtools.json pi-plan-mode.json pi-statusline.json pr-review.json AGENTS.md; do
     activate_path "$STAGING_DIR/control/$config" "$PI_CONFIG_DIR/$config"
 done
 for tree in extensions agents prompts themes; do activate_path "$STAGING_DIR/control/$tree" "$PI_CONFIG_DIR/$tree"; done
@@ -349,6 +378,8 @@ activate_path "$STAGING_DIR/control/pi-workspace.py" "$HOME/.local/share/pi/cont
 activate_path "$STAGING_DIR/control/pi-runtime.py" "$HOME/.local/share/pi/control/pi-runtime.py"
 activate_path "$STAGING_DIR/control/pi-sandbox-gc.py" "$HOME/.local/share/pi/control/pi-sandbox-gc.py"
 activate_path "$STAGING_DIR/control/pi-secretary-control.py" "$HOME/.local/share/pi/control/pi-secretary-control.py"
+activate_path "$STAGING_DIR/control/pi-root-session.py" "$HOME/.local/share/pi/control/pi-root-session.py"
+activate_path "$STAGING_DIR/control/pi-secretary-stats.py" "$HOME/.local/share/pi/control/pi-secretary-stats.py"
 if [ -n "$MACHINE_PROFILE" ]; then
     mkdir -p -m 700 "$MACHINE_CONFIG_DIR"
     chmod 700 "$MACHINE_CONFIG_DIR"
@@ -356,7 +387,7 @@ if [ -n "$MACHINE_PROFILE" ]; then
 fi
 skill_rollback_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pi/rollback/skills"
 activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status" "$skill_rollback_dir"
-for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-review-agent pi-sandbox-gc; do
+for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-root-session pi-secretary-stats pi-review-agent pi-sandbox-gc pi-restart; do
     activate_path "$STAGING_DIR/control/$launcher" "$HOME/.local/bin/$launcher"
 done
 
@@ -483,13 +514,14 @@ if ! grep -Fq "direnv hook $shell_name" "$startup_file" 2>/dev/null; then
     echo "Added direnv hook to $startup_file"
 fi
 
-# Reload tmux config if tmux is running
+# Do not live-reload tmux while managed panes are running. The config starts
+# restore/repair hooks, so reloading here can race the explicit activation
+# restart and duplicate panes. pi-restart applies the complete generation.
 if tmux info &> /dev/null; then
-    tmux source-file ~/.tmux.conf
-    echo "Reloaded tmux config"
+    echo "tmux is running; use pi-restart to activate the new generation"
 fi
 
 echo ""
 echo "Done! Open a new terminal or source your shell startup file."
-echo "Next: run 'pi-start all' to start the personal workspace and secretary grid."
-echo "If pi-start is not on PATH yet: '$HOME/.local/bin/pi-start all'"
+echo "Next: review 'pi-root-session migrate --dry-run', then run 'pi-restart' to start the managed grid."
+echo "If launchers are not on PATH yet: '$HOME/.local/bin/pi-root-session' and '$HOME/.local/bin/pi-restart'"

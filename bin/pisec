@@ -22,8 +22,9 @@ if [[ -f "$HOME/.local/share/pi/control/pi-secretary-control.py" ]]; then contro
 
 declare -a default_aliases=(vla-lens csv-agent SleepyDreamyV3)
 usage() {
-  printf '%s\n' 'usage: pisec [register --alias ALIAS [REPOSITORY] | list | launch-info PROJECT_ID | open]'
+  printf '%s\n' 'usage: pisec [register --alias ALIAS [REPOSITORY] | list | launch-info PROJECT_ID | open | launch]'
   printf '%s\n' '       pisec                 (open the default three projects)'
+  printf '%s\n' '       pisec launch          (repair the grid when panes are idle)'
   printf '%s\n' '       pisec activate ALIAS [ALIAS ...]'
   printf '%s\n' '       pisec swap ACTIVE_ALIAS INACTIVE_ALIAS'
   printf '%s\n' '       each projects-N window contains at most two side-by-side secretary panes'
@@ -117,11 +118,19 @@ release_grid_lock() {
   [[ -n "$lock_dir" ]] && rmdir "$lock_dir" 2>/dev/null || :
 }
 trap release_grid_lock EXIT
-if command -v flock >/dev/null 2>&1; then
+if [[ ${PI_LAUNCHER_FORCE_DIRECTORY_LOCK:-0} != 1 ]] && command -v flock >/dev/null 2>&1; then
   flock -x "$lock_fd"
 else
   lock_dir="${lock}.d"
-  mkdir "$lock_dir" || { printf 'pisec: workspace lock is already held\n' >&2; exit 1; }
+  acquired=0
+  for ((attempt = 1; attempt <= 1000; attempt++)); do
+    if mkdir "$lock_dir" 2>/dev/null; then
+      acquired=1
+      break
+    fi
+    sleep 0.01
+  done
+  (( acquired == 1 )) || { printf 'pisec: workspace lock acquisition timed out\n' >&2; exit 1; }
 fi
 fail() { printf 'pisec: %s\n' "$1" >&2; exit 1; }
 
@@ -316,6 +325,39 @@ fi
 target_count=${#target_indices[@]}
 (( target_count > 0 )) || fail 'no active projects selected'
 
+switch_to_grid() {
+  local target=$1
+  # Never keep the grid repair lock in the attached client. A normal `pisec`
+  # invocation is a navigation operation once a live secretary exists; it
+  # must not restart a Pi process while it is holding an unflushed turn.
+  eval "exec ${lock_fd}>&-"
+  release_grid_lock
+  trap - EXIT
+  if [[ -n "${TMUX:-}" ]]; then
+    exec tmux switch-client -t "=$session:$target"
+  else
+    exec tmux attach-session -t "=$session:$target"
+  fi
+}
+
+# `pisec`/`pisec open` are safe return-to-grid operations. The old behavior
+# rebuilt every window on each invocation, which killed a secretary that could
+# still be thinking; its in-memory user turn then appeared to vanish on the
+# next launch. Explicit `launch`/`activate`/`swap` commands still perform
+# repairs or intentional layout changes, while a live grid is never rebuilt
+# just to navigate back to it.
+if (( session_exists == 1 && ${#live_indices[@]} > 0 )) &&
+   [[ "$action" == default || "$action" == open || "$action" == "" ]]; then
+  switch_to_grid "${window_ids[0]}"
+fi
+if (( session_exists == 1 && ${#live_indices[@]} > 0 )) && [[ "$action" == launch ]]; then
+  # `launch` is also used by the post-resurrect repair hook. It must not
+  # attach or switch a client when there is already a live grid.
+  release_grid_lock
+  trap - EXIT
+  exit 0
+fi
+
 # Rebuild the pane layout without killing the pisec session itself. Creating
 # replacement windows first keeps attached clients alive while old windows are
 # retired, and Pi session history remains on disk across the restart. With an
@@ -367,10 +409,5 @@ for k in "${!pending_panes[@]}"; do
 done
 
 if [[ "$action" == default || "$action" == open || "$action" == "" ]]; then
-  # The attached tmux client must not inherit the grid repair lock. Otherwise
-  # a later activation blocks for the entire lifetime of that client.
-  eval "exec ${lock_fd}>&-"
-  release_grid_lock
-  trap - EXIT
-  if [[ -n "${TMUX:-}" ]]; then exec tmux switch-client -t "=$session:${rebuilt_windows[0]}"; else exec tmux attach-session -t "=$session:${rebuilt_windows[0]}"; fi
+  switch_to_grid "${rebuilt_windows[0]}"
 fi

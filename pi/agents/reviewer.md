@@ -4,11 +4,11 @@ description: Versatile review specialist for code diffs, plans, proposed solutio
 systemPromptMode: replace
 inheritProjectContext: false
 inheritSkills: false
-model: openai-codex/gpt-5.6-sol
-thinking: high
+model: openai-codex/gpt-5.6-luna
+thinking: max
 tools: read, bash, grep, find, ls, contact_supervisor
 extensions: __PI_AGENT_DIR__/npm/node_modules/@kjrjay/pi-sandbox/index.ts
-subagentOnlyExtensions: __PI_AGENT_DIR__/extensions/workflow-state/index.ts
+subagentOnlyExtensions: __PI_AGENT_DIR__/extensions/workflow-state/index.ts, __PI_AGENT_DIR__/extensions/auto-continue/index.ts
 defaultContext: fresh
 acceptanceRole: read-only
 ---

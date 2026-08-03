@@ -51,6 +51,33 @@ apply_verified_patch \
   "$patch_dir/pi-subagents-0.35.1-artifacts.patch"
 
 apply_verified_patch \
+  pi-subagents-hidden-success \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/runs/background/notify.ts" \
+  0.35.1 \
+  d3a349cfaa1e74dbc81e8215e0aa3f76f78e03b7a29515f047a91301045ed8e3 \
+  10f8cacc2d40cfe9ced2740f8d01af57bb134fa164afd5831f4717895bca0b01 \
+  "$patch_dir/pi-subagents-0.35.1-hidden-success.patch"
+
+apply_verified_patch \
+  pi-subagents-hidden-success-extension \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/extension/index.ts" \
+  0.35.1 \
+  af1755857c0a4f30eabfd95ecfff11cd83cb95e13a39fe43d8fe5f68567f757e \
+  b713a3eafd90ca0e0808669b70ee11bacd119ba2c94ec12b956a1a8bdbe3b318 \
+  "$patch_dir/pi-subagents-0.35.1-hidden-success-extension.patch"
+
+apply_verified_patch \
+  pi-subagents-worker-read-only-fanout \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/extension/fanout-child.ts" \
+  0.35.1 \
+  8cfba3086dbb460c59c18ebbe7bd04f3020f457d3e7ed5c91dc53dbfa9c5aa08 \
+  bce5d9ee261a86fba34b9e421be745a5fca8a91d6a755c3c44d790e3c3df9727 \
+  "$patch_dir/pi-subagents-0.35.1-worker-read-only-fanout.patch"
+
+apply_verified_patch \
   pi-subagents-no-host-verify \
   "$agent_dir/npm/node_modules/pi-subagents" \
   "$agent_dir/npm/node_modules/pi-subagents/src/runs/shared/acceptance.ts" \
@@ -103,7 +130,7 @@ apply_verified_patch \
   "$agent_dir/npm/node_modules/pi-subagents/skills/pi-subagents/SKILL.md" \
   0.35.1 \
   188a6d85ed2c1102d3351e3138a0a11a9864f00d6e36a7ae1371377d3e57333d \
-  496b5d02e0f578336a46aee46534ffddd6097f501791c7844986250e93f776ec \
+  39a97d5b66806fbb85fe73aac2cd96608ee70c4adf69dc17d39a6cf3fdcc32bd \
   "$patch_dir/pi-subagents-0.35.1-skill.patch"
 
 apply_verified_patch \
@@ -154,6 +181,15 @@ apply_verified_patch \
   "$patch_dir/pi-subagents-0.35.1-model-policy.patch"
 
 apply_verified_patch \
+  pi-subagents-failure-events \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/runs/background/subagent-runner.ts" \
+  0.35.1 \
+  0bb23f0cf27cea7b74d89a528770440992821dfc2fe5bd15aa2ff309d6aea7e9 \
+  ece4fc0f43896a0d8193c68d73d10dc217c9d8e77154b57d2dacea1945a6fc87 \
+  "$patch_dir/pi-subagents-0.35.1-failure-events.patch"
+
+apply_verified_patch \
   pi-subagents-unbounded-parallel \
   "$agent_dir/npm/node_modules/pi-subagents" \
   "$agent_dir/npm/node_modules/pi-subagents/src/shared/types.ts" \
@@ -173,7 +209,7 @@ verify_model_policy_file() {
 }
 verify_model_policy_file src/runs/background/async-execution.ts b3da8caa2777a9f8c3c63794dd53ef05d2e38e26faca1a5cd0f87adb015d9c78
 verify_model_policy_file src/runs/background/async-resume.ts df29d4b27aedd92d563b15afb1ea383a5a965962580debbb764f0944c8fe2b37
-verify_model_policy_file src/runs/background/subagent-runner.ts 0bb23f0cf27cea7b74d89a528770440992821dfc2fe5bd15aa2ff309d6aea7e9
+verify_model_policy_file src/runs/background/subagent-runner.ts ece4fc0f43896a0d8193c68d73d10dc217c9d8e77154b57d2dacea1945a6fc87
 verify_model_policy_file src/runs/foreground/chain-execution.ts 0565a3a72250b73ca17a71e0f500f48f7b2bedc2cb14fbed2f2fe1d9b28075c6
 verify_model_policy_file src/runs/foreground/execution.ts c409ea5f40a0cd2bf1954c77ef8e531f2fe160cd24c4e4fcc8c7610ab59d513e
 verify_model_policy_file src/runs/foreground/subagent-executor.ts f6365f211cf56c4201454678ef96fe99ac4c55cd058d098d0b60285e4db3c800

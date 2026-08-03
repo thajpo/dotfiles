@@ -10,7 +10,7 @@ cleanup() { rm -rf "$temporary"; }
 trap cleanup EXIT
 core_fixture="$temporary/core-fixture"
 npm install --prefix "$core_fixture" --no-save --no-package-lock --no-audit --no-fund \
-  @earendil-works/pi-coding-agent@0.82.1 >/dev/null
+  @earendil-works/pi-coding-agent@0.83.0 >/dev/null
 PI_CORE_DIR="$core_fixture" "$root/scripts/pi-patch-core" >/dev/null
 chmod -R go-w "$core_fixture"
 

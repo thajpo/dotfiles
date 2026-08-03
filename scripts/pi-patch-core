@@ -12,10 +12,10 @@ interactive="$package_dir/dist/modes/interactive/interactive-mode.js"
 terminal="$package_dir/node_modules/@earendil-works/pi-tui/dist/terminal.js"
 viewport="$package_dir/dist/modes/interactive/pinned-conversation-viewport.mjs"
 viewport_source="$repo_root/pi/core/pinned-conversation-viewport.mjs"
-patch_file="$repo_root/pi/patches/pi-coding-agent-0.82.1-pinned-editor.patch"
+patch_file="$repo_root/pi/patches/pi-coding-agent-0.83.0-pinned-editor.patch"
 
-before_interactive=45f9fb6925b22738f230a4c4b4ffc4aaa79d9bffdda6305a44e23645adac282b
-after_interactive=71af0d25338e9d1d5a3a5784c132511c0b40185e1e15cc1cfa3041c390711f8c
+before_interactive=ce0586199f448b8105e6e91b507771abb8024199634dd84d3c97f9010a9d52aa
+after_interactive=164899d309425b6778290e627d7149392e7c9d8c743d8d2e13fc6924ceed1dc5
 before_terminal=131a0b0f2f4e90ef282b927e16df56fbe390e727db4a57f90d73801bceb0f37c
 after_terminal=85bf4f05c8c956cb452fcb1605e70dfc65f8e939801cd23a999c5fd5583653d9
 viewport_hash=73abd100cd546326fc74e5fc8e4df2183713f61d16e5a586b514c476260caeb5
@@ -33,7 +33,7 @@ hash_file() {
 }
 [[ -f "$package_dir/package.json" ]] || exit 1
 version=$(node -p 'require(process.argv[1]).version' "$package_dir/package.json")
-[[ $version == 0.82.1 ]] || { [[ $mode == check ]] && exit 1; printf 'pi-core: unsupported version: %s\n' "$version" >&2; exit 1; }
+[[ $version == 0.83.0 ]] || { [[ $mode == check ]] && exit 1; printf 'pi-core: unsupported version: %s\n' "$version" >&2; exit 1; }
 
 actual_interactive=$(hash_file "$interactive")
 actual_terminal=$(hash_file "$terminal")

@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -9,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PiPersonalTests(unittest.TestCase):
-    def test_creates_four_pane_personal_session_and_is_idempotent(self):
+    def test_creates_two_pane_windows_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             home = root / "home"
@@ -43,16 +44,22 @@ with pathlib.Path(os.environ["FAKE_TMUX_LOG"]).open("a") as stream:
     stream.write(json.dumps(args) + "\n")
 cmd = args[0]
 existing = os.environ.get("FAKE_TMUX_EXISTING") == "1"
+target = args[args.index("-t") + 1] if "-t" in args else ""
 if cmd == "has-session": raise SystemExit(0 if existing else 1)
 if cmd == "new-session": print("@1"); raise SystemExit(0)
-if cmd == "list-windows": print("@1\tpersonal"); raise SystemExit(0)
+if cmd == "new-window": print("@2"); raise SystemExit(0)
+if cmd == "list-windows": print("@1\tpersonal-1\n@2\tpersonal-2"); raise SystemExit(0)
 if cmd == "list-panes":
     if args[-1] == "#{pane_id}":
-        print("%1")
+        print("%1" if target == "@1" else "%3")
     elif existing:
-        titles = ["mlre-transition", "financials", "dotfiles", "pi-host"]
-        session_ids = ["personal-mlre-transition", "personal-financials", "personal-dotfiles", "personal-host"]
-        for index, (title, session_id) in enumerate(zip(titles, session_ids), 1):
+        groups = {
+            "@1": [("mlre-transition", "personal-mlre-transition"), ("financials", "personal-financials")],
+            "@2": [("dotfiles", "personal-dotfiles"), ("pi-host", "personal-host")],
+        }
+        start = 1 if target == "@1" else 3
+        for offset, (title, session_id) in enumerate(groups[target]):
+            index = start + offset
             dead = 1 if os.environ.get("FAKE_TMUX_DEAD") == title else 0
             if os.environ.get("FAKE_TMUX_NO_ROLES") == "1":
                 print(f"%{index}|π - changed|{dead}||/restored/path|exec launcher --session-id {session_id}")
@@ -74,23 +81,35 @@ raise SystemExit(0)
             env.update({
                 "HOME": str(home),
                 "PATH": f"{fake_bin}:/usr/local/bin:/usr/bin:/bin",
+                "PI_LAUNCHER_FORCE_DIRECTORY_LOCK": "1",
                 "FAKE_TMUX_LOG": str(log),
                 "FAKE_TMUX_COUNTER": str(counter),
             })
+            lock_dir = home / ".local/state/pi/personal.lock.d"
+            lock_dir.parent.mkdir(parents=True, exist_ok=True)
+            lock_dir.mkdir()
+            release_lock = subprocess.Popen([
+                sys.executable, "-c",
+                f"import time; time.sleep(0.15); __import__('os').rmdir({str(lock_dir)!r})",
+            ])
             result = subprocess.run(
                 [str(ROOT / "bin/pi-personal"), "--ensure"],
                 cwd=home, env=env, text=True, capture_output=True,
             )
+            release_lock.wait(timeout=2)
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertEqual(len([call for call in calls if call[0] == "new-session"]), 1)
             splits = [call for call in calls if call[0] == "split-window"]
-            self.assertEqual(len(splits), 3)
-            commands = [call[-1] for call in calls if call[0] in {"new-session", "split-window"}]
+            self.assertEqual(len(splits), 2)
+            self.assertEqual(len([call for call in calls if call[0] == "new-window"]), 1)
+            commands = [call[-1] for call in calls if call[0] in {"new-session", "new-window", "split-window"}]
             for session_id in ["personal-mlre-transition", "personal-financials", "personal-dotfiles", "personal-host"]:
                 self.assertTrue(any(session_id in command for command in commands), session_id)
             self.assertTrue(any("--session-dir" in command and "pi-personal-host" in command for command in commands))
-            self.assertIn(["select-layout", "-t", "@1", "tiled"], calls)
+            self.assertEqual(len([call for call in calls if call[0] == "select-layout"]), 2)
+            self.assertTrue(all(call[-1] == "even-horizontal" for call in calls if call[0] == "select-layout"))
+            self.assertNotIn("tiled", {call[-1] for call in calls if call[0] == "select-layout"})
             self.assertIn(["set-option", "-w", "-t", "@1", "pane-border-status", "top"], calls)
             self.assertFalse(any(call[0] in {"attach-session", "switch-client"} for call in calls))
 

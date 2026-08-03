@@ -41,6 +41,19 @@ SUPPORTED_OBJECT_FORMATS = {"sha1": 40, "sha256": 64}
 WORKSTREAM_ROLES = {"feature", "research", "analysis", "review", "integration"}
 GIT_READ_OPERATIONS = {"status", "log", "diff", "show", "branch", "rev-parse", "remote", "tag", "worktree"}
 GIT_READ_BLOCKED_ARGS = ("-c", "--config", "--config-env", "--exec-path", "--git-dir", "--work-tree", "-C", "--output", "--ext-diff", "--textconv", "--no-index")
+GIT_WRITE_OPERATIONS = {"commit", "push", "commit-and-push"}
+CLEANUP_PLAN_VERSION = 1
+CLEANUP_SOURCE_PREFIXES = ("benchmark/", "side-agent/")
+CLEANUP_DESTINATION_PREFIX = "feature/"
+CLEANUP_BRANCH_RE = re.compile(
+    r"^(?=.{1,240}$)(?![-.])(?!.*(?:\.\.|//|@\{))(?!.*[./]$)"
+    r"(?!.*[ ~^:?*\\\[\]])[A-Za-z0-9_][A-Za-z0-9._/@-]*$"
+)
+MAX_CLEANUP_ITEMS = 256
+MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
+MAX_COMMIT_MESSAGE = 4 * 1024
+MAX_COMMIT_PATHS = 128
+MAX_COMMIT_PATH = 1024
 GIT_BRANCH_READ_FLAGS = {
     "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--no-abbrev",
     "--column", "--no-column", "-i", "--ignore-case", "--contains", "--no-contains",
@@ -566,6 +579,563 @@ def git_read(project_id: str, operation: str, git_args: list[str]) -> dict[str, 
         raise SecretaryError("Git output is too large")
     return {"projectId": project_id, "operation": operation, "args": git_args,
             "stdout": result.stdout, "stderr": result.stderr}
+
+
+def _git_write_path(repo: Path, value: str) -> str:
+    if (not isinstance(value, str) or not value or len(value.encode()) > MAX_COMMIT_PATH or
+            value.startswith(("/", "\\")) or value.startswith(("-", "!", "^")) or
+            any(ord(char) < 32 for char in value) or any(char in value for char in "*?[]:") or
+            any(part in {"", ".", ".."} for part in value.split("/"))):
+        raise SecretaryError("Git commit paths must be explicit relative paths")
+    candidate = (repo / value).resolve(strict=False)
+    if not within(repo, candidate):
+        raise SecretaryError("Git commit path escapes the registered repository")
+    return value
+
+
+def _git_write_paths(repo: Path, paths: list[str] | None) -> list[str]:
+    if not isinstance(paths, list) or not paths or len(paths) > MAX_COMMIT_PATHS:
+        raise SecretaryError("Git commit requires a non-empty explicit path list")
+    result = [_git_write_path(repo, value) for value in paths]
+    if len(set(result)) != len(result):
+        raise SecretaryError("Git commit path list contains duplicates")
+    return result
+
+
+def _git_write_message(message: str | None) -> str:
+    if not isinstance(message, str) or not message or len(message.encode()) > MAX_COMMIT_MESSAGE or not message.strip():
+        raise SecretaryError("Git commit requires an explicit non-empty message")
+    if any(ord(char) < 32 and char not in "\n\t" for char in message):
+        raise SecretaryError("invalid Git commit message")
+    return message
+
+
+def _current_branch(repo: Path) -> str:
+    result = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], repo, check=False)
+    branch = result.stdout.strip()
+    if (result.returncode != 0 or not branch or len(branch.encode()) > 512 or
+            any(char.isspace() for char in branch) or branch.startswith("-") or
+            branch.endswith(("/", ".")) or ".." in branch or "@{" in branch or "//" in branch):
+        raise SecretaryError("Git write requires a checked-out branch")
+    full_ref = run(["git", "symbolic-ref", "--quiet", "HEAD"], repo, check=False).stdout.strip()
+    if full_ref != f"refs/heads/{branch}":
+        raise SecretaryError("Git write requires the current checked-out branch")
+    return branch
+
+
+def _git_write_command(repo: Path, operation: str, command: list[str], *, index_file: Path | None = None) -> None:
+    environment = _env()
+    # Use the host process's normal user Git configuration and credential
+    # helpers, and preserve only the host SSH-agent socket when present. Never
+    # pass model data as an auth setting, run repository hooks, or allow prompts.
+    environment.update({"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "PAGER": "cat"})
+    ssh_auth_sock = os.environ.get("SSH_AUTH_SOCK", "")
+    if ssh_auth_sock.startswith("/") and "\n" not in ssh_auth_sock and "\x00" not in ssh_auth_sock:
+        environment["SSH_AUTH_SOCK"] = ssh_auth_sock
+    if index_file is not None:
+        environment["GIT_INDEX_FILE"] = str(index_file)
+    result = subprocess.run(command, cwd=str(repo), text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=environment)
+    if result.returncode:
+        # Git may include remote URLs or helper diagnostics in either stream;
+        # never return those details to the secretary or model.
+        raise SecretaryError(f"git {operation} failed (exit {result.returncode})")
+
+
+@contextlib.contextmanager
+def _temporary_git_index(repo: Path, common: Path) -> Iterator[Path]:
+    index_value = _git(repo, "rev-parse", "--git-path", "index")
+    index_path = Path(index_value)
+    if not index_path.is_absolute():
+        index_path = (repo / index_path).resolve(strict=False)
+    fd, temporary = tempfile.mkstemp(prefix="pi-secretary-index-", dir=str(common))
+    os.close(fd)
+    temporary_path = Path(temporary)
+    try:
+        if index_path.is_file():
+            temporary_path.write_bytes(index_path.read_bytes())
+        yield temporary_path
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary_path.unlink()
+
+
+def _refresh_git_index(repo: Path, paths: list[str]) -> None:
+    result = subprocess.run(["git", "reset", "HEAD", "--", *paths], cwd=str(repo),
+                            env=_env(), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            text=True, check=False)
+    if result.returncode:
+        raise SecretaryError("Git index refresh failed")
+
+
+@contextlib.contextmanager
+def _git_write_lock(common: Path) -> Iterator[None]:
+    path = common / "pi-secretary-git-write.lock"
+    if path.exists() or path.is_symlink():
+        _safe_lstat(path, directory=False)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def git_write(project_id: str, operation: str, message: str | None = None,
+              paths: list[str] | None = None) -> dict[str, Any]:
+    """Commit and/or push only the registered repository's current branch."""
+    if operation not in GIT_WRITE_OPERATIONS:
+        raise SecretaryError("Git write operation is not supported")
+    if operation == "push" and (message is not None or paths):
+        raise SecretaryError("Git push does not accept commit arguments")
+
+    initial = _require_secretary(project_id)
+    initial_repo = _canonical_repo(initial["primaryRepository"])
+    _, initial_common, _ = project_identity(initial_repo)
+    with _git_write_lock(initial_common):
+        current = _require_secretary(project_id)
+        repo = _canonical_repo(current["primaryRepository"])
+        _, common, _ = project_identity(repo)
+        if repo != initial_repo or common != initial_common:
+            raise SecretaryError("registered project changed during Git write authorization")
+        # Revalidate durable project identity and capability while holding the
+        # same common-dir lock used for the Git mutation.
+        _project_context(repo, current["capability"])
+        branch = _current_branch(repo)
+        if operation in {"push", "commit-and-push"}:
+            remote = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(repo),
+                                    env=_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    text=True, check=False)
+            if remote.returncode:
+                raise SecretaryError("Git push requires the existing origin remote")
+        commit_oid: str | None = None
+        if operation in {"commit", "commit-and-push"}:
+            commit_message = _git_write_message(message)
+            commit_paths = _git_write_paths(repo, paths)
+            # Stage and commit through a temporary index. This preserves any
+            # unrelated pre-staged paths and leaves the real index unchanged
+            # if validation or Git commit fails.
+            with _temporary_git_index(repo, common) as temporary_index:
+                if temporary_index.stat().st_size == 0:
+                    _git_write_command(repo, "initialize-index", ["git", "read-tree", "--empty"], index_file=temporary_index)
+                _git_write_command(repo, "stage", [
+                    "git", "-c", "core.hooksPath=/dev/null", "add", "--", *commit_paths,
+                ], index_file=temporary_index)
+                _git_write_command(repo, "commit", [
+                    "git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+                    "commit", "--only", "--no-verify", "-m", commit_message, "--", *commit_paths,
+                ], index_file=temporary_index)
+                _refresh_git_index(repo, commit_paths)
+            if _current_branch(repo) != branch:
+                raise SecretaryError("Git branch changed during commit")
+            commit_oid = _git(repo, "rev-parse", "HEAD^{commit}").lower()
+
+        if operation in {"push", "commit-and-push"}:
+            if _current_branch(repo) != branch:
+                raise SecretaryError("Git branch changed before push")
+            _git_write_command(repo, "push", [
+                "git", "-c", "core.hooksPath=/dev/null", "push", "--no-verify", "origin",
+                f"refs/heads/{branch}:refs/heads/{branch}",
+            ])
+
+        result: dict[str, Any] = {"projectId": project_id, "operation": operation,
+                                  "branch": branch}
+        if commit_oid is not None:
+            result["commit"] = commit_oid
+        if operation in {"push", "commit-and-push"}:
+            result["remote"] = "origin"
+            result["pushed"] = True
+        return result
+
+
+def _cleanup_branch_name(value: Any, label: str) -> str:
+    if (not isinstance(value, str) or not CLEANUP_BRANCH_RE.fullmatch(value) or
+            value.startswith("refs/") or
+            any(part in {"", ".", ".."} or part.startswith(".") or part.endswith(".") or part.endswith(".lock")
+                for part in value.split("/"))):
+        raise SecretaryError(f"invalid cleanup {label}")
+    return value
+
+
+def _cleanup_source_branch(value: Any, label: str) -> str:
+    branch = _cleanup_branch_name(value, label)
+    if not branch.startswith(CLEANUP_SOURCE_PREFIXES):
+        raise SecretaryError(f"cleanup {label} is outside the owned namespaces")
+    return branch
+
+
+def _cleanup_destination_branch(value: Any) -> str:
+    branch = _cleanup_branch_name(value, "destination branch")
+    if not branch.startswith(CLEANUP_DESTINATION_PREFIX):
+        raise SecretaryError("cleanup destination branch must use the feature/ namespace")
+    return branch
+
+
+def _cleanup_absolute_path(value: Any, label: str) -> Path:
+    if not isinstance(value, str) or not value or len(value) > 4096 or not os.path.isabs(value):
+        raise SecretaryError(f"cleanup {label} must be an absolute path")
+    path = Path(value).resolve(strict=False)
+    _no_symlink_path(path)
+    return path
+
+
+def _cleanup_artifact_root() -> Path:
+    raw = os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi" / "agent"))
+    root = Path(os.path.expanduser(raw))
+    if not root.is_absolute():
+        raise SecretaryError("Pi agent directory must be absolute")
+    return root.resolve(strict=False)
+
+
+def _cleanup_artifact_allowed(path: Path, kind: str, repository: Path,
+                              worktree_root: Path) -> None:
+    if kind not in {"subagent-artifact", "workflow-artifact"}:
+        raise SecretaryError("invalid cleanup artifact kind")
+    if (within(repository, path) or within(path, repository) or
+            within(worktree_root, path) or within(path, worktree_root)):
+        raise SecretaryError("cleanup artifact cannot be inside the repository or worktree root")
+    agent_root = _cleanup_artifact_root()
+    sessions = agent_root / "sessions"
+    relative = path.relative_to(sessions) if within(sessions, path) else None
+    if kind == "workflow-artifact":
+        if relative is None or "workflow-artifacts" not in relative.parts:
+            raise SecretaryError("workflow artifact is outside the Pi workflow artifact namespace")
+        return
+    if relative is not None and "subagent-artifacts" in relative.parts:
+        return
+    temporary_root = Path(tempfile.gettempdir()).resolve(strict=False)
+    if within(temporary_root, path):
+        temporary_relative = path.relative_to(temporary_root)
+        if temporary_relative.parts and temporary_relative.parts[0].startswith("pi-subagents-"):
+            return
+    raise SecretaryError("subagent artifact is outside the Pi artifact namespaces")
+
+
+def _cleanup_artifact_digest(path: Path) -> str:
+    info = _safe_lstat(path, directory=False)
+    assert info is not None
+    if info.st_size > MAX_ARTIFACT_BYTES:
+        raise SecretaryError("cleanup artifact is too large")
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise SecretaryError("cannot read cleanup artifact") from error
+    return digest.hexdigest()
+
+
+def _cleanup_worktree_records(repo: Path) -> list[dict[str, Any]]:
+    output = _git(repo, "worktree", "list", "--porcelain")
+    records: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+
+    def finish() -> None:
+        nonlocal current
+        if current is not None:
+            if not isinstance(current.get("path"), Path) or not isinstance(current.get("head"), str):
+                raise SecretaryError("malformed Git worktree listing")
+            records.append(current)
+        current = None
+
+    for line in output.splitlines() + [""]:
+        if line.startswith("worktree "):
+            finish()
+            current = {"path": Path(line[9:]).resolve(strict=False), "head": None,
+                       "branch": None, "locked": False, "prunable": False}
+        elif current is not None and line.startswith("HEAD "):
+            current["head"] = line[5:].strip().lower()
+        elif current is not None and line.startswith("branch refs/heads/"):
+            current["branch"] = line[len("branch refs/heads/"):]
+        elif current is not None and line.startswith("locked"):
+            current["locked"] = True
+        elif current is not None and line.startswith("prunable"):
+            current["prunable"] = True
+        elif not line:
+            finish()
+    return records
+
+
+def _cleanup_worktree_live_in_registry(project_id: str, path: Path) -> bool:
+    project = _record_dir(_state_root(), project_id)
+    directory = project / "workstreams"
+    if directory.exists():
+        _safe_lstat(directory, directory=True)
+        for record_path in directory.glob("*.json"):
+            record = _read_json(record_path, WORKSTREAM_FIELDS, required=WORKSTREAM_FIELDS)
+            if record.get("closedAt") is None and Path(record["workspace"]).resolve(strict=False) == path:
+                return True
+
+    registry = _cleanup_artifact_root() / "root-registry.json"
+    if not registry.exists() or registry.is_symlink():
+        return False
+    _safe_lstat(registry, directory=False)
+    if registry.stat().st_size > MAX_JSON:
+        raise SecretaryError("root registry is too large")
+    try:
+        value = json.loads(registry.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise SecretaryError("root registry is malformed") from error
+    records = value.get("records") if isinstance(value, dict) else None
+    if not isinstance(records, list):
+        raise SecretaryError("root registry is malformed")
+    for record in records:
+        if (isinstance(record, dict) and record.get("status") == "active" and
+                isinstance(record.get("worktree"), str) and
+                Path(record["worktree"]).resolve(strict=False) == path):
+            return True
+    return False
+
+
+def _cleanup_worktree_has_live_process(path: Path) -> bool:
+    if Path.cwd().resolve(strict=False) == path or within(path, Path.cwd().resolve(strict=False)):
+        return True
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return False
+    try:
+        entries = list(proc.iterdir())
+    except OSError:
+        return True
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            cwd = Path(os.readlink(entry / "cwd")).resolve(strict=False)
+        except OSError:
+            continue
+        if cwd == path or within(path, cwd):
+            return True
+    return False
+
+
+def _cleanup_branch_oid(repo: Path, branch: str, object_format: str) -> str | None:
+    result = run(["git", "rev-parse", "--verify", "--quiet", "--end-of-options",
+                  f"refs/heads/{branch}^{{commit}}"], repo, check=False)
+    if result.returncode == 1:
+        return None
+    if result.returncode:
+        raise SecretaryError("could not inspect cleanup branch")
+    return _validate_oid(result.stdout.strip(), object_format)
+
+
+def _normalize_cleanup_plan(raw: Any, object_format: str) -> dict[str, Any]:
+    if not isinstance(raw, dict) or set(raw) - {"version", "renames", "deletions", "worktrees", "artifacts"}:
+        raise SecretaryError("invalid cleanup plan shape")
+    if raw.get("version", CLEANUP_PLAN_VERSION) != CLEANUP_PLAN_VERSION:
+        raise SecretaryError("unsupported cleanup plan version")
+
+    def entries(name: str) -> list[Any]:
+        value = raw.get(name, [])
+        if not isinstance(value, list) or len(value) > MAX_CLEANUP_ITEMS:
+            raise SecretaryError(f"invalid cleanup plan {name}")
+        return value
+
+    renames: list[dict[str, str]] = []
+    for item in entries("renames"):
+        if not isinstance(item, dict) or set(item) != {"from", "to", "expectedOid"}:
+            raise SecretaryError("invalid cleanup branch rename")
+        renames.append({
+            "from": _cleanup_source_branch(item["from"], "source branch"),
+            "to": _cleanup_destination_branch(item["to"]),
+            "expectedOid": _validate_oid(item["expectedOid"], object_format),
+        })
+
+    deletions: list[dict[str, str]] = []
+    for item in entries("deletions"):
+        if not isinstance(item, dict) or set(item) != {"branch", "expectedOid"}:
+            raise SecretaryError("invalid cleanup branch deletion")
+        deletions.append({
+            "branch": _cleanup_source_branch(item["branch"], "branch"),
+            "expectedOid": _validate_oid(item["expectedOid"], object_format),
+        })
+
+    worktrees: list[dict[str, str]] = []
+    for item in entries("worktrees"):
+        if not isinstance(item, dict) or set(item) != {"path", "branch", "expectedOid"}:
+            raise SecretaryError("invalid cleanup worktree removal")
+        worktrees.append({
+            "path": str(_cleanup_absolute_path(item["path"], "worktree path")),
+            "branch": _cleanup_source_branch(item["branch"], "worktree branch"),
+            "expectedOid": _validate_oid(item["expectedOid"], object_format),
+        })
+
+    artifacts: list[dict[str, str]] = []
+    for item in entries("artifacts"):
+        if not isinstance(item, dict) or set(item) != {"path", "kind", "expectedSha256"}:
+            raise SecretaryError("invalid cleanup artifact")
+        path = _cleanup_absolute_path(item["path"], "artifact path")
+        kind = item["kind"]
+        if kind not in {"subagent-artifact", "workflow-artifact"}:
+            raise SecretaryError("invalid cleanup artifact kind")
+        digest = item["expectedSha256"]
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            raise SecretaryError("invalid cleanup artifact digest")
+        artifacts.append({"path": str(path), "kind": kind, "expectedSha256": digest.lower()})
+
+    if not renames and not deletions and not worktrees and not artifacts:
+        raise SecretaryError("cleanup plan is empty")
+    if len({item["from"] for item in renames}) != len(renames) or len({item["to"] for item in renames}) != len(renames):
+        raise SecretaryError("cleanup plan contains duplicate branch rename")
+    if len({item["branch"] for item in deletions}) != len(deletions):
+        raise SecretaryError("cleanup plan contains duplicate branch deletion")
+    if len({item["path"] for item in worktrees}) != len(worktrees):
+        raise SecretaryError("cleanup plan contains duplicate worktree")
+    if len({item["path"] for item in artifacts}) != len(artifacts):
+        raise SecretaryError("cleanup plan contains duplicate artifact")
+    if ({item["from"] for item in renames} & {item["branch"] for item in deletions} or
+            {item["to"] for item in renames} & ({item["from"] for item in renames} | {item["branch"] for item in deletions})):
+        raise SecretaryError("cleanup plan has overlapping branch operations")
+    return {"version": CLEANUP_PLAN_VERSION, "renames": sorted(renames, key=lambda item: item["from"]),
+            "deletions": sorted(deletions, key=lambda item: item["branch"]),
+            "worktrees": sorted(worktrees, key=lambda item: item["path"]),
+            "artifacts": sorted(artifacts, key=lambda item: item["path"])}
+
+
+def _cleanup_plan_hash(plan: dict[str, Any]) -> str:
+    encoded = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _inspect_cleanup_plan(project_id: str, repo: Path, plan: dict[str, Any],
+                          object_format: str, policy_root: Path) -> dict[str, Any]:
+    normalized = _normalize_cleanup_plan(plan, object_format)
+    records = _cleanup_worktree_records(repo)
+    by_path = {record["path"]: record for record in records}
+    by_branch = {record["branch"]: record for record in records if record.get("branch")}
+    planned_worktree_branches = {item["branch"] for item in normalized["worktrees"]}
+    protected = set(_load_policy_and_classify(repo)[0].get("protectedBranches", []))
+    actions: list[dict[str, Any]] = []
+
+    for item in normalized["renames"]:
+        source_oid = _cleanup_branch_oid(repo, item["from"], object_format)
+        if source_oid != item["expectedOid"]:
+            raise SecretaryError(f"cleanup branch OID changed: {item['from']}")
+        if item["from"] in protected or item["to"] in protected:
+            raise SecretaryError("cleanup cannot rename a protected branch")
+        if _cleanup_branch_oid(repo, item["to"], object_format) is not None:
+            raise SecretaryError(f"cleanup destination branch already exists: {item['to']}")
+        record = by_branch.get(item["from"])
+        if record is not None and item["from"] not in planned_worktree_branches:
+            raise SecretaryError(f"cleanup branch is checked out: {item['from']}")
+        actions.append({"kind": "branch-rename", "from": item["from"], "to": item["to"], "oid": source_oid})
+
+    for item in normalized["deletions"]:
+        branch = item["branch"]
+        source_oid = _cleanup_branch_oid(repo, branch, object_format)
+        if source_oid != item["expectedOid"]:
+            raise SecretaryError(f"cleanup branch OID changed: {branch}")
+        if branch in protected:
+            raise SecretaryError("cleanup cannot delete a protected branch")
+        record = by_branch.get(branch)
+        if record is not None and branch not in planned_worktree_branches:
+            raise SecretaryError(f"cleanup branch is checked out: {branch}")
+        actions.append({"kind": "branch-delete", "branch": branch, "oid": source_oid})
+
+    for item in normalized["worktrees"]:
+        path = Path(item["path"])
+        if not within(policy_root, path) or within(repo, path) or within(path, repo):
+            raise SecretaryError("cleanup worktree is outside the configured worktree root")
+        record = by_path.get(path)
+        if record is None:
+            raise SecretaryError(f"cleanup worktree is not registered: {path}")
+        if record.get("branch") != item["branch"] or record.get("head") != item["expectedOid"]:
+            raise SecretaryError(f"cleanup worktree identity changed: {path}")
+        if record.get("locked") or record.get("prunable"):
+            raise SecretaryError(f"cleanup worktree is locked or prunable: {path}")
+        if not path.is_dir() or path.is_symlink():
+            raise SecretaryError(f"cleanup worktree is missing or unsafe: {path}")
+        if _cleanup_worktree_live_in_registry(project_id, path) or _cleanup_worktree_has_live_process(path):
+            raise SecretaryError(f"cleanup worktree is live or owned by an active session: {path}")
+        if _git(path, "status", "--porcelain=v1", "--untracked-files=all"):
+            raise SecretaryError(f"cleanup worktree is dirty: {path}")
+        actions.append({"kind": "worktree-remove", "path": str(path), "branch": item["branch"], "oid": item["expectedOid"]})
+
+    for item in normalized["artifacts"]:
+        path = Path(item["path"])
+        _cleanup_artifact_allowed(path, item["kind"], repo, policy_root)
+        if not path.is_file() or path.is_symlink():
+            raise SecretaryError(f"cleanup artifact is missing or not a regular file: {path}")
+        digest = _cleanup_artifact_digest(path)
+        if digest != item["expectedSha256"]:
+            raise SecretaryError(f"cleanup artifact changed: {path}")
+        actions.append({"kind": "artifact-delete", "path": str(path), "sha256": digest})
+
+    plan_hash = _cleanup_plan_hash(normalized)
+    return {"plan": normalized, "planHash": plan_hash, "actions": actions,
+            "counts": {"renames": len(normalized["renames"]), "deletions": len(normalized["deletions"]),
+                       "worktrees": len(normalized["worktrees"]), "artifacts": len(normalized["artifacts"])} }
+
+
+def _apply_cleanup_ref_transaction(repo: Path, plan: dict[str, Any]) -> None:
+    updates = plan["renames"] + plan["deletions"]
+    if not updates:
+        return
+    commands = ["start"]
+    for item in plan["renames"]:
+        commands.append(f"create refs/heads/{item['to']} {item['expectedOid']}")
+        commands.append(f"delete refs/heads/{item['from']} {item['expectedOid']}")
+    for item in plan["deletions"]:
+        commands.append(f"delete refs/heads/{item['branch']} {item['expectedOid']}")
+    commands.extend(["prepare", "commit", ""])
+    result = subprocess.run(["git", "update-ref", "--stdin"], cwd=str(repo), input="\n".join(commands),
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=_env())
+    if result.returncode:
+        raise SecretaryError("Git cleanup ref transaction failed")
+
+
+def _apply_cleanup(repo: Path, inspected: dict[str, Any]) -> dict[str, Any]:
+    plan = inspected["plan"]
+    for item in plan["worktrees"]:
+        worktree = Path(item["path"])
+        if _cleanup_worktree_has_live_process(worktree):
+            raise SecretaryError(f"cleanup worktree became live during apply: {worktree}")
+        if _git(worktree, "status", "--porcelain=v1", "--untracked-files=all"):
+            raise SecretaryError(f"cleanup worktree became dirty during apply: {worktree}")
+        result = run(["git", "worktree", "remove", item["path"]], repo, check=False)
+        if result.returncode:
+            raise SecretaryError(f"could not remove owned cleanup worktree: {item['path']}")
+    _apply_cleanup_ref_transaction(repo, plan)
+    for item in plan["artifacts"]:
+        path = Path(item["path"])
+        if _cleanup_artifact_digest(path) != item["expectedSha256"]:
+            raise SecretaryError(f"cleanup artifact changed during apply: {path}")
+        try:
+            path.unlink()
+        except OSError as error:
+            raise SecretaryError(f"could not remove cleanup artifact: {path}") from error
+    return {"applied": True, "planHash": inspected["planHash"],
+            "renamedBranches": [item["from"] + " -> " + item["to"] for item in plan["renames"]],
+            "deletedBranches": [item["branch"] for item in plan["deletions"]],
+            "removedWorktrees": [item["path"] for item in plan["worktrees"]],
+            "removedArtifacts": [item["path"] for item in plan["artifacts"]]}
+
+
+def git_cleanup(project_id: str, operation: str, plan: dict[str, Any],
+                plan_hash: str | None = None) -> dict[str, Any]:
+    if operation not in {"plan", "apply"}:
+        raise SecretaryError("cleanup operation must be plan or apply")
+    info = _require_secretary(project_id)
+    repo = _canonical_repo(info["primaryRepository"])
+    _, common, object_format = project_identity(repo)
+    _policy, trusted_live, policy_root = _load_policy_and_classify(repo)
+    if not trusted_live:
+        raise SecretaryError("Git cleanup requires a trusted-live repository")
+    inspected = _inspect_cleanup_plan(project_id, repo, plan, object_format, policy_root)
+    if operation == "plan":
+        return {"projectId": project_id, "operation": "plan", **inspected}
+    if not isinstance(plan_hash, str) or not hmac.compare_digest(plan_hash, inspected["planHash"]):
+        raise SecretaryError("cleanup plan hash does not match")
+    with _git_write_lock(common):
+        # Re-read all OIDs, worktree state, and artifact digests while holding
+        # the common-dir lock so an approved plan cannot silently drift.
+        current = _inspect_cleanup_plan(project_id, repo, plan, object_format, policy_root)
+        if not hmac.compare_digest(current["planHash"], plan_hash):
+            raise SecretaryError("cleanup plan changed before apply")
+        return {"projectId": project_id, "operation": "apply", **_apply_cleanup(repo, current)}
 
 
 @contextlib.contextmanager
@@ -1741,6 +2311,12 @@ def _cli() -> int:
     sub.add_parser("status")
     p = sub.add_parser("git-read"); p.add_argument("--project-id", required=True)
     p.add_argument("--operation", required=True); p.add_argument("git_args", nargs=argparse.REMAINDER)
+    p = sub.add_parser("git-write"); p.add_argument("--project-id", required=True)
+    p.add_argument("--operation", required=True); p.add_argument("--message")
+    p.add_argument("--path", dest="paths", action="append", default=[])
+    p = sub.add_parser("git-cleanup"); p.add_argument("--project-id", required=True)
+    p.add_argument("--operation", choices=("plan", "apply"), required=True)
+    p.add_argument("--plan-json", required=True); p.add_argument("--plan-hash")
     p = sub.add_parser("brief-create"); p.add_argument("title"); p.add_argument("text")
     p = sub.add_parser("brief-read"); p.add_argument("brief_id")
     sub.add_parser("brief-list")
@@ -1790,6 +2366,14 @@ def _cli() -> int:
             result = status(args.repository, args.capability)
         elif args.command == "git-read":
             result = git_read(args.project_id, args.operation, args.git_args)
+        elif args.command == "git-write":
+            result = git_write(args.project_id, args.operation, args.message, args.paths)
+        elif args.command == "git-cleanup":
+            try:
+                cleanup_plan = json.loads(args.plan_json)
+            except (TypeError, json.JSONDecodeError) as error:
+                raise SecretaryError("cleanup plan JSON is malformed") from error
+            result = git_cleanup(args.project_id, args.operation, cleanup_plan, args.plan_hash)
         elif args.command == "brief-create":
             result = create_brief(args.repository, args.capability, args.title, args.text)
         elif args.command == "brief-read":

@@ -618,7 +618,7 @@
 -  task: "Implement the approved approach: ..."
 -})
 -```
-+- **Configured nesting depth is 1.** Children cannot launch descendants.
++- **Configured nesting depth is 2.** Ordinary children cannot launch descendants; explicit workers may use constrained read-only fanout.
 +- **Forked runs require a persisted parent session.** Use `context: "fresh"` when no session file exists.
 +- **No mandatory Fable/clarify/planner/review-loop ceremony.** Use what fits the task.
 +- **No mandatory clarification.** Use `interview` when genuine ambiguity exists; skip when the task is clear.

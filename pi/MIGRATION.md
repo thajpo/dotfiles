@@ -14,7 +14,7 @@
   activation and Docker boundary tests therefore remain an explicit `pi-host`
   step.
 - Final global `AGENTS.md` SHA-256:
-  `74c99dc419b64a3976f77320e5ceb335c37340b3e45a71d7ce09125ed7c26d5b`.
+  `c9fc282049e8a7f9f88d07fad9f73a979531b02edd3abc7b7966c27dbd1cac5b`.
   Installation links `~/.pi/agent/AGENTS.md` to
   `$HOME/dotfiles/agent/AGENTS.md`; project-specific context files are not
   changed.
@@ -26,7 +26,7 @@ Observed before modification:
 - Checked-out migration branch: `pi-sandbox/ac954fb84584fc29`, clean.
 - Host source branch represented in the clone: `chore/dotfiles-octo-sync` at
   `549e57c`.
-- Pi version pin: `0.82.1`.
+- Pi version pin: `0.83.0`.
 - Container Node/npm: `v22.23.1` / `10.9.8`; Bun was unavailable.
 - Package pins: `pi-subagents@0.35.1`, `@kjrjay/pi-sandbox@0.2.0`,
   `pi-btw@0.4.1`, and the exact versions in `npm/package-lock.json`.
@@ -38,9 +38,13 @@ Observed before modification:
 
 ### KEEP
 
-- Pi and all npm version pins and lockfile integrity values.
+- Pi and all npm version pins and lockfile integrity values, including
+  `pi-image-tools@1.4.0`.
 - `pi-subagents` as the sole coding-agent orchestrator.
-- Luna/Sol role mapping and child depth/concurrency caps; investigation uses Luna xhigh, workers use Luna max, and review tiers use Luna xhigh/Luna max/Sol high.
+- Flat durable root sessions, an atomic root registry, exact session-file
+  launch, and stable root worktrees. Legacy sessions are copied, never merged
+  or deleted, until an explicit cleanup review.
+- Luna Max for every Pi role, with child depth/concurrency caps.
 - User-scoped child sessions and the no-project-artifact patch.
 - Fail-closed tool routing and disabled host-side acceptance commands.
 - `pi-btw` and its sandbox proxy design.
@@ -70,9 +74,9 @@ Observed before modification:
 
 - The files in this migration are not active merely because they are committed.
 - The hardened Docker image, patched installed npm sources, global workflow
-  symlink, workflow-state extension, scoped child roles, repository policy,
-  launchers, and generated host context require the reviewed installer from
-  explicit `pi-host`.
+  symlink, root-session extension/registry, image package, scoped child roles,
+  repository policy, launchers, and generated host context require the reviewed
+  installer from explicit `pi-host`.
 
 ### UNKNOWN
 
@@ -83,9 +87,11 @@ Observed before modification:
 ## Workflow and context layer
 
 The parent selects FAST, RIP, BUILD, or MAJOR and an independent OFF, LIGHT, or
-DEEP learning level. Subagent execution is synchronous by default; genuinely
-long work opts into async explicitly. Child roles start fresh, do not inherit the parent
-transcript or context files, and receive applicable repository instructions in
+DEEP learning level. Top-level subagent execution is asynchronous by default;
+successful completion notices wake the root model without displaying a child
+transcript. Failures and attention events remain visible, and
+`/subagents-fleet` remains an explicit inspection surface. Child roles start
+fresh, do not inherit the parent transcript or context files, and receive applicable repository instructions in
 their scoped assignment. Forking remains an explicit exception when the full
 persisted parent history is the required source material.
 
@@ -117,6 +123,41 @@ wrong-workspace, wrong-Git, or wrong-identity-resource route fails before tool
 execution. Independent trusted candidates may derive a
 separate container only for a linked worktree below the policy worktree root,
 with the same Git common directory and a harness-created candidate branch.
+
+## Root-session migration and acceptance
+
+Before the first restart, inspect the legacy inventory without changing Git or
+session files:
+
+```bash
+pi-root-session migrate --dry-run
+```
+
+Review every proposed repository/worktree and duplicate group. Apply the copy
+only after the mapping is correct:
+
+```bash
+pi-root-session migrate
+pi-root-session list
+```
+
+The migration forks each selected history into `sessions/root/<id>.jsonl`,
+rewrites only its session header to the stable worktree, records the source in
+`parentSession`, and places ambiguous duplicates below `sessions/root/archive`.
+It never removes a legacy JSONL or Git worktree. After live resume acceptance,
+review a dry cleanup and apply it only deliberately:
+
+```bash
+pi-root-session cleanup --repository /path/to/repository
+pi-root-session cleanup --repository /path/to/repository --apply
+```
+
+Acceptance evidence must show: restarting a managed root opens the same exact
+JSONL and worktree; `/resume` lists only direct root files; two direct roots have
+different registry IDs; a depth-1 investigator runs under `sessions/subagent`;
+success notices have `display: false` with `triggerTurn: true`; failed notices
+remain visible; a pasted image is a native session content block and survives
+resume/fork; and archiving does not leave a new prunable worktree.
 
 ## Activation and rollback
 

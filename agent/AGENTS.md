@@ -31,17 +31,15 @@ Default routing:
   `openai-codex/gpt-5.6-luna:max`
 
 - Parent decision authority:
-  `openai-codex/gpt-5.6-luna:xhigh`
+  `openai-codex/gpt-5.6-luna:max`
 
 - Secretary and read-only investigation/context collection:
-  `openai-codex/gpt-5.6-luna:xhigh`
+  `openai-codex/gpt-5.6-luna:max`
 
-- Reviewer tiers by circumstance:
-  light `openai-codex/gpt-5.6-luna:xhigh`, medium `openai-codex/gpt-5.6-luna:max`,
-  heavy/high-risk `openai-codex/gpt-5.6-sol:high`
+- Reviewers and all other roles:
+  `openai-codex/gpt-5.6-luna:max`
 
-Use Sol because consequential uncertainty remains, not merely because the task
-is large.
+Use Luna Max consistently for every Pi role.
 
 Use pi-subagents as the coding-agent orchestrator. Keep delegation lightweight:
 the parent chooses the number and shape of investigators from the task rather

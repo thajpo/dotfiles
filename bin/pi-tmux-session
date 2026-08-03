@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# Stable Pi entry point for tmux and tmux-resurrect.  The task route is still
-# created afresh for each process, but the conversation store is keyed by the
-# launcher session ID rather than by a transient protected worktree path.
+# Stable Pi entry point for tmux and tmux-resurrect. The launcher ID is only a
+# lookup key; bin/pi resolves it to the exact durable root JSONL and worktree.
 set -euo pipefail
 
 self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-agent_dir=${PI_CODING_AGENT_DIR:-"$HOME/.pi/agent"}
 session_id=""
 for ((index=1; index <= $#; index++)); do
   case "${!index}" in
@@ -25,12 +23,7 @@ done
   exit 2
 }
 
-session_dir="$agent_dir/sessions/tmux/$session_id"
-mkdir -p -m 700 "$session_dir"
-chmod 700 "$session_dir"
 # Keep this wrapper as a child process so tmux-resurrect captures the exact
-# --session-id command line. Do not exec through it: replacing this process
-# with `pi` makes resurrect save only the rewritten `pi` argv. The old direct
-# form was `"$self_dir/pi" "$@"`; the private session directory is now added
-# explicitly so a restored worktree can find the same conversation.
-"$self_dir/pi" --session-dir "$session_dir" "$@"
+# --session-id lookup command. bin/pi performs the durable exact-path lookup
+# before creating the task route; no cwd-derived session directory is allowed.
+"$self_dir/pi" "$@"

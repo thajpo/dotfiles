@@ -138,9 +138,9 @@ fail() {
 }
 lock_dirs=()
 release_lock_dirs() {
-  local lock_dir
-  for lock_dir in "${lock_dirs[@]}"; do
-    rmdir "$lock_dir" 2>/dev/null || :
+  local index
+  for ((index = ${#lock_dirs[@]} - 1; index >= 0; index--)); do
+    rmdir "${lock_dirs[$index]}" 2>/dev/null || :
   done
 }
 trap release_lock_dirs EXIT
@@ -148,7 +148,7 @@ project_lock_fd=8
 worktree_lock_fd=9
 exec 8>"$project_lock"
 exec 9>"$worktree_lock"
-if command -v flock >/dev/null 2>&1; then
+if [[ ${PI_LAUNCHER_FORCE_DIRECTORY_LOCK:-0} != 1 ]] && command -v flock >/dev/null 2>&1; then
   flock -x "$project_lock_fd"
   flock -x "$worktree_lock_fd"
 else

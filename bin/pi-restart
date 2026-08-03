@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Restart every tmux workspace, then boot the managed Pi personal/secretary setup.
+set -euo pipefail
+
+if (( EUID == 0 )); then
+  printf 'pi-restart: refusing to run as root\n' >&2
+  exit 1
+fi
+command -v tmux >/dev/null 2>&1 || { printf 'pi-restart: tmux is required\n' >&2; exit 127; }
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+pi_start="$HOME/.local/bin/pi-start"
+[[ -x "$pi_start" ]] || pi_start="$self_dir/pi-start"
+[[ -x "$pi_start" ]] || { printf 'pi-restart: pi-start is missing\n' >&2; exit 1; }
+
+# Killing the server also kills the pane containing this command. Preserve the
+# attached terminal and ignore the server's hangup long enough to boot a new
+# server. A detached or non-interactive tmux invocation is refused rather than
+# destroying the server with nowhere to reattach.
+client_tty=""
+if [[ -n "${TMUX:-}" ]]; then
+  client_tty=$(tmux display-message -p '#{client_tty}' 2>/dev/null || true)
+  [[ "$client_tty" == /dev/* && -c "$client_tty" ]] || {
+    printf 'pi-restart: cannot identify the attached terminal; run from an attached tmux client\n' >&2
+    exit 1
+  }
+  trap '' HUP
+fi
+
+printf 'pi-restart: stopping all tmux sessions and starting pi-start all\n' >&2
+# Tell the freshly started tmux server to skip tmux-resurrect/continuum restore.
+# Pi conversations still resume through their stable session IDs; restoring the
+# old pane layout as well would race pi-start and duplicate managed panes.
+export PI_RESTARTING=1
+tmux kill-server >/dev/null 2>&1 || true
+unset TMUX
+trap - HUP
+
+if [[ -n "$client_tty" ]]; then
+  exec "$pi_start" all <"$client_tty" >"$client_tty" 2>&1
+fi
+exec "$pi_start" all

@@ -1,0 +1,22 @@
+--- a/src/extension/index.ts
++++ b/src/extension/index.ts
+@@ -208,6 +208,7 @@
+ 	cleanupOldChainDirs();
+ 
+ 	const config = loadConfig();
++	const completionVisibility = (config as { completionVisibility?: "visible" | "hidden-success" }).completionVisibility;
+ 	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
+ 	const asyncByDefault = config.asyncByDefault === true;
+ 	const tempArtifactsDir = getArtifactsDir(null);
+@@ -472,7 +473,10 @@
+ 			}
+ 		}
+ 	}
+-	disposeSubagentNotify = registerSubagentNotify(pi, state, { batchConfig: config.completionBatch });
++	disposeSubagentNotify = registerSubagentNotify(pi, state, {
++		batchConfig: config.completionBatch,
++		completionVisibility,
++	});
+ 
+ 	const existingVisibleControlNotices = globalStore[controlNoticeSeenStoreKey];
+ 	const visibleControlNotices = existingVisibleControlNotices instanceof Set ? existingVisibleControlNotices as Set<string> : new Set<string>();

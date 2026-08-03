@@ -157,6 +157,156 @@ class SecretaryControlTests(unittest.TestCase):
         }
         self.assertEqual(after, before)
 
+    def test_secretary_git_write_is_capability_bounded_and_redacts_git_diagnostics(self):
+        registered = secretary.register_project(self.source, "git-write-project")
+        project_id = registered["projectId"]
+        with mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": "wrong"}, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "capability"):
+                secretary.git_write(project_id, "push")
+            with self.assertRaisesRegex(secretary.SecretaryError, "capability"):
+                secretary.git_write(project_id, "commit", "message", ["tracked"])
+
+        with mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability}, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "supported"):
+                secretary.git_write(project_id, "force-push")
+            with self.assertRaisesRegex(secretary.SecretaryError, "relative"):
+                secretary.git_write(project_id, "commit", "message", ["../outside"])
+            with self.assertRaisesRegex(secretary.SecretaryError, "relative"):
+                secretary.git_write(project_id, "commit", "message", ["*.py"])
+            with self.assertRaisesRegex(secretary.SecretaryError, "commit arguments"):
+                secretary.git_write(project_id, "push", "not-allowed", [])
+            with self.assertRaisesRegex(secretary.SecretaryError, "origin remote"):
+                secretary.git_write(project_id, "push")
+            head_before = git(self.source, "rev-parse", "HEAD")
+            (self.source / "tracked").write_text("commit-and-push must preflight\n")
+            with self.assertRaisesRegex(secretary.SecretaryError, "origin remote"):
+                secretary.git_write(project_id, "commit-and-push", "must not commit", ["tracked"])
+            self.assertEqual(git(self.source, "rev-parse", "HEAD"), head_before)
+
+            (self.source / "tracked").write_text("secretary commit\n")
+            committed = secretary.git_write(project_id, "commit", "bounded commit", ["tracked"])
+            self.assertEqual(committed["operation"], "commit")
+            self.assertEqual(committed["branch"], "main")
+            self.assertNotIn("remote", committed)
+
+            remote = Path(self.tmp.name) / "origin.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True,
+                           text=True, capture_output=True)
+            git(self.source, "remote", "add", "origin", str(remote))
+            pushed = secretary.git_write(project_id, "push")
+            self.assertEqual(pushed["remote"], "origin")
+            self.assertTrue(pushed["pushed"])
+            rendered = json.dumps(pushed)
+            self.assertNotIn(str(remote), rendered)
+            self.assertNotIn("https://", rendered)
+
+            (self.source / "new-file").write_text("new secretary file\n")
+            added = secretary.git_write(project_id, "commit", "bounded new file", ["new-file"])
+            self.assertEqual(added["operation"], "commit")
+            self.assertIn("new-file", git(self.source, "show", "--format=", "--name-only", "HEAD"))
+
+            (self.source / "tracked").write_text("secretary composite\n")
+            combined = secretary.git_write(project_id, "commit-and-push", "bounded combined", ["tracked"])
+            self.assertEqual(combined["operation"], "commit-and-push")
+            self.assertTrue(combined["pushed"])
+
+        failed = subprocess.CompletedProcess(
+            ["git", "push"], 1, "", "fatal: https://user:secret@example.invalid/repo.git failed")
+        with mock.patch.object(secretary.subprocess, "run", return_value=failed):
+            with self.assertRaisesRegex(secretary.SecretaryError, "exit 1") as error:
+                secretary._git_write_command(self.source, "push", ["git", "push"])
+        self.assertNotIn("user:secret", str(error.exception))
+        self.assertNotIn("example.invalid", str(error.exception))
+
+    def test_secretary_git_write_preserves_index_on_failed_commit(self):
+        registered = secretary.register_project(self.source, "git-write-index-project")
+        with mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability}, clear=False):
+            (self.source / "unrelated").write_text("keep staged\n")
+            git(self.source, "add", "unrelated")
+            before = git(self.source, "diff", "--cached", "--name-status")
+            head_before = git(self.source, "rev-parse", "HEAD")
+            (self.source / "tracked").write_text("failed secretary commit\n")
+            original = secretary._git_write_command
+
+            def fail_commit(repo_path, operation, command, **kwargs):
+                if operation == "commit":
+                    raise secretary.SecretaryError("git commit failed (exit 1)")
+                return original(repo_path, operation, command, **kwargs)
+
+            with mock.patch.object(secretary, "_git_write_command", side_effect=fail_commit):
+                with self.assertRaisesRegex(secretary.SecretaryError, "exit 1"):
+                    secretary.git_write(registered["projectId"], "commit", "will fail", ["tracked"])
+            self.assertEqual(git(self.source, "diff", "--cached", "--name-status"), before)
+            self.assertEqual(git(self.source, "rev-parse", "HEAD"), head_before)
+            committed = secretary.git_write(registered["projectId"], "commit", "bounded after failure", ["tracked"])
+            self.assertEqual(committed["operation"], "commit")
+            self.assertIn("A\tunrelated", git(self.source, "diff", "--cached", "--name-status"))
+            self.assertNotIn("unrelated", git(self.source, "show", "--format=", "--name-only", "HEAD"))
+
+    def test_secretary_git_cleanup_plans_and_applies_exact_owned_resources(self):
+        registered = secretary.register_project(self.source, "cleanup-project")
+        project_id = registered["projectId"]
+        for branch in ("benchmark/38-direct-sol", "benchmark/39-direct-sol", "benchmark/discard", "side-agent/stale"):
+            git(self.source, "branch", branch)
+        side_path = Path(self.tmp.name) / "worktrees" / "side-agent-stale"
+        git(self.source, "worktree", "add", str(side_path), "side-agent/stale")
+
+        agent_dir = self.home / ".pi" / "agent"
+        artifact = agent_dir / "sessions" / "sec-cleanup" / "subagent-artifacts" / "benchmark-meta.json"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("benchmark-only artifact\n")
+        artifact.chmod(0o600)
+        artifact_digest = __import__("hashlib").sha256(artifact.read_bytes()).hexdigest()
+        oid = git(self.source, "rev-parse", "benchmark/38-direct-sol")
+        side_oid = git(self.source, "rev-parse", "side-agent/stale")
+        plan = {
+            "version": 1,
+            "renames": [
+                {"from": "benchmark/38-direct-sol", "to": "feature/rq024-foundation-execution", "expectedOid": oid},
+                {"from": "benchmark/39-direct-sol", "to": "feature/rq024-evidence-index", "expectedOid": oid},
+            ],
+            "deletions": [
+                {"branch": "benchmark/discard", "expectedOid": oid},
+                {"branch": "side-agent/stale", "expectedOid": side_oid},
+            ],
+            "worktrees": [{"path": str(side_path), "branch": "side-agent/stale", "expectedOid": side_oid}],
+            "artifacts": [{"path": str(artifact), "kind": "subagent-artifact", "expectedSha256": artifact_digest}],
+        }
+        source_before = (self.source / "tracked").read_text()
+        with mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability, "PI_CODING_AGENT_DIR": str(agent_dir)}, clear=False):
+            planned = secretary.git_cleanup(project_id, "plan", plan)
+            self.assertEqual(planned["operation"], "plan")
+            self.assertEqual(planned["counts"], {"renames": 2, "deletions": 2, "worktrees": 1, "artifacts": 1})
+            self.assertTrue(side_path.exists())
+            self.assertTrue(artifact.exists())
+            self.assertTrue(subprocess.run(["git", "show-ref", "--verify", "--quiet", "refs/heads/benchmark/discard"], cwd=self.source).returncode == 0)
+
+            applied = secretary.git_cleanup(project_id, "apply", plan, planned["planHash"])
+        self.assertTrue(applied["applied"])
+        self.assertFalse(side_path.exists())
+        self.assertFalse(artifact.exists())
+        self.assertFalse(subprocess.run(["git", "show-ref", "--verify", "--quiet", "refs/heads/benchmark/38-direct-sol"], cwd=self.source).returncode == 0)
+        self.assertFalse(subprocess.run(["git", "show-ref", "--verify", "--quiet", "refs/heads/benchmark/discard"], cwd=self.source).returncode == 0)
+        self.assertEqual(git(self.source, "rev-parse", "feature/rq024-foundation-execution"), oid)
+        self.assertEqual(git(self.source, "rev-parse", "feature/rq024-evidence-index"), oid)
+        self.assertEqual(git(self.source, "status", "--porcelain=v1", "--untracked-files=all"), "")
+        self.assertEqual((self.source / "tracked").read_text(), source_before)
+
+    def test_secretary_git_cleanup_refuses_stale_oids_and_source_artifacts(self):
+        registered = secretary.register_project(self.source, "cleanup-refusal")
+        git(self.source, "branch", "benchmark/stale")
+        with mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability}, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "OID changed"):
+                secretary.git_cleanup(registered["projectId"], "plan", {
+                    "version": 1,
+                    "deletions": [{"branch": "benchmark/stale", "expectedOid": "0" * 40}],
+                })
+            with self.assertRaisesRegex(secretary.SecretaryError, "artifact cannot be inside"):
+                secretary.git_cleanup(registered["projectId"], "plan", {
+                    "version": 1,
+                    "artifacts": [{"path": str(self.source / "tracked"), "kind": "subagent-artifact", "expectedSha256": "0" * 64}],
+                })
+
     def test_concurrent_duplicate_alias_registration_fails_once(self):
         other = repo(Path(self.tmp.name), "other-repository")
         barrier = threading.Barrier(2)

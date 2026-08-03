@@ -16,6 +16,17 @@ printf '%s\n%s\n' \
 
 self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 dotfiles_dir=$(realpath "$self_dir/..")
+agent_dir=${PI_CODING_AGENT_DIR:-"$HOME/.pi/agent"}
+auto_continue_extension="$dotfiles_dir/pi/extensions/auto-continue/index.ts"
+if [[ ! -r "$auto_continue_extension" ]]; then
+  auto_continue_extension="$agent_dir/extensions/auto-continue/index.ts"
+fi
+host_extension_args=()
+if [[ -r "$auto_continue_extension" ]]; then
+  # Host mode still disables extension discovery; this one explicit, inert
+  # lifecycle extension only resumes the same task after compaction.
+  host_extension_args=(-e "$auto_continue_extension")
+fi
 helper="$dotfiles_dir/scripts/pi-workspace.py"
 if [[ ! -f "$helper" ]]; then
   helper="$HOME/.local/share/pi/control/pi-workspace.py"
@@ -56,7 +67,6 @@ while IFS='=' read -r name _; do
 done < <(env)
 
 session_id=$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import secrets; print(secrets.token_hex(8))')
-agent_dir=${PI_CODING_AGENT_DIR:-"$HOME/.pi/agent"}
 session_root="$agent_dir/sessions/host-maintenance"
 mkdir -p -m 700 "$session_root"
 [[ -d "$session_root" && ! -L "$session_root" ]] || {
@@ -86,6 +96,7 @@ chmod 700 "$session_dir"
 "$real_pi" \
   --no-context-files \
   --no-extensions \
+  "${host_extension_args[@]}" \
   --no-skills \
   --no-prompt-templates \
   --session-dir "$session_dir" \

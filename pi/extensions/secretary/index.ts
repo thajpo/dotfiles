@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import fs from "node:fs";
 import path from "node:path";
+import { gitCleanupApplyWasAuthorized, gitWriteWasAuthorized, type GitAuthorization, type GitCleanupAuthorization } from "./authorization.ts";
 
 const PROJECT_ID = /^[0-9a-f]{64}$/;
 const ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/;
@@ -10,8 +11,27 @@ const ROLE = Type.Union([
   Type.Literal("feature"), Type.Literal("research"), Type.Literal("analysis"),
   Type.Literal("review"), Type.Literal("integration"),
 ]);
+const CLEANUP_PLAN = Type.Object({
+  version: Type.Optional(Type.Literal(1)),
+  renames: Type.Optional(Type.Array(Type.Object({
+    from: Type.String({ maxLength: 240 }), to: Type.String({ maxLength: 240 }),
+    expectedOid: Type.String({ minLength: 40, maxLength: 64 }),
+  }), { maxItems: 256 })),
+  deletions: Type.Optional(Type.Array(Type.Object({
+    branch: Type.String({ maxLength: 240 }), expectedOid: Type.String({ minLength: 40, maxLength: 64 }),
+  }), { maxItems: 256 })),
+  worktrees: Type.Optional(Type.Array(Type.Object({
+    path: Type.String({ maxLength: 4096 }), branch: Type.String({ maxLength: 240 }),
+    expectedOid: Type.String({ minLength: 40, maxLength: 64 }),
+  }), { maxItems: 256 })),
+  artifacts: Type.Optional(Type.Array(Type.Object({
+    path: Type.String({ maxLength: 4096 }),
+    kind: Type.Union([Type.Literal("subagent-artifact"), Type.Literal("workflow-artifact")]),
+    expectedSha256: Type.String({ minLength: 64, maxLength: 64 }),
+  }), { maxItems: 256 })),
+});
 
-type Authorization = "record" | "promote" | "open" | "ack" | "review" | "land" | "integrate" | "cleanup";
+type Authorization = "record" | "promote" | "open" | "ack" | "review" | "land" | "integrate" | "cleanup" | GitAuthorization | GitCleanupAuthorization;
 let authorized = new Set<Authorization>();
 
 function requiredEnvironment(): { projectId: string; alias: string; control: string } {
@@ -61,15 +81,21 @@ function updateAuthorization(text: string, source: string): void {
   if (source === "extension") return;
   const value = text.toLowerCase();
   if (recordWasAuthorized(value)) authorized.add("record");
+  for (const action of gitWriteWasAuthorized(value)) authorized.add(action);
+  if (gitCleanupApplyWasAuthorized(value)) authorized.add("git-cleanup");
   if (/\b(spin|promote)\b.*\b(out|session|agent)|\b(new feature|create (an? )?agent|open (an? )?agent)\b/.test(value)) authorized.add("promote");
   if (/\b(open|resume|focus|switch to)\b/.test(value)) authorized.add("open");
   if (/\b(acknowledge|dismiss|clear)\b.*\b(attention|event|notification|this)\b/.test(value)) authorized.add("ack");
   if (/\b(review|reviewer)\b.*\b(create|start|assign|open|this|it)\b|\b(create|start|assign)\b.*\breviewer\b/.test(value)) authorized.add("review");
-  if (/\b(land|fast-forward)\b.*\b(review|candidate|workstream|this|it)\b|\bmerge\b.*\b(reviewed|candidate|workstream|this|it)\b/.test(value)) authorized.add("land");
-  if (/\b(integrat|integration)\w*\b.*\b(agent|workstream|create|start|this|it)\b|\b(create|start)\b.*\bintegration\b/.test(value)) authorized.add("integrate");
+  const landingDenied = /\b(?:don't|do not|never|not|without|avoid|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:land|fast-forward|merge)\b/.test(value);
+  const integrationDenied = /\b(?:don't|do not|never|not|without|avoid|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:integrat|integration)\w*\b/.test(value);
+  if (!landingDenied && /\b(land|fast-forward)\b.*\b(review|candidate|workstream|this|it)\b|\bmerge\b.*\b(reviewed|candidate|workstream|this|it)\b/.test(value)) authorized.add("land");
+  if (!integrationDenied && /\b(integrat|integration)\w*\b.*\b(agent|workstream|create|start|this|it)\b|\b(create|start)\b.*\bintegration\b/.test(value)) authorized.add("integrate");
   if (/\b(clean up|cleanup|remove)\b.*\b(workstream|agent|resources|this|it)\b/.test(value)) authorized.add("cleanup");
   if (/^\s*(yes|yep|do it|go ahead|please do|sounds good)[.!\s]*$/i.test(text)) {
-    authorized.add("record"); authorized.add("promote"); authorized.add("open"); authorized.add("ack"); authorized.add("review"); authorized.add("land"); authorized.add("integrate"); authorized.add("cleanup");
+    // Landing/integration are acceptance decisions, not generic secretary
+    // actions. The user and secretary must name that decision explicitly.
+    authorized.add("record"); authorized.add("promote"); authorized.add("open"); authorized.add("ack"); authorized.add("review"); authorized.add("cleanup");
   }
 }
 
@@ -98,15 +124,15 @@ export default function secretary(pi: ExtensionAPI): void {
       systemPrompt: event.systemPrompt + `\n\nYou are the persistent secretary for project ${alias} (project ID ${projectId}).\n` +
         "Switchboard boundary: inspect project evidence, record bounded ideas, and create/open peer full agents only after the current natural-language user turn explicitly authorizes it. Natural-language requests to log, note, capture, document, save, record, or park guidance count as record authorization; do not require the user to repeat a particular keyword. " +
         "You may use the subagent tool for read-only investigation when parallel or specialized inspection would improve the answer. Choose the number and shape of investigators according to the work rather than following a fixed fanout recipe; use their existing report formats and synthesize the results. Investigation never needs a Git worktree. " +
-        "You are not a coding agent and cannot modify repository files, Git, or run shell commands. A promoted full agent owns implementation, its task_packet, and direct technical discussion. Never fabricate a user turn or relay general agent chat. Use secretary_git for bounded read-only Git inspection; never claim Git is unavailable when that tool can answer.\n\n" +
+        "You are not a coding agent and cannot modify repository files, run shell commands, or perform arbitrary Git operations. A promoted full agent owns implementation, its task_packet, and direct technical discussion. After the current user turn explicitly authorizes commit, push, or commit-and-push, use only secretary_git_write with an explicit message and relative path list for commits; push is limited to origin and the current branch. For Git cleanup, first use secretary_git for inspection, then use secretary_git_cleanup with exact expected OIDs, owned paths, and a dry-run plan; only apply after the current user turn explicitly authorizes applying that cleanup plan. Cleanup never accepts arbitrary Git arguments, remote operations, force deletion, or product-source paths. Never fabricate a user turn or relay general agent chat. Use secretary_git for bounded read-only Git inspection; never claim Git is unavailable when that tool can answer.\n\n" +
         "## Project-status skill\n" + projectStatusSkill() +
-        "\n\nUse only the read allowlist and secretary semantic tools. User affirmation such as 'yes' is sufficient authorization; never ask for a second form or confirmation.",
+        "\n\nUse only the read allowlist and secretary semantic tools. User affirmation such as 'yes' is sufficient for ordinary record/open/review/workstream actions; landing or integration requires the secretary and user to explicitly decide acceptance, and Git writes/cleanup require their own explicit current-turn authorization. Never inherit a generic affirmation for landing or integration.",
     };
   });
 
   const invoke = async (args: string[], signal: AbortSignal) => {
     const { control } = requiredEnvironment();
-    const result = await pi.exec("python3", [control, ...args], { signal, timeout: 120_000 });
+    const result = await pi.exec("python3", [control, ...args], { signal });
     if (result.code !== 0) throw new Error((result.stderr || result.stdout || "secretary operation failed").trim());
     return result.stdout.trim();
   };
@@ -124,6 +150,63 @@ export default function secretary(pi: ExtensionAPI): void {
     async execute(_id, params, signal) {
       const { projectId } = requiredEnvironment();
       const text = await invoke(["git-read", "--project-id", projectId, "--operation", params.operation, "--", ...(params.args ?? [])], signal);
+      return { content: [{ type: "text", text }], details: {} };
+    },
+  });
+
+  // Keep the normal read-only launcher marker. This bounded exception is only
+  // registered in the parent secretary process, never in child investigators.
+  if (process.env.PI_SUBAGENT_CHILD !== "1") {
+    pi.registerTool({
+      name: "secretary_git_write", label: "Write Git",
+      description: "Commit explicit relative paths and/or push the current branch to the existing origin after explicit current-turn commit/push authorization. No arbitrary Git arguments, remotes, refs, force, delete, tags, or URLs are accepted.",
+      parameters: Type.Union([
+        Type.Object({
+          operation: Type.Literal("commit"),
+          message: Type.String({ maxLength: 4096 }),
+          paths: Type.Array(Type.String({ maxLength: 1024 }), { minItems: 1, maxItems: 128 }),
+        }),
+        Type.Object({ operation: Type.Literal("push") }),
+        Type.Object({
+          operation: Type.Literal("commit-and-push"),
+          message: Type.String({ maxLength: 4096 }),
+          paths: Type.Array(Type.String({ maxLength: 1024 }), { minItems: 1, maxItems: 128 }),
+        }),
+      ]),
+      async execute(_id, params, signal) {
+        const operation = params.operation;
+        const authorization: Authorization = operation === "commit"
+          ? "git-commit"
+          : operation === "push"
+            ? "git-push"
+            : "git-commit-and-push";
+        consume(authorization);
+        const { projectId } = requiredEnvironment();
+        const args = ["git-write", "--project-id", projectId, "--operation", operation];
+        if (operation !== "push") {
+          const commitParams = params as { message: string; paths: string[] };
+          args.push(`--message=${commitParams.message}`, ...commitParams.paths.flatMap((value) => ["--path", value]));
+        }
+        const text = await invoke(args, signal);
+        return { content: [{ type: "text", text }], details: {} };
+      },
+    });
+  }
+  pi.registerTool({
+    name: "secretary_git_cleanup", label: "Plan/apply Git cleanup",
+    description: "Inventory or apply an exact, dry-run-verified cleanup plan for owned benchmark/side-agent branches, worktrees under the managed worktree root, and Pi-owned artifact files. Apply requires explicit current-turn cleanup authorization and a matching plan hash. No source paths, arbitrary Git arguments, force deletion, remotes, or pushes are accepted.",
+    parameters: Type.Union([
+      Type.Object({ operation: Type.Literal("plan"), plan: CLEANUP_PLAN }),
+      Type.Object({ operation: Type.Literal("apply"), plan: CLEANUP_PLAN, planHash: Type.String({ minLength: 64, maxLength: 64 }) }),
+    ]),
+    async execute(_id, rawParams, signal) {
+      const params = rawParams as { operation: "plan" | "apply"; plan: Record<string, unknown>; planHash?: string };
+      if (params.operation === "apply") consume("git-cleanup");
+      const { projectId } = requiredEnvironment();
+      const args = ["git-cleanup", "--project-id", projectId, "--operation", params.operation,
+        `--plan-json=${JSON.stringify(params.plan)}`];
+      if (params.operation === "apply") args.push(`--plan-hash=${params.planHash ?? ""}`);
+      const text = await invoke(args, signal);
       return { content: [{ type: "text", text }], details: {} };
     },
   });
@@ -159,7 +242,7 @@ export default function secretary(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "secretary_land_reviewed", label: "Land reviewed commit",
-    description: "Human-origin fast-forward-only landing of an exact current ACCEPT receipt under the target lock.",
+    description: "After the secretary and user jointly decide acceptance, fast-forward-only landing of an exact current ACCEPT receipt under the target lock. A reviewer receipt never authorizes automatic merge.",
     parameters: Type.Object({ requestId: Type.String({ pattern: ID.source }) }),
     async execute(_id, params, signal) {
       consume("land"); const { projectId } = requiredEnvironment();
@@ -169,7 +252,7 @@ export default function secretary(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "secretary_create_integration", label: "Create integration agent",
-    description: "Create a separate full integration agent for a reviewed candidate after explicit user instruction; never merges automatically.",
+    description: "After the secretary and user explicitly decide the reviewed candidate needs integration, create a separate full integration agent; never merges automatically.",
     parameters: Type.Object({ requestId: Type.String({ pattern: ID.source }) }),
     async execute(_id, params, signal) {
       consume("integrate"); const { projectId } = requiredEnvironment();

@@ -47,6 +47,12 @@ else
   }
 fi
 
+# The restart-only environment flag is needed while tmux parses its startup
+# config, but must not leak into later panes or config reloads.
+if [[ ${PI_RESTARTING:-0} == 1 ]]; then
+  tmux set-environment -gu PI_RESTARTING 2>/dev/null || true
+fi
+
 case "$action" in
   personal)
     "$personal" --ensure
@@ -70,13 +76,13 @@ case "$action" in
 esac
 
 if [[ "$action" == host ]]; then
-  host_pane=$(tmux list-panes -t =pi-personal:personal -F '#{pane_id}\t#{@pi_personal_role}' 2>/dev/null | awk -F '\t' '$2 == "pi-host" { print $1; exit }')
+  host_pane=$(tmux list-panes -a -t =pi-personal -F '#{pane_id}\t#{@pi_personal_role}' 2>/dev/null | awk -F '\t' '$2 == "pi-host" { print $1; exit }')
   [[ -n "$host_pane" ]] || { printf 'pi-start: pi-host pane was not found\n' >&2; exit 1; }
   tmux select-pane -t "$host_pane"
 fi
 
 if [[ -n ${TMUX:-} ]]; then
-  exec tmux switch-client -t =pi-personal:personal
+  exec tmux switch-client -t =pi-personal:personal-1
 else
-  exec tmux attach-session -t =pi-personal:personal
+  exec tmux attach-session -t =pi-personal:personal-1
 fi

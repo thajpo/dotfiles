@@ -8,11 +8,17 @@ My terminal setup: tmux + neovim (LazyVim).
 git clone https://github.com/thajpo/dotfiles.git
 cd dotfiles
 ./install.sh
-pi-start all
+pi-root-session migrate --dry-run
+pi-restart
 ```
 
-`pi-start all` boots tmux, the personal workspace, and the secretary grid. If
-`~/.local/bin` is not on `PATH` yet, run `~/.local/bin/pi-start all` instead.
+Review and apply the root-session migration before restarting an existing Pi
+workspace. `pi-image-tools@1.4.0` owns `Ctrl+V` and persists native image
+attachments without sharing host `/tmp` with task containers.
+
+`pi-restart` applies the new generation, boots tmux, and starts the personal
+workspace and secretary grid. If it is not on `PATH` yet, run
+`~/.local/bin/pi-restart` instead.
 
 Machine-specific non-secret settings live in `machines/`. On Apple Silicon
 macOS and Linux x86_64, `install.sh` selects the matching profile and installs
@@ -214,12 +220,14 @@ threshold is `-55 dBFS`. Override calibration with
 - Deterministic trusted-live/isolated repository policy and hardened Docker task containers
 - One shared execution plane for parent, subagents, and pi-btw
 - Explicit unsandboxed `pi-host` maintenance launcher
-- `pi-start` boots tmux from a cold start; `pi --help-custom` (also `pi -help-custom`) documents workspace startup, recovery, and session switching
+- `pi-start` boots tmux from a cold start; `pi-restart` replaces every tmux workspace and reruns `pi-start all`; `pi --help-custom` (also `pi -help-custom`) documents workspace startup, recovery, and session switching
 - `pidev` is the managed Pi development launcher; it records the canonical project directory and uses a stable session store so tmux-resurrect can reopen the same conversation even after a temporary worktree disappears
 - In Pi, `Ctrl-g` enters conversation browse mode: use `j/k`, `Ctrl-u/d`, `gg/G`, `v`, and `y`; press `i`, `q`, or `Esc` to return to the pinned prompt
 - `/fast` enables OpenAI's priority service tier for the current session; use `/fast off` to disable it
-- `pisec` opens the default three secretary projects (`vla-lens`, `csv-agent`, `SleepyDreamyV3`); secretaries may fan out to any useful number of existing read-only investigator agents without creating Git worktrees, while implementation still requires an explicit full workstream; with an odd active count `pisec` gives the first project its own window and puts the remaining projects into two side-by-side panes; use `pisec activate ALIAS ...` or `pisec swap OLD_ALIAS NEW_ALIAS` to change the active set
-- `pi-personal` maintains a separate four-pane session for `mlre-transition`, the financial workbook (`investing/investment-os`), dotfiles, and an explicit `pi-host` session; tmux ensures it on startup and `Ctrl-a p` switches to it
+- `/goal <objective>` uses pi-goal for bounded same-session continuation; the default is ten automatic responses with a three-run no-progress guard
+- Interactive subagent runs return control instead of blocking on `subagent_wait`; completion notifications and status/control actions remain available
+- `pisec` opens the default three secretary projects (`vla-lens`, `csv-agent`, `SleepyDreamyV3`) without restarting live panes; `pisec launch` is the explicit idle-pane repair path; secretaries may fan out to any useful number of existing read-only investigator agents without creating Git worktrees, while implementation still requires an explicit full workstream; with an odd active count `pisec` gives the first project its own window and puts the remaining projects into two side-by-side panes; use `pisec activate ALIAS ...` or `pisec swap OLD_ALIAS NEW_ALIAS` to change the active set
+- `pi-personal` maintains a separate session with at most two side-by-side panes per window for `mlre-transition`, the financial workbook (`investing/investment-os`), dotfiles, and an explicit `pi-host` session; additional roles get additional windows, and `Ctrl-a p` switches to it
 - Installs to `~/.pi/agent` without tracking credentials, sessions, or runtime state
 
 ### Tools installed

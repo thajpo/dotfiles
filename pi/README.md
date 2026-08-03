@@ -2,7 +2,8 @@
 
 This directory contains the reproducible, non-secret Pi harness:
 
-- Pi `0.82.1` and exact npm package pins;
+- Pi `0.83.0` and exact npm package pins;
+- `@narumitw/pi-goal@0.43.0` for bounded, same-session `/goal` continuation;
 - `pi-subagents` as the sole coding-agent orchestrator;
 - deterministic trusted-live and isolated Docker workspaces;
 - `pi-btw` routed through the active task execution plane;
@@ -37,6 +38,22 @@ projects without the lock pair use a task-local environment at
 
 Active `SKILL.md` directories are mounted read-only at their original absolute
 paths so the model can load them without exposing the host home directory.
+
+## Image attachments
+
+`pi-image-tools@1.4.0` is installed as a pinned Pi package. Its clipboard handler
+reads native clipboard bytes in the host Pi process and sends `ImageContent`
+blocks, so images are persisted in the root session JSONL and do not depend on
+host/container `/tmp` sharing. Pi's built-in image-paste binding is disabled in
+`keybindings.json`; `Ctrl+V` is owned by the extension. The package's peer range
+ends at Pi 0.80, so the acceptance suite includes a smoke test against the
+pinned Pi 0.83 APIs; activation uses `--legacy-peer-deps` deliberately and
+keeps the package pin explicit.
+
+Automatic or manual compaction does not end an active task. The global
+`auto-continue` extension queues a hidden follow-up with `triggerTurn: true`
+after the compaction lifecycle unwinds; overflow recovery that Pi already
+retries is not duplicated.
 
 ## Workspace modes
 
@@ -82,9 +99,12 @@ to `pi-sandbox/<session-hash>`; the active host checkout stays unchanged.
 ### Host maintenance
 
 `pi-host` is deliberately unsandboxed, normal-user, fresh-session maintenance.
-It prints a warning and disables context files, extensions, skills, and prompt
-templates, so autonomous subagents are not loaded. It may run commands that use
-interactive `sudo`, but the harness never stores or bypasses authentication.
+It prints a warning and disables context files, extension discovery, skills, and
+prompt templates, so autonomous subagents are not loaded. It may explicitly
+load only the inert `auto-continue` lifecycle extension so a host task resumes
+after compaction; no tools or subagent providers are enabled by that extension.
+It may run commands that use interactive `sudo`, but the harness never stores
+or bypasses authentication.
 
 This mode is dangerous: it can read or exfiltrate user secrets, delete user
 files, change startup configuration, use authenticated CLIs, and modify user
@@ -93,19 +113,79 @@ sudo authentication may temporarily authorize root commands. This risk is
 accepted only when the user explicitly launches `pi-host`; ordinary `pi` never
 falls back to it.
 
+## Durable root sessions
+
+Visible root sessions are flat files in `~/.pi/agent/sessions/root/*.jsonl` and
+are indexed by the atomic user-owned `~/.pi/agent/root-registry.json`. A root
+record contains the immutable conversation ID, profile, exact session file,
+canonical repository identity, stable worktree, branch, and active/archived
+state. `bin/pi`, `pi-tmux-session`, and the secretary launcher pass the exact
+session path; they never use cwd-based `--session-id` lookup. Private child
+sessions use `~/.pi/agent/sessions/subagent/` and are therefore absent from the
+root session selector.
+
+A dirty existing checkout is recorded in place rather than stashed, reset, or
+copied; clean repositories receive a private linked worktree. The migration
+utility is `pi-root-session migrate --dry-run` followed by
+`pi-root-session migrate`; it forks selected legacy histories into stable
+worktrees, records `parentSession`, leaves source files untouched, and archives
+ambiguous duplicates. Run `pi-root-session cleanup` only after reviewing the
+migration; `--apply` is the only path that prunes stale Git metadata or obsolete
+same-HEAD legacy branches.
+
 ## Task topology
 
 One normal task has one route, workspace, branch, and container. Parent,
 scouts, worker, reviewers, and BTW share it. Child context style does not alter
-the execution plane. Children cannot publish or remove the task container.
+the execution plane. Children cannot publish or remove the task container. A
+worker may spawn headless asynchronous investigators, but that nested fanout is
+mechanically restricted to read-only agents with read/search/supervisor tools;
+it cannot create worktrees, write, edit, run shell commands, or spawn again.
+
+`/goal <objective>` uses pi-goal to continue the same session after a settled
+turn until `goal_complete`, `goal_blocked`, pause, no-progress detection, or a
+provider/runtime stop. This harness configures no automatic response-count or
+no-progress turn limit. Use `/goal --tokens <budget> ...` only when an explicit
+provider-token bound is desired.
 Investigator count is selected from the task rather than a fixed fanout recipe;
 report-only parallelism does not create Git worktrees. Secretary investigators
-run in the foreground with only read/search and bounded read-only Git tools;
-they inherit neither shell/write tools nor ordinary extensions.
+run asynchronously with only read/search and bounded read-only Git tools; they
+inherit neither shell/write tools nor ordinary extensions. Interactive
+sessions keep `subagent_wait` non-blocking: completion notifications and
+`subagent({ action: "status" })` remain available without holding the parent
+turn open. Secretary investigations impose no elapsed-time, assistant-turn, or
+tool-call budget; their observed duration and token usage are appended to
+`~/.pi/agent/secretary-stats.jsonl` (or the configured `PI_CODING_AGENT_DIR`).
+Each record omits prompts, task text, paths, and outputs. Run
+`pi-secretary-stats` (or add `--json`) to aggregate duration, tokens, turns,
+tool calls, cost, agent, model, and project totals.
 
 Explicit independent mutable candidates receive linked worktrees, branches, and
 containers. They must commit before comparison; candidate worktrees and branches
 remain until explicitly removed.
+
+### Secretary Git maintenance
+
+See `SECRETARY_WORKFLOW.md` for the complete user-facing topology, tool
+allowlists, worker lifecycle, session boundaries, and failure behavior.
+
+The secretary is not given arbitrary shell or Git arguments. `secretary_git` is
+read-only. `secretary_git_cleanup` accepts a structured plan containing only
+exact `benchmark/*` or `side-agent/*` branch entries, `feature/*` rename
+destinations, worktree paths under the host-managed worktree root, and exact
+Pi-owned artifact files. A plan records expected Git OIDs and artifact hashes.
+The secretary first asks the host controller for a dry-run inventory and receives
+a canonical plan hash; an apply call must repeat the plan and hash after an
+explicit current-turn cleanup authorization. The controller revalidates the
+repository identity, OIDs, branch/worktree ownership, protected branches,
+worktree cleanliness, active-session/process use, and artifact hashes while
+holding the repository common-directory lock. It uses compare-and-swap Git ref
+updates and non-forced removal of clean owned worktrees. `secretary_land_reviewed`
+can materialize a reviewed candidate only after the secretary and user jointly
+decide that it is acceptable and the user explicitly authorizes landing; a
+reviewer receipt never triggers an automatic merge. Cleanup never accepts
+arbitrary Git arguments, source paths, remote operations, pushes, or force
+deletions, and this capability does not execute the requested cleanup by itself.
 
 ## Engineering workflow and context
 
@@ -128,8 +208,11 @@ history rather than a filtered brief.
 Report-only roles omit `write` and `edit`, but their sandboxed `bash` can still
 mutate the worktree. `acceptanceRole: read-only` controls acceptance inference;
 it is not an authority boundary. The parent therefore verifies the actual
-changed paths after children run. Long work opts into async explicitly; the
-default is synchronous so FAST does not acquire an automatic reviewed gate.
+changed paths after children run. Top-level child runs are asynchronous by
+default and successful completion notices are private model messages; use
+`/subagents-fleet` or `subagent({ action: "status", view: "fleet" })` for
+explicit inspection. Failures, pauses, stops, and attention notices remain
+visible.
 
 Context measurement is opt-in:
 
@@ -148,7 +231,9 @@ from expected source hashes, builds the hardened image, safely installs or
 preserves the host policy, and links `pi` plus `pi-host`. Run it only after
 review from explicit host mode. Restarting Pi is the activation boundary.
 
-See `MIGRATION.md` for classification, hashes, limitations, cleanup, and rollback.
+See `MIGRATION.md` for classification, root-session migration, hashes,
+limitations, cleanup, and rollback. Do not restart the managed tmux grid until
+`pi-root-session migrate --dry-run` has been reviewed.
 
 ## Resource cleanup
 

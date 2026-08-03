@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -59,6 +60,8 @@ class SecretaryLauncherTests(unittest.TestCase):
             for path in [
                 agent_dir / "npm/node_modules/@kjrjay/pi-sandbox/index.ts",
                 agent_dir / "extensions/secretary/index.ts",
+                agent_dir / "extensions/root-session/index.ts",
+                agent_dir / "extensions/auto-continue/index.ts",
                 agent_dir / "extensions/secretary-subagents/index.ts",
                 agent_dir / "extensions/secretary-investigator-git/index.ts",
                 agent_dir / "extensions/fast-mode/index.ts",
@@ -90,10 +93,14 @@ pathlib.Path(os.environ['FAKE_PI_OUTPUT']).write_text(json.dumps({
             self.assertEqual(invocation["cwd"], str(repos[0]))
             args = invocation["args"]
             self.assertEqual(args[args.index("--tools") + 1],
-                             "read,grep,find,ls,subagent,secretary_git,secretary_record_idea,secretary_create_workstream,secretary_open_workstream,secretary_list_workstreams,secretary_list_attention,secretary_acknowledge_attention,secretary_create_reviewer,secretary_land_reviewed,secretary_create_integration,secretary_cleanup_workstream")
-            for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--session-id"]:
+                             "read,grep,find,ls,subagent,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea,secretary_create_workstream,secretary_open_workstream,secretary_list_workstreams,secretary_list_attention,secretary_acknowledge_attention,secretary_create_reviewer,secretary_land_reviewed,secretary_create_integration,secretary_cleanup_workstream")
+            for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--session"]:
                 self.assertIn(flag, args)
-            self.assertEqual(args.count("-e"), 3)
+            self.assertEqual(args.count("-e"), 5)
+            self.assertNotIn("--session-id", args)
+            session_file = Path(args[args.index("--session") + 1])
+            self.assertTrue(session_file.is_file())
+            self.assertEqual(session_file.parent.name, "root")
             self.assertNotIn("bash", args[args.index("--tools") + 1])
             self.assertEqual(invocation["secretary"]["PI_SECRETARY_READ_ONLY"], "1")
             self.assertEqual(invocation["secretary"]["PI_SECRETARY_PROJECT_ID"], records[0]["projectId"])
@@ -127,8 +134,17 @@ raise SystemExit(0)
             pgrep = fake_bin / "pgrep"
             pgrep.write_text("#!/bin/sh\nexit 1\n")
             pgrep.chmod(0o755)
-            env.update({"PATH": f"{fake_bin}:/usr/local/bin:/usr/bin:/bin", "FAKE_TMUX_LOG": str(log)})
+            env.update({"PATH": f"{fake_bin}:/usr/local/bin:/usr/bin:/bin", "FAKE_TMUX_LOG": str(log),
+                        "PI_LAUNCHER_FORCE_DIRECTORY_LOCK": "1"})
+            lock_dir = root / "state/pi-secretary/pisec-grid.lock.d"
+            lock_dir.parent.mkdir(parents=True, exist_ok=True)
+            lock_dir.mkdir()
+            release_lock = subprocess.Popen([
+                sys.executable, "-c",
+                f"import time; time.sleep(0.15); __import__('os').rmdir({str(lock_dir)!r})",
+            ])
             result = subprocess.run([str(ROOT / "bin/pisec"), "launch"], cwd=home, env=env, text=True, capture_output=True)
+            release_lock.wait(timeout=2)
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             sends = [call for call in calls if call[0] == "send-keys"]
@@ -145,7 +161,7 @@ raise SystemExit(0)
             self.assertLess(first_layout, first_split)
             self.assertIn(["select-layout", "-t", "@2", "even-horizontal"], calls)
 
-    def test_pisec_relaunch_maps_live_processes_without_titles_or_duplicates(self):
+    def test_pisec_open_preserves_live_processes_without_restarting_them(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             home, _, records, env = setup_registry(root, 2)
@@ -199,15 +215,17 @@ print('\\n'.join(value['children']))
 """)
             pgrep.chmod(0o755)
             env.update({"PATH": f"{fake_bin}:/usr/local/bin:/usr/bin:/bin",
-                        "FAKE_TMUX_LOG": str(log), "FAKE_PROCESSES": str(process_path)})
-            result = subprocess.run([str(ROOT / "bin/pisec"), "launch"], cwd=home,
+                        "FAKE_TMUX_LOG": str(log), "FAKE_PROCESSES": str(process_path),
+                        "TMUX": "/tmp/fake-tmux,1,0"})
+            result = subprocess.run([str(ROOT / "bin/pisec"), "open"], cwd=home,
                                     env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
-            self.assertEqual(len([call for call in calls if call[0] == "send-keys"]), 2)
-            self.assertEqual(len([call for call in calls if call[0] == "split-window"]), 1)
+            self.assertFalse(any(call[0] in {"send-keys", "split-window", "new-window", "kill-window"}
+                                 for call in calls))
+            self.assertIn(["switch-client", "-t", "=pisec:@1"], calls)
             titles = [call[-1] for call in calls if call[0] == "select-pane"]
-            self.assertEqual(titles, [record["alias"] for record in records])
+            self.assertEqual(titles, [])
 
     def test_pisec_rejects_wrong_window_and_extra_arguments(self):
         with tempfile.TemporaryDirectory() as tmp:

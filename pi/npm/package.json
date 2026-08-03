@@ -4,14 +4,16 @@
   "dependencies": {
     "@kjrjay/pi-sandbox": "0.2.0",
     "@narumitw/pi-github-pr": "0.31.0",
+    "@narumitw/pi-goal": "0.43.0",
     "@narumitw/pi-plan-mode": "0.31.0",
     "@narumitw/pi-statusline": "0.31.0",
     "@narumitw/pi-usage": "0.31.0",
     "pi-btw": "0.4.1",
+    "pi-image-tools": "1.4.0",
     "pi-nvim": "0.2.4",
     "pi-subagents": "0.35.1",
-    "typebox": "1.1.38",
     "pi-vim": "0.14.1",
-    "pisesh": "0.1.12"
+    "pisesh": "0.1.12",
+    "typebox": "1.1.38"
   }
 }
