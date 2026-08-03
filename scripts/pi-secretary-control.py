@@ -724,6 +724,23 @@ def _temporary_worktree_index(index_path: Path) -> Iterator[Path]:
             temporary.unlink()
 
 
+def _repair_landed_worktree_index(target: Path, index_path: Path, candidate: str) -> None:
+    with _temporary_worktree_index(index_path) as temporary_index:
+        environment = _env()
+        environment["GIT_INDEX_FILE"] = str(temporary_index)
+        read_tree = subprocess.run(["git", "-C", str(target), "read-tree", "--reset", candidate],
+                                    env=environment, text=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, check=False)
+        if read_tree.returncode:
+            raise SecretaryError("could not reconstruct landed target index")
+        clean = subprocess.run(["git", "-C", str(target), "status", "--porcelain=v1", "--untracked-files=all"],
+                               env=environment, text=True, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, check=False)
+        if clean.returncode or clean.stdout:
+            raise SecretaryError("landed target worktree is not clean at the candidate commit")
+        os.replace(temporary_index, index_path)
+
+
 def git_write(project_id: str, operation: str, message: str | None = None,
               paths: list[str] | None = None) -> dict[str, Any]:
     """Commit and/or push only the registered repository's current branch."""
@@ -1266,6 +1283,10 @@ def _inspect_cleanup_recovery(project_id: str, repo: Path, original_plan: dict[s
     completed_artifacts = set(recovery["completedArtifacts"])
     pending_artifacts = set(recovery["pendingArtifacts"])
     quarantine_artifacts = recovery["quarantineArtifacts"]
+    registered_worktree_paths = {record["path"] for record in _cleanup_worktree_records(repo)}
+    for pending in pending_worktrees:
+        if not Path(pending).exists() and pending in registered_worktree_paths:
+            raise SecretaryError(f"cleanup recovery retains stale Git worktree metadata: {pending}")
     owned_quarantines: set[str] = set()
     for artifact_path in pending_artifacts:
         quarantine = _artifact_quarantine_path(Path(artifact_path), recovery["planHash"])
@@ -1279,10 +1300,7 @@ def _inspect_cleanup_recovery(project_id: str, repo: Path, original_plan: dict[s
                                if item["path"] not in completed_worktrees and
                                not (item["path"] in pending_worktrees and not Path(item["path"]).exists())],
                  "artifacts": [item for item in normalized["artifacts"]
-                               if item["path"] not in completed_artifacts and
-                               not (item["path"] in pending_artifacts and
-                                    not Path(item["path"]).exists() and
-                                    item["path"] not in owned_quarantines)]}
+                               if item["path"] not in completed_artifacts]}
     ref_and_worktree_plan = {"version": 1, "renames": remaining["renames"],
                              "deletions": remaining["deletions"],
                              "worktrees": remaining["worktrees"], "artifacts": []}
@@ -1319,19 +1337,15 @@ def _apply_cleanup(repo: Path, inspected: dict[str, Any], recovery_path: Path,
     completed_artifacts: list[str] = list(recovery["completedArtifacts"] if recovery else [])
     pending_artifacts: list[str] = list(recovery["pendingArtifacts"] if recovery else [])
     quarantine_artifacts: dict[str, str] = dict(recovery["quarantineArtifacts"] if recovery else {})
-    recovered_pending_artifacts = set(pending_artifacts)
     refs_applied = bool(recovery and recovery["refsApplied"])
     refs_pending = bool(recovery and recovery["refsPending"])
+    registered_worktree_paths = {record["path"] for record in _cleanup_worktree_records(repo)}
     for pending in list(pending_worktrees):
         if pending not in completed_worktrees and not Path(pending).exists():
+            if pending in registered_worktree_paths:
+                raise SecretaryError(f"cleanup recovery retains stale Git worktree metadata: {pending}")
             completed_worktrees.append(pending)
             pending_worktrees.remove(pending)
-    for pending in list(pending_artifacts):
-        pending_path = Path(pending)
-        if (pending not in completed_artifacts and not pending_path.exists() and
-                not _artifact_quarantine_path(pending_path, inspected["planHash"]).exists()):
-            completed_artifacts.append(pending)
-            pending_artifacts.remove(pending)
     _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
                             plan_hash=inspected["planHash"], phase="worktrees",
                             completed_worktrees=completed_worktrees,
@@ -2490,6 +2504,9 @@ def land_reviewed(project_id: str, request_id: str) -> dict[str, Any]:
             with _git_worktree_index_lock(target) as target_index:
                 actual = _git(repo, "rev-parse", f"{target_ref}^{{commit}}").lower()
                 if actual == candidate:
+                    if _git(target, "branch", "--show-current") != target_ref.removeprefix("refs/heads/"):
+                        raise SecretaryError("target worktree branch changed")
+                    _repair_landed_worktree_index(target, target_index, candidate)
                     return _record_landing(project, project_id, workstream["workstreamId"], request_id,
                                            receipt["receiptId"], target_ref, expected, candidate)
                 if actual != expected:
