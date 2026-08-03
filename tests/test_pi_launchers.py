@@ -36,20 +36,23 @@ def setup_home(root: Path):
         "worktreeRoot": str(home / ".local/share/pi/worktrees"),
     }))
     policy.chmod(0o600)
-    fake_dir = home / ".local/share/pi/bin"
-    fake_dir.mkdir(parents=True)
-    fake = fake_dir / "pi"
+    package = home / ".local/share/pi/core/node_modules/@earendil-works/pi-coding-agent"
+    (package / "dist").mkdir(parents=True)
+    (package.parent.parent / ".bin").mkdir(parents=True)
+    (package / "package.json").write_text('{"name":"@earendil-works/pi-coding-agent","version":"0.83.0"}\n')
+    fake = package / "dist/cli.js"
     fake.write_text("""#!/usr/bin/env python3
 import json, os, pathlib, sys
 out = pathlib.Path(os.environ['FAKE_PI_OUTPUT'])
 out.write_text(json.dumps({'args': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k:v for k,v in os.environ.items() if k.startswith('PI_TASK_') or k == 'PI_SUBAGENTS_WORKTREE_DIR'}}))
 """)
     fake.chmod(0o755)
+    (package.parent.parent / ".bin/pi").symlink_to(fake)
     output = root / "fake-output.json"
     env = os.environ.copy()
     env.update({
         "HOME": str(home),
-        "PATH": f"{ROOT / 'bin'}:{repo}:{fake_dir}:/usr/local/bin:/usr/bin:/bin",
+        "PATH": f"{ROOT / 'bin'}:{repo}:/usr/local/bin:/usr/bin:/bin",
         "FAKE_PI_OUTPUT": str(output),
     })
     return home, repo, output, env

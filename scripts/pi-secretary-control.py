@@ -468,6 +468,32 @@ def _workstream_cleanup_lock(project: Path) -> Iterator[None]:
         os.close(fd)
 
 
+@contextlib.contextmanager
+def _worktree_exclusive_lease(repo: Path, workspace: Path) -> Iterator[None]:
+    """Exclude managed Pi launches while the worktree is being removed."""
+    common = _git_path(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    workspace = workspace.resolve(strict=False)
+    lease_root = _state_root() / "worktree-leases"
+    _ensure_dir(lease_root)
+    key = hashlib.sha256(f"{common}\0{workspace}".encode()).hexdigest()
+    path = lease_root / f"{key}.lock"
+    if path.exists() or path.is_symlink():
+        _safe_lstat(path, directory=False)
+    try:
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as error:
+        raise SecretaryError("cleanup cannot establish the worktree lease") from error
+    try:
+        os.fchmod(fd, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise SecretaryError("cleanup refuses a worktree with an active Pi lease") from error
+        yield
+    finally:
+        os.close(fd)
+
+
 # --- Project context (revalidates identity, capability, policy) ---
 
 def _validate_project_record(path: Path, project_id: str, common: Path,
@@ -1230,27 +1256,10 @@ def _cleanup_worktree_has_live_process(path: Path) -> bool:
         return True
     proc = Path("/proc")
     if not proc.is_dir():
-        try:
-            result = subprocess.run(["lsof", "-nP", "-a", "-d", "cwd", "-F", "n"],
-                                    env=_env(), text=True, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, check=False)
-        except FileNotFoundError as error:
-            raise SecretaryError("cleanup cannot prove process absence on this platform") from error
-        if result.returncode not in {0, 1} or result.stderr.strip():
-            raise SecretaryError("cleanup cannot prove process absence on this platform")
-        for line in result.stdout.splitlines():
-            if not line.startswith("n"):
-                continue
-            raw_cwd = line[1:]
-            if raw_cwd.endswith(" (deleted)"):
-                raw_cwd = raw_cwd[:-10]
-            try:
-                cwd = Path(raw_cwd).resolve(strict=False)
-            except OSError as error:
-                raise SecretaryError("cleanup received an unreadable process cwd") from error
-            if cwd == path or within(path, cwd):
-                return True
-        return False
+        # lsof output is not an authoritative all-UID process inventory on
+        # macOS or restricted hosts. Refuse destructive worktree removal
+        # rather than interpreting incomplete visibility as process absence.
+        raise SecretaryError("cleanup cannot prove process absence without authoritative process inventory")
     try:
         entries = list(proc.iterdir())
     except OSError as error:
@@ -3086,6 +3095,14 @@ def _worktree_quarantine_path(workspace: Path, label: str) -> Path:
 def _remove_worktree_with_process_guard(repo: Path, workspace: Path, label: str,
                                         on_quarantine: Any, *,
                                         on_quarantine_state: Any | None = None) -> None:
+    with _worktree_exclusive_lease(repo, workspace):
+        _remove_worktree_with_process_guard_unlocked(
+            repo, workspace, label, on_quarantine, on_quarantine_state=on_quarantine_state)
+
+
+def _remove_worktree_with_process_guard_unlocked(repo: Path, workspace: Path, label: str,
+                                                on_quarantine: Any, *,
+                                                on_quarantine_state: Any | None = None) -> None:
     if _cleanup_worktree_has_live_process(workspace):
         raise SecretaryError(f"cleanup refuses a live {label} process")
     quarantine = _worktree_quarantine_path(workspace, label)
@@ -3124,6 +3141,15 @@ def _remove_worktree_with_process_guard(repo: Path, workspace: Path, label: str,
 
 def _resume_quarantined_worktree(repo: Path, quarantine: Path, policy_root: Path,
                                   expected: dict[str, Any]) -> bool:
+    original_raw = expected.get("originalPath") if isinstance(expected, dict) else None
+    if not isinstance(original_raw, str) or not Path(original_raw).is_absolute():
+        raise SecretaryError("cleanup recovery lacks a bound original worktree")
+    with _worktree_exclusive_lease(repo, Path(original_raw)):
+        return _resume_quarantined_worktree_unlocked(repo, quarantine, policy_root, expected)
+
+
+def _resume_quarantined_worktree_unlocked(repo: Path, quarantine: Path, policy_root: Path,
+                                          expected: dict[str, Any]) -> bool:
     required = {"kind", "originalPath", "workstreamId", "requestId", "branch", "expectedOid",
                 "tmuxSession", "tmuxWindow", "tmuxSocket", "sessionId", "state"}
     if set(expected) != required or expected["kind"] not in {"candidate", "review"} or \

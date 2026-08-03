@@ -36,9 +36,45 @@ for argument in "$@"; do
 done
 
 real_pi=$($helper resolve-pi --self "$self_path" --cwd "$PWD")
+
+# Hold a shared worktree lease for the entire Pi process. Secretary cleanup
+# takes the matching exclusive lease before its final liveness check and Git
+# removal, so a managed launch cannot acquire the cwd in that interval.
+exec_pinned_pi() {
+  local workspace common state_root lease_dir lease_key lease_path
+  workspace=$(pwd -P)
+  common=$(git -C "$workspace" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  if [[ -z "$common" ]]; then
+    exec "$@"
+  fi
+  common=$(realpath "$common")
+  state_root=${XDG_STATE_HOME:-$HOME/.local/state}
+  [[ "$state_root" == /* ]] || { printf 'pi: XDG_STATE_HOME must be absolute\n' >&2; exit 1; }
+  lease_dir="$state_root/pi/worktree-leases"
+  mkdir -p "$lease_dir"
+  chmod 700 "$state_root" "$state_root/pi" "$lease_dir"
+  if command -v sha256sum >/dev/null 2>&1; then
+    lease_key=$(printf '%s\0%s' "$common" "$workspace" | sha256sum | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    lease_key=$(printf '%s\0%s' "$common" "$workspace" | shasum -a 256 | awk '{print $1}')
+  else
+    printf 'pi: no SHA-256 utility found for worktree lease\n' >&2
+    exit 1
+  fi
+  lease_path="$lease_dir/$lease_key.lock"
+  python3 - "$lease_path" "$@" <<'PY'
+import fcntl
+import os
+import sys
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+os.fchmod(fd, 0o600)
+fcntl.flock(fd, fcntl.LOCK_SH)
+os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
+PY
+}
 case "${1:-}" in
   -h|--help|-v|--version)
-    exec "$real_pi" "$@"
+    exec_pinned_pi "$real_pi" "$@"
     ;;
 esac
 root_helper="$dotfiles_dir/scripts/pi-root-session.py"
@@ -194,4 +230,4 @@ if [[ "$PI_TASK_POLICY_VALID" != "True" && "$PI_TASK_POLICY_VALID" != "true" ]];
   printf 'Pi repository policy was unavailable or invalid; fail-closed isolated mode selected.\n' >&2
 fi
 cd "$PI_TASK_WORKTREE"
-exec "$real_pi" "${root_args[@]}"
+exec_pinned_pi "$real_pi" "${root_args[@]}"

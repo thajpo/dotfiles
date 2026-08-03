@@ -349,36 +349,23 @@ def safe_command_path(name: str, *, exclude: list[pathlib.Path] | None = None) -
 
 
 def resolve_pi(self_path: pathlib.Path, cwd: pathlib.Path) -> pathlib.Path:
+    # Ordinary and reviewer launches must use the installed, version-attested
+    # Pi core. Never fall back to PATH, /usr/bin, a repository checkout, or a
+    # user-provided executable: installer provenance is part of the runtime
+    # security boundary, not merely a control-plane resource check.
     resolved_self = self_path.resolve(strict=True)
-    repo_result = run(["git", "rev-parse", "--show-toplevel"], cwd=cwd.resolve(strict=True), check=False)
-    excluded = [pathlib.Path(repo_result.stdout.strip()).resolve(strict=True)] if repo_result.returncode == 0 else []
-    core_bin = pathlib.Path.home() / ".local/share/pi/core/node_modules/.bin"
-    original = os.environ.get("PATH", "")
-    os.environ["PATH"] = f"{core_bin}{os.pathsep}{original}"
+    candidate_path = DEFAULT_PI_CORE_EXECUTABLE.expanduser()
     try:
-        candidate = safe_command_path("pi", exclude=excluded)
-    finally:
-        os.environ["PATH"] = original
-    if not candidate or candidate == resolved_self:
-        # Continue searching after excluding the wrapper itself.
-        original = os.environ.get("PATH", "")
-        parts = []
-        for entry in original.split(os.pathsep):
-            if not entry or not pathlib.Path(entry).is_absolute():
-                continue
-            try:
-                if (pathlib.Path(entry) / "pi").resolve(strict=False) == resolved_self:
-                    continue
-            except OSError:
-                continue
-            parts.append(entry)
-        os.environ["PATH"] = os.pathsep.join(parts)
-        try:
-            candidate = safe_command_path("pi", exclude=excluded)
-        finally:
-            os.environ["PATH"] = original
-    if not candidate:
-        raise WorkspaceError("no trusted underlying Pi executable found in host-owned installation paths")
+        candidate = candidate_path.resolve(strict=True)
+        info = candidate.stat()
+    except OSError as error:
+        raise WorkspaceError(f"pinned Pi core executable is unavailable: {candidate_path}") from error
+    if (candidate == resolved_self or not stat.S_ISREG(info.st_mode) or
+            not os.access(candidate, os.X_OK) or info.st_uid not in {0, os.getuid()} or
+            info.st_mode & 0o022):
+        raise WorkspaceError("pinned Pi core executable has unsafe identity or permissions")
+    if pi_core_package_root(candidate) is None:
+        raise WorkspaceError("pinned Pi core package is unavailable or has the wrong version")
     return candidate
 
 

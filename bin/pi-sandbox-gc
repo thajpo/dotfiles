@@ -5,9 +5,22 @@ if (( EUID == 0 )); then
   printf 'pi-sandbox-gc: refusing to run as root\n' >&2
   exit 1
 fi
+# GC is destructive host control-plane code. Never substitute a helper from
+# the current repository: an untrusted checkout must not choose what --apply
+# executes. Installation is the provenance boundary.
 helper="$HOME/.local/share/pi/control/pi-sandbox-gc.py"
-if [[ -x "$PWD/scripts/pi-sandbox-gc.py" ]]; then
-  helper="$PWD/scripts/pi-sandbox-gc.py"
-fi
-[[ -x "$helper" ]] || { printf 'pi-sandbox-gc: helper is missing: %s\n' "$helper" >&2; exit 1; }
+[[ -f "$helper" && ! -L "$helper" && -x "$helper" ]] || {
+  printf 'pi-sandbox-gc: installed helper is missing or unsafe: %s\n' "$helper" >&2
+  exit 1
+}
+helper_uid=$(stat -c '%u' "$helper" 2>/dev/null || stat -f '%u' "$helper" 2>/dev/null || true)
+helper_mode=$(stat -c '%a' "$helper" 2>/dev/null || stat -f '%Lp' "$helper" 2>/dev/null || true)
+[[ "$helper_uid" == "$EUID" || "$helper_uid" == 0 ]] || {
+  printf 'pi-sandbox-gc: installed helper has an unexpected owner\n' >&2
+  exit 1
+}
+[[ "$helper_mode" =~ ^[0-7]+$ && $((8#$helper_mode & 022)) -eq 0 ]] || {
+  printf 'pi-sandbox-gc: installed helper is writable by group or other\n' >&2
+  exit 1
+}
 exec python3 "$helper" "$@"
