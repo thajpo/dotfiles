@@ -1791,9 +1791,11 @@ def _find_orphan_review_receipt(project: Path, request: dict[str, Any]) -> dict[
 
 def _validate_review_request(path: Path, project_id: str) -> dict[str, Any]:
     fields = {"schemaVersion", "requestId", "projectId", "workstreamId", "candidateOid",
-              "candidateTree", "baseOid", "requestedAt", "reviewerSessionId", "reviewWorkspace", "reviewerTmuxSocket", "receiptId"}
-    value = _read_json(path, fields, required=fields - {"reviewerTmuxSocket"})
+              "candidateTree", "baseOid", "requestedAt", "reviewerSessionId", "reviewWorkspace",
+              "reviewerTmuxSocket", "launchState", "receiptId"}
+    value = _read_json(path, fields, required=fields - {"reviewerTmuxSocket", "launchState"})
     value.setdefault("reviewerTmuxSocket", None)
+    value.setdefault("launchState", "pending")
     if value.get("schemaVersion") != 1 or value.get("projectId") != project_id or value.get("requestId") != path.stem:
         raise SecretaryError("malformed review request")
     _id(value.get("workstreamId"), "workstream id")
@@ -1806,6 +1808,8 @@ def _validate_review_request(path: Path, project_id: str) -> dict[str, Any]:
     if value.get("reviewWorkspace") is not None and not Path(str(value["reviewWorkspace"])).is_absolute():
         raise SecretaryError("malformed review request")
     if value.get("reviewerTmuxSocket") is not None and (not isinstance(value["reviewerTmuxSocket"], str) or not value["reviewerTmuxSocket"].startswith("/")):
+        raise SecretaryError("malformed review request")
+    if value.get("launchState") not in {"pending", "launched"}:
         raise SecretaryError("malformed review request")
     if value.get("receiptId") is not None:
         _id(value["receiptId"], "review receipt id")
@@ -1855,7 +1859,7 @@ def _create_review_request(project_id: str, workstream_id: str, record: dict[str
     value = {"schemaVersion": 1, "requestId": request_id, "projectId": project_id,
              "workstreamId": workstream_id, "candidateOid": candidate, "candidateTree": tree,
              "baseOid": record["baseOid"], "requestedAt": _utc_now(), "reviewerSessionId": None,
-             "reviewWorkspace": None, "reviewerTmuxSocket": None, "receiptId": None}
+             "reviewWorkspace": None, "reviewerTmuxSocket": None, "launchState": "pending", "receiptId": None}
     _atomic(_review_request_path(project, request_id), json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
     return value
 
@@ -2272,6 +2276,23 @@ def _validate_workstream_record(path: Path, project: Path, repo: Path,
     if not within(policy_root, ws_path) or within(repo, ws_path):
         raise SecretaryError("workstream workspace escapes policy root")
     if allow_missing_workspace and not ws_path.exists():
+        registered = _registered_worktrees(repo)
+        if registered is None or any(path == ws_path for path, _ in registered):
+            raise SecretaryError("missing workstream workspace still has a Git registration")
+        base_exists = run(["git", "cat-file", "-e", f"{record['baseOid']}^{{commit}}"], repo, check=False)
+        if base_exists.returncode:
+            raise SecretaryError("recorded workstream base commit is unavailable")
+        branch_ref = f"refs/heads/{record['branch']}"
+        branch = run(["git", "rev-parse", "--verify", "--quiet", "--end-of-options",
+                      f"{branch_ref}^{{commit}}"], repo, check=False)
+        if branch.returncode == 0:
+            current_oid = branch.stdout.strip().lower()
+            _validate_oid(current_oid, object_format)
+            if not _is_ancestor(repo, oid, current_oid):
+                raise SecretaryError("recorded baseOid is not an ancestor of workstream branch")
+            return {**record, "currentOid": current_oid}
+        if branch.returncode != 1:
+            raise SecretaryError("could not inspect workstream branch")
         return {**record, "currentOid": None}
     # Verify actual worktree: exact canonical repo, common directory and
     # object format, exact branch, base is ancestor of current HEAD.
@@ -2321,7 +2342,8 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
     if not hmac.compare_digest(os.environ.get("PI_SECRETARY_CAPABILITY", ""), info["capability"]):
         raise SecretaryError("secretary capability required")
     project = _record_dir(_state_root(), project_id)
-    event = _validate_event(_event_path(project, event_id), project_id)
+    event_path = _event_path(project, event_id)
+    event = _validate_event(event_path, project_id)
     if event["kind"] != "review-requested" or event["acknowledgedAt"] is not None:
         raise SecretaryError("event is not an open review request")
     try:
@@ -2334,18 +2356,24 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
     if (before["reviewerTmuxSocket"] is not None and reviewer_tmux_socket is not None and
             before["reviewerTmuxSocket"] != reviewer_tmux_socket):
         raise SecretaryError("reviewer belongs to a different tmux server")
-    workstream = None
-    launch_reviewer = False
-    if before["reviewerSessionId"] is None:
-        _, _, workstream = _require_workstream(project_id, before["workstreamId"])
+    _, project, project_record, repo = _project_context(info["primaryRepository"], info["capability"])
     with _project_lock(project):
+        current_event = _validate_event(event_path, project_id)
+        if current_event["kind"] != "review-requested" or current_event["acknowledgedAt"] is not None:
+            raise SecretaryError("event is not an open review request")
+        try:
+            current_request_id = json.loads(current_event["details"])["reviewRequestId"]
+        except (KeyError, TypeError, json.JSONDecodeError) as error:
+            raise SecretaryError("review event is malformed") from error
+        if current_request_id != request_id:
+            raise SecretaryError("review event changed concurrently")
         request = _validate_review_request(request_path, project_id)
+        launch_reviewer = False
         if request["reviewerSessionId"] is None:
-            if workstream is None or workstream["workstreamId"] != request["workstreamId"]:
-                raise SecretaryError("review assignment changed concurrently")
+            workstream = _validate_workstream_record(_workstream_path(project, request["workstreamId"]), project, repo,
+                                                      project_record["objectFormat"], project_record["gitCommonDir"])
             parent = Path(workstream["workspace"]).parent
             workspace = parent / f"review-{request_id}"
-            repo = Path(info["primaryRepository"])
             if workspace.exists() or workspace.is_symlink():
                 if workspace.is_symlink() or not workspace.is_dir():
                     raise SecretaryError("review workspace already exists and is unsafe")
@@ -2362,6 +2390,7 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
             request["reviewerSessionId"] = "rv-" + secrets.token_hex(24)
             request["reviewWorkspace"] = str(workspace.resolve(strict=True))
             request["reviewerTmuxSocket"] = reviewer_tmux_socket
+            request["launchState"] = "pending"
             _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
             launch_reviewer = True
         else:
@@ -2373,21 +2402,37 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
                     raise SecretaryError("reviewer tmux server changed concurrently")
                 if request["reviewerTmuxSocket"] is None:
                     request["reviewerTmuxSocket"] = reviewer_tmux_socket
-                    _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
-    if not launch_reviewer:
+            if request["launchState"] == "launched":
+                _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
+                return request
+            request["launchState"] = "pending"
+            _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
+            launch_reviewer = True
+        if not launch_reviewer:
+            return request
+        environment = _env()
+        for name in ("TMUX", "TERM", "COLORTERM", "PI_CODING_AGENT_DIR"):
+            if os.environ.get(name): environment[name] = os.environ[name]
+        environment.update({"PI_PIDEV_SESSION_ID": request["reviewerSessionId"],
+                            "PI_PIDEV_REVIEW_PROJECT_ID": project_id,
+                            "PI_PIDEV_REVIEW_REQUEST_ID": request_id,
+                            "PI_PIDEV_CONTROL": str(Path(__file__).resolve())})
+        try:
+            result = subprocess.run([str(_pidev_path())], cwd=request["reviewWorkspace"], env=environment,
+                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        except (OSError, SecretaryError) as error:
+            request["launchState"] = "pending"
+            _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
+            if isinstance(error, SecretaryError):
+                raise
+            raise SecretaryError(f"review launch failed: {error}") from error
+        if result.returncode:
+            request["launchState"] = "pending"
+            _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
+            raise SecretaryError(f"review launch failed: {(result.stderr or result.stdout).strip()[:300]}")
+        request["launchState"] = "launched"
+        _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
         return request
-    environment = _env()
-    for name in ("TMUX", "TERM", "COLORTERM", "PI_CODING_AGENT_DIR"):
-        if os.environ.get(name): environment[name] = os.environ[name]
-    environment.update({"PI_PIDEV_SESSION_ID": request["reviewerSessionId"],
-                        "PI_PIDEV_REVIEW_PROJECT_ID": project_id,
-                        "PI_PIDEV_REVIEW_REQUEST_ID": request_id,
-                        "PI_PIDEV_CONTROL": str(Path(__file__).resolve())})
-    result = subprocess.run([str(_pidev_path())], cwd=request["reviewWorkspace"], env=environment,
-                            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    if result.returncode:
-        raise SecretaryError(f"review launch failed: {(result.stderr or result.stdout).strip()[:300]}")
-    return request
 
 
 def review_launch_info(project_id: str, request_id: str) -> dict[str, Any]:
@@ -2485,6 +2530,9 @@ def _record_landing(project: Path, project_id: str, workstream_id: str, request_
                     receipt_id: str, target_ref: str, expected: str, candidate: str) -> dict[str, Any]:
     existing = _landing_for(project, workstream_id)
     if existing is not None and existing["requestId"] == request_id and existing["landedOid"] == candidate:
+        if (existing["projectId"] != project_id or existing["receiptId"] != receipt_id or
+                existing["targetRef"] != target_ref or existing["expectedTargetOid"] != expected):
+            raise SecretaryError("existing landing operation does not match exact review assignment")
         return {**existing, "landed": True, "requiresIntegration": False, "recovered": True}
     operation = {"schemaVersion": 1, "operationId": "land-" + secrets.token_hex(16),
                  "kind": "landing", "projectId": project_id, "workstreamId": workstream_id,
@@ -2623,6 +2671,24 @@ def _validate_landing_provenance(project: Path, project_id: str, repo: Path,
     _validate_oid(landing["landedOid"], record["objectFormat"] if "objectFormat" in record else _git(repo, "rev-parse", "--show-object-format"))
 
 
+def _validate_review_worktree_for_cleanup(request: dict[str, Any], project: Path,
+                                          project_record: dict[str, Any], repo: Path) -> Path:
+    workspace = _validate_review_workspace(request, require_clean=True)
+    _, trusted_live, policy_root = _load_policy_and_classify(repo)
+    if not trusted_live or not within(policy_root, workspace) or within(repo, workspace):
+        raise SecretaryError("review checkout escapes policy root")
+    if _canonical_repo(workspace) != workspace:
+        raise SecretaryError("review checkout is not the expected repository")
+    actual_common = _git_path(workspace, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    actual_format = _git(workspace, "rev-parse", "--show-object-format")
+    if actual_common != Path(project_record["gitCommonDir"]).resolve(strict=True) or actual_format != project_record["objectFormat"]:
+        raise SecretaryError("review checkout Git identity does not match project")
+    registered = _registered_worktrees(repo)
+    if registered is None or not any(path == workspace and branch is None for path, branch in registered):
+        raise SecretaryError("review checkout is not an exact detached Git worktree")
+    return workspace
+
+
 def _tmux_window_live(session: str, window: str, socket_path: str | None) -> bool:
     if socket_path is None or not socket_path.startswith("/") or "\n" in socket_path or "\x00" in socket_path:
         raise SecretaryError("cleanup lacks authoritative tmux server identity")
@@ -2649,6 +2715,62 @@ def _tmux_window_live(session: str, window: str, socket_path: str | None) -> boo
     if any(not name or "\t" in name or "\x00" in name for name in values):
         raise SecretaryError("cleanup received malformed tmux state")
     return window in values
+
+
+def _revalidate_cleanup_state(project_id: str, workstream_id: str, project: Path,
+                              project_record: dict[str, Any], repo: Path,
+                              expected_record: dict[str, Any],
+                              expected_reviews: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    current = _validate_workstream_record(_workstream_path(project, workstream_id), project, repo,
+                                          project_record["objectFormat"], project_record["gitCommonDir"],
+                                          allow_missing_workspace=True)
+    immutable = ("schemaVersion", "workstreamId", "title", "role", "briefId", "targetRef",
+                 "baseOid", "workspace", "branch", "createdAt")
+    if current["closedAt"] is not None or any(current[name] != expected_record[name] for name in immutable):
+        raise SecretaryError("workstream state changed during cleanup")
+    landing = _landing_for(project, workstream_id)
+    if landing is None:
+        raise SecretaryError("cleanup lost its landing operation")
+    _validate_landing_provenance(project, project_id, repo, current, landing)
+    target_oid = _git(repo, "rev-parse", f"{current['targetRef']}^{{commit}}").lower()
+    if not _is_ancestor(repo, landing["landedOid"], target_oid):
+        raise SecretaryError("landed commit is no longer reachable from target")
+
+    workspace = Path(current["workspace"])
+    if workspace.exists() or workspace.is_symlink():
+        raise SecretaryError("cleanup found a reappeared candidate worktree")
+    _assert_worktree_registration_absent(repo, workspace, "candidate")
+
+    seen_reviews: set[str] = set()
+    for request_path in (project / "reviews" / "requests").glob("*.json"):
+        request = _validate_review_request(request_path, project_id)
+        if request["workstreamId"] != workstream_id:
+            continue
+        request_id = request["requestId"]
+        expected = expected_reviews.get(request_id)
+        if expected is None:
+            raise SecretaryError("cleanup found a new review assignment")
+        seen_reviews.add(request_id)
+        for name in ("projectId", "requestId", "workstreamId", "candidateOid", "candidateTree", "baseOid",
+                     "requestedAt", "reviewerSessionId", "reviewWorkspace", "reviewerTmuxSocket", "receiptId"):
+            if request[name] != expected[name]:
+                raise SecretaryError("review assignment changed during cleanup")
+        if request["reviewWorkspace"] is not None:
+            review = Path(request["reviewWorkspace"])
+            if review.exists() or review.is_symlink():
+                raise SecretaryError("cleanup found a reappeared review worktree")
+            _assert_worktree_registration_absent(repo, review, "review")
+    if seen_reviews != set(expected_reviews):
+        raise SecretaryError("review assignment disappeared during cleanup")
+
+    branch_ref = f"refs/heads/{current['branch']}"
+    branch = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", branch_ref],
+                            env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    if branch.returncode == 0:
+        raise SecretaryError("cleanup found a reappeared workstream branch")
+    if branch.returncode != 1:
+        raise SecretaryError("could not inspect owned branch")
+    return current, landing
 
 
 def cleanup_workstream(project_id: str, workstream_id: str) -> dict[str, Any]:
@@ -2700,14 +2822,19 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
                             plan_hash=hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest(),
                             phase="prepared")
     removed_review_paths: list[str] = []
+    expected_reviews: dict[str, dict[str, Any]] = {}
     for request_path in (project / "reviews" / "requests").glob("*.json"):
         request = _validate_review_request(request_path, project_id)
-        if request["workstreamId"] != workstream_id or request["reviewWorkspace"] is None:
+        if request["workstreamId"] != workstream_id:
+            continue
+        expected_reviews[request["requestId"]] = dict(request)
+        if request["reviewWorkspace"] is None:
             continue
         review = Path(request["reviewWorkspace"])
         if not review.exists() and not review.is_symlink():
             _assert_worktree_registration_absent(repo, review, "review")
             continue
+        _validate_review_worktree_for_cleanup(request, project, project_record, repo)
         with _git_worktree_index_lock(review):
             if (_git(review, "rev-parse", "HEAD^{commit}").lower() != request["candidateOid"] or
                     _git(review, "status", "--porcelain=v1")):
@@ -2764,12 +2891,8 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
                             phase="branch-deleted", completed_worktrees=completed_worktrees,
                             refs_applied=True)
     with _project_lock(project):
-        current = _validate_workstream_record(record_path, project, repo, project_record["objectFormat"],
-                                              project_record["gitCommonDir"], allow_missing_workspace=True)
-        immutable = ("schemaVersion", "workstreamId", "title", "role", "briefId", "targetRef",
-                     "baseOid", "workspace", "branch", "createdAt")
-        if current["closedAt"] is not None or any(current[name] != record[name] for name in immutable):
-            raise SecretaryError("workstream state changed during cleanup")
+        current, _ = _revalidate_cleanup_state(project_id, workstream_id, project, project_record, repo,
+                                                record, expected_reviews)
         persisted = {name: current[name] for name in WORKSTREAM_FIELDS}
         closed_at = _utc_now()
         persisted["closedAt"] = closed_at
