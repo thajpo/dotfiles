@@ -71,8 +71,11 @@ class SecretaryLauncherTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("placeholder\n")
             output = root / "pi-output.json"
-            fake_pi = home / ".local/bin/pi"
-            fake_pi.parent.mkdir(parents=True)
+            package = home / ".local/share/pi/core/node_modules/@earendil-works/pi-coding-agent"
+            (package / "dist").mkdir(parents=True)
+            (package.parent.parent / ".bin").mkdir(parents=True)
+            (package / "package.json").write_text('{"name":"@earendil-works/pi-coding-agent","version":"0.83.0"}\n')
+            fake_pi = package / "dist/cli.js"
             fake_pi.write_text("""#!/usr/bin/env python3
 import json, os, pathlib, sys
 pathlib.Path(os.environ['FAKE_PI_OUTPUT']).write_text(json.dumps({
@@ -81,9 +84,10 @@ pathlib.Path(os.environ['FAKE_PI_OUTPUT']).write_text(json.dumps({
 }))
 """)
             fake_pi.chmod(0o755)
+            (package.parent.parent / ".bin/pi").symlink_to(fake_pi)
             env.update({
                 "PI_CODING_AGENT_DIR": str(agent_dir), "FAKE_PI_OUTPUT": str(output),
-                "PATH": f"{fake_pi.parent}:/usr/local/bin:/usr/bin:/bin",
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
             })
             result = subprocess.run(
                 [str(ROOT / "bin/pi-secretary"), "--internal-launch", "--project-id", records[0]["projectId"]],
