@@ -862,6 +862,10 @@ eval "exec ${project_lock_fd}>&-"
 release_lock_dirs
 if [[ -n ${TMUX:-} ]]; then
   exec tmux switch-client -t "=$project_session"
-else
+elif [[ -t 0 && -t 1 ]]; then
   exec tmux attach-session -t "=$project_session"
+else
+  # Host-launched reviewer/full-agent startup only needs the detached window;
+  # there is no client to attach when pidev runs under secretary.
+  exit 0
 fi
