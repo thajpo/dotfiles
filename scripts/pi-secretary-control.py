@@ -684,7 +684,7 @@ def _git_write_lock(common: Path) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _git_worktree_index_lock(worktree: Path) -> Iterator[None]:
+def _git_worktree_index_lock(worktree: Path) -> Iterator[Path]:
     index_value = _git(worktree, "rev-parse", "--git-path", "index")
     index_path = Path(index_value)
     if not index_path.is_absolute():
@@ -700,7 +700,7 @@ def _git_worktree_index_lock(worktree: Path) -> Iterator[None]:
         os.fchmod(fd, 0o600)
         os.write(fd, token)
         os.fsync(fd)
-        yield
+        yield index_path
     finally:
         os.close(fd)
         try:
@@ -708,6 +708,20 @@ def _git_worktree_index_lock(worktree: Path) -> Iterator[None]:
                 lock_path.unlink()
         except FileNotFoundError:
             pass
+
+
+@contextlib.contextmanager
+def _temporary_worktree_index(index_path: Path) -> Iterator[Path]:
+    fd, raw_path = tempfile.mkstemp(prefix=".pi-secretary-index-", dir=str(index_path.parent))
+    os.close(fd)
+    temporary = Path(raw_path)
+    try:
+        if index_path.is_file():
+            temporary.write_bytes(index_path.read_bytes())
+        yield temporary
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
 
 
 def git_write(project_id: str, operation: str, message: str | None = None,
@@ -860,13 +874,28 @@ def _artifact_quarantine_path(path: Path, plan_hash: str) -> Path:
     return path.with_name(f".{path.name}.cleanup-{plan_hash}-{key}")
 
 
-def _quarantine_delete_artifact(path: Path, expected_sha256: str, plan_hash: str) -> None:
+def _cleanup_inode(path: Path) -> str:
+    info = _safe_lstat(path, directory=False)
+    assert info is not None
+    return f"{info.st_dev}:{info.st_ino}"
+
+
+def _quarantine_delete_artifact(path: Path, expected_sha256: str, plan_hash: str,
+                                *, owned_quarantine: str | None = None,
+                                on_quarantine: Any | None = None) -> None:
     quarantine = _artifact_quarantine_path(path, plan_hash)
-    if not quarantine.exists() and not quarantine.is_symlink():
+    if quarantine.exists() or quarantine.is_symlink():
+        actual_identity = _cleanup_inode(quarantine)
+        if owned_quarantine != actual_identity:
+            raise SecretaryError(f"cleanup found an unowned artifact quarantine: {quarantine}")
+    else:
         try:
             path.rename(quarantine)
         except OSError as error:
             raise SecretaryError(f"could not quarantine cleanup artifact: {path}") from error
+        actual_identity = _cleanup_inode(quarantine)
+        if on_quarantine is not None:
+            on_quarantine(quarantine, actual_identity)
     # Rename is the atomic pathname transition. Hash and delete only the
     # quarantined inode; a writer that replaces the original path after the
     # rename cannot cause its newer artifact to be unlinked. A leftover
@@ -1147,13 +1176,27 @@ def _cleanup_recovery_path(project: Path, kind: str, identifier: str) -> Path:
 
 def _write_cleanup_recovery(path: Path, *, kind: str, identifier: str, plan_hash: str,
                             phase: str, completed_worktrees: list[str] | None = None,
+                            pending_worktrees: list[str] | None = None,
                             completed_artifacts: list[str] | None = None,
-                            refs_applied: bool = False, error: str | None = None) -> None:
+                            pending_artifacts: list[str] | None = None,
+                            quarantine_artifacts: dict[str, str] | None = None,
+                            refs_applied: bool = False, refs_pending: bool = False,
+                            error: str | None = None) -> None:
+    if quarantine_artifacts is None and path.exists() and not path.is_symlink():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(previous, dict) and isinstance(previous.get("quarantineArtifacts"), dict):
+                quarantine_artifacts = {str(key): str(value) for key, value in previous["quarantineArtifacts"].items()}
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            quarantine_artifacts = {}
     value = {"schemaVersion": 1, "kind": kind, "identifier": identifier,
              "planHash": plan_hash, "phase": phase,
              "completedWorktrees": sorted(completed_worktrees or []),
+             "pendingWorktrees": sorted(pending_worktrees or []),
              "completedArtifacts": sorted(completed_artifacts or []),
-             "refsApplied": refs_applied, "updatedAt": _utc_now()}
+             "pendingArtifacts": sorted(pending_artifacts or []),
+             "quarantineArtifacts": quarantine_artifacts or {},
+             "refsApplied": refs_applied, "refsPending": refs_pending, "updatedAt": _utc_now()}
     if error:
         value["error"] = error[:500]
     _atomic(path, json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
@@ -1163,31 +1206,83 @@ def _read_cleanup_recovery(path: Path, *, kind: str, identifier: str, plan_hash:
     if not path.exists() and not path.is_symlink():
         return None
     fields = {"schemaVersion", "kind", "identifier", "planHash", "phase", "completedWorktrees",
-              "completedArtifacts", "refsApplied", "updatedAt", "error"}
+              "pendingWorktrees", "completedArtifacts", "pendingArtifacts", "quarantineArtifacts",
+              "refsApplied", "refsPending", "updatedAt", "error"}
     value = _read_json(path, fields, required={"schemaVersion", "kind", "identifier", "planHash", "phase",
-                                                 "completedWorktrees", "completedArtifacts", "refsApplied", "updatedAt"})
+                                                 "completedWorktrees", "pendingWorktrees", "completedArtifacts",
+                                                 "pendingArtifacts", "quarantineArtifacts", "refsApplied",
+                                                 "refsPending", "updatedAt"})
     if (value["schemaVersion"] != 1 or value["kind"] != kind or value["identifier"] != identifier or
             value["planHash"] != plan_hash or value["phase"] not in {"prepared", "worktrees", "reviews",
-            "candidate", "refs-applied", "artifacts", "branch-deleted", "complete", "error"} or
+            "candidate", "worktree-pending", "refs-pending", "refs-applied", "artifact-pending",
+            "artifacts", "branch-deleted", "complete", "error"} or
             not isinstance(value["completedWorktrees"], list) or
             not all(isinstance(item, str) for item in value["completedWorktrees"]) or
+            not isinstance(value["pendingWorktrees"], list) or
+            not all(isinstance(item, str) for item in value["pendingWorktrees"]) or
             not isinstance(value["completedArtifacts"], list) or
             not all(isinstance(item, str) for item in value["completedArtifacts"]) or
-            not isinstance(value["refsApplied"], bool)):
+            not isinstance(value["pendingArtifacts"], list) or
+            not all(isinstance(item, str) for item in value["pendingArtifacts"]) or
+            not isinstance(value["quarantineArtifacts"], dict) or
+            not all(isinstance(key, str) and isinstance(item, str)
+                    for key, item in value["quarantineArtifacts"].items()) or
+            not isinstance(value["refsApplied"], bool) or not isinstance(value["refsPending"], bool)):
         raise SecretaryError("invalid cleanup recovery manifest")
     return value
+
+
+def _resolve_cleanup_recovery_refs(repo: Path, normalized: dict[str, Any], object_format: str,
+                                   recovery: dict[str, Any]) -> dict[str, Any]:
+    if not recovery["refsPending"] or recovery["refsApplied"]:
+        return recovery
+    applied_states: list[bool] = []
+    for item in normalized["renames"]:
+        source = _cleanup_branch_oid(repo, item["from"], object_format)
+        destination = _cleanup_branch_oid(repo, item["to"], object_format)
+        applied_states.append(source is None and destination == item["expectedOid"])
+        if not applied_states[-1] and not (source == item["expectedOid"] and destination is None):
+            raise SecretaryError("cleanup recovery found an ambiguous branch rename state")
+    for item in normalized["deletions"]:
+        source = _cleanup_branch_oid(repo, item["branch"], object_format)
+        applied_states.append(source is None)
+        if not applied_states[-1] and source != item["expectedOid"]:
+            raise SecretaryError("cleanup recovery found an ambiguous branch deletion state")
+    if applied_states and all(applied_states):
+        recovery["refsApplied"] = True
+    elif applied_states and not any(applied_states):
+        recovery["refsApplied"] = False
+    elif applied_states:
+        raise SecretaryError("cleanup recovery found partially applied branch refs")
+    recovery["refsPending"] = False
+    return recovery
 
 
 def _inspect_cleanup_recovery(project_id: str, repo: Path, original_plan: dict[str, Any],
                               object_format: str, policy_root: Path, recovery: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_cleanup_plan(original_plan, object_format)
     completed_worktrees = set(recovery["completedWorktrees"])
+    pending_worktrees = set(recovery["pendingWorktrees"])
     completed_artifacts = set(recovery["completedArtifacts"])
+    pending_artifacts = set(recovery["pendingArtifacts"])
+    quarantine_artifacts = recovery["quarantineArtifacts"]
+    owned_quarantines: set[str] = set()
+    for artifact_path in pending_artifacts:
+        quarantine = _artifact_quarantine_path(Path(artifact_path), recovery["planHash"])
+        if (quarantine.is_file() and not quarantine.is_symlink() and
+                quarantine_artifacts.get(artifact_path) == _cleanup_inode(quarantine)):
+            owned_quarantines.add(artifact_path)
     remaining = {"version": 1,
                  "renames": [] if recovery["refsApplied"] else normalized["renames"],
                  "deletions": [] if recovery["refsApplied"] else normalized["deletions"],
-                 "worktrees": [item for item in normalized["worktrees"] if item["path"] not in completed_worktrees],
-                 "artifacts": [item for item in normalized["artifacts"] if item["path"] not in completed_artifacts]}
+                 "worktrees": [item for item in normalized["worktrees"]
+                               if item["path"] not in completed_worktrees and
+                               not (item["path"] in pending_worktrees and not Path(item["path"]).exists())],
+                 "artifacts": [item for item in normalized["artifacts"]
+                               if item["path"] not in completed_artifacts and
+                               not (item["path"] in pending_artifacts and
+                                    not Path(item["path"]).exists() and
+                                    item["path"] not in owned_quarantines)]}
     ref_and_worktree_plan = {"version": 1, "renames": remaining["renames"],
                              "deletions": remaining["deletions"],
                              "worktrees": remaining["worktrees"], "artifacts": []}
@@ -1200,7 +1295,7 @@ def _inspect_cleanup_recovery(project_id: str, repo: Path, original_plan: dict[s
         path = Path(item["path"])
         _cleanup_artifact_allowed(path, item["kind"], repo, policy_root)
         quarantine = _artifact_quarantine_path(path, recovery["planHash"])
-        if quarantine.is_file() and not quarantine.is_symlink():
+        if (item["path"] in pending_artifacts and item["path"] in owned_quarantines):
             digest = _cleanup_artifact_digest(quarantine)
         elif path.is_file() and not path.is_symlink():
             digest = _cleanup_artifact_digest(path)
@@ -1220,15 +1315,42 @@ def _apply_cleanup(repo: Path, inspected: dict[str, Any], recovery_path: Path,
     plan = inspected["plan"]
     reported_plan = inspected.get("reportedPlan", plan)
     completed_worktrees: list[str] = list(recovery["completedWorktrees"] if recovery else [])
+    pending_worktrees: list[str] = list(recovery["pendingWorktrees"] if recovery else [])
     completed_artifacts: list[str] = list(recovery["completedArtifacts"] if recovery else [])
+    pending_artifacts: list[str] = list(recovery["pendingArtifacts"] if recovery else [])
+    quarantine_artifacts: dict[str, str] = dict(recovery["quarantineArtifacts"] if recovery else {})
+    recovered_pending_artifacts = set(pending_artifacts)
     refs_applied = bool(recovery and recovery["refsApplied"])
+    refs_pending = bool(recovery and recovery["refsPending"])
+    for pending in list(pending_worktrees):
+        if pending not in completed_worktrees and not Path(pending).exists():
+            completed_worktrees.append(pending)
+            pending_worktrees.remove(pending)
+    for pending in list(pending_artifacts):
+        pending_path = Path(pending)
+        if (pending not in completed_artifacts and not pending_path.exists() and
+                not _artifact_quarantine_path(pending_path, inspected["planHash"]).exists()):
+            completed_artifacts.append(pending)
+            pending_artifacts.remove(pending)
     _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
                             plan_hash=inspected["planHash"], phase="worktrees",
                             completed_worktrees=completed_worktrees,
-                            completed_artifacts=completed_artifacts, refs_applied=refs_applied)
+                            pending_worktrees=pending_worktrees,
+                            completed_artifacts=completed_artifacts,
+                            pending_artifacts=pending_artifacts,
+                            refs_applied=refs_applied, refs_pending=refs_pending)
     for item in plan["worktrees"]:
         worktree = Path(item["path"])
         try:
+            if item["path"] not in completed_worktrees and item["path"] not in pending_worktrees:
+                pending_worktrees.append(item["path"])
+                _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
+                                        plan_hash=inspected["planHash"], phase="worktree-pending",
+                                        completed_worktrees=completed_worktrees,
+                                        pending_worktrees=pending_worktrees,
+                                        completed_artifacts=completed_artifacts,
+                                        pending_artifacts=pending_artifacts,
+                                        refs_applied=refs_applied, refs_pending=refs_pending)
             if _cleanup_worktree_has_live_process(worktree):
                 raise SecretaryError(f"cleanup worktree became live during apply: {worktree}")
             if _git(worktree, "status", "--porcelain=v1", "--untracked-files=all"):
@@ -1236,48 +1358,113 @@ def _apply_cleanup(repo: Path, inspected: dict[str, Any], recovery_path: Path,
             result = run(["git", "worktree", "remove", item["path"]], repo, check=False)
             if result.returncode:
                 raise SecretaryError(f"could not remove owned cleanup worktree: {item['path']}")
-            completed_worktrees.append(item["path"])
+            if item["path"] not in completed_worktrees:
+                completed_worktrees.append(item["path"])
+            if item["path"] in pending_worktrees:
+                pending_worktrees.remove(item["path"])
             _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
                                     plan_hash=inspected["planHash"], phase="worktrees",
-                                    completed_worktrees=completed_worktrees)
+                                    completed_worktrees=completed_worktrees,
+                                    pending_worktrees=pending_worktrees,
+                                    completed_artifacts=completed_artifacts,
+                                    pending_artifacts=pending_artifacts,
+                                    refs_applied=refs_applied, refs_pending=refs_pending)
         except Exception as error:
             _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
                                     plan_hash=inspected["planHash"], phase="error",
-                                    completed_worktrees=completed_worktrees, error=str(error))
+                                    completed_worktrees=completed_worktrees,
+                                    pending_worktrees=pending_worktrees,
+                                    completed_artifacts=completed_artifacts,
+                                    pending_artifacts=pending_artifacts,
+                                    refs_applied=refs_applied, refs_pending=refs_pending,
+                                    error=str(error))
             raise
     if not refs_applied:
+        refs_pending = True
+        _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
+                                plan_hash=inspected["planHash"], phase="refs-pending",
+                                completed_worktrees=completed_worktrees,
+                                pending_worktrees=pending_worktrees,
+                                completed_artifacts=completed_artifacts,
+                                pending_artifacts=pending_artifacts,
+                                refs_applied=refs_applied, refs_pending=refs_pending)
         try:
             _apply_cleanup_ref_transaction(repo, plan)
         except Exception as error:
             _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
                                     plan_hash=inspected["planHash"], phase="error",
-                                    completed_worktrees=completed_worktrees, error=str(error))
+                                    completed_worktrees=completed_worktrees,
+                                    pending_worktrees=pending_worktrees,
+                                    completed_artifacts=completed_artifacts,
+                                    pending_artifacts=pending_artifacts,
+                                    refs_applied=refs_applied, refs_pending=refs_pending,
+                                    error=str(error))
             raise
         refs_applied = True
+        refs_pending = False
     _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
                             plan_hash=inspected["planHash"], phase="refs-applied",
                             completed_worktrees=completed_worktrees,
-                            completed_artifacts=completed_artifacts, refs_applied=refs_applied)
+                            pending_worktrees=pending_worktrees,
+                            completed_artifacts=completed_artifacts,
+                            pending_artifacts=pending_artifacts,
+                            refs_applied=refs_applied, refs_pending=refs_pending)
     for item in plan["artifacts"]:
         path = Path(item["path"])
         try:
-            _quarantine_delete_artifact(path, item["expectedSha256"], inspected["planHash"])
-            completed_artifacts.append(item["path"])
+            if item["path"] not in completed_artifacts and item["path"] not in pending_artifacts:
+                pending_artifacts.append(item["path"])
+                _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
+                                        plan_hash=inspected["planHash"], phase="artifact-pending",
+                                        completed_worktrees=completed_worktrees,
+                                        pending_worktrees=pending_worktrees,
+                                        completed_artifacts=completed_artifacts,
+                                        pending_artifacts=pending_artifacts,
+                                        refs_applied=refs_applied, refs_pending=refs_pending)
+            def mark_quarantine(_quarantine: Path, identity: str) -> None:
+                quarantine_artifacts[item["path"]] = identity
+                _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
+                                        plan_hash=inspected["planHash"], phase="artifact-pending",
+                                        completed_worktrees=completed_worktrees,
+                                        pending_worktrees=pending_worktrees,
+                                        completed_artifacts=completed_artifacts,
+                                        pending_artifacts=pending_artifacts,
+                                        quarantine_artifacts=quarantine_artifacts,
+                                        refs_applied=refs_applied, refs_pending=refs_pending)
+            _quarantine_delete_artifact(
+                path, item["expectedSha256"], inspected["planHash"],
+                owned_quarantine=quarantine_artifacts.get(item["path"]), on_quarantine=mark_quarantine)
+            if item["path"] not in completed_artifacts:
+                completed_artifacts.append(item["path"])
+            if item["path"] in pending_artifacts:
+                pending_artifacts.remove(item["path"])
+            quarantine_artifacts.pop(item["path"], None)
             _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
                                     plan_hash=inspected["planHash"], phase="artifacts",
                                     completed_worktrees=completed_worktrees,
-                                    completed_artifacts=completed_artifacts, refs_applied=refs_applied)
+                                    pending_worktrees=pending_worktrees,
+                                    completed_artifacts=completed_artifacts,
+                                    pending_artifacts=pending_artifacts,
+                                    quarantine_artifacts=quarantine_artifacts,
+                                    refs_applied=refs_applied, refs_pending=refs_pending)
         except Exception as error:
             _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
                                     plan_hash=inspected["planHash"], phase="error",
                                     completed_worktrees=completed_worktrees,
-                                    completed_artifacts=completed_artifacts, refs_applied=refs_applied,
+                                    pending_worktrees=pending_worktrees,
+                                    completed_artifacts=completed_artifacts,
+                                    pending_artifacts=pending_artifacts,
+                                    refs_applied=refs_applied, refs_pending=refs_pending,
                                     error=str(error))
             raise
     _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
                             plan_hash=inspected["planHash"], phase="complete",
                             completed_worktrees=completed_worktrees,
-                            completed_artifacts=completed_artifacts, refs_applied=refs_applied)
+                            pending_worktrees=pending_worktrees,
+                            completed_artifacts=completed_artifacts,
+                            pending_artifacts=pending_artifacts,
+                            quarantine_artifacts=quarantine_artifacts,
+                            refs_applied=refs_applied, refs_pending=refs_pending)
     return {"applied": True, "planHash": inspected["planHash"],
             "recoveryPath": str(recovery_path), "recovered": recovery is not None,
             "renamedBranches": [item["from"] + " -> " + item["to"] for item in reported_plan["renames"]],
@@ -1313,6 +1500,8 @@ def git_cleanup(project_id: str, operation: str, plan: dict[str, Any],
         # inspection point instead of an unexplained partial state.
         recovery = _read_cleanup_recovery(recovery_path, kind="git", identifier=plan_hash, plan_hash=plan_hash)
         reported_plan = _normalize_cleanup_plan(plan, object_format)
+        if recovery is not None:
+            recovery = _resolve_cleanup_recovery_refs(repo, reported_plan, object_format, recovery)
         if recovery is not None and recovery["phase"] == "complete":
             return {"projectId": project_id, "operation": "apply", "applied": True,
                     "recovered": True, "planHash": plan_hash, "recoveryPath": str(recovery_path),
@@ -1574,6 +1763,18 @@ def _validate_review_receipt(path: Path, request: dict[str, Any] | None = None) 
     return value
 
 
+def _find_orphan_review_receipt(project: Path, request: dict[str, Any]) -> dict[str, Any] | None:
+    directory = project / "reviews" / "receipts"
+    matches: list[dict[str, Any]] = []
+    for receipt_path in sorted(directory.glob("*.json")):
+        receipt = _validate_review_receipt(receipt_path)
+        if receipt["requestId"] == request["requestId"]:
+            matches.append(_validate_review_receipt(receipt_path, request))
+    if len(matches) > 1:
+        raise SecretaryError("multiple orphan review receipts exist for one request")
+    return matches[0] if matches else None
+
+
 def _validate_review_request(path: Path, project_id: str) -> dict[str, Any]:
     fields = {"schemaVersion", "requestId", "projectId", "workstreamId", "candidateOid",
               "candidateTree", "baseOid", "requestedAt", "reviewerSessionId", "reviewWorkspace", "reviewerTmuxSocket", "receiptId"}
@@ -1630,11 +1831,12 @@ def _assert_review_candidate_ready(record: dict[str, Any]) -> None:
 
 
 def _create_review_request(project_id: str, workstream_id: str, record: dict[str, Any]) -> dict[str, Any]:
-    _assert_review_candidate_ready(record)
     project = _record_dir(_state_root(), project_id)
     workspace = Path(record["workspace"])
-    candidate = _git(workspace, "rev-parse", "HEAD^{commit}").lower()
-    tree = _git(workspace, "rev-parse", "HEAD^{tree}").lower()
+    with _git_worktree_index_lock(workspace):
+        _assert_review_candidate_ready(record)
+        candidate = _git(workspace, "rev-parse", "HEAD^{commit}").lower()
+        tree = _git(workspace, "rev-parse", "HEAD^{tree}").lower()
     request_id = "rr-" + secrets.token_hex(16)
     value = {"schemaVersion": 1, "requestId": request_id, "projectId": project_id,
              "workstreamId": workstream_id, "candidateOid": candidate, "candidateTree": tree,
@@ -2180,6 +2382,13 @@ def submit_review(project_id: str, request_id: str, verdict: str, summary: str, 
             if (existing["verdict"], existing["summary"], existing["findings"]) != (verdict, summary, findings):
                 raise SecretaryError("conflicting review receipt already exists")
             return existing
+        orphan = _find_orphan_review_receipt(project, current)
+        if orphan is not None:
+            if (orphan["verdict"], orphan["summary"], orphan["findings"]) != (verdict, summary, findings):
+                raise SecretaryError("conflicting orphan review receipt already exists")
+            current["receiptId"] = orphan["receiptId"]
+            _atomic(request_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+            return orphan
         # The pre-lock validation above is only an early failure. Revalidate the
         # exact detached checkout while holding both the assignment lock and
         # its Git index lock immediately before creating the immutable receipt.
@@ -2278,26 +2487,37 @@ def land_reviewed(project_id: str, request_id: str) -> dict[str, Any]:
             target = _target_worktree(repo, target_ref)
             candidate = status["candidateOid"]
             expected = status["baseOid"]
-            actual = _git(repo, "rev-parse", f"{target_ref}^{{commit}}").lower()
-            if actual == candidate:
+            with _git_worktree_index_lock(target) as target_index:
+                actual = _git(repo, "rev-parse", f"{target_ref}^{{commit}}").lower()
+                if actual == candidate:
+                    return _record_landing(project, project_id, workstream["workstreamId"], request_id,
+                                           receipt["receiptId"], target_ref, expected, candidate)
+                if actual != expected:
+                    return {"landed": False, "requiresIntegration": True, "reason": "target-moved",
+                            "expectedTargetOid": expected, "actualTargetOid": actual, "candidateOid": candidate}
+                if not _is_ancestor(repo, actual, candidate):
+                    return {"landed": False, "requiresIntegration": True, "reason": "not-fast-forward",
+                            "expectedTargetOid": expected, "actualTargetOid": actual, "candidateOid": candidate}
+                if _git(target, "status", "--porcelain=v1"):
+                    raise SecretaryError("target worktree is dirty")
+                if _git(target, "branch", "--show-current") != target_ref.removeprefix("refs/heads/"):
+                    raise SecretaryError("target worktree branch changed")
+                # Git refuses to use the real index while its lock is held, so
+                # merge through a private index and atomically install it while
+                # the target index lock excludes concurrent checkout/commit.
+                with _temporary_worktree_index(target_index) as temporary_index:
+                    merge_env = _env()
+                    merge_env["GIT_INDEX_FILE"] = str(temporary_index)
+                    merged = subprocess.run(["git", "-C", str(target), "merge", "--ff-only", "--no-edit", candidate],
+                                            env=merge_env, text=True, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, check=False)
+                    if merged.returncode:
+                        raise SecretaryError("fast-forward landing failed")
+                    os.replace(temporary_index, target_index)
+                if _git(repo, "rev-parse", f"{target_ref}^{{commit}}").lower() != candidate:
+                    raise SecretaryError("fast-forward landing failed")
                 return _record_landing(project, project_id, workstream["workstreamId"], request_id,
                                        receipt["receiptId"], target_ref, expected, candidate)
-            if actual != expected:
-                return {"landed": False, "requiresIntegration": True, "reason": "target-moved",
-                        "expectedTargetOid": expected, "actualTargetOid": actual, "candidateOid": candidate}
-            if not _is_ancestor(repo, actual, candidate):
-                return {"landed": False, "requiresIntegration": True, "reason": "not-fast-forward",
-                        "expectedTargetOid": expected, "actualTargetOid": actual, "candidateOid": candidate}
-            if _git(target, "status", "--porcelain=v1"):
-                raise SecretaryError("target worktree is dirty")
-            if _git(target, "branch", "--show-current") != target_ref.removeprefix("refs/heads/"):
-                raise SecretaryError("target worktree branch changed")
-            merged = subprocess.run(["git", "-C", str(target), "merge", "--ff-only", "--no-edit", candidate],
-                                    env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-            if merged.returncode or _git(repo, "rev-parse", f"{target_ref}^{{commit}}").lower() != candidate:
-                raise SecretaryError("fast-forward landing failed")
-            return _record_landing(project, project_id, workstream["workstreamId"], request_id,
-                                   receipt["receiptId"], target_ref, expected, candidate)
     finally:
         os.close(fd)
 

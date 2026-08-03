@@ -24,7 +24,7 @@
  	} catch {
  		if (process.platform === "darwin") {
  			const result = spawnSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" });
-@@ -429,6 +432,187 @@
+@@ -429,6 +432,185 @@
  	}
  }
  
@@ -207,20 +207,18 @@
 +	return name.includes(".stale-");
 +}
 +
-+const parentTransitionRegistry = new Map<string, { path: string; owner: SandboxParentTransitionRecord; depth: number }>();
-+
  function syncGit(cwd: string, args: string[]): string {
  	const result = spawnSync("git", args, {
  		cwd,
-@@ -1075,6 +1259,7 @@
+@@ -1075,6 +1257,7 @@
  	private runtimeInfo: RuntimeInfo | undefined;
  	private routePath: string | undefined;
  	private checkpointTail: Promise<unknown> = Promise.resolve();
-+	private parentTransition: { path: string; owner: SandboxParentTransitionRecord; depth: number } | undefined;
++	private parentTransition: { path: string; owner: SandboxParentTransitionRecord } | undefined;
  
  	constructor(private readonly pi: ExtensionAPI) {}
  
-@@ -1116,6 +1301,223 @@
+@@ -1116,6 +1299,201 @@
  		return this.gitRefState;
  	}
  
@@ -300,25 +298,8 @@
 +
 +	private beginChildLifecycleTransition(operation: string): { release(): void } | undefined {
 +		if (!this.routePath || !this.route) return undefined;
++		if (this.parentTransition) throw new Error(`Sandbox parent transition is already active: ${this.parentTransition.path}`);
 +		const canonicalRoute = realpathSync(this.routePath);
-+		const registered = this.parentTransition?.owner.routePath === canonicalRoute
-+			? this.parentTransition
-+			: parentTransitionRegistry.get(canonicalRoute);
-+		if (registered) {
-+			registered.depth += 1;
-+			this.parentTransition = registered;
-+			const transition = registered;
-+			return {
-+				release: () => {
-+					transition.depth -= 1;
-+					if (transition.depth > 0 || this.parentTransition !== transition) return;
-+					const current = parseSandboxParentTransition(readFileSync(transition.path, "utf8"));
-+					if (current?.token === transition.owner.token && !hasFileReclaimMarker(transition.path, transition.owner.token)) rmSync(transition.path, { force: true });
-+					if (parentTransitionRegistry.get(transition.owner.routePath) === transition) parentTransitionRegistry.delete(transition.owner.routePath);
-+					this.parentTransition = undefined;
-+				},
-+			};
-+		}
 +		if (!operation || operation.length > 128) throw new Error("Sandbox child lifecycle transition operation is invalid");
 +		const leaseRoot = sandboxLeaseRoot(canonicalRoute);
 +		mkdirSync(leaseRoot, { recursive: true, mode: 0o700 });
@@ -361,14 +342,12 @@
 +			}
 +		}
 +		if (!transitionCreated) throw new Error(`Could not acquire sandbox parent transition: ${transitionPath}`);
-+		const transition = { path: transitionPath, owner, depth: 1 };
-+		parentTransitionRegistry.set(canonicalRoute, transition);
++		const transition = { path: transitionPath, owner };
 +		this.parentTransition = transition;
 +		try {
 +			const active = this.activeChildLeases();
 +			if (active.length > 0) {
 +				this.parentTransition = undefined;
-+				if (parentTransitionRegistry.get(canonicalRoute) === transition) parentTransitionRegistry.delete(canonicalRoute);
 +				rmSync(transitionPath, { force: true });
 +				const shown = active.slice(0, 6).map((lease) => `${lease.source}:${lease.runId}`).join(", ");
 +				const suffix = active.length > 6 ? `, +${active.length - 6} more` : "";
@@ -376,7 +355,6 @@
 +			}
 +		} catch (error) {
 +			if (this.parentTransition === transition) this.parentTransition = undefined;
-+			if (parentTransitionRegistry.get(canonicalRoute) === transition) parentTransitionRegistry.delete(canonicalRoute);
 +			try {
 +				const current = parseSandboxParentTransition(readFileSync(transitionPath, "utf8"));
 +				if (current?.token === owner.token && !hasFileReclaimMarker(transitionPath, owner.token)) rmSync(transitionPath, { force: true });
@@ -387,11 +365,9 @@
 +		}
 +		return {
 +			release: () => {
-+			transition.depth -= 1;
-+			if (transition.depth > 0 || this.parentTransition !== transition) return;
++			if (this.parentTransition !== transition) return;
 +			const current = parseSandboxParentTransition(readFileSync(transition.path, "utf8"));
 +			if (current?.token === transition.owner.token && !hasFileReclaimMarker(transition.path, transition.owner.token)) rmSync(transition.path, { force: true });
-+			if (parentTransitionRegistry.get(transition.owner.routePath) === transition) parentTransitionRegistry.delete(transition.owner.routePath);
 +			this.parentTransition = undefined;
 +		},
 +		};
@@ -444,7 +420,7 @@
  	private repoIdentity(repoRoot: string): string {
  		return createHash("sha256").update(repoRoot).digest("hex").slice(0, 10);
  	}
-@@ -1834,6 +2236,10 @@
+@@ -1834,6 +2212,10 @@
  
  	private async prepareGitRefWorkspace(ctx?: ExtensionContext) {
  		if (!this.containerName) throw new Error("Sandbox container is not running");
@@ -455,7 +431,7 @@
  		const state = await this.ensureGitRefState(ctx);
  		if (this.getMode() === "trusted-live") {
  			if (!(await this.containerHasGitRepo(state.repoRoot))) throw new Error("Trusted-live bind is not a usable Git worktree inside the container");
-@@ -1859,13 +2265,25 @@
+@@ -1859,13 +2241,25 @@
  				.trim();
  			if (containerHead !== hostHead) {
  				const workspaceStatus = await this.containerWorkspaceStatus();
@@ -482,7 +458,7 @@
  				}
  			}
  			if (!reseedExistingWorkspace) {
-@@ -1910,6 +2328,9 @@
+@@ -1910,6 +2304,9 @@
  		} finally {
  			await rm(temp, { recursive: true, force: true });
  		}
@@ -492,7 +468,7 @@
  	}
  
  	private async copyDirectoryToContainer(sourceDir: string, targetDir: string) {
-@@ -2279,7 +2700,7 @@
+@@ -2279,7 +2676,7 @@
  		state: GitRefState,
  		sandboxHead: string,
  		baseCommit: string,
@@ -501,7 +477,7 @@
  		useImportedHead: (importedHead: string) => Promise<T>,
  	): Promise<T> {
  		if (!this.containerName) throw new Error("Sandbox container is not running");
-@@ -2405,16 +2826,21 @@
+@@ -2405,16 +2802,21 @@
  		if (this.getMode() === "trusted-live") return { committed: false, imported: false, message: "Trusted-live changes are already visible; no checkpoint or import was performed" };
  		if (isChildProcess()) throw new Error("Collaborating children cannot checkpoint or publish the parent task");
  		if (this.pendingRebase) throw new Error("Sandbox rebase is pending; complete or abort it before checkpointing");
@@ -533,7 +509,7 @@
  	}
  
  	async checkpointGitRef(ctx?: ExtensionContext): Promise<GitRefCheckpointResult> {
-@@ -2429,12 +2855,15 @@
+@@ -2429,12 +2831,15 @@
  	}
  
  	private async containerRebaseInProgress(): Promise<boolean> {
@@ -553,7 +529,7 @@
  		], { timeoutMs: 10_000 });
  		return result.code === 0;
  	}
-@@ -2617,7 +3046,9 @@
+@@ -2617,7 +3022,9 @@
  
  	async rebaseHost(ctx?: ExtensionContext): Promise<RebaseResult> {
  		if (this.getMode() === "trusted-live") throw new Error("Use ordinary Git directly in trusted-live mode; no promotion rebase exists");
@@ -564,7 +540,7 @@
  		if (this.pendingRebase) return this.rebaseStatus();
  
  		// Capture all current work before selecting the old sandbox tip.
-@@ -2658,18 +3089,22 @@
+@@ -2658,18 +3065,22 @@
  		})).stdout.toString().trim());
  		if (!Number.isSafeInteger(expectedCommitCount) || expectedCommitCount < 0) throw new Error("Could not determine sandbox commit count");
  
@@ -594,7 +570,7 @@
  		await this.ensure(ctx);
  		if (await this.containerRebaseInProgress()) {
  			const conflictFiles = await this.rebaseConflictFiles();
-@@ -2721,6 +3156,9 @@
+@@ -2721,6 +3132,9 @@
  		await this.completeRebaseState(state, pending, pending.newBase);
  		ctx?.ui.setStatus("sandbox-rebase", undefined);
  		return { completed: true, conflicted: false, message: `Rebased ${pending.expectedCommitCount} commit(s) onto ${state.baseBranch} @ ${pending.newBase.slice(0, 12)}` };
@@ -604,7 +580,7 @@
  	}
  
  	async rebaseStatus(): Promise<RebaseResult> {
-@@ -2747,6 +3185,8 @@
+@@ -2747,6 +3161,8 @@
  	async abortRebase(ctx?: ExtensionContext): Promise<string> {
  		const pending = this.pendingRebase;
  		if (!pending) return "No sandbox rebase is pending";
@@ -613,7 +589,7 @@
  		await this.ensure(ctx);
  		if (await this.containerRebaseInProgress()) {
  			await this.containerGit(["-c", "core.hooksPath=/dev/null", "rebase", "--abort"], { timeoutMs: 120_000 }).catch(() => undefined);
-@@ -2756,6 +3196,9 @@
+@@ -2756,6 +3172,9 @@
  		this.setPendingRebase(undefined);
  		ctx?.ui.setStatus("sandbox-rebase", undefined);
  		return `Aborted sandbox rebase; restored ${pending.oldSandboxTip.slice(0, 12)}`;
@@ -623,7 +599,7 @@
  	}
  
  	async assertReadyForAgentTurn() {
-@@ -2764,6 +3207,11 @@
+@@ -2764,6 +3183,11 @@
  
  	async autoCheckpointSandboxChanges(ctx?: ExtensionContext) {
  		if (!this.isEnabled() || this.pendingRebase || this.getMode() === "trusted-live" || isChildProcess()) return;
@@ -635,7 +611,7 @@
  		const result = await this.checkpointGitRef(ctx);
  		if (result.committed || result.imported) ctx?.ui.notify(result.message, "info");
  	}
-@@ -2795,26 +3243,47 @@
+@@ -2795,26 +3219,47 @@
  			this.dockerPortMappings = [];
  			return;
  		}
@@ -694,7 +670,7 @@
  		}
  	}
  }
-@@ -2838,6 +3307,7 @@
+@@ -2838,6 +3283,7 @@
  	isEnabled() { return this.engine.isEnabled(); }
  	getConfig() { return this.engine.getConfig(); }
  	getRuntimeInfo() { return this.engine.getRuntimeInfo(); }
@@ -702,7 +678,7 @@
  	getMode() { return this.engine.getMode(); }
  	getRoute() { return this.engine.getRoute(); }
  	getGitRefState() { return this.engine.getGitRefState(); }
-@@ -3647,6 +4117,7 @@
+@@ -3647,6 +4093,7 @@
  					const target = parseTarget(config.target, "target");
  					const gitRefState = sandbox.workspace.getGitRefState();
  					const targetLock = sandbox.workspace.getTargetLockStatus();
@@ -710,7 +686,7 @@
  					const dockerPorts = formatDockerPortMappings(sandbox.lifecycle.getDockerPortMappings());
  					ctx.ui.notify(
  						[
-@@ -3672,6 +4143,12 @@
+@@ -3672,6 +4119,12 @@
  							`Container lifecycle: ${config.lifecycle}`,
  								`Package cache volume: ${PACKAGE_CACHE_VOLUME} scoped by task or dependency environment -> ${PACKAGE_CACHE_ROOT}`,
  							`Rebase pending: ${sandbox.workspace.hasPendingRebase()}`,

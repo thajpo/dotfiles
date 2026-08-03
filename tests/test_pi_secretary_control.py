@@ -292,6 +292,35 @@ class SecretaryControlTests(unittest.TestCase):
         self.assertEqual(git(self.source, "status", "--porcelain=v1", "--untracked-files=all"), "")
         self.assertEqual((self.source / "tracked").read_text(), source_before)
 
+    def test_secretary_git_cleanup_replays_after_worktree_side_effect_before_refs(self):
+        registered = secretary.register_project(self.source, "cleanup-replay")
+        project_id = registered["projectId"]
+        branch = "side-agent/replay"
+        side_path = Path(self.tmp.name) / "worktrees" / "side-agent-replay"
+        git(self.source, "branch", branch)
+        git(self.source, "worktree", "add", str(side_path), branch)
+        oid = git(self.source, "rev-parse", branch)
+        plan = {"version": 1, "deletions": [{"branch": branch, "expectedOid": oid}],
+                "worktrees": [{"path": str(side_path), "branch": branch, "expectedOid": oid}]}
+        environment = {"PI_SECRETARY_CAPABILITY": self.capability}
+        with mock.patch.dict(os.environ, environment, clear=False):
+            planned = secretary.git_cleanup(project_id, "plan", plan)
+            with mock.patch.object(secretary, "_apply_cleanup_ref_transaction",
+                                   side_effect=secretary.SecretaryError("simulated ref interruption")):
+                with self.assertRaisesRegex(secretary.SecretaryError, "simulated ref interruption"):
+                    secretary.git_cleanup(project_id, "apply", plan, planned["planHash"])
+        project = Path(self.env["XDG_STATE_HOME"]) / "pi-secretary" / "projects" / project_id
+        recovery = next((project / "operations").glob(f"cleanup-git-{planned['planHash']}.json"))
+        manifest = json.loads(recovery.read_text())
+        self.assertEqual(manifest["phase"], "error")
+        self.assertIn(str(side_path), manifest["completedWorktrees"])
+        with mock.patch.dict(os.environ, environment, clear=False):
+            replayed = secretary.git_cleanup(project_id, "apply", plan, planned["planHash"])
+        self.assertTrue(replayed["recovered"])
+        self.assertFalse(side_path.exists())
+        self.assertNotEqual(subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                                             cwd=self.source, check=False).returncode, 0)
+
     def test_secretary_git_cleanup_refuses_stale_oids_and_source_artifacts(self):
         registered = secretary.register_project(self.source, "cleanup-refusal")
         git(self.source, "branch", "benchmark/stale")
