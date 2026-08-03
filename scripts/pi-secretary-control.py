@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shlex
 import stat
 import subprocess
 import sys
@@ -1040,25 +1041,74 @@ def _cleanup_worktree_live_in_registry(project_id: str, path: Path) -> bool:
 
 
 def _cleanup_worktree_has_live_process(path: Path) -> bool:
-    if Path.cwd().resolve(strict=False) == path or within(path, Path.cwd().resolve(strict=False)):
+    path = path.resolve(strict=False)
+    try:
+        current = Path.cwd().resolve(strict=False)
+    except OSError as error:
+        raise SecretaryError("cleanup cannot inspect current process cwd") from error
+    if current == path or within(path, current):
         return True
     proc = Path("/proc")
     if not proc.is_dir():
+        try:
+            result = subprocess.run(["lsof", "-nP", "-a", "-d", "cwd", "-F", "n"],
+                                    env=_env(), text=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, check=False)
+        except FileNotFoundError as error:
+            raise SecretaryError("cleanup cannot prove process absence on this platform") from error
+        if result.returncode not in {0, 1} or result.stderr.strip():
+            raise SecretaryError("cleanup cannot prove process absence on this platform")
+        for line in result.stdout.splitlines():
+            if not line.startswith("n"):
+                continue
+            raw_cwd = line[1:]
+            if raw_cwd.endswith(" (deleted)"):
+                raw_cwd = raw_cwd[:-10]
+            try:
+                cwd = Path(raw_cwd).resolve(strict=False)
+            except OSError as error:
+                raise SecretaryError("cleanup received an unreadable process cwd") from error
+            if cwd == path or within(path, cwd):
+                return True
         return False
     try:
         entries = list(proc.iterdir())
-    except OSError:
-        return True
+    except OSError as error:
+        raise SecretaryError("cleanup cannot inspect process table") from error
     for entry in entries:
         if not entry.name.isdigit():
             continue
         try:
-            raw_cwd = os.readlink(entry / "cwd")
-            if raw_cwd.endswith(" (deleted)"):
-                raw_cwd = raw_cwd[:-10]
-            cwd = Path(raw_cwd).resolve(strict=False)
-        except OSError:
+            if entry.stat().st_uid != os.getuid():
+                continue
+        except FileNotFoundError:
             continue
+        except OSError as error:
+            raise SecretaryError("cleanup cannot inspect process ownership") from error
+        try:
+            raw_cwd = os.readlink(entry / "cwd")
+        except FileNotFoundError:
+            continue
+        except PermissionError as error:
+            try:
+                command = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+            except OSError as command_error:
+                raise SecretaryError("cleanup cannot inspect a process cwd") from command_error
+            # Linux user-systemd intentionally hides its cwd even from the
+            # same UID; it cannot be a Pi worktree process unless its command
+            # identity says otherwise. All other unreadable processes fail closed.
+            if not ((command.startswith("/usr/lib/systemd/systemd") and "--user" in command) or
+                    command.startswith("(sd-pam)")):
+                raise SecretaryError("cleanup cannot inspect a process cwd") from error
+            continue
+        except OSError as error:
+            raise SecretaryError("cleanup cannot inspect a process cwd") from error
+        if raw_cwd.endswith(" (deleted)"):
+            raw_cwd = raw_cwd[:-10]
+        try:
+            cwd = Path(raw_cwd).resolve(strict=False)
+        except OSError as error:
+            raise SecretaryError("cleanup received an unreadable process cwd") from error
         if cwd == path or within(path, cwd):
             return True
     return False
@@ -1863,7 +1913,7 @@ def _validate_review_request(path: Path, project_id: str) -> dict[str, Any]:
         raise SecretaryError("malformed review request")
     if value.get("reviewerTmuxSocket") is not None and (not isinstance(value["reviewerTmuxSocket"], str) or not value["reviewerTmuxSocket"].startswith("/")):
         raise SecretaryError("malformed review request")
-    if value.get("launchState") not in {"pending", "launched"}:
+    if value.get("launchState") not in {"pending", "launched", "uncertain"}:
         raise SecretaryError("malformed review request")
     if value.get("receiptId") is not None:
         _id(value["receiptId"], "review receipt id")
@@ -2081,7 +2131,7 @@ def _workstream_runtime(project: Path, repo: Path, record: dict[str, Any]) -> di
                 not re.fullmatch(r"[A-Za-z0-9_-]{1,300}", value["tmuxWindow"]) or
                 (value.get("tmuxSocket") is not None and
                  (not isinstance(value.get("tmuxSocket"), str) or not value["tmuxSocket"].startswith("/"))) or
-                value.get("launchState") not in {"pending", "launched"} or
+                value.get("launchState") not in {"pending", "launched", "uncertain"} or
                 (value.get("seededAt") is not None and not isinstance(value.get("seededAt"), str))):
             raise SecretaryError("malformed workstream runtime record")
         if value["seededAt"] is not None:
@@ -2466,11 +2516,16 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
                         raise SecretaryError("reviewer tmux server changed concurrently")
                     if request["reviewerTmuxSocket"] is None:
                         request["reviewerTmuxSocket"] = reviewer_tmux_socket
-                if request["launchState"] == "launched":
-                    if request["reviewerTmuxSocket"] is None or _reviewer_process_live(request, repo):
+                if request["launchState"] in {"launched", "uncertain"}:
+                    live = _reviewer_process_live(request, repo)
+                    if live is True:
+                        request["launchState"] = "launched"
                         _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
                         return request
-                    request["launchState"] = "pending"
+                    if live is None:
+                        request["launchState"] = "uncertain"
+                        _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
+                        raise SecretaryError("cannot prove reviewer process state")
                 request["launchState"] = "pending"
                 _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
 
@@ -2491,12 +2546,15 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
             launch_error = error
         else:
             launch_error = None
-        if launch_error is None and result is not None and result.returncode == 0 and request["reviewerTmuxSocket"] is not None:
-            if not _wait_for_reviewer_process(request, repo):
+        if launch_error is None and result is not None and result.returncode == 0:
+            live = _wait_for_reviewer_process(request, repo)
+            if live is not True:
                 with _project_lock(project):
                     current = _validate_review_request(request_path, project_id)
-                    current["launchState"] = "pending"
+                    current["launchState"] = "uncertain" if live is None else "pending"
                     _atomic(request_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+                if live is None:
+                    raise SecretaryError("cannot prove reviewer process state")
                 raise SecretaryError("review launch did not become live")
         with _project_lock(project):
             current = _validate_review_request(request_path, project_id)
@@ -2782,6 +2840,41 @@ def _validate_review_worktree_for_cleanup(request: dict[str, Any], project: Path
     return _validate_review_worktree_identity(request, project, project_record, repo, require_clean=True)
 
 
+def _remove_worktree_with_process_guard(repo: Path, workspace: Path, label: str,
+                                        on_quarantine: Any) -> None:
+    if _cleanup_worktree_has_live_process(workspace):
+        raise SecretaryError(f"cleanup refuses a live {label} process")
+    quarantine: Path | None = None
+    for _ in range(8):
+        candidate = workspace.parent / f".pi-secretary-{label}-quarantine-{secrets.token_hex(12)}"
+        if not candidate.exists() and not candidate.is_symlink():
+            quarantine = candidate
+            break
+    if quarantine is None:
+        raise SecretaryError(f"cleanup cannot allocate {label} quarantine")
+    moved = subprocess.run(["git", "-C", str(repo), "worktree", "move", str(workspace), str(quarantine)],
+                           env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if moved.returncode:
+        raise SecretaryError(f"could not quarantine clean {label} worktree")
+    try:
+        if workspace.exists() or workspace.is_symlink():
+            raise SecretaryError(f"cleanup found a reappeared {label} path during quarantine")
+        if _cleanup_worktree_has_live_process(workspace) or _cleanup_worktree_has_live_process(quarantine):
+            raise SecretaryError(f"cleanup found a live {label} process during quarantine")
+        registered = _registered_worktrees(repo)
+        if registered is None or not any(path == quarantine for path, _ in registered):
+            raise SecretaryError(f"cleanup lost {label} quarantine registration")
+        removed = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(quarantine)],
+                                 env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if removed.returncode:
+            raise SecretaryError(f"could not remove quarantined {label} worktree")
+        if workspace.exists() or workspace.is_symlink() or _cleanup_worktree_has_live_process(quarantine):
+            raise SecretaryError(f"cleanup found a {label} process or path after removal")
+    except Exception as error:
+        on_quarantine(quarantine, str(error))
+        raise
+
+
 def _tmux_window_live(session: str, window: str, socket_path: str | None) -> bool:
     if socket_path is None or not socket_path.startswith("/") or "\n" in socket_path or "\x00" in socket_path:
         raise SecretaryError("cleanup lacks authoritative tmux server identity")
@@ -2811,24 +2904,29 @@ def _tmux_window_live(session: str, window: str, socket_path: str | None) -> boo
 
 
 def _managed_process_live(socket: str | None, session: str, window: str,
-                          workspace: Path, session_id: str) -> bool:
+                          workspace: Path, session_id: str) -> bool | None:
     if not isinstance(socket, str) or not socket.startswith("/") or "\n" in socket or "\x00" in socket:
-        return False
+        return None
     workspace = workspace.resolve(strict=False)
+    try:
+        if not _tmux_window_live(session, window, socket):
+            return False
+    except SecretaryError:
+        return None
     panes = subprocess.run(["tmux", "-S", socket, "list-panes", "-t", f"={session}:{window}",
                             "-F", "#{pane_pid}\t#{pane_current_path}"],
                            env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if panes.returncode != 0:
-        return False
+        return None
     roots: list[int] = []
     for line in panes.stdout.splitlines():
         fields = line.split("\t", 1)
         if len(fields) != 2 or not fields[0].isdigit():
-            return False
+            return None
         try:
             pane_path = Path(fields[1]).resolve(strict=False)
         except (OSError, RuntimeError):
-            return False
+            return None
         if pane_path == workspace:
             roots.append(int(fields[0]))
     if not roots:
@@ -2836,16 +2934,22 @@ def _managed_process_live(socket: str | None, session: str, window: str,
     processes = subprocess.run(["ps", "-eo", "pid=,ppid=,args="], env=_env(), text=True,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if processes.returncode != 0:
-        return False
+        return None
     parents: dict[int, int] = {}
     args_by_pid: dict[int, str] = {}
     for line in processes.stdout.splitlines():
+        if not line.strip():
+            continue
         fields = line.strip().split(None, 2)
         if len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
-            continue
+            return None
         pid, parent = int(fields[0]), int(fields[1])
         parents[pid] = parent
         args_by_pid[pid] = fields[2]
+    allowed_launchers = {
+        str(Path(__file__).resolve().parents[1] / "bin" / "pidev"),
+        str(Path.home() / ".local" / "bin" / "pidev"),
+    }
     pending = list(roots)
     seen: set[int] = set()
     while pending:
@@ -2853,11 +2957,17 @@ def _managed_process_live(socket: str | None, session: str, window: str,
         if pid in seen:
             continue
         seen.add(pid)
-        args = args_by_pid.get(pid, "")
-        tokens = args.split()
-        if ("--launch" in tokens and "--session-id" in tokens and
+        args = args_by_pid.get(pid)
+        if args is None:
+            return None
+        try:
+            tokens = shlex.split(args)
+        except ValueError:
+            return None
+        launcher_present = any(token in allowed_launchers for token in tokens)
+        if (launcher_present and "--launch" in tokens and "--session-id" in tokens and
                 any(tokens[index + 1] == session_id for index, token in enumerate(tokens[:-1])
-                    if token == "--session-id") and "pidev" in args):
+                    if token == "--session-id")):
             return True
         pending.extend(child for child, parent in parents.items() if parent == pid)
     return False
@@ -2881,13 +2991,16 @@ def _reviewer_process_live(request: dict[str, Any], repo: Path) -> bool:
 
 def _wait_for_managed_process(socket: str | None, session: str, window: str,
                               workspace: Path, session_id: str, repo: Path,
-                              timeout: float = 10.0) -> bool:
+                              timeout: float = 10.0) -> bool | None:
     if not isinstance(socket, str):
-        return False
+        return None
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _managed_process_live(socket, session, window, workspace, session_id):
+        live = _managed_process_live(socket, session, window, workspace, session_id)
+        if live is True:
             return True
+        if live is None:
+            return None
         time.sleep(0.1)
     return _managed_process_live(socket, session, window, workspace, session_id)
 
@@ -2987,6 +3100,12 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
     record_path = _workstream_path(project, workstream_id)
     record = _validate_workstream_record(record_path, project, repo, project_record["objectFormat"],
                                          project_record["gitCommonDir"], allow_missing_workspace=True)
+    recovery_path = _cleanup_recovery_path(project, "workstream", workstream_id)
+    plan_hash = hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest()
+    previous_recovery = _read_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
+                                               plan_hash=plan_hash)
+    if previous_recovery and previous_recovery["pendingWorktrees"]:
+        raise SecretaryError("cleanup has an unresolved quarantined worktree")
     if record["closedAt"] is not None:
         expected_reviews: dict[str, dict[str, Any]] = {}
         for request_path in (project / "reviews" / "requests").glob("*.json"):
@@ -3020,11 +3139,16 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
             raise SecretaryError("cleanup refuses a live workstream process")
         _assert_worktree_registration_absent(repo, workspace, "candidate")
 
-    recovery_path = _cleanup_recovery_path(project, "workstream", workstream_id)
     completed_worktrees: list[str] = []
+    pending_quarantines: list[str] = []
     _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
-                            plan_hash=hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest(),
-                            phase="prepared")
+                            plan_hash=plan_hash, phase="prepared")
+    def quarantine_failure(path: Path, error: str) -> None:
+        pending_quarantines.append(str(path))
+        _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
+                                plan_hash=plan_hash, phase="worktree-pending",
+                                completed_worktrees=completed_worktrees,
+                                pending_worktrees=pending_quarantines, error=error)
     removed_review_paths: list[str] = []
     expected_reviews: dict[str, dict[str, Any]] = {}
     for request_path in (project / "reviews" / "requests").glob("*.json"):
@@ -3056,10 +3180,7 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
                 raise SecretaryError("cleanup refuses a live review window")
             if _cleanup_worktree_has_live_process(review):
                 raise SecretaryError("cleanup refuses a live review process")
-            removed = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(review)], env=_env(),
-                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-            if removed.returncode:
-                raise SecretaryError("could not remove clean owned review worktree")
+            _remove_worktree_with_process_guard(repo, review, "review", quarantine_failure)
             removed_review_paths.append(str(review))
             completed_worktrees.append(str(review))
             _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
@@ -3076,10 +3197,7 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
                 raise SecretaryError("cleanup refuses a live workstream window")
             if _cleanup_worktree_has_live_process(workspace):
                 raise SecretaryError("cleanup refuses a live workstream process")
-            removed = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(workspace)], env=_env(),
-                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-            if removed.returncode:
-                raise SecretaryError("could not remove clean owned worktree")
+            _remove_worktree_with_process_guard(repo, workspace, "candidate", quarantine_failure)
             completed_worktrees.append(str(workspace))
             _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
                                     plan_hash=hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest(),
@@ -3170,12 +3288,19 @@ def launch_workstream(project_id: str, workstream_id: str) -> dict[str, Any]:
                 raise SecretaryError("workstream belongs to a different tmux server")
             desired_socket = runtime["tmuxSocket"] or current_socket or _default_tmux_socket()
             runtime["tmuxSocket"] = desired_socket
-            if runtime["launchState"] == "launched":
-                if _managed_process_live(desired_socket, runtime["tmuxSession"], runtime["tmuxWindow"],
-                                          Path(record["workspace"]), runtime["piSessionId"]):
+            if runtime["launchState"] in {"launched", "uncertain"}:
+                live = _managed_process_live(desired_socket, runtime["tmuxSession"], runtime["tmuxWindow"],
+                                              Path(record["workspace"]), runtime["piSessionId"])
+                if live is True:
+                    runtime["launchState"] = "launched"
+                    _atomic(runtime_path, json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n")
                     record.update(runtime)
                     return record
-                runtime["launchState"] = "pending"
+                if live is None:
+                    runtime["launchState"] = "uncertain"
+                    _atomic(runtime_path, json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n")
+                    raise SecretaryError("cannot prove workstream process state")
+            runtime["launchState"] = "pending"
             _atomic(runtime_path, json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n")
         record.update(runtime)
         brief_path = _brief_path(project, record["briefId"])
@@ -3200,12 +3325,15 @@ def launch_workstream(project_id: str, workstream_id: str) -> dict[str, Any]:
         else:
             launch_error = None
         if launch_error is None and result is not None and result.returncode == 0:
-            if not _wait_for_managed_process(runtime["tmuxSocket"], runtime["tmuxSession"], runtime["tmuxWindow"],
-                                              Path(record["workspace"]), runtime["piSessionId"], repo):
+            live = _wait_for_managed_process(runtime["tmuxSocket"], runtime["tmuxSession"], runtime["tmuxWindow"],
+                                              Path(record["workspace"]), runtime["piSessionId"], repo)
+            if live is not True:
                 with _project_lock(project):
                     current = _workstream_runtime(project, repo, record)
-                    current["launchState"] = "pending"
+                    current["launchState"] = "uncertain" if live is None else "pending"
                     _atomic(runtime_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+                if live is None:
+                    raise SecretaryError("cannot prove workstream process state")
                 raise SecretaryError("workstream launch did not become live")
         with _project_lock(project):
             current = _workstream_runtime(project, repo, record)

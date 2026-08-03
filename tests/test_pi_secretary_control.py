@@ -273,7 +273,8 @@ class SecretaryControlTests(unittest.TestCase):
             "artifacts": [{"path": str(artifact), "kind": "subagent-artifact", "expectedSha256": artifact_digest}],
         }
         source_before = (self.source / "tracked").read_text()
-        with mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability, "PI_CODING_AGENT_DIR": str(agent_dir)}, clear=False):
+        with mock.patch.object(secretary, "_cleanup_worktree_has_live_process", return_value=False), \
+             mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability, "PI_CODING_AGENT_DIR": str(agent_dir)}, clear=False):
             planned = secretary.git_cleanup(project_id, "plan", plan)
             self.assertEqual(planned["operation"], "plan")
             self.assertEqual(planned["counts"], {"renames": 2, "deletions": 2, "worktrees": 1, "artifacts": 1})
@@ -303,7 +304,8 @@ class SecretaryControlTests(unittest.TestCase):
         plan = {"version": 1, "deletions": [{"branch": branch, "expectedOid": oid}],
                 "worktrees": [{"path": str(side_path), "branch": branch, "expectedOid": oid}]}
         environment = {"PI_SECRETARY_CAPABILITY": self.capability}
-        with mock.patch.dict(os.environ, environment, clear=False):
+        with mock.patch.object(secretary, "_cleanup_worktree_has_live_process", return_value=False), \
+             mock.patch.dict(os.environ, environment, clear=False):
             planned = secretary.git_cleanup(project_id, "plan", plan)
             with mock.patch.object(secretary, "_apply_cleanup_ref_transaction",
                                    side_effect=secretary.SecretaryError("simulated ref interruption")):
@@ -314,7 +316,8 @@ class SecretaryControlTests(unittest.TestCase):
         manifest = json.loads(recovery.read_text())
         self.assertEqual(manifest["phase"], "error")
         self.assertIn(str(side_path), manifest["completedWorktrees"])
-        with mock.patch.dict(os.environ, environment, clear=False):
+        with mock.patch.object(secretary, "_cleanup_worktree_has_live_process", return_value=False), \
+             mock.patch.dict(os.environ, environment, clear=False):
             replayed = secretary.git_cleanup(project_id, "apply", plan, planned["planHash"])
         self.assertTrue(replayed["recovered"])
         self.assertFalse(side_path.exists())
@@ -652,13 +655,15 @@ class SecretaryControlTests(unittest.TestCase):
             if Path(path) == record_path:
                 raise secretary.SecretaryError("simulated cleanup interruption")
             return real_atomic(path, content)
-        with mock.patch.dict(os.environ, secretary_env, clear=False), \
+        with mock.patch.object(secretary, "_cleanup_worktree_has_live_process", return_value=False), \
+             mock.patch.dict(os.environ, secretary_env, clear=False), \
              mock.patch.object(secretary, "_tmux_window_live", return_value=False), \
              mock.patch.object(secretary, "_atomic", side_effect=interrupted_atomic):
             with self.assertRaisesRegex(secretary.SecretaryError, "cleanup interruption"):
                 secretary.cleanup_workstream(registered["projectId"], workstream["workstreamId"])
         self.assertFalse(feature.exists())
-        with mock.patch.dict(os.environ, secretary_env, clear=False), \
+        with mock.patch.object(secretary, "_cleanup_worktree_has_live_process", return_value=False), \
+             mock.patch.dict(os.environ, secretary_env, clear=False), \
              mock.patch.object(secretary, "_tmux_window_live", return_value=False):
             cleaned = secretary.cleanup_workstream(registered["projectId"], workstream["workstreamId"])
         self.assertFalse(feature.exists())
