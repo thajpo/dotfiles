@@ -1296,10 +1296,12 @@ def git_cleanup(project_id: str, operation: str, plan: dict[str, Any],
     _policy, trusted_live, policy_root = _load_policy_and_classify(repo)
     if not trusted_live:
         raise SecretaryError("Git cleanup requires a trusted-live repository")
-    inspected = _inspect_cleanup_plan(project_id, repo, plan, object_format, policy_root)
+    normalized_for_hash = _normalize_cleanup_plan(plan, object_format)
+    expected_plan_hash = _cleanup_plan_hash(normalized_for_hash)
     if operation == "plan":
+        inspected = _inspect_cleanup_plan(project_id, repo, plan, object_format, policy_root)
         return {"projectId": project_id, "operation": "plan", **inspected}
-    if not isinstance(plan_hash, str) or not hmac.compare_digest(plan_hash, inspected["planHash"]):
+    if not isinstance(plan_hash, str) or not hmac.compare_digest(plan_hash, expected_plan_hash):
         raise SecretaryError("cleanup plan hash does not match")
     project = _record_dir(_state_root(), project_id)
     recovery_path = _cleanup_recovery_path(project, "git", plan_hash)
