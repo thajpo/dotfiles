@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import datetime
+import errno
 import fcntl
 import hashlib
 import hmac
@@ -923,19 +925,50 @@ def _cleanup_artifact_allowed(path: Path, kind: str, repository: Path,
     raise SecretaryError("subagent artifact is outside the Pi artifact namespaces")
 
 
-def _cleanup_artifact_digest(path: Path) -> str:
-    info = _safe_lstat(path, directory=False)
-    assert info is not None
-    if info.st_size > MAX_ARTIFACT_BYTES:
-        raise SecretaryError("cleanup artifact is too large")
-    digest = hashlib.sha256()
+def _cleanup_artifact_identity(info: os.stat_result) -> str:
+    # ctime changes when Git moves the file into quarantine; device/inode,
+    # size, and mtime remain stable while still pinning the planned content.
+    return f"{info.st_dev}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}"
+
+
+def _cleanup_lstat(path: Path, *, directory: bool | None = None,
+                   missing: bool = False) -> os.stat_result | None:
     try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+        info = path.lstat()
+    except FileNotFoundError:
+        if missing:
+            return None
+        raise SecretaryError(f"missing cleanup path: {path}")
     except OSError as error:
-        raise SecretaryError("cannot read cleanup artifact") from error
-    return digest.hexdigest()
+        raise SecretaryError(f"cannot inspect cleanup path: {path}") from error
+    if stat.S_ISLNK(info.st_mode) or (directory is True and not stat.S_ISDIR(info.st_mode)) or \
+            (directory is False and not stat.S_ISREG(info.st_mode)):
+        raise SecretaryError(f"unsafe cleanup path: {path}")
+    if info.st_uid != os.getuid():
+        raise SecretaryError(f"cleanup path is not owned by invoking user: {path}")
+    return info
+
+
+def _cleanup_inode(path: Path, *, directory: bool = False) -> str:
+    info = _cleanup_lstat(path, directory=True if directory else False)
+    assert info is not None
+    return f"{info.st_dev}:{info.st_ino}"
+
+
+def _cleanup_parent_fd(path: Path, expected_identity: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(path), flags)
+        info = os.fstat(fd)
+        current = path.lstat()
+    except OSError as error:
+        raise SecretaryError(f"cannot securely open cleanup artifact directory: {path}") from error
+    actual = f"{info.st_dev}:{info.st_ino}"
+    current_identity = f"{current.st_dev}:{current.st_ino}"
+    if actual != expected_identity or current_identity != expected_identity:
+        os.close(fd)
+        raise SecretaryError(f"cleanup artifact directory identity changed: {path}")
+    return fd
 
 
 def _cleanup_artifact_digest_fd(fd: int, info: os.stat_result) -> str:
@@ -960,62 +993,142 @@ def _cleanup_artifact_digest_fd(fd: int, info: os.stat_result) -> str:
     return digest.hexdigest()
 
 
+def _cleanup_artifact_snapshot(path: Path, expected_identity: str,
+                               expected_parent_identity: str) -> str:
+    parent_fd = _cleanup_parent_fd(path.parent, expected_parent_identity)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        try:
+            fd = os.open(path.name, flags, dir_fd=parent_fd)
+        except OSError as error:
+            raise SecretaryError(f"cannot securely open cleanup artifact: {path}") from error
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or _cleanup_artifact_identity(info) != expected_identity:
+                raise SecretaryError(f"cleanup artifact identity changed: {path}")
+            digest = _cleanup_artifact_digest_fd(fd, info)
+            try:
+                current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            except OSError as error:
+                raise SecretaryError(f"cannot recheck cleanup artifact: {path}") from error
+            if _cleanup_artifact_identity(current) != expected_identity:
+                raise SecretaryError(f"cleanup artifact identity changed: {path}")
+            return digest
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _rename_cleanup_noreplace(src_dir_fd: int, src_name: str,
+                              dst_dir_fd: int, dst_name: str) -> None:
+    # A check followed by Path.rename() can overwrite an attacker-created
+    # quarantine pathname. Linux renameat2(RENAME_NOREPLACE) gives us the
+    # required atomic destination check while the directory descriptors pin
+    # both parents. Unsupported platforms fail closed rather than downgrade.
+    if not sys.platform.startswith("linux"):
+        raise SecretaryError("platform cannot guarantee atomic cleanup quarantine")
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        renameat2 = libc.renameat2
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                              ctypes.c_char_p, ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(src_dir_fd, os.fsencode(src_name), dst_dir_fd,
+                           os.fsencode(dst_name), 1)
+    except AttributeError:
+        syscall_numbers = {"x86_64": 316, "amd64": 316, "aarch64": 276,
+                           "armv7l": 382, "ppc64le": 357, "s390x": 347}
+        number = syscall_numbers.get(os.uname().machine)
+        if number is None:
+            raise SecretaryError("platform cannot guarantee atomic cleanup quarantine")
+        syscall = libc.syscall
+        syscall.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_char_p,
+                            ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        syscall.restype = ctypes.c_long
+        result = syscall(number, src_dir_fd, os.fsencode(src_name), dst_dir_fd,
+                         os.fsencode(dst_name), 1)
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number == errno.EEXIST:
+            raise SecretaryError("cleanup quarantine destination already exists")
+        raise SecretaryError(f"could not atomically quarantine cleanup artifact: {os.strerror(error_number)}")
+
+
 def _artifact_quarantine_path(path: Path, plan_hash: str) -> Path:
     key = hashlib.sha256(str(path).encode()).hexdigest()[:16]
     return path.with_name(f".{path.name}.cleanup-{plan_hash}-{key}")
 
 
-def _cleanup_inode(path: Path) -> str:
-    info = _safe_lstat(path, directory=False)
-    assert info is not None
-    return f"{info.st_dev}:{info.st_ino}"
-
-
-def _quarantine_delete_artifact(path: Path, expected_sha256: str, plan_hash: str,
-                                *, owned_quarantine: str | None = None,
+def _quarantine_delete_artifact(path: Path, expected_sha256: str,
+                                expected_identity: str, expected_parent_identity: str,
+                                plan_hash: str, *, owned_quarantine: str | None = None,
                                 on_quarantine: Any | None = None) -> None:
     quarantine = _artifact_quarantine_path(path, plan_hash)
-    if quarantine.exists() or quarantine.is_symlink():
-        actual_identity = _cleanup_inode(quarantine)
-        if owned_quarantine != actual_identity:
-            raise SecretaryError(f"cleanup found an unowned artifact quarantine: {quarantine}")
-    else:
+    parent_fd = _cleanup_parent_fd(path.parent, expected_parent_identity)
+    try:
+        q_info: os.stat_result | None
         try:
-            path.rename(quarantine)
+            q_info = os.stat(quarantine.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            q_info = None
         except OSError as error:
-            raise SecretaryError(f"could not quarantine cleanup artifact: {path}") from error
-        actual_identity = _cleanup_inode(quarantine)
-        if on_quarantine is not None:
-            on_quarantine(quarantine, actual_identity)
-    # Hash and delete the same quarantined inode through an open descriptor.
-    # Recheck identity and metadata before unlinking so a concurrent writer or
-    # pathname replacement cannot turn this into an arbitrary-file delete.
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(str(quarantine), flags)
-    except OSError as error:
-        raise SecretaryError(f"could not open quarantined cleanup artifact: {path}") from error
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise SecretaryError("cleanup quarantine is not a regular file")
-        digest = _cleanup_artifact_digest_fd(fd, info)
-        if digest != expected_sha256:
-            raise SecretaryError(f"cleanup artifact changed during apply: {path}")
-        current = _safe_lstat(quarantine, directory=False)
-        assert current is not None
-        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
-            raise SecretaryError("cleanup quarantine identity changed during apply")
-        parent_fd = os.open(str(quarantine.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                                getattr(os, "O_NOFOLLOW", 0))
+            raise SecretaryError(f"cannot inspect cleanup quarantine: {quarantine}") from error
+        if q_info is not None:
+            if (not stat.S_ISREG(q_info.st_mode) or
+                    _cleanup_artifact_identity(q_info) != expected_identity or
+                    owned_quarantine != _cleanup_artifact_identity(q_info)):
+                raise SecretaryError(f"cleanup found an unowned or changed artifact quarantine: {quarantine}")
+        else:
+            source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                source_fd = os.open(path.name, source_flags, dir_fd=parent_fd)
+            except OSError as error:
+                raise SecretaryError(f"could not open cleanup artifact before quarantine: {path}") from error
+            try:
+                source_info = os.fstat(source_fd)
+                if (not stat.S_ISREG(source_info.st_mode) or
+                        _cleanup_artifact_identity(source_info) != expected_identity):
+                    raise SecretaryError(f"cleanup artifact identity changed: {path}")
+                digest = _cleanup_artifact_digest_fd(source_fd, source_info)
+                if digest != expected_sha256:
+                    raise SecretaryError(f"cleanup artifact changed during apply: {path}")
+                _rename_cleanup_noreplace(parent_fd, path.name, parent_fd, quarantine.name)
+            finally:
+                os.close(source_fd)
+            try:
+                q_info = os.stat(quarantine.name, dir_fd=parent_fd, follow_symlinks=False)
+            except OSError as error:
+                raise SecretaryError(f"could not inspect quarantined cleanup artifact: {path}") from error
+            actual_identity = _cleanup_artifact_identity(q_info)
+            if on_quarantine is not None:
+                on_quarantine(quarantine, actual_identity)
+            if actual_identity != expected_identity:
+                raise SecretaryError(f"cleanup quarantined an unexpected artifact: {path}")
+        assert q_info is not None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
+            fd = os.open(quarantine.name, flags, dir_fd=parent_fd)
+        except OSError as error:
+            raise SecretaryError(f"could not open quarantined cleanup artifact: {path}") from error
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or
+                    _cleanup_artifact_identity(info) != expected_identity):
+                raise SecretaryError("cleanup quarantine identity changed during apply")
+            digest = _cleanup_artifact_digest_fd(fd, info)
+            if digest != expected_sha256:
+                raise SecretaryError(f"cleanup artifact changed during apply: {path}")
+            current = os.stat(quarantine.name, dir_fd=parent_fd, follow_symlinks=False)
+            if _cleanup_artifact_identity(current) != _cleanup_artifact_identity(info):
+                raise SecretaryError("cleanup quarantine identity changed during apply")
             os.unlink(quarantine.name, dir_fd=parent_fd)
+        except OSError as error:
+            raise SecretaryError(f"could not remove quarantined cleanup artifact: {path}") from error
         finally:
-            os.close(parent_fd)
-    except OSError as error:
-        raise SecretaryError(f"could not remove quarantined cleanup artifact: {path}") from error
+            os.close(fd)
     finally:
-        os.close(fd)
+        os.close(parent_fd)
 
 
 def _cleanup_worktree_records(repo: Path) -> list[dict[str, Any]]:
@@ -1164,7 +1277,7 @@ def _cleanup_branch_oid(repo: Path, branch: str, object_format: str) -> str | No
     return _validate_oid(result.stdout.strip(), object_format)
 
 
-def _normalize_cleanup_plan(raw: Any, object_format: str) -> dict[str, Any]:
+def _normalize_cleanup_plan(raw: Any, object_format: str, *, require_artifact_identity: bool = False) -> dict[str, Any]:
     if not isinstance(raw, dict) or set(raw) - {"version", "renames", "deletions", "worktrees", "artifacts"}:
         raise SecretaryError("invalid cleanup plan shape")
     if raw.get("version", CLEANUP_PLAN_VERSION) != CLEANUP_PLAN_VERSION:
@@ -1207,7 +1320,8 @@ def _normalize_cleanup_plan(raw: Any, object_format: str) -> dict[str, Any]:
 
     artifacts: list[dict[str, str]] = []
     for item in entries("artifacts"):
-        if not isinstance(item, dict) or set(item) != {"path", "kind", "expectedSha256"}:
+        allowed = {"path", "kind", "expectedSha256", "expectedIdentity", "expectedParentIdentity"}
+        if not isinstance(item, dict) or not set(item) <= allowed or not {"path", "kind", "expectedSha256"} <= set(item):
             raise SecretaryError("invalid cleanup artifact")
         path = _cleanup_absolute_path(item["path"], "artifact path")
         kind = item["kind"]
@@ -1216,7 +1330,25 @@ def _normalize_cleanup_plan(raw: Any, object_format: str) -> dict[str, Any]:
         digest = item["expectedSha256"]
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
             raise SecretaryError("invalid cleanup artifact digest")
-        artifacts.append({"path": str(path), "kind": kind, "expectedSha256": digest.lower()})
+        expected_identity = item.get("expectedIdentity")
+        expected_parent_identity = item.get("expectedParentIdentity")
+        if require_artifact_identity and (not isinstance(expected_identity, str) or
+                                           not isinstance(expected_parent_identity, str)):
+            raise SecretaryError("cleanup apply requires pinned artifact identities")
+        if expected_identity is None:
+            info = _cleanup_lstat(path, directory=False)
+            assert info is not None
+            expected_identity = _cleanup_artifact_identity(info)
+        if expected_parent_identity is None:
+            expected_parent_identity = _cleanup_inode(path.parent, directory=True)
+        if (not isinstance(expected_identity, str) or
+                not re.fullmatch(r"[0-9]+:[0-9]+:[0-9]+:[0-9]+", expected_identity) or
+                not isinstance(expected_parent_identity, str) or
+                not re.fullmatch(r"[0-9]+:[0-9]+", expected_parent_identity)):
+            raise SecretaryError("invalid cleanup artifact identity")
+        artifacts.append({"path": str(path), "kind": kind, "expectedSha256": digest.lower(),
+                          "expectedIdentity": expected_identity,
+                          "expectedParentIdentity": expected_parent_identity})
 
     if not renames and not deletions and not worktrees and not artifacts:
         raise SecretaryError("cleanup plan is empty")
@@ -1243,8 +1375,10 @@ def _cleanup_plan_hash(plan: dict[str, Any]) -> str:
 
 
 def _inspect_cleanup_plan(project_id: str, repo: Path, plan: dict[str, Any],
-                          object_format: str, policy_root: Path) -> dict[str, Any]:
-    normalized = _normalize_cleanup_plan(plan, object_format)
+                          object_format: str, policy_root: Path,
+                          *, require_artifact_identity: bool = False) -> dict[str, Any]:
+    normalized = _normalize_cleanup_plan(plan, object_format,
+                                         require_artifact_identity=require_artifact_identity)
     records = _cleanup_worktree_records(repo)
     by_path = {record["path"]: record for record in records}
     by_branch = {record["branch"]: record for record in records if record.get("branch")}
@@ -1301,10 +1435,12 @@ def _inspect_cleanup_plan(project_id: str, repo: Path, plan: dict[str, Any],
         _cleanup_artifact_allowed(path, item["kind"], repo, policy_root)
         if not path.is_file() or path.is_symlink():
             raise SecretaryError(f"cleanup artifact is missing or not a regular file: {path}")
-        digest = _cleanup_artifact_digest(path)
+        digest = _cleanup_artifact_snapshot(path, item["expectedIdentity"],
+                                            item["expectedParentIdentity"])
         if digest != item["expectedSha256"]:
             raise SecretaryError(f"cleanup artifact changed: {path}")
-        actions.append({"kind": "artifact-delete", "path": str(path), "sha256": digest})
+        actions.append({"kind": "artifact-delete", "path": str(path), "sha256": digest,
+                        "identity": item["expectedIdentity"]})
 
     plan_hash = _cleanup_plan_hash(normalized)
     return {"plan": normalized, "planHash": plan_hash, "actions": actions,
@@ -1434,8 +1570,9 @@ def _inspect_cleanup_recovery(project_id: str, repo: Path, original_plan: dict[s
     owned_quarantines: set[str] = set()
     for artifact_path in pending_artifacts:
         quarantine = _artifact_quarantine_path(Path(artifact_path), recovery["planHash"])
-        if (quarantine.is_file() and not quarantine.is_symlink() and
-                quarantine_artifacts.get(artifact_path) == _cleanup_inode(quarantine)):
+        info = _cleanup_lstat(quarantine, directory=False, missing=True)
+        if (info is not None and
+                quarantine_artifacts.get(artifact_path) == _cleanup_artifact_identity(info)):
             owned_quarantines.add(artifact_path)
     remaining = {"version": 1,
                  "renames": [] if recovery["refsApplied"] else normalized["renames"],
@@ -1457,15 +1594,18 @@ def _inspect_cleanup_recovery(project_id: str, repo: Path, original_plan: dict[s
         path = Path(item["path"])
         _cleanup_artifact_allowed(path, item["kind"], repo, policy_root)
         quarantine = _artifact_quarantine_path(path, recovery["planHash"])
-        if (item["path"] in pending_artifacts and item["path"] in owned_quarantines):
-            digest = _cleanup_artifact_digest(quarantine)
+        if item["path"] in pending_artifacts and item["path"] in owned_quarantines:
+            digest = _cleanup_artifact_snapshot(quarantine, item["expectedIdentity"],
+                                                item["expectedParentIdentity"])
         elif path.is_file() and not path.is_symlink():
-            digest = _cleanup_artifact_digest(path)
+            digest = _cleanup_artifact_snapshot(path, item["expectedIdentity"],
+                                                item["expectedParentIdentity"])
         else:
             raise SecretaryError(f"cleanup recovery artifact is missing: {path}")
         if digest != item["expectedSha256"]:
             raise SecretaryError(f"cleanup recovery artifact changed: {path}")
-        actions.append({"kind": "artifact-delete", "path": str(path), "sha256": item["expectedSha256"]})
+        actions.append({"kind": "artifact-delete", "path": str(path), "sha256": item["expectedSha256"],
+                        "identity": item["expectedIdentity"]})
     return {"plan": remaining, "reportedPlan": normalized, "planHash": recovery["planHash"],
             "actions": actions, "counts": {"renames": len(remaining["renames"]),
             "deletions": len(remaining["deletions"]), "worktrees": len(remaining["worktrees"]),
@@ -1590,7 +1730,8 @@ def _apply_cleanup(repo: Path, inspected: dict[str, Any], recovery_path: Path,
                                         quarantine_artifacts=quarantine_artifacts,
                                         refs_applied=refs_applied, refs_pending=refs_pending)
             _quarantine_delete_artifact(
-                path, item["expectedSha256"], inspected["planHash"],
+                path, item["expectedSha256"], item["expectedIdentity"],
+                item["expectedParentIdentity"], inspected["planHash"],
                 owned_quarantine=quarantine_artifacts.get(item["path"]), on_quarantine=mark_quarantine)
             if item["path"] not in completed_artifacts:
                 completed_artifacts.append(item["path"])
@@ -1641,7 +1782,8 @@ def git_cleanup(project_id: str, operation: str, plan: dict[str, Any],
     _policy, trusted_live, policy_root = _load_policy_and_classify(repo)
     if not trusted_live:
         raise SecretaryError("Git cleanup requires a trusted-live repository")
-    normalized_for_hash = _normalize_cleanup_plan(plan, object_format)
+    normalized_for_hash = _normalize_cleanup_plan(plan, object_format,
+                                                  require_artifact_identity=operation == "apply")
     expected_plan_hash = _cleanup_plan_hash(normalized_for_hash)
     if operation == "plan":
         inspected = _inspect_cleanup_plan(project_id, repo, plan, object_format, policy_root)
@@ -1668,7 +1810,8 @@ def git_cleanup(project_id: str, operation: str, plan: dict[str, Any],
                     "removedWorktrees": [item["path"] for item in reported_plan["worktrees"]],
                     "removedArtifacts": [item["path"] for item in reported_plan["artifacts"]]}
         if recovery is None:
-            current = _inspect_cleanup_plan(project_id, repo, plan, object_format, policy_root)
+            current = _inspect_cleanup_plan(project_id, repo, plan, object_format, policy_root,
+                                            require_artifact_identity=True)
         else:
             current = _inspect_cleanup_recovery(project_id, repo, plan, object_format, policy_root, recovery)
         if not hmac.compare_digest(current["planHash"], plan_hash):
@@ -2920,6 +3063,35 @@ def _remove_worktree_with_process_guard(repo: Path, workspace: Path, label: str,
         raise
 
 
+def _resume_quarantined_worktree(repo: Path, quarantine: Path, policy_root: Path, label: str) -> None:
+    if not quarantine.is_absolute():
+        raise SecretaryError(f"cleanup recovery quarantine is not absolute: {quarantine}")
+    _no_symlink_path(quarantine)
+    quarantine = quarantine.resolve(strict=False)
+    if (not within(policy_root, quarantine) or within(repo, quarantine) or
+            within(quarantine, repo) or quarantine.is_symlink() or not quarantine.is_dir()):
+        raise SecretaryError(f"cleanup recovery quarantine is outside the managed worktree root: {quarantine}")
+    registered = _registered_worktrees(repo)
+    if registered is None or not any(path == quarantine for path, _ in registered):
+        if quarantine.exists() or quarantine.is_symlink():
+            raise SecretaryError(f"cleanup recovery lost Git registration for {label}: {quarantine}")
+        _assert_worktree_registration_absent(repo, quarantine, label)
+        return
+    with _git_worktree_index_lock(quarantine):
+        if _cleanup_worktree_has_live_process(quarantine):
+            raise SecretaryError(f"cleanup recovery refuses a live {label} process: {quarantine}")
+        if _git(quarantine, "status", "--porcelain=v1", "--untracked-files=all"):
+            raise SecretaryError(f"cleanup recovery refuses a dirty {label} worktree: {quarantine}")
+        removed = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(quarantine)],
+                                 env=_env(), text=True, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, check=False)
+        if removed.returncode:
+            raise SecretaryError(f"cleanup recovery could not remove quarantined {label} worktree")
+        if quarantine.exists() or quarantine.is_symlink():
+            raise SecretaryError(f"cleanup recovery found a reappeared {label} quarantine: {quarantine}")
+        _assert_worktree_registration_absent(repo, quarantine, label)
+
+
 def _tmux_window_live(session: str, window: str, socket_path: str | None) -> bool:
     if socket_path is None or not socket_path.startswith("/") or "\n" in socket_path or "\x00" in socket_path:
         raise SecretaryError("cleanup lacks authoritative tmux server identity")
@@ -2952,8 +3124,6 @@ def _managed_process_live(socket: str | None, session: str, window: str,
                           workspace: Path, session_id: str) -> bool | None:
     if not isinstance(socket, str) or not socket.startswith("/") or "\n" in socket or "\x00" in socket:
         return None
-    if not Path(socket).exists():
-        return False
     workspace = workspace.resolve(strict=False)
     try:
         if not _tmux_window_live(session, window, socket):
@@ -3020,12 +3190,12 @@ def _managed_process_live(socket: str | None, session: str, window: str,
     return False
 
 
-def _reviewer_process_live(request: dict[str, Any], repo: Path) -> bool:
+def _reviewer_process_live(request: dict[str, Any], repo: Path) -> bool | None:
     socket = request.get("reviewerTmuxSocket")
     workspace_raw = request.get("reviewWorkspace")
     session_id = request.get("reviewerSessionId")
     if not isinstance(workspace_raw, str) or not isinstance(session_id, str):
-        return False
+        return None
     common = _git_path(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
     common_hash = hashlib.sha256(str(common).encode()).hexdigest()
     repo_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-") or "repo"
@@ -3052,12 +3222,12 @@ def _wait_for_managed_process(socket: str | None, session: str, window: str,
     return _managed_process_live(socket, session, window, workspace, session_id)
 
 
-def _wait_for_reviewer_process(request: dict[str, Any], repo: Path, timeout: float = 10.0) -> bool:
+def _wait_for_reviewer_process(request: dict[str, Any], repo: Path, timeout: float = 10.0) -> bool | None:
     socket = request.get("reviewerTmuxSocket")
     workspace_raw = request.get("reviewWorkspace")
     session_id = request.get("reviewerSessionId")
     if not isinstance(socket, str) or not isinstance(workspace_raw, str) or not isinstance(session_id, str):
-        return False
+        return None
     common = _git_path(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
     common_hash = hashlib.sha256(str(common).encode()).hexdigest()
     repo_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-") or "repo"
@@ -3151,8 +3321,26 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
     plan_hash = hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest()
     previous_recovery = _read_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
                                                plan_hash=plan_hash)
+    recovered_worktrees: list[str] = list(previous_recovery["completedWorktrees"] if previous_recovery else [])
     if previous_recovery and previous_recovery["pendingWorktrees"]:
-        raise SecretaryError("cleanup has an unresolved quarantined worktree")
+        _, trusted_live, policy_root = _load_policy_and_classify(repo)
+        if not trusted_live:
+            raise SecretaryError("cleanup recovery requires a trusted-live repository")
+        pending = list(previous_recovery["pendingWorktrees"])
+        for index, pending_path in enumerate(pending):
+            try:
+                _resume_quarantined_worktree(repo, Path(pending_path), policy_root, "recovered")
+            except Exception as error:
+                _write_cleanup_recovery(
+                    recovery_path, kind="workstream", identifier=workstream_id,
+                    plan_hash=plan_hash, phase="worktree-pending",
+                    completed_worktrees=recovered_worktrees, pending_worktrees=pending[index:],
+                    error=str(error))
+                raise
+            recovered_worktrees.append(str(Path(pending_path).resolve(strict=False)))
+        _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
+                                plan_hash=plan_hash, phase="worktrees",
+                                completed_worktrees=recovered_worktrees, pending_worktrees=[])
     if record["closedAt"] is not None:
         expected_reviews: dict[str, dict[str, Any]] = {}
         for request_path in (project / "reviews" / "requests").glob("*.json"):
@@ -3186,7 +3374,7 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
             raise SecretaryError("cleanup refuses a live workstream process")
         _assert_worktree_registration_absent(repo, workspace, "candidate")
 
-    completed_worktrees: list[str] = []
+    completed_worktrees: list[str] = list(dict.fromkeys(recovered_worktrees))
     pending_quarantines: list[str] = []
     _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
                             plan_hash=plan_hash, phase="prepared")

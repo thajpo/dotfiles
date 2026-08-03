@@ -11,8 +11,16 @@ const TARGETED_ACTIONS = new Set<LifecycleAction>(["interrupt", "stop", "resume"
 const TERMINAL_JOB_STATES = new Set(["complete", "completed", "failed", "paused", "stopped"]);
 
 export function actionAuthorization(value: string): ActionAuthorization {
+  // IDs are not necessarily hexadecimal: pi-subagents also uses values such
+  // as run-1, nested-run-id, and namespaced session IDs. Extract only tokens
+  // that have an ID shape; ordinary prose ("stop the investigation") must
+  // remain the deliberate sole-candidate path below.
+  const tokens = value.match(/\b[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\b/g) ?? [];
+  const ids = tokens.filter((token) =>
+    /\d/.test(token) || /[-_.:/]/.test(token) || /^[a-f0-9]{8,64}$/i.test(token),
+  );
   return {
-    ids: [...new Set(value.match(/\b[a-f0-9]{8,64}\b/g) ?? [])],
+    ids: [...new Set(ids)],
     agents: [...new Set(value.match(/\b(?:scout|researcher|oracle|worker|investigator)\b/g) ?? [])],
   };
 }

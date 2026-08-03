@@ -20,6 +20,10 @@ const collision = new Map([
   ["01234567aa", {{ status: "running", agents: ["scout"] }}],
   ["01234567bb", {{ status: "running", agents: ["scout"] }}],
 ]);
+const named = new Map([
+  ["run-1", {{ status: "running", agents: ["worker"] }}],
+  ["nested-run-id", {{ status: "running", agents: ["worker"] }}],
+]);
 const results = [
   actionTargetIsAuthorized("stop", {{ id: "01234567" }}, actionAuthorization("stop run 01234567"), {{ asyncJobs: one }}),
   actionTargetIsAuthorized("stop", {{ id: "fedcba98" }}, actionAuthorization("stop run fedcba98"), {{ asyncJobs: one }}),
@@ -28,6 +32,9 @@ const results = [
   actionTargetIsAuthorized("stop", {{}}, actionAuthorization("stop the investigation"), {{ asyncJobs: one }}),
   actionTargetIsAuthorized("stop", {{}}, actionAuthorization("stop the investigation"), {{ asyncJobs: local }}),
   actionTargetIsAuthorized("stop", {{ id: "01234567aa" }}, actionAuthorization("stop run 01234567"), {{ asyncJobs: collision }}),
+  actionTargetIsAuthorized("stop", {{ id: "run-1" }}, actionAuthorization("stop run-1"), {{ asyncJobs: named }}),
+  actionTargetIsAuthorized("stop", {{ id: "nested-run-id" }}, actionAuthorization("stop nested-run-id"), {{ asyncJobs: named }}),
+  actionTargetIsAuthorized("stop", {{ id: "run-1" }}, actionAuthorization("stop unrelated 01234567"), {{ asyncJobs: named }}),
 ];
 process.stdout.write(JSON.stringify(results));
 """
@@ -36,7 +43,7 @@ process.stdout.write(JSON.stringify(results));
             cwd=ROOT, text=True, capture_output=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), [True, False, True, True, True, False, False])
+        self.assertEqual(json.loads(result.stdout), [True, False, True, True, True, False, False, True, True, False])
 
 
 if __name__ == "__main__":

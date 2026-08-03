@@ -28,6 +28,8 @@ const CLEANUP_PLAN = Type.Object({
     path: Type.String({ maxLength: 4096 }),
     kind: Type.Union([Type.Literal("subagent-artifact"), Type.Literal("workflow-artifact")]),
     expectedSha256: Type.String({ minLength: 64, maxLength: 64 }),
+    expectedIdentity: Type.Optional(Type.String({ maxLength: 256 })),
+    expectedParentIdentity: Type.Optional(Type.String({ maxLength: 128 })),
   }), { maxItems: 256 })),
 });
 

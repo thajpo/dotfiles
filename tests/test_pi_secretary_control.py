@@ -278,11 +278,15 @@ class SecretaryControlTests(unittest.TestCase):
             planned = secretary.git_cleanup(project_id, "plan", plan)
             self.assertEqual(planned["operation"], "plan")
             self.assertEqual(planned["counts"], {"renames": 2, "deletions": 2, "worktrees": 1, "artifacts": 1})
+            self.assertIn("expectedIdentity", planned["plan"]["artifacts"][0])
+            self.assertIn("expectedParentIdentity", planned["plan"]["artifacts"][0])
+            with self.assertRaisesRegex(secretary.SecretaryError, "pinned artifact identities"):
+                secretary.git_cleanup(project_id, "apply", plan, planned["planHash"])
             self.assertTrue(side_path.exists())
             self.assertTrue(artifact.exists())
             self.assertTrue(subprocess.run(["git", "show-ref", "--verify", "--quiet", "refs/heads/benchmark/discard"], cwd=self.source).returncode == 0)
 
-            applied = secretary.git_cleanup(project_id, "apply", plan, planned["planHash"])
+            applied = secretary.git_cleanup(project_id, "apply", planned["plan"], planned["planHash"])
         self.assertTrue(applied["applied"])
         self.assertFalse(side_path.exists())
         self.assertFalse(artifact.exists())
@@ -310,7 +314,7 @@ class SecretaryControlTests(unittest.TestCase):
             with mock.patch.object(secretary, "_apply_cleanup_ref_transaction",
                                    side_effect=secretary.SecretaryError("simulated ref interruption")):
                 with self.assertRaisesRegex(secretary.SecretaryError, "simulated ref interruption"):
-                    secretary.git_cleanup(project_id, "apply", plan, planned["planHash"])
+                    secretary.git_cleanup(project_id, "apply", planned["plan"], planned["planHash"])
         project = Path(self.env["XDG_STATE_HOME"]) / "pi-secretary" / "projects" / project_id
         recovery = next((project / "operations").glob(f"cleanup-git-{planned['planHash']}.json"))
         manifest = json.loads(recovery.read_text())
@@ -318,7 +322,7 @@ class SecretaryControlTests(unittest.TestCase):
         self.assertIn(str(side_path), manifest["completedWorktrees"])
         with mock.patch.object(secretary, "_cleanup_worktree_has_live_process", return_value=False), \
              mock.patch.dict(os.environ, environment, clear=False):
-            replayed = secretary.git_cleanup(project_id, "apply", plan, planned["planHash"])
+            replayed = secretary.git_cleanup(project_id, "apply", planned["plan"], planned["planHash"])
         self.assertTrue(replayed["recovered"])
         self.assertFalse(side_path.exists())
         self.assertNotEqual(subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
