@@ -58,7 +58,7 @@
  interface SessionLeaseOptions {
  	rootDir?: string;
  	now?: () => number;
-@@ -138,6 +180,83 @@
+@@ -138,6 +180,86 @@
  	}
  }
  
@@ -103,6 +103,7 @@
 +		if (value.version !== 1
 +			|| typeof value.token !== "string"
 +			|| typeof value.routePath !== "string"
++			|| !path.isAbsolute(value.routePath)
 +			|| typeof value.operation !== "string"
 +			|| value.operation.length === 0
 +			|| value.operation.length > 128
@@ -111,7 +112,9 @@
 +			|| value.pid <= 0
 +			|| typeof value.hostname !== "string"
 +			|| typeof value.acquiredAt !== "string"
-+			|| typeof value.acquiredAtMs !== "number") return undefined;
++			|| typeof value.acquiredAtMs !== "number"
++			|| !Number.isFinite(value.acquiredAtMs)
++			|| (value.processStartIdentity !== undefined && typeof value.processStartIdentity !== "string")) return undefined;
 +		return value as SandboxParentTransitionOwner;
 +	} catch {
 +		return undefined;
@@ -142,7 +145,7 @@
  function conflictMessage(canonicalSessionFile: string, owner: SessionLeaseOwner | undefined): string {
  	if (!owner) {
  		return `Direct revival of session '${canonicalSessionFile}' is blocked by an existing lease with unreadable owner metadata. Refusing to reclaim it without proof that the owner is stale.`;
-@@ -186,6 +305,77 @@
+@@ -186,6 +308,77 @@
  	}
  }
  

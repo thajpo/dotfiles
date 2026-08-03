@@ -335,6 +335,9 @@ class HarnessStaticTests(unittest.TestCase):
             "writePrivateAtomicJson",
             "processStartIdentity",
             "child start is blocked until it finishes",
+            "!path.isAbsolute(value.routePath)",
+            "Number.isFinite(value.acquiredAtMs)",
+            "processStartIdentity !== undefined && typeof value.processStartIdentity !== \"string\"",
         ]:
             self.assertIn(evidence, child_lease_patch)
         self.assertIn("acquireSandboxChildLease", child_runner_patch)
@@ -375,6 +378,8 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('docker system prune', (ROOT / "pi/README.md").read_text())
         self.assertIn("--apply", gc)
         self.assertIn("pi.container-sandbox.managed", gc)
+        self.assertIn("owner_status", gc)
+        self.assertIn("owner state unproven", gc)
 
     def test_installer_is_fail_closed_and_rollback_protected(self):
         installer = (ROOT / "install.sh").read_text()

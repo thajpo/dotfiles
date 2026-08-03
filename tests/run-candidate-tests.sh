@@ -15,3 +15,5 @@ cp -a "$source_modules" "$temporary/npm/node_modules"
 PI_CODING_AGENT_DIR="$temporary" "$root/scripts/pi-patch-subagents" >/dev/null
 PI_TEST_PACKAGE_ROOT="$temporary/npm" \
   "$temporary/npm/node_modules/.bin/jiti" "$root/tests/pi-candidate-worktrees.mjs"
+PI_TEST_PACKAGE_ROOT="$temporary/npm" \
+  "$temporary/npm/node_modules/.bin/jiti" "$root/tests/pi-child-lease.mjs"

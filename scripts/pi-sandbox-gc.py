@@ -36,28 +36,41 @@ def inspect(kind: str, identifier: str) -> dict[str, Any]:
     return parsed[0]
 
 
-def owner_identity(pid: int) -> str:
+def owner_identity(pid: int) -> str | None:
     try:
         fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
         return f"linux:{fields[21]}"
     except (OSError, IndexError):
         result = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "lstart="], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
         value = result.stdout.strip()
-        return f"darwin:{value}" if result.returncode == 0 and value else "unavailable"
+        return f"darwin:{value}" if result.returncode == 0 and value else None
+
+
+def owner_status(labels: dict[str, str]) -> bool | None:
+    """Return alive/dead/unknown; unknown ownership is never collectible."""
+    raw_pid = labels.get("pi.container-sandbox.owner", "")
+    expected = labels.get("pi.container-sandbox.owner-identity", "")
+    if not raw_pid.isdecimal() or len(raw_pid) > 10 or not expected or len(expected) != 16 or any(c not in "0123456789abcdef" for c in expected):
+        return None
+    pid = int(raw_pid)
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return None
+    identity = owner_identity(pid)
+    if identity is None:
+        return None
+    actual = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    return actual == expected
 
 
 def owner_alive(labels: dict[str, str]) -> bool:
-    try:
-        pid = int(labels.get("pi.container-sandbox.owner", ""))
-    except ValueError:
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    expected = labels.get("pi.container-sandbox.owner-identity", "")
-    actual = hashlib.sha256(owner_identity(pid).encode()).hexdigest()[:16]
-    return bool(expected) and expected == actual
+    # Compatibility helper for callers/tests; unknown is deliberately not alive.
+    return owner_status(labels) is True
 
 
 def created_epoch(value: str) -> float:
@@ -86,8 +99,12 @@ def main() -> int:
         for mount in item.get("Mounts", []) or []:
             if mount.get("Type") == "volume" and mount.get("Name", "").startswith("pi-package-cache-"):
                 referenced_volumes.add(mount["Name"])
-        if owner_alive(labels):
+        owner = owner_status(labels)
+        if owner is True:
             actions.append({"kind": "container", "id": identifier, "action": "retain", "reason": "owner-alive"})
+            continue
+        if owner is not False:
+            actions.append({"kind": "container", "id": identifier, "action": "retain", "reason": "owner state unproven"})
             continue
         target = labels.get("pi.container-sandbox.target", "unknown")
         if target == "trusted-live":
