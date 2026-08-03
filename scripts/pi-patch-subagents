@@ -75,7 +75,8 @@ apply_verified_patch \
   0.35.1 \
   8cfba3086dbb460c59c18ebbe7bd04f3020f457d3e7ed5c91dc53dbfa9c5aa08 \
   bce5d9ee261a86fba34b9e421be745a5fca8a91d6a755c3c44d790e3c3df9727 \
-  "$patch_dir/pi-subagents-0.35.1-worker-read-only-fanout.patch"
+  "$patch_dir/pi-subagents-0.35.1-worker-read-only-fanout.patch" \
+  8c28be64f679220d9ee1cfc2d44f67230b4b2fa50b3cefd338f8d7c0fab609aa
 
 apply_verified_patch \
   pi-subagents-host-command-fanout \
@@ -218,6 +219,15 @@ apply_verified_patch \
   "$patch_dir/pi-subagents-0.35.1-unbounded-parallel.patch" \
   996af3c6ef8538bbbb93ffbf6d368011735440a52e0336d3522286af8897e784
 
+apply_verified_patch \
+  pi-subagents-sandbox-child-lease \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/runs/shared/session-lease.ts" \
+  0.35.1 \
+  267c1a66872aeb9689c598904060b4dd3e03bd42a6690ac4aa029f9358bd2318 \
+  c6f6e4ef496f4b387e5e7501056a9f4ea83412d8f3e0e707344eccc383cebf51 \
+  "$patch_dir/pi-subagents-0.35.1-sandbox-child-lease.patch"
+
 verify_model_policy_file() {
   local relative=$1 expected=$2 compatible=${3:-} path="$agent_dir/npm/node_modules/pi-subagents/$1" actual
   [[ -f $path ]] || { printf 'pi-subagents-model-policy: source missing: %s\n' "$path" >&2; exit 1; }
@@ -255,3 +265,30 @@ apply_verified_patch \
   e43cb1832c920b01e4baa50958144e5a216b44e4049cd27161b37831d59b0c4d \
   "$patch_dir/pi-subagents-0.35.1-observability-foreground-start-executor.patch" \
   e43cb1832c920b01e4baa50958144e5a216b44e4049cd27161b37831d59b0c4d
+
+apply_verified_patch \
+  pi-subagents-sandbox-child-lease-runner \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/runs/background/subagent-runner.ts" \
+  0.35.1 \
+  ece4fc0f43896a0d8193c68d73d10dc217c9d8e77154b57d2dacea1945a6fc87 \
+  e10daebe0b8b9056a616b7dd457a325fafa61ac2e9c9fedb9d8ec718f48060df \
+  "$patch_dir/pi-subagents-0.35.1-sandbox-child-lease-runner.patch"
+
+apply_verified_patch \
+  pi-subagents-sandbox-child-lease-foreground \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/runs/foreground/subagent-executor.ts" \
+  0.35.1 \
+  e43cb1832c920b01e4baa50958144e5a216b44e4049cd27161b37831d59b0c4d \
+  780eca45f52d0ca81cf70069b8c3dd65b9469ff9873a49dd22552f6671b083eb \
+  "$patch_dir/pi-subagents-0.35.1-sandbox-child-lease-foreground.patch"
+
+apply_verified_patch \
+  pi-sandbox-child-lifecycle \
+  "$agent_dir/npm/node_modules/@kjrjay/pi-sandbox" \
+  "$agent_dir/npm/node_modules/@kjrjay/pi-sandbox/index.ts" \
+  0.2.0 \
+  ac17d426b3f975cce31b2b0cf3c9b026c21b2cad38fac48ff99efcfbf1dca032 \
+  89fc0bf4a5a2b3a9b0a2a118a5e95c8e2a3d86520e0e351ec2df0b068a93e07f \
+  "$patch_dir/pi-sandbox-0.2.0-child-lifecycle.patch"

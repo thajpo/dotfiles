@@ -1,0 +1,608 @@
+--- a/index.ts
++++ b/index.ts
+@@ -28,9 +28,9 @@
+ 
+ import { spawn, spawnSync } from "node:child_process";
+ import { createHash, randomBytes } from "node:crypto";
+-import { createWriteStream, existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
++import { createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+ import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+-import { homedir, tmpdir } from "node:os";
++import { homedir, hostname, tmpdir } from "node:os";
+ import path from "node:path";
+ import { pathToFileURL } from "node:url";
+ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+@@ -418,7 +418,10 @@
+ 
+ function processStartTicks(pid: number): string {
+ 	try {
+-		return `linux:${readFileSync(`/proc/${pid}/stat`, "utf8").split(/\s+/)[21] ?? "unavailable"}`;
++		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
++		const commandEnd = stat.lastIndexOf(")");
++		const fields = commandEnd === -1 ? [] : stat.slice(commandEnd + 1).trim().split(/\s+/);
++		return fields[19] ? `linux:${fields[19]}` : "unavailable";
+ 	} catch {
+ 		if (process.platform === "darwin") {
+ 			const result = spawnSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" });
+@@ -429,6 +432,99 @@
+ 	}
+ }
+ 
++interface SandboxChildLeaseRecord {
++	version: 1;
++	routePath: string;
++	runId: string;
++	sessionId?: string;
++	source: "async" | "foreground";
++	pid: number;
++	hostname: string;
++	processStartIdentity?: string;
++	acquiredAt: string;
++	acquiredAtMs: number;
++}
++
++interface SandboxParentTransitionRecord {
++	version: 1;
++	token: string;
++	routePath: string;
++	operation: string;
++	pid: number;
++	hostname: string;
++	processStartIdentity?: string;
++	acquiredAt: string;
++	acquiredAtMs: number;
++}
++
++function childProcessAlive(pid: number): boolean | undefined {
++	try {
++		process.kill(pid, 0);
++		return true;
++	} catch (error) {
++		const code = (error as NodeJS.ErrnoException).code;
++		if (code === "ESRCH") return false;
++		if (code === "EPERM") return true;
++		return undefined;
++	}
++}
++
++function childProcessOwnerIsStale(owner: Pick<SandboxChildLeaseRecord, "pid" | "hostname" | "processStartIdentity">): boolean {
++	if (owner.hostname !== hostname()) return false;
++	const alive = childProcessAlive(owner.pid);
++	if (alive === false) return true;
++	if (alive !== true || !owner.processStartIdentity) return false;
++	const currentIdentity = processStartTicks(owner.pid);
++	return currentIdentity !== "unavailable" && currentIdentity !== owner.processStartIdentity;
++}
++
++function childLeaseIsStale(owner: SandboxChildLeaseRecord): boolean {
++	return childProcessOwnerIsStale(owner);
++}
++
++function parseSandboxParentTransition(value: unknown): SandboxParentTransitionRecord | undefined {
++	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
++	const owner = value as Partial<SandboxParentTransitionRecord>;
++	if (owner.version !== 1
++		|| typeof owner.token !== "string"
++		|| typeof owner.routePath !== "string"
++		|| !path.isAbsolute(owner.routePath)
++		|| typeof owner.operation !== "string"
++		|| owner.operation.length === 0
++		|| owner.operation.length > 128
++		|| typeof owner.pid !== "number"
++		|| !Number.isInteger(owner.pid)
++		|| owner.pid <= 0
++		|| typeof owner.hostname !== "string"
++		|| typeof owner.acquiredAt !== "string"
++		|| typeof owner.acquiredAtMs !== "number"
++		|| !Number.isFinite(owner.acquiredAtMs)
++		|| (owner.processStartIdentity !== undefined && typeof owner.processStartIdentity !== "string")) return undefined;
++	return owner as SandboxParentTransitionRecord;
++}
++
++function parseSandboxChildLease(value: unknown): SandboxChildLeaseRecord | undefined {
++	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
++	const owner = value as Partial<SandboxChildLeaseRecord>;
++	if (owner.version !== 1
++		|| typeof owner.routePath !== "string"
++		|| !path.isAbsolute(owner.routePath)
++		|| typeof owner.runId !== "string"
++		|| owner.runId.length === 0
++		|| owner.runId.length > 512
++		|| (owner.source !== "async" && owner.source !== "foreground")
++		|| typeof owner.pid !== "number"
++		|| !Number.isInteger(owner.pid)
++		|| owner.pid <= 0
++		|| typeof owner.hostname !== "string"
++		|| typeof owner.acquiredAt !== "string"
++		|| typeof owner.acquiredAtMs !== "number"
++		|| !Number.isFinite(owner.acquiredAtMs)
++		|| (owner.sessionId !== undefined && typeof owner.sessionId !== "string")
++		|| (owner.processStartIdentity !== undefined && typeof owner.processStartIdentity !== "string")) return undefined;
++	return owner as SandboxChildLeaseRecord;
++}
++
+ function syncGit(cwd: string, args: string[]): string {
+ 	const result = spawnSync("git", args, {
+ 		cwd,
+@@ -1075,6 +1171,7 @@
+ 	private runtimeInfo: RuntimeInfo | undefined;
+ 	private routePath: string | undefined;
+ 	private checkpointTail: Promise<unknown> = Promise.resolve();
++	private parentTransition: { path: string; owner: SandboxParentTransitionRecord; depth: number } | undefined;
+ 
+ 	constructor(private readonly pi: ExtensionAPI) {}
+ 
+@@ -1116,6 +1213,194 @@
+ 		return this.gitRefState;
+ 	}
+ 
++	private activeChildLeases(): SandboxChildLeaseRecord[] {
++		if (!this.routePath || !this.route) return [];
++		const canonicalRoute = realpathSync(this.routePath);
++		const leaseRoot = path.join(path.dirname(canonicalRoute), "subagent-sandbox-leases");
++		let rootInfo: ReturnType<typeof lstatSync>;
++		try {
++			rootInfo = lstatSync(leaseRoot);
++		} catch (error) {
++			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
++			throw error;
++		}
++		const uid = process.getuid?.();
++		if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory() || (uid !== undefined && rootInfo.uid !== uid) || (rootInfo.mode & 0o077) !== 0) {
++			throw new Error(`Sandbox child lease root is unsafe: ${leaseRoot}`);
++		}
++		const active: SandboxChildLeaseRecord[] = [];
++		for (const entry of readdirSync(leaseRoot, { withFileTypes: true })) {
++			if (entry.name === "parent-transition.json") {
++				const transitionPath = path.join(leaseRoot, entry.name);
++				const transitionInfo = lstatSync(transitionPath);
++				if (transitionInfo.isSymbolicLink() || !transitionInfo.isFile() || (transitionInfo.mode & 0o077) !== 0) throw new Error(`Sandbox parent transition metadata is unsafe: ${transitionPath}`);
++				continue;
++			}
++			if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error(`Sandbox child lease entry is unsafe: ${path.join(leaseRoot, entry.name)}`);
++			const leaseDir = path.join(leaseRoot, entry.name);
++			const ownerPath = path.join(leaseDir, "owner.json");
++			let ownerInfo: ReturnType<typeof lstatSync>;
++			try {
++				ownerInfo = lstatSync(ownerPath);
++			} catch (error) {
++				if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
++				throw error;
++			}
++			if (ownerInfo.isSymbolicLink() || !ownerInfo.isFile() || (uid !== undefined && ownerInfo.uid !== uid) || (ownerInfo.mode & 0o077) !== 0) {
++				throw new Error(`Sandbox child lease metadata is unsafe: ${ownerPath}`);
++			}
++			let owner: SandboxChildLeaseRecord | undefined;
++			try {
++				owner = parseSandboxChildLease(JSON.parse(readFileSync(ownerPath, "utf8")));
++			} catch {
++				owner = undefined;
++			}
++			if (!owner || owner.routePath !== canonicalRoute || (owner.sessionId !== undefined && owner.sessionId !== this.route.session)) {
++				throw new Error(`Sandbox child lease metadata is invalid or belongs to another task: ${ownerPath}`);
++			}
++			if (childLeaseIsStale(owner)) {
++				rmSync(leaseDir, { recursive: true, force: true });
++				continue;
++			}
++			active.push(owner);
++		}
++		return active.sort((left, right) => left.acquiredAtMs - right.acquiredAtMs);
++	}
++
++	private beginChildLifecycleTransition(operation: string): { release(): void } | undefined {
++		if (!this.routePath || !this.route) return undefined;
++		if (this.parentTransition) {
++			this.parentTransition.depth += 1;
++			const transition = this.parentTransition;
++			return {
++				release: () => {
++					transition.depth -= 1;
++					if (transition.depth > 0 || this.parentTransition !== transition) return;
++					const current = parseSandboxParentTransition(readFileSync(transition.path, "utf8"));
++					if (current?.token === transition.owner.token) rmSync(transition.path, { force: true });
++					this.parentTransition = undefined;
++				},
++			};
++		}
++		if (!operation || operation.length > 128) throw new Error("Sandbox child lifecycle transition operation is invalid");
++		const canonicalRoute = realpathSync(this.routePath);
++		const leaseRoot = path.join(path.dirname(canonicalRoute), "subagent-sandbox-leases");
++		mkdirSync(leaseRoot, { recursive: true, mode: 0o700 });
++		const uid = process.getuid?.();
++		const rootInfo = lstatSync(leaseRoot);
++		if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory() || (uid !== undefined && rootInfo.uid !== uid) || (rootInfo.mode & 0o077) !== 0) {
++			throw new Error(`Sandbox child lease root is unsafe: ${leaseRoot}`);
++		}
++		const transitionPath = path.join(leaseRoot, "parent-transition.json");
++		const now = Date.now();
++		const owner: SandboxParentTransitionRecord = {
++			version: 1,
++			token: randomBytes(16).toString("hex"),
++			routePath: canonicalRoute,
++			operation,
++			pid: process.pid,
++			hostname: hostname(),
++			...(processStartTicks(process.pid) !== "unavailable" ? { processStartIdentity: processStartTicks(process.pid) } : {}),
++			acquiredAt: new Date(now).toISOString(),
++			acquiredAtMs: now,
++		};
++		let transitionCreated = false;
++		for (let attempt = 0; attempt < 2; attempt++) {
++			try {
++				writeFileSync(transitionPath, JSON.stringify(owner, null, 2), { encoding: "utf8", mode: 0o600, flag: "wx" });
++				transitionCreated = true;
++				break;
++			} catch (error) {
++				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
++				let existing: SandboxParentTransitionRecord | undefined;
++				try {
++					existing = parseSandboxParentTransition(JSON.parse(readFileSync(transitionPath, "utf8")));
++				} catch {
++					existing = undefined;
++				}
++				if (!existing || !childProcessOwnerIsStale(existing)) {
++					throw new Error(`Sandbox parent transition is already active: ${transitionPath}`);
++				}
++				rmSync(transitionPath, { force: true });
++			}
++		}
++		if (!transitionCreated) throw new Error(`Could not acquire sandbox parent transition: ${transitionPath}`);
++		const transition = { path: transitionPath, owner, depth: 1 };
++		this.parentTransition = transition;
++		try {
++			const active = this.activeChildLeases();
++			if (active.length > 0) {
++				this.parentTransition = undefined;
++				rmSync(transitionPath, { force: true });
++				const shown = active.slice(0, 6).map((lease) => `${lease.source}:${lease.runId}`).join(", ");
++				const suffix = active.length > 6 ? `, +${active.length - 6} more` : "";
++				throw new Error(`Cannot ${operation} while ${active.length} subagent child run${active.length === 1 ? " is" : "s are"} active (${shown}${suffix}). Wait for children to complete or stop them, then verify and export their artifacts before retrying.`);
++			}
++		} catch (error) {
++			if (this.parentTransition === transition) this.parentTransition = undefined;
++			try {
++				const current = parseSandboxParentTransition(readFileSync(transitionPath, "utf8"));
++				if (current?.token === owner.token) rmSync(transitionPath, { force: true });
++			} catch {
++				// Preserve the original failure; an unreadable transition remains fail-closed.
++			}
++			throw error;
++		}
++		return {
++			release: () => {
++			transition.depth -= 1;
++			if (transition.depth > 0 || this.parentTransition !== transition) return;
++			const current = parseSandboxParentTransition(readFileSync(transition.path, "utf8"));
++			if (current?.token === transition.owner.token) rmSync(transition.path, { force: true });
++			this.parentTransition = undefined;
++		},
++		};
++	}
++
++	private activeParentTransition(): SandboxParentTransitionRecord | undefined {
++		if (!this.routePath || !this.route) return undefined;
++		const canonicalRoute = realpathSync(this.routePath);
++		const transitionPath = path.join(path.dirname(canonicalRoute), "subagent-sandbox-leases", "parent-transition.json");
++		let info: ReturnType<typeof lstatSync>;
++		try {
++			info = lstatSync(transitionPath);
++		} catch (error) {
++			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
++			throw error;
++		}
++		if (info.isSymbolicLink() || !info.isFile() || (info.mode & 0o077) !== 0) throw new Error(`Sandbox parent transition metadata is unsafe: ${transitionPath}`);
++		let owner: SandboxParentTransitionRecord | undefined;
++		try {
++			owner = parseSandboxParentTransition(JSON.parse(readFileSync(transitionPath, "utf8")));
++		} catch {
++			owner = undefined;
++		}
++		if (!owner || owner.routePath !== canonicalRoute) throw new Error(`Sandbox parent transition metadata is invalid: ${transitionPath}`);
++		if (childProcessOwnerIsStale(owner)) {
++			rmSync(transitionPath, { force: true });
++			return undefined;
++		}
++		return owner;
++	}
++
++	getChildLifecycleStatus(): { active: number; runs: string[]; transition?: string } {
++		const leases = this.activeChildLeases();
++		const transition = this.activeParentTransition();
++		return {
++			active: leases.length,
++			runs: leases.map((lease) => `${lease.source}:${lease.runId}`),
++			...(transition ? { transition: transition.operation } : {}),
++		};
++	}
++
++	private childLifecycleBlock(operation: string): string | undefined {
++		const leases = this.activeChildLeases();
++		if (leases.length === 0) return undefined;
++		const shown = leases.slice(0, 6).map((lease) => `${lease.source}:${lease.runId}`).join(", ");
++		const suffix = leases.length > 6 ? `, +${leases.length - 6} more` : "";
++		return `Cannot ${operation} while ${leases.length} subagent child run${leases.length === 1 ? " is" : "s are"} active (${shown}${suffix}). Wait for children to complete or stop them, then verify and export their artifacts before retrying.`;
++	}
++
+ 	private repoIdentity(repoRoot: string): string {
+ 		return createHash("sha256").update(repoRoot).digest("hex").slice(0, 10);
+ 	}
+@@ -1834,6 +2119,10 @@
+ 
+ 	private async prepareGitRefWorkspace(ctx?: ExtensionContext) {
+ 		if (!this.containerName) throw new Error("Sandbox container is not running");
++		const transition = !isChildProcess() && this.getMode() === "isolated"
++			? this.beginChildLifecycleTransition("rebind the isolated sandbox workspace")
++			: undefined;
++		try {
+ 		const state = await this.ensureGitRefState(ctx);
+ 		if (this.getMode() === "trusted-live") {
+ 			if (!(await this.containerHasGitRepo(state.repoRoot))) throw new Error("Trusted-live bind is not a usable Git worktree inside the container");
+@@ -1859,13 +2148,25 @@
+ 				.trim();
+ 			if (containerHead !== hostHead) {
+ 				const workspaceStatus = await this.containerWorkspaceStatus();
++				if (await this.containerRebaseInProgress()) {
++					throw new Error(`${state.commitTarget} sandbox container has an unfinished rebase; resolve or abort it before synchronization`);
++				}
+ 				const hostKnowsContainerHead = (await runGit(["cat-file", "-e", `${containerHead}^{commit}`], { cwd: state.repoRoot, timeoutMs: 10_000 })).code === 0;
+ 				const hostAdvanced = hostKnowsContainerHead &&
+ 					(await runGit(["merge-base", "--is-ancestor", containerHead, hostHead], { cwd: state.repoRoot, timeoutMs: 30_000 })).code === 0;
++				const containerAdvanced = !workspaceStatus && !isChildProcess() &&
++					(await this.containerGit(["merge-base", "--is-ancestor", hostHead, containerHead], { timeoutMs: 30_000 })).code === 0;
+ 				if (!workspaceStatus && hostAdvanced) {
++					if (isChildProcess()) throw new Error(`${state.commitTarget} child cannot rebind the isolated workspace; parent must synchronize it after child completion`);
+ 					reseedExistingWorkspace = true;
++				} else if (containerAdvanced) {
++					await this.importContainerHistory(state, containerHead, hostHead, "recovery", async (importedHead) => {
++						await this.publishImportedHead(state, importedHead, hostHead);
++					});
++					await this.applyGitRefUntrackedFiles(state);
++					return;
+ 				} else {
+-					throw new Error(`${state.commitTarget} sandbox container is out of sync with ${state.sandboxRef}; preserve or inspect the container before retrying`);
++					throw new Error(`${state.commitTarget} sandbox container is out of sync with ${state.sandboxRef}; workspace must be clean and history must descend from the recorded host OID before recovery`);
+ 				}
+ 			}
+ 			if (!reseedExistingWorkspace) {
+@@ -1910,6 +2211,9 @@
+ 		} finally {
+ 			await rm(temp, { recursive: true, force: true });
+ 		}
++		} finally {
++			transition?.release();
++		}
+ 	}
+ 
+ 	private async copyDirectoryToContainer(sourceDir: string, targetDir: string) {
+@@ -2279,7 +2583,7 @@
+ 		state: GitRefState,
+ 		sandboxHead: string,
+ 		baseCommit: string,
+-		purpose: "checkpoint" | "rebase",
++		purpose: "checkpoint" | "rebase" | "recovery",
+ 		useImportedHead: (importedHead: string) => Promise<T>,
+ 	): Promise<T> {
+ 		if (!this.containerName) throw new Error("Sandbox container is not running");
+@@ -2405,16 +2709,21 @@
+ 		if (this.getMode() === "trusted-live") return { committed: false, imported: false, message: "Trusted-live changes are already visible; no checkpoint or import was performed" };
+ 		if (isChildProcess()) throw new Error("Collaborating children cannot checkpoint or publish the parent task");
+ 		if (this.pendingRebase) throw new Error("Sandbox rebase is pending; complete or abort it before checkpointing");
+-		await this.ensure(ctx);
+-		const state = await this.ensureGitRefState(ctx);
+-		const expectedParent = await this.hostSandboxHead(state);
+-		const checkpoint = await this.createSandboxCheckpoint(state, expectedParent, ctx);
+-		const imported = await this.importSandboxHeadToHost(state, expectedParent);
+-		return {
+-			committed: checkpoint.committed,
+-			imported: imported.imported,
+-			message: `${checkpoint.committed ? "Committed" : "No new commit"}; ${imported.imported ? "imported" : "ref already current"} ${state.sandboxRef} @ ${imported.commitHash.slice(0, 12)}`,
+-		};
++		const transition = this.beginChildLifecycleTransition("checkpoint or move the sandbox ref");
++		try {
++			await this.ensure(ctx);
++			const state = await this.ensureGitRefState(ctx);
++			const expectedParent = await this.hostSandboxHead(state);
++			const checkpoint = await this.createSandboxCheckpoint(state, expectedParent, ctx);
++			const imported = await this.importSandboxHeadToHost(state, expectedParent);
++			return {
++				committed: checkpoint.committed,
++				imported: imported.imported,
++				message: `${checkpoint.committed ? "Committed" : "No new commit"}; ${imported.imported ? "imported" : "ref already current"} ${state.sandboxRef} @ ${imported.commitHash.slice(0, 12)}`,
++			};
++		} finally {
++			transition?.release();
++		}
+ 	}
+ 
+ 	async checkpointGitRef(ctx?: ExtensionContext): Promise<GitRefCheckpointResult> {
+@@ -2429,12 +2738,15 @@
+ 	}
+ 
+ 	private async containerRebaseInProgress(): Promise<boolean> {
+-		const result = await this.execCode([
++		if (!this.containerName) return false;
++		const result = await this.runtimeExec([
++			"exec",
++			"-w",
++			this.gitRefState?.repoRoot ?? this.cwd,
++			this.containerName,
+ 			"sh",
+ 			"-c",
+-			'cd "$1" && { test -d "$(git rev-parse --git-path rebase-merge)" || test -d "$(git rev-parse --git-path rebase-apply)"; }',
+-			"sh",
+-			this.cwd,
++			'{ test -d "$(git rev-parse --git-path rebase-merge)" || test -d "$(git rev-parse --git-path rebase-apply)"; }',
+ 		], { timeoutMs: 10_000 });
+ 		return result.code === 0;
+ 	}
+@@ -2617,7 +2929,9 @@
+ 
+ 	async rebaseHost(ctx?: ExtensionContext): Promise<RebaseResult> {
+ 		if (this.getMode() === "trusted-live") throw new Error("Use ordinary Git directly in trusted-live mode; no promotion rebase exists");
+-		await this.ensure(ctx);
++		const transition = this.beginChildLifecycleTransition("rebase the sandbox");
++		try {
++			await this.ensure(ctx);
+ 		if (this.pendingRebase) return this.rebaseStatus();
+ 
+ 		// Capture all current work before selecting the old sandbox tip.
+@@ -2658,18 +2972,22 @@
+ 		})).stdout.toString().trim());
+ 		if (!Number.isSafeInteger(expectedCommitCount) || expectedCommitCount < 0) throw new Error("Could not determine sandbox commit count");
+ 
+-		return this.startContainerRebase(state, {
+-			oldBase,
+-			newBase,
+-			oldSandboxTip,
+-			expectedCommitCount,
+-			baseRef,
+-		}, ctx);
++			return this.startContainerRebase(state, {
++				oldBase,
++				newBase,
++				expectedCommitCount,
++				baseRef,
++			}, ctx);
++		} finally {
++			transition?.release();
++		}
+ 	}
+ 
+ 	async finalizePendingRebase(ctx?: ExtensionContext): Promise<RebaseResult> {
+ 		const pending = this.pendingRebase;
+ 		if (!pending) return { completed: true, conflicted: false, message: "No sandbox rebase is pending" };
++		const transition = this.beginChildLifecycleTransition("finalize the sandbox rebase");
++		try {
+ 		await this.ensure(ctx);
+ 		if (await this.containerRebaseInProgress()) {
+ 			const conflictFiles = await this.rebaseConflictFiles();
+@@ -2721,6 +3039,9 @@
+ 		await this.completeRebaseState(state, pending, pending.newBase);
+ 		ctx?.ui.setStatus("sandbox-rebase", undefined);
+ 		return { completed: true, conflicted: false, message: `Rebased ${pending.expectedCommitCount} commit(s) onto ${state.baseBranch} @ ${pending.newBase.slice(0, 12)}` };
++		} finally {
++			transition?.release();
++		}
+ 	}
+ 
+ 	async rebaseStatus(): Promise<RebaseResult> {
+@@ -2747,6 +3068,8 @@
+ 	async abortRebase(ctx?: ExtensionContext): Promise<string> {
+ 		const pending = this.pendingRebase;
+ 		if (!pending) return "No sandbox rebase is pending";
++		const transition = this.beginChildLifecycleTransition("abort the sandbox rebase");
++		try {
+ 		await this.ensure(ctx);
+ 		if (await this.containerRebaseInProgress()) {
+ 			await this.containerGit(["-c", "core.hooksPath=/dev/null", "rebase", "--abort"], { timeoutMs: 120_000 }).catch(() => undefined);
+@@ -2756,6 +3079,9 @@
+ 		this.setPendingRebase(undefined);
+ 		ctx?.ui.setStatus("sandbox-rebase", undefined);
+ 		return `Aborted sandbox rebase; restored ${pending.oldSandboxTip.slice(0, 12)}`;
++		} finally {
++			transition?.release();
++		}
+ 	}
+ 
+ 	async assertReadyForAgentTurn() {
+@@ -2764,6 +3090,11 @@
+ 
+ 	async autoCheckpointSandboxChanges(ctx?: ExtensionContext) {
+ 		if (!this.isEnabled() || this.pendingRebase || this.getMode() === "trusted-live" || isChildProcess()) return;
++		const blocked = this.childLifecycleBlock("automatically checkpoint the sandbox ref");
++		if (blocked) {
++			ctx?.ui.notify(blocked, "warning");
++			return;
++		}
+ 		const result = await this.checkpointGitRef(ctx);
+ 		if (result.committed || result.imported) ctx?.ui.notify(result.message, "info");
+ 	}
+@@ -2795,26 +3126,47 @@
+ 			this.dockerPortMappings = [];
+ 			return;
+ 		}
++		let transition: { release(): void } | undefined;
++		try {
++			transition = this.beginChildLifecycleTransition("shut down or remove the sandbox container");
++		} catch (error) {
++			ctx?.ui.notify(error instanceof Error ? error.message : String(error), "warning");
++			return;
++		}
+ 		const containerToCleanup = this.containerName;
++		let preserveContainer = this.pendingRebase !== undefined;
+ 		try {
+ 			// Do not auto-checkpoint unless the sandbox was actually started.
+ 			// checkpointGitRef() calls ensure(), and on a resume/session
+ 			// switch that would create a throwaway container for the session being
+ 			// left, producing two containers for one visible resume.
+-			if (this.started && this.containerName && this.getMode() === "isolated") await this.autoCheckpointSandboxChanges(ctx);
++			if (this.started && this.containerName && this.getMode() === "isolated" && !preserveContainer) {
++				try {
++					await this.autoCheckpointSandboxChanges(ctx);
++				} catch (error) {
++					preserveContainer = true;
++					ctx?.ui.notify(`Sandbox retained after checkpoint failure: ${error instanceof Error ? error.message : String(error)}`, "warning");
++				}
++			}
+ 		} finally {
+-			if (containerToCleanup) {
+-				if (this.config.lifecycle === "remove") {
+-					await this.removeOwnedTaskContainers();
+-				} else if (explicitStop || this.config.lifecycle === "stopped") {
+-					await this.runtimeExec(["stop", containerToCleanup]).catch(() => undefined);
++			try {
++				if (!preserveContainer && containerToCleanup) {
++					if (this.config.lifecycle === "remove") {
++						await this.removeOwnedTaskContainers();
++					} else if (explicitStop || this.config.lifecycle === "stopped") {
++						await this.runtimeExec(["stop", containerToCleanup]).catch(() => undefined);
++					}
+ 				}
++				if (!preserveContainer) {
++					ctx?.ui.setStatus("sandbox", undefined);
++					this.containerName = undefined;
++					this.started = false;
++					this.dockerPortMappings = [];
++					this.depsInstalled = false;
++				}
++			} finally {
++				transition?.release();
+ 			}
+-			ctx?.ui.setStatus("sandbox", undefined);
+-			this.containerName = undefined;
+-			this.started = false;
+-			this.dockerPortMappings = [];
+-			this.depsInstalled = false;
+ 		}
+ 	}
+ }
+@@ -2838,6 +3190,7 @@
+ 	isEnabled() { return this.engine.isEnabled(); }
+ 	getConfig() { return this.engine.getConfig(); }
+ 	getRuntimeInfo() { return this.engine.getRuntimeInfo(); }
++	getChildLifecycleStatus() { return this.engine.getChildLifecycleStatus(); }
+ 	getMode() { return this.engine.getMode(); }
+ 	getRoute() { return this.engine.getRoute(); }
+ 	getGitRefState() { return this.engine.getGitRefState(); }
+@@ -3647,6 +4000,7 @@
+ 					const target = parseTarget(config.target, "target");
+ 					const gitRefState = sandbox.workspace.getGitRefState();
+ 					const targetLock = sandbox.workspace.getTargetLockStatus();
++					const childLifecycle = sandbox.workspace.getChildLifecycleStatus();
+ 					const dockerPorts = formatDockerPortMappings(sandbox.lifecycle.getDockerPortMappings());
+ 					ctx.ui.notify(
+ 						[
+@@ -3672,6 +4026,12 @@
+ 							`Container lifecycle: ${config.lifecycle}`,
+ 								`Package cache volume: ${PACKAGE_CACHE_VOLUME} scoped by task or dependency environment -> ${PACKAGE_CACHE_ROOT}`,
+ 							`Rebase pending: ${sandbox.workspace.hasPendingRebase()}`,
++							`Child lifecycle: ${childLifecycle.active === 0 && !childLifecycle.transition ? "unlocked" : `FROZEN (${childLifecycle.active} active${childLifecycle.transition ? `; ${childLifecycle.transition}` : ""})`}`,
++							...(childLifecycle.active > 0 || childLifecycle.transition ? [
++								...(childLifecycle.transition ? [`Parent transition: ${childLifecycle.transition}`] : []),
++								...(childLifecycle.active > 0 ? [`Active child runs: ${childLifecycle.runs.slice(0, 6).join(", ")}${childLifecycle.runs.length > 6 ? `, +${childLifecycle.runs.length - 6} more` : ""}`] : []),
++								"Recovery: wait/stop children, verify and export artifacts, then retry checkpoint.",
++							] : []),
+ 							`Review model: ${config.review.model || "(current session model)"}`,
+ 							`Review thinking: ${config.review.thinkingLevel}`,
+ 							`Review max diff: ${formatSize(config.review.maxDiffBytes)}`,

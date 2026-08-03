@@ -198,6 +198,16 @@ Explicit independent mutable candidates receive linked worktrees, branches, and
 containers. They must commit before comparison; candidate worktrees and branches
 remain until explicitly removed.
 
+Parent sandbox ref moves, rebases, automatic checkpoints, and container teardown
+are frozen while a child run is active. Child runners publish a private,
+route-bound lease with PID start-identity metadata; dead owners are reclaimed only
+when process death or PID reuse is demonstrable. `/sandbox status` reports the
+active leases and recovery is intentionally wait/stop, verify/export artifacts,
+then retry—not stale-ref cleanup during execution. If a completed child left a
+clean descendant commit in the container, the parent imports it through a
+bundle, verifies ancestry and object integrity, and updates the sandbox ref with
+compare-and-swap; dirty, rebased, unrelated, or ambiguous state remains blocked.
+
 ### Secretary Git maintenance
 
 See `SECRETARY_WORKFLOW.md` for the complete user-facing topology, tool

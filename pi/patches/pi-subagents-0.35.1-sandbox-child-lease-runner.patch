@@ -1,0 +1,40 @@
+--- a/src/runs/background/subagent-runner.ts
++++ b/src/runs/background/subagent-runner.ts
+@@ -101,7 +101,7 @@
+ import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
+ import { resolveWatchdogConfig } from "../../watchdog/settings.ts";
+ import { createBoundedByteTail, createBoundedLineReader, formatProtocolOutputLimit, MAX_CHILD_STDERR_BYTES, projectChildLifecycle, type ChildLifecycleAction, type ProtocolOutputLimit } from "../shared/child-protocol.ts";
+-import { acquireSessionLease, type SessionLeaseRequest } from "../shared/session-lease.ts";
++import { acquireSandboxChildLease, acquireSessionLease, type SessionLeaseRequest } from "../shared/session-lease.ts";
+ import {
+ 	CHILD_WATCHDOG_CONFIG_ENV,
+ 	acceptChildWatchdogEvent,
+@@ -3763,6 +3763,19 @@
+ }
+ 
+ async function runConfiguredSubagent(config: SubagentRunConfig): Promise<void> {
++	const sandboxChildLease = acquireSandboxChildLease({
++		runId: config.id,
++		...(typeof config.sessionId === "string" ? { sessionId: config.sessionId } : {}),
++		source: "async",
++	});
++	const releaseSandboxChildLease = (): void => {
++		try {
++			sandboxChildLease?.release();
++		} catch {
++			// Exit cleanup is best effort; stale leases are reclaimed only after the owner is demonstrably gone.
++		}
++	};
++	process.once("exit", releaseSandboxChildLease);
+ 	let lease: ReturnType<typeof acquireSessionLease> | undefined;
+ 	let startupCommitted = config.revivalLease === undefined;
+ 	const startupPath = path.join(config.asyncDir, "runner-startup.json");
+@@ -3804,6 +3817,8 @@
+ 		throw error;
+ 	} finally {
+ 		process.off("exit", releaseOnExit);
++		process.off("exit", releaseSandboxChildLease);
++		releaseSandboxChildLease();
+ 		if (lease) {
+ 			try {
+ 				lease.release();

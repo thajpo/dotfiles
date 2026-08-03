@@ -243,6 +243,10 @@ class HarnessStaticTests(unittest.TestCase):
         patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-task-routing.patch").read_text()
         control_plane_patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-control-plane-resources.patch").read_text()
         ownership_patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-user-workspace.patch").read_text()
+        child_lifecycle_patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-child-lifecycle.patch").read_text()
+        child_lease_patch = (ROOT / "pi/patches/pi-subagents-0.35.1-sandbox-child-lease.patch").read_text()
+        child_runner_patch = (ROOT / "pi/patches/pi-subagents-0.35.1-sandbox-child-lease-runner.patch").read_text()
+        child_foreground_patch = (ROOT / "pi/patches/pi-subagents-0.35.1-sandbox-child-lease-foreground.patch").read_text()
         for evidence in [
             "Missing host-owned Pi task route",
             "Task route workspace mismatch",
@@ -310,6 +314,30 @@ class HarnessStaticTests(unittest.TestCase):
             'chmod -R u+rwX .',
         ]:
             self.assertIn(evidence, ownership_patch)
+        for evidence in [
+            "subagent-sandbox-leases",
+            "parent-transition.json",
+            "processStartIdentity",
+            "checkpoint or move the sandbox ref",
+            "getChildLifecycleStatus",
+            "FROZEN",
+            "verify and export their artifacts",
+            "recovery",
+            "workspace must be clean",
+            "child cannot rebind",
+            "history must descend from the recorded host OID",
+        ]:
+            self.assertIn(evidence, child_lifecycle_patch)
+        for evidence in [
+            "ensureNoSandboxParentTransition",
+            "PI_SUBAGENT_CHILD",
+            "writePrivateAtomicJson",
+            "processStartIdentity",
+            "child start is blocked until it finishes",
+        ]:
+            self.assertIn(evidence, child_lease_patch)
+        self.assertIn("acquireSandboxChildLease", child_runner_patch)
+        self.assertIn("acquireSandboxChildLease", child_foreground_patch)
         added_lines = "\n".join(
             line[1:]
             for line in ownership_patch.splitlines()
@@ -325,6 +353,10 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("pi-subagents-0.35.1-failure-events.patch", installer)
         self.assertIn("pi-subagents-0.35.1-observability-foreground-start-types.patch", installer)
         self.assertIn("pi-subagents-0.35.1-observability-foreground-start-executor.patch", installer)
+        self.assertIn("pi-subagents-0.35.1-sandbox-child-lease.patch", installer)
+        self.assertIn("pi-subagents-0.35.1-sandbox-child-lease-runner.patch", installer)
+        self.assertIn("pi-subagents-0.35.1-sandbox-child-lease-foreground.patch", installer)
+        self.assertIn("pi-sandbox-0.2.0-child-lifecycle.patch", installer)
         self.assertIn("pi-sandbox-0.2.0-user-workspace.patch", installer)
         self.assertIn("pi-sandbox-0.2.0-runtime-contract.patch", installer)
         self.assertIn("pi-sandbox-0.2.0-control-plane-resources.patch", installer)
@@ -433,6 +465,7 @@ class HarnessStaticTests(unittest.TestCase):
         reviewer = (ROOT / "bin/pi-review-agent").read_text()
         self.assertIn("--tools read,grep,find,ls,host_command,submit_review_receipt", reviewer)
         self.assertIn("--no-extensions", reviewer)
+        self.assertIn('--model "openai-codex/gpt-5.6-luna" --thinking high', reviewer)
         self.assertNotIn("bash,", reviewer)
         receipt_extension = (ROOT / "pi/extensions/review-receipt/index.ts").read_text()
         self.assertEqual(receipt_extension.count("pi.registerTool"), 1)

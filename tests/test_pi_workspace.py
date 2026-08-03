@@ -136,6 +136,8 @@ class WorkspacePreparationTests(unittest.TestCase):
         (package / "docs").mkdir(parents=True, exist_ok=True)
         (package / "examples").mkdir(exist_ok=True)
         (package / "dist").mkdir(exist_ok=True)
+        for resource in (package / "docs", package / "examples"):
+            resource.chmod(0o755)
         (package / "package.json").write_text('{"name":"@earendil-works/pi-coding-agent","version":"0.83.0"}\n')
         executable = package / "dist/cli.js"
         executable.write_text("#!/usr/bin/env node\n")
