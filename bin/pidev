@@ -860,7 +860,9 @@ eval "exec ${project_lock_fd}>&-"
 # descriptors, and `exec` bypasses the shell EXIT trap. Release it explicitly
 # before handing control to tmux.
 release_lock_dirs
-if [[ -n ${TMUX:-} ]]; then
+if [[ ${PI_PIDEV_DETACHED:-0} == 1 ]]; then
+  exit 0
+elif [[ -n ${TMUX:-} ]]; then
   exec tmux switch-client -t "=$project_session"
 elif [[ -t 0 && -t 1 ]]; then
   exec tmux attach-session -t "=$project_session"

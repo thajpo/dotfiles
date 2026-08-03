@@ -40,6 +40,7 @@ process.stdout.write(JSON.stringify(cases.map((value) => gitWriteWasAuthorized(v
             "what would cleanup remove?": False,
             "please plan the cleanup of benchmark branches": False,
             "please apply that Git cleanup plan": True,
+            "please apply no Git cleanup": False,
             "delete the benchmark branches and remove the side-agent worktrees": True,
             "do not delete or remove anything": False,
             "yes": False,

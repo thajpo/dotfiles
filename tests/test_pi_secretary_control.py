@@ -386,6 +386,7 @@ class SecretaryControlTests(unittest.TestCase):
         fake.write_text("#!/usr/bin/env python3\nimport json,os,pathlib\npathlib.Path(%r).write_text(json.dumps({k:os.environ.get(k) for k in ['PI_PIDEV_SESSION_ID','PI_PIDEV_WORKSTREAM_ID','PI_PIDEV_BRIEF_PATH']}))\n" % str(output))
         fake.chmod(0o700)
         with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
+             mock.patch.object(secretary, "_wait_for_managed_process", return_value=True), \
              mock.patch.dict(os.environ, {"TMUX": "/tmp/promotion-tmux,11,0"}, clear=False):
             promoted = secretary.promote_workstream(registered["projectId"], "Promoted", "Goal and boundaries", "feature")
         self.assertRegex(promoted["piSessionId"], r"^ws-[0-9a-f]{48}$")
@@ -681,6 +682,7 @@ class SecretaryControlTests(unittest.TestCase):
         fake = Path(self.tmp.name) / "integration-pidev"
         fake.write_text("#!/bin/sh\nexit 0\n"); fake.chmod(0o700)
         with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
+             mock.patch.object(secretary, "_wait_for_managed_process", return_value=True), \
              mock.patch.dict(os.environ, secretary_env, clear=False):
             integration = secretary.create_integration(registered["projectId"], moved_request_id)
         self.assertEqual(integration["role"], "integration")

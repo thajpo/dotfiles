@@ -7,7 +7,7 @@ export function gitCleanupApplyWasAuthorized(value: string): boolean {
   const target = /\b(?:git|branch(?:es)?|worktrees?|work-trees?|artifacts?|benchmark|side-agent)\b/i;
   const action = /\b(?:clean(?:up|ing|ed)?|remove|delete|rename|prune|apply|execute|perform)\b/i;
   const explicit = /(?:^|[.!?,;]\s*)(?:please\s+|go ahead and\s+|you can\s+|you may\s+|authorize\s+|approved to\s+)?(?:apply|execute|perform|clean(?:up|ing|ed)?|clean-up|remove|delete|rename|prune)\b[\s\S]{0,120}\b(?:git|branch(?:es)?|worktrees?|work-trees?|artifacts?|benchmark|side-agent)\b/i;
-  const denied = /\b(?:don't|do not|never|not|without|avoid|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:clean|remove|delete|rename|prune|apply|execute|perform)\b/i;
+  const denied = /\b(?:don't|do not|never|no|not|without|avoid|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:clean(?:up)?|clean up|remove|delete|rename|prune|apply|execute|perform)\b/i;
   return target.test(value) && action.test(value) && explicit.test(value) && !denied.test(value);
 }
 

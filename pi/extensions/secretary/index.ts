@@ -93,8 +93,8 @@ function updateAuthorization(text: string, source: string): void {
   const integrationDenied = /\b(?:don't|do not|never|not|without|avoid|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:integrat|integration)\w*\b/.test(value);
   if (!landingDenied && /\b(land|fast-forward)\b.*\b(review|candidate|workstream|this|it)\b|\bmerge\b.*\b(reviewed|candidate|workstream|this|it)\b/.test(value)) authorized.add("land");
   if (!integrationDenied && /\b(integrat|integration)\w*\b.*\b(agent|workstream|create|start|this|it)\b|\b(create|start)\b.*\bintegration\b/.test(value)) authorized.add("integrate");
-  const cleanupDenied = /\b(?:don't|do not|never|not|without|avoid|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:clean up|cleanup|remove)\b/.test(value) ||
-    /\b(?:clean up|cleanup|remove)\b[\s\S]{0,60}\b(?:don't|do not|never|not|without|avoid|can't|cannot|shouldn't|should not)\b/.test(value);
+  const cleanupDenied = /\b(?:don't|do not|never|no|not|without|avoid|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:clean up|cleanup|remove)\b/.test(value) ||
+    /\b(?:clean up|cleanup|remove)\b[\s\S]{0,60}\b(?:don't|do not|never|no|not|without|avoid|can't|cannot|shouldn't|should not)\b/.test(value);
   const cleanupTarget = value.match(/\bws-[a-z0-9][a-z0-9-]{0,59}\b/)?.[0] ??
     value.match(/[\u0060\"']([a-z0-9][a-z0-9-]{0,62})[\u0060\"']/)?.[1] ?? null;
   const cleanupIntent = /\b(clean up|cleanup|remove)\b[\s\S]{0,80}\b(?:workstream|agent|resources?|this|it)\b/.test(value) ||

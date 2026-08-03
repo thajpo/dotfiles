@@ -433,6 +433,22 @@ def _review_launch_lock(project: Path, request_id: str) -> Iterator[None]:
         os.close(fd)
 
 
+@contextlib.contextmanager
+def _workstream_launch_lock(project: Path, workstream_id: str) -> Iterator[None]:
+    directory = project / "workstream-launch-locks"
+    _ensure_dir(directory)
+    path = directory / f"{_id(workstream_id, 'workstream id')}.lock"
+    if path.exists() or path.is_symlink():
+        _safe_lstat(path, directory=False)
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 # --- Project context (revalidates identity, capability, policy) ---
 
 def _validate_project_record(path: Path, project_id: str, common: Path,
@@ -2019,16 +2035,24 @@ def _current_tmux_socket() -> str | None:
     return pieces[0]
 
 
+def _default_tmux_socket() -> str:
+    raw_dir = os.environ.get("TMUX_TMPDIR", "/tmp")
+    if not raw_dir.startswith("/") or "\n" in raw_dir or "\x00" in raw_dir:
+        raise SecretaryError("malformed tmux temporary directory")
+    return str(Path(raw_dir) / f"tmux-{os.getuid()}" / "default")
+
+
 def _workstream_runtime_path(project: Path, workstream_id: str) -> Path:
     return project / "workstream-runtime" / f"{_id(workstream_id, 'workstream id')}.json"
 
 
 def _workstream_runtime(project: Path, repo: Path, record: dict[str, Any]) -> dict[str, Any]:
     path = _workstream_runtime_path(project, record["workstreamId"])
-    fields = {"schemaVersion", "workstreamId", "piSessionId", "tmuxSession", "tmuxWindow", "tmuxSocket", "seededAt"}
+    fields = {"schemaVersion", "workstreamId", "piSessionId", "tmuxSession", "tmuxWindow", "tmuxSocket", "launchState", "seededAt"}
     if path.exists() or path.is_symlink():
-        value = _read_json(path, fields, required=fields - {"tmuxSocket"})
+        value = _read_json(path, fields, required=fields - {"tmuxSocket", "launchState"})
         value.setdefault("tmuxSocket", None)
+        value.setdefault("launchState", "pending")
         if (value.get("schemaVersion") != 1 or value.get("workstreamId") != record["workstreamId"] or
                 not isinstance(value.get("piSessionId"), str) or
                 not SESSION_RE.fullmatch(value["piSessionId"]) or
@@ -2038,6 +2062,7 @@ def _workstream_runtime(project: Path, repo: Path, record: dict[str, Any]) -> di
                 not re.fullmatch(r"[A-Za-z0-9_-]{1,300}", value["tmuxWindow"]) or
                 (value.get("tmuxSocket") is not None and
                  (not isinstance(value.get("tmuxSocket"), str) or not value["tmuxSocket"].startswith("/"))) or
+                value.get("launchState") not in {"pending", "launched"} or
                 (value.get("seededAt") is not None and not isinstance(value.get("seededAt"), str))):
             raise SecretaryError("malformed workstream runtime record")
         if value["seededAt"] is not None:
@@ -2053,7 +2078,7 @@ def _workstream_runtime(project: Path, repo: Path, record: dict[str, Any]) -> di
              "piSessionId": "ws-" + secrets.token_hex(24),
              "tmuxSession": f"pi-{repo_name}-{common_hash[:12]}",
              "tmuxWindow": f"w-{worktree_name}-{worktree_hash[:12]}",
-             "tmuxSocket": _current_tmux_socket(), "seededAt": None}
+             "tmuxSocket": _current_tmux_socket(), "launchState": "pending", "seededAt": None}
     _atomic(path, json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
     return value
 
@@ -2371,9 +2396,10 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
         raise SecretaryError("review event is malformed") from error
     request_path = _review_request_path(project, request_id)
     before = _validate_review_request(request_path, project_id)
-    reviewer_tmux_socket = _current_tmux_socket()
-    if (before["reviewerTmuxSocket"] is not None and reviewer_tmux_socket is not None and
-            before["reviewerTmuxSocket"] != reviewer_tmux_socket):
+    current_tmux_socket = _current_tmux_socket()
+    reviewer_tmux_socket = current_tmux_socket or before["reviewerTmuxSocket"] or _default_tmux_socket()
+    if (before["reviewerTmuxSocket"] is not None and current_tmux_socket is not None and
+            before["reviewerTmuxSocket"] != current_tmux_socket):
         raise SecretaryError("reviewer belongs to a different tmux server")
     _, project, project_record, repo = _project_context(info["primaryRepository"], info["capability"])
     with _review_launch_lock(project, request_id):
@@ -2430,8 +2456,10 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
                 _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
 
         environment = _env()
-        for name in ("TERM", "COLORTERM", "PI_CODING_AGENT_DIR"):
+        for name in ("TERM", "COLORTERM", "PI_CODING_AGENT_DIR", "TMUX_TMPDIR"):
             if os.environ.get(name): environment[name] = os.environ[name]
+        environment["TMUX"] = f"{request['reviewerTmuxSocket']},0,0"
+        environment["PI_PIDEV_DETACHED"] = "1"
         environment.update({"PI_PIDEV_SESSION_ID": request["reviewerSessionId"],
                             "PI_PIDEV_REVIEW_PROJECT_ID": project_id,
                             "PI_PIDEV_REVIEW_REQUEST_ID": request_id,
@@ -2475,8 +2503,9 @@ def review_launch_info(project_id: str, request_id: str) -> dict[str, Any]:
     _, project, project_record, repo = _project_context(info["primaryRepository"], info["capability"],
                                                          reconcile_facts=False)
     request = _validate_review_request(_review_request_path(project, request_id), project_id)
-    if request["reviewerSessionId"] is None or request["reviewWorkspace"] is None:
-        raise SecretaryError("review request is not assigned")
+    if (request["reviewerSessionId"] is None or request["reviewWorkspace"] is None or
+            request["reviewerTmuxSocket"] is None):
+        raise SecretaryError("review request is not assigned to an authoritative tmux server")
     _validate_review_worktree_identity(request, project, project_record, repo, require_clean=False)
     return {**request, "capability": info["capability"]}
 
@@ -2762,28 +2791,19 @@ def _tmux_window_live(session: str, window: str, socket_path: str | None) -> boo
     return window in values
 
 
-def _reviewer_process_live(request: dict[str, Any], repo: Path) -> bool:
-    socket = request.get("reviewerTmuxSocket")
-    workspace_raw = request.get("reviewWorkspace")
-    session_id = request.get("reviewerSessionId")
-    if (not isinstance(socket, str) or not socket.startswith("/") or "\n" in socket or "\x00" in socket or
-            not isinstance(workspace_raw, str) or not isinstance(session_id, str)):
+def _managed_process_live(socket: str | None, session: str, window: str,
+                          workspace: Path, session_id: str) -> bool:
+    if not isinstance(socket, str) or not socket.startswith("/") or "\n" in socket or "\x00" in socket:
         return False
-    workspace = Path(workspace_raw).resolve(strict=False)
-    common = _git_path(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    common_hash = hashlib.sha256(str(common).encode()).hexdigest()
-    repo_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-") or "repo"
-    review_name = re.sub(r"[^A-Za-z0-9_-]+", "-", workspace.name).strip("-") or "worktree"
-    session = f"pi-{repo_name}-{common_hash[:12]}"
-    window = f"w-{review_name}-{hashlib.sha256(str(workspace).encode()).hexdigest()[:12]}"
+    workspace = workspace.resolve(strict=False)
     panes = subprocess.run(["tmux", "-S", socket, "list-panes", "-t", f"={session}:{window}",
-                            "-F", "#{pane_pid}\\t#{pane_current_path}"],
+                            "-F", "#{pane_pid}\t#{pane_current_path}"],
                            env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if panes.returncode != 0:
         return False
     roots: list[int] = []
     for line in panes.stdout.splitlines():
-        fields = line.split("\\t", 1)
+        fields = line.split("\t", 1)
         if len(fields) != 2 or not fields[0].isdigit():
             return False
         try:
@@ -2827,15 +2847,49 @@ def _reviewer_process_live(request: dict[str, Any], repo: Path) -> bool:
     return False
 
 
-def _wait_for_reviewer_process(request: dict[str, Any], repo: Path, timeout: float = 10.0) -> bool:
-    if request.get("reviewerTmuxSocket") is None:
-        return True
+def _reviewer_process_live(request: dict[str, Any], repo: Path) -> bool:
+    socket = request.get("reviewerTmuxSocket")
+    workspace_raw = request.get("reviewWorkspace")
+    session_id = request.get("reviewerSessionId")
+    if not isinstance(workspace_raw, str) or not isinstance(session_id, str):
+        return False
+    common = _git_path(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    common_hash = hashlib.sha256(str(common).encode()).hexdigest()
+    repo_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-") or "repo"
+    workspace = Path(workspace_raw).resolve(strict=False)
+    worktree_name = re.sub(r"[^A-Za-z0-9_-]+", "-", workspace.name).strip("-") or "worktree"
+    return _managed_process_live(socket, f"pi-{repo_name}-{common_hash[:12]}",
+                                 f"w-{worktree_name}-{hashlib.sha256(str(workspace).encode()).hexdigest()[:12]}",
+                                 workspace, session_id)
+
+
+def _wait_for_managed_process(socket: str | None, session: str, window: str,
+                              workspace: Path, session_id: str, repo: Path,
+                              timeout: float = 10.0) -> bool:
+    if not isinstance(socket, str):
+        return False
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _reviewer_process_live(request, repo):
+        if _managed_process_live(socket, session, window, workspace, session_id):
             return True
         time.sleep(0.1)
-    return _reviewer_process_live(request, repo)
+    return _managed_process_live(socket, session, window, workspace, session_id)
+
+
+def _wait_for_reviewer_process(request: dict[str, Any], repo: Path, timeout: float = 10.0) -> bool:
+    socket = request.get("reviewerTmuxSocket")
+    workspace_raw = request.get("reviewWorkspace")
+    session_id = request.get("reviewerSessionId")
+    if not isinstance(socket, str) or not isinstance(workspace_raw, str) or not isinstance(session_id, str):
+        return False
+    common = _git_path(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    common_hash = hashlib.sha256(str(common).encode()).hexdigest()
+    repo_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-") or "repo"
+    workspace = Path(workspace_raw).resolve(strict=False)
+    worktree_name = re.sub(r"[^A-Za-z0-9_-]+", "-", workspace.name).strip("-") or "worktree"
+    return _wait_for_managed_process(socket, f"pi-{repo_name}-{common_hash[:12]}",
+                                     f"w-{worktree_name}-{hashlib.sha256(str(workspace).encode()).hexdigest()[:12]}",
+                                     workspace, session_id, repo, timeout)
 
 
 def _revalidate_cleanup_state(project_id: str, workstream_id: str, project: Path,
@@ -3078,36 +3132,71 @@ def _pidev_path() -> Path:
 def launch_workstream(project_id: str, workstream_id: str) -> dict[str, Any]:
     info = launch_info(project_id, internal=True)
     repo = Path(info["primaryRepository"])
-    record = open_workstream(repo, info["capability"], workstream_id)
     project = _record_dir(_state_root(), project_id)
-    current_socket = _current_tmux_socket()
-    if record["tmuxSocket"] is not None and current_socket is not None and record["tmuxSocket"] != current_socket:
-        raise SecretaryError("workstream belongs to a different tmux server")
-    if record["tmuxSocket"] is None and current_socket is not None:
+    with _workstream_launch_lock(project, workstream_id):
+        record = open_workstream(repo, info["capability"], workstream_id)
+        current_socket = _current_tmux_socket()
         runtime_path = _workstream_runtime_path(project, workstream_id)
         with _project_lock(project):
             runtime = _workstream_runtime(project, repo, record)
-            if runtime["tmuxSocket"] not in (None, current_socket):
-                raise SecretaryError("workstream tmux server changed concurrently")
-            runtime["tmuxSocket"] = current_socket
+            if (runtime["tmuxSocket"] is not None and current_socket is not None and
+                    runtime["tmuxSocket"] != current_socket):
+                raise SecretaryError("workstream belongs to a different tmux server")
+            desired_socket = runtime["tmuxSocket"] or current_socket or _default_tmux_socket()
+            runtime["tmuxSocket"] = desired_socket
+            if runtime["launchState"] == "launched":
+                if _managed_process_live(desired_socket, runtime["tmuxSession"], runtime["tmuxWindow"],
+                                          Path(record["workspace"]), runtime["piSessionId"]):
+                    record.update(runtime)
+                    return record
+                runtime["launchState"] = "pending"
             _atomic(runtime_path, json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n")
-        record["tmuxSocket"] = current_socket
-    brief_path = _brief_path(project, record["briefId"])
-    _safe_lstat(brief_path, directory=False)
-    environment = _env()
-    for name in ("TMUX", "TERM", "COLORTERM", "PI_CODING_AGENT_DIR"):
-        if os.environ.get(name):
-            environment[name] = os.environ[name]
-    environment.update({"PI_PIDEV_SESSION_ID": record["piSessionId"],
-                        "PI_PIDEV_WORKSTREAM_ID": workstream_id,
-                        "PI_PIDEV_PROJECT_ID": project_id,
-                        "PI_PIDEV_BRIEF_PATH": str(brief_path),
-                        "PI_PIDEV_CONTROL": str(Path(__file__).resolve())})
-    result = subprocess.run([str(_pidev_path())], cwd=record["workspace"], env=environment,
-                            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    if result.returncode:
-        raise SecretaryError(f"workstream launch failed: {(result.stderr or result.stdout).strip()[:300]}")
-    return record
+        record.update(runtime)
+        brief_path = _brief_path(project, record["briefId"])
+        _safe_lstat(brief_path, directory=False)
+        environment = _env()
+        for name in ("TERM", "COLORTERM", "PI_CODING_AGENT_DIR", "TMUX_TMPDIR"):
+            if os.environ.get(name):
+                environment[name] = os.environ[name]
+        environment["TMUX"] = f"{runtime['tmuxSocket']},0,0"
+        environment["PI_PIDEV_DETACHED"] = "1"
+        environment.update({"PI_PIDEV_SESSION_ID": record["piSessionId"],
+                            "PI_PIDEV_WORKSTREAM_ID": workstream_id,
+                            "PI_PIDEV_PROJECT_ID": project_id,
+                            "PI_PIDEV_BRIEF_PATH": str(brief_path),
+                            "PI_PIDEV_CONTROL": str(Path(__file__).resolve())})
+        try:
+            result = subprocess.run([str(_pidev_path())], cwd=record["workspace"], env=environment,
+                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        except (OSError, SecretaryError) as error:
+            result = None
+            launch_error = error
+        else:
+            launch_error = None
+        if launch_error is None and result is not None and result.returncode == 0:
+            if not _wait_for_managed_process(runtime["tmuxSocket"], runtime["tmuxSession"], runtime["tmuxWindow"],
+                                              Path(record["workspace"]), runtime["piSessionId"], repo):
+                with _project_lock(project):
+                    current = _workstream_runtime(project, repo, record)
+                    current["launchState"] = "pending"
+                    _atomic(runtime_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+                raise SecretaryError("workstream launch did not become live")
+        with _project_lock(project):
+            current = _workstream_runtime(project, repo, record)
+            if any(current[name] != runtime[name] for name in ("piSessionId", "tmuxSession", "tmuxWindow", "tmuxSocket")):
+                raise SecretaryError("workstream launch state changed concurrently")
+            if launch_error is not None or result is None or result.returncode:
+                current["launchState"] = "pending"
+                _atomic(runtime_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+                if isinstance(launch_error, SecretaryError):
+                    raise launch_error
+                if launch_error is not None:
+                    raise SecretaryError(f"workstream launch failed: {launch_error}") from launch_error
+                raise SecretaryError(f"workstream launch failed: {(result.stderr or result.stdout).strip()[:300]}")
+            current["launchState"] = "launched"
+            _atomic(runtime_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+            record.update(current)
+            return record
 
 
 def record_idea(project_id: str, title: str, brief_text: str) -> dict[str, Any]:
