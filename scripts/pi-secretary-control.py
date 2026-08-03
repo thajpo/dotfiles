@@ -2095,6 +2095,15 @@ def _worktree_registered(repo: Path, workspace: Path, branch: str) -> bool | Non
     return any(path == expected and current_branch == branch for path, current_branch in entries)
 
 
+def _assert_worktree_registration_absent(repo: Path, workspace: Path, label: str) -> None:
+    entries = _registered_worktrees(repo)
+    if entries is None:
+        raise SecretaryError(f"cleanup cannot prove {label} Git worktree absence")
+    expected = workspace.resolve(strict=False)
+    if any(path == expected for path, _ in entries):
+        raise SecretaryError(f"cleanup found stale {label} Git worktree registration: {workspace}")
+
+
 def _branch_registered(repo: Path, branch: str) -> bool | None:
     entries = _registered_worktrees(repo)
     if entries is None:
@@ -2332,13 +2341,20 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
                 raise SecretaryError("review assignment changed concurrently")
             parent = Path(workstream["workspace"]).parent
             workspace = parent / f"review-{request_id}"
-            if workspace.exists() or workspace.is_symlink():
-                raise SecretaryError("review workspace already exists")
             repo = Path(info["primaryRepository"])
-            created = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(workspace), request["candidateOid"]],
-                                     env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-            if created.returncode:
-                raise SecretaryError("could not create exact review worktree")
+            if workspace.exists() or workspace.is_symlink():
+                if workspace.is_symlink() or not workspace.is_dir():
+                    raise SecretaryError("review workspace already exists and is unsafe")
+                candidate_request = {**request, "reviewWorkspace": str(workspace.resolve(strict=True))}
+                registered = _registered_worktrees(repo)
+                if registered is None or not any(path == workspace.resolve(strict=True) and branch is None for path, branch in registered):
+                    raise SecretaryError("review workspace already exists without an exact Git worktree registration")
+                _validate_review_workspace(candidate_request, require_clean=True)
+            else:
+                created = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(workspace), request["candidateOid"]],
+                                         env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                if created.returncode:
+                    raise SecretaryError("could not create exact review worktree")
             request["reviewerSessionId"] = "rv-" + secrets.token_hex(24)
             request["reviewWorkspace"] = str(workspace.resolve(strict=True))
             request["reviewerTmuxSocket"] = reviewer_tmux_socket
@@ -2650,6 +2666,7 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
             continue
         review = Path(request["reviewWorkspace"])
         if not review.exists() and not review.is_symlink():
+            _assert_worktree_registration_absent(repo, review, "review")
             continue
         with _git_worktree_index_lock(review):
             if (_git(review, "rev-parse", "HEAD^{commit}").lower() != request["candidateOid"] or
@@ -2688,6 +2705,8 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
             _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
                                     plan_hash=hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest(),
                                     phase="candidate", completed_worktrees=completed_worktrees)
+    else:
+        _assert_worktree_registration_absent(repo, workspace, "candidate")
     branch_ref = f"refs/heads/{raw['branch']}"
     branch = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", branch_ref], env=_env(),
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
