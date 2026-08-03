@@ -2424,7 +2424,7 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
                 _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
 
         environment = _env()
-        for name in ("TMUX", "TERM", "COLORTERM", "PI_CODING_AGENT_DIR"):
+        for name in ("TERM", "COLORTERM", "PI_CODING_AGENT_DIR"):
             if os.environ.get(name): environment[name] = os.environ[name]
         environment.update({"PI_PIDEV_SESSION_ID": request["reviewerSessionId"],
                             "PI_PIDEV_REVIEW_PROJECT_ID": project_id,
