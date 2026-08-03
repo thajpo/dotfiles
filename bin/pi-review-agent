@@ -42,6 +42,7 @@ eval "project_id=${values[0]} request_id=${values[1]} candidate_oid=${values[2]}
 [[ $(realpath "$PWD") == "$workspace" ]] || { printf 'pi-review-agent: wrong checkout\n' >&2; exit 2; }
 [[ $(git rev-parse 'HEAD^{commit}') == "$candidate_oid" && $(git rev-parse 'HEAD^{tree}') == "$candidate_tree" ]] || { printf 'pi-review-agent: assigned checkout moved\n' >&2; exit 1; }
 real_pi=$($helper resolve-pi --self "$self_path" --cwd "$workspace")
+export PI_PINNED_PI_EXECUTABLE="$real_pi"
 prepared=$($helper prepare-read-only --cwd "$workspace" --owner-pid "$$" --pi-executable "$real_pi")
 eval "$(python3 - "$prepared" <<'PY'
 import json,shlex,sys

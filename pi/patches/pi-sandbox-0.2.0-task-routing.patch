@@ -240,8 +240,8 @@
 +	}
 +	if (createHash("sha256").update(capability).digest("hex") !== route.capabilityHash) throw new Error("Pi task route capability mismatch");
 +	try { process.kill(route.ownerPid!, 0); } catch { throw new Error("Pi task route owner is no longer running"); }
-+	if (route.ownerStartTicks !== "unavailable" && processStartTicks(route.ownerPid!) !== route.ownerStartTicks) {
-+		throw new Error("Pi task route owner identity is stale");
++	if (route.ownerStartTicks === "unavailable" || processStartTicks(route.ownerPid!) !== route.ownerStartTicks) {
++		throw new Error("Pi task route owner identity is unavailable or stale");
 +	}
 +	if (route.uid !== process.getuid?.() || route.gid !== process.getgid?.()) throw new Error("Pi task route UID/GID mismatch");
 +	if (Date.now() / 1000 - Number(route.createdAt ?? 0) > 7 * 24 * 60 * 60) throw new Error("Pi task route is stale");

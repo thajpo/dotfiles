@@ -246,12 +246,12 @@ def process_start_ticks(pid: int) -> str:
                 stderr=subprocess.DEVNULL,
                 check=False,
             )
-        except OSError:
-            return "unavailable"
+        except OSError as error:
+            raise WorkspaceError("cannot attest task-route owner process identity") from error
         value = result.stdout.strip()
         if value:
             return f"darwin:{value}"
-    return "unavailable"
+    raise WorkspaceError("cannot attest task-route owner process identity")
 
 
 def container_platform() -> str:

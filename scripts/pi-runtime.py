@@ -95,23 +95,26 @@ def manifest_digest(paths: list[Path], base_id: str, platform_name: str) -> str:
     return digest.hexdigest()
 
 
-def image_has_contract(image: str, key: str, base_id: str) -> bool:
+def image_has_contract(image: str, key: str, base_id: str, base_layers: list[str]) -> bool:
     try:
         item = inspect_image(image)
     except RuntimeErrorContract:
         return False
     labels = ((item.get("Config") or {}).get("Labels") or {})
+    layers = ((item.get("RootFS") or {}).get("Layers") or [])
     return (
         labels.get("pi.runtime.managed") == "true"
         and labels.get("pi.runtime.provider") == "uv"
         and labels.get("pi.runtime.environment-key") == key
         and labels.get("pi.runtime.base-id") == base_id
+        and bool(base_layers) and layers[:len(base_layers)] == base_layers
     )
 
 
-def build_image(worktree: Path, paths: list[Path], base_image: str, base_id: str, platform_name: str, key: str) -> str:
+def build_image(worktree: Path, paths: list[Path], base_image: str, base_id: str,
+                base_layers: list[str], platform_name: str, key: str) -> str:
     final_image = f"pi-runtime-uv:{key[:32]}"
-    if image_has_contract(final_image, key, base_id):
+    if image_has_contract(final_image, key, base_id, base_layers):
         return final_image
 
     cache_root = Path(os.path.expanduser(str(DEFAULT_CACHE_ROOT)))
@@ -121,14 +124,16 @@ def build_image(worktree: Path, paths: list[Path], base_image: str, base_id: str
     with lock_path.open("a+") as lock:
         os.chmod(lock_path, 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        if image_has_contract(final_image, key, base_id):
+        if image_has_contract(final_image, key, base_id, base_layers):
             return final_image
         with tempfile.TemporaryDirectory(prefix="pi-runtime-build-") as temporary:
             context = Path(temporary)
             for source in paths:
                 shutil.copyfile(source, context / source.name)
             copy_lines = "\n".join(f"COPY {path.name} /opt/pi/runtime-project/{path.name}" for path in paths)
-            dockerfile = f"""FROM {base_image}
+            # Build from the inspected immutable image ID, never the mutable
+            # tag that was used to discover it.
+            dockerfile = f"""FROM {base_id}
 WORKDIR /opt/pi/runtime-project
 {copy_lines}
 RUN mkdir -p /opt/pi/env \\
@@ -152,8 +157,13 @@ ENV PATH=/opt/pi/env/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin
             ])
             metadata = inspect_image(temporary_image)
             labels = ((metadata.get("Config") or {}).get("Labels") or {})
-            if labels.get("pi.runtime.environment-key") != key or labels.get("pi.runtime.base-id") != base_id:
-                raise RuntimeErrorContract("derived runtime image failed label verification")
+            layers = ((metadata.get("RootFS") or {}).get("Layers") or [])
+            parent = str(metadata.get("Parent", ""))
+            if (labels.get("pi.runtime.environment-key") != key or
+                    labels.get("pi.runtime.base-id") != base_id or
+                    not base_layers or layers[:len(base_layers)] != base_layers or
+                    (parent and parent != base_id)):
+                raise RuntimeErrorContract("derived runtime image failed immutable base verification")
             run(["docker", "tag", temporary_image, final_image])
             run(["docker", "image", "rm", temporary_image])
         return final_image
@@ -183,8 +193,11 @@ def prepare(route_path: Path) -> dict[str, Any]:
         }
     base_item = inspect_image(base_image)
     base_id, platform_name = base_id_and_platform(base_item)
+    base_layers = ((base_item.get("RootFS") or {}).get("Layers") or [])
+    if not isinstance(base_layers, list) or not base_layers or not all(isinstance(layer, str) and layer for layer in base_layers):
+        raise RuntimeErrorContract("base image metadata is missing immutable filesystem layers")
     key = manifest_digest(paths, base_id, platform_name)
-    image = build_image(worktree, paths, base_image, base_id, platform_name, key)
+    image = build_image(worktree, paths, base_image, base_id, base_layers, platform_name, key)
     return {
         "provider": "uv",
         "mode": "derived-image",

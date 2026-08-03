@@ -36,6 +36,7 @@ for argument in "$@"; do
 done
 
 real_pi=$($helper resolve-pi --self "$self_path" --cwd "$PWD")
+export PI_PINNED_PI_EXECUTABLE="$real_pi"
 
 # Hold a shared worktree lease for the entire Pi process. Secretary cleanup
 # takes the matching exclusive lease before its final liveness check and Git

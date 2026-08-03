@@ -473,7 +473,10 @@ def _worktree_exclusive_lease(repo: Path, workspace: Path) -> Iterator[None]:
     """Exclude managed Pi launches while the worktree is being removed."""
     common = _git_path(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
     workspace = workspace.resolve(strict=False)
-    lease_root = _state_root() / "worktree-leases"
+    state_root = Path(os.path.expanduser(os.environ.get("XDG_STATE_HOME", "~/.local/state")))
+    if not state_root.is_absolute():
+        raise SecretaryError("XDG_STATE_HOME must be absolute for worktree leases")
+    lease_root = state_root / "pi" / "worktree-leases"
     _ensure_dir(lease_root)
     key = hashlib.sha256(f"{common}\0{workspace}".encode()).hexdigest()
     path = lease_root / f"{key}.lock"
@@ -3321,6 +3324,10 @@ def _managed_process_live(socket: str | None, session: str, window: str,
                 continue
             key, value = item.split(b"=", 1)
             values[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+        pinned_core = str(Path.home() / ".local" / "share" / "pi" / "core" / "node_modules" /
+                          "@earendil-works" / "pi-coding-agent" / "dist" / "cli.js")
+        if values.get("PI_PINNED_PI_EXECUTABLE") != pinned_core:
+            return False
         task_workspace = values.get("PI_TASK_WORKTREE", "")
         try:
             task_workspace_path = Path(task_workspace).resolve(strict=False)
