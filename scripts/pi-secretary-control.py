@@ -2742,13 +2742,16 @@ def _tmux_window_live(session: str, window: str, socket_path: str | None) -> boo
 def _revalidate_cleanup_state(project_id: str, workstream_id: str, project: Path,
                               project_record: dict[str, Any], repo: Path,
                               expected_record: dict[str, Any],
-                              expected_reviews: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+                              expected_reviews: dict[str, dict[str, Any]],
+                              *, allow_closed: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
     current = _validate_workstream_record(_workstream_path(project, workstream_id), project, repo,
                                           project_record["objectFormat"], project_record["gitCommonDir"],
                                           allow_missing_workspace=True)
     immutable = ("schemaVersion", "workstreamId", "title", "role", "briefId", "targetRef",
                  "baseOid", "workspace", "branch", "createdAt")
-    if current["closedAt"] is not None or any(current[name] != expected_record[name] for name in immutable):
+    if ((allow_closed and (current["closedAt"] is None or current["closedAt"] != expected_record["closedAt"])) or
+            (not allow_closed and current["closedAt"] is not None) or
+            any(current[name] != expected_record[name] for name in immutable)):
         raise SecretaryError("workstream state changed during cleanup")
     landing = _landing_for(project, workstream_id)
     if landing is None:
@@ -2818,6 +2821,14 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
     record = _validate_workstream_record(record_path, project, repo, project_record["objectFormat"],
                                          project_record["gitCommonDir"], allow_missing_workspace=True)
     if record["closedAt"] is not None:
+        expected_reviews: dict[str, dict[str, Any]] = {}
+        for request_path in (project / "reviews" / "requests").glob("*.json"):
+            request = _validate_review_request(request_path, project_id)
+            if request["workstreamId"] == workstream_id:
+                expected_reviews[request["requestId"]] = dict(request)
+        with _project_lock(project):
+            _revalidate_cleanup_state(project_id, workstream_id, project, project_record, repo,
+                                      record, expected_reviews, allow_closed=True)
         return {"workstreamId": workstream_id, "closedAt": record["closedAt"], "alreadyClosed": True}
     landing = _landing_for(project, workstream_id)
     if landing is None:

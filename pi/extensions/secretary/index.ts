@@ -95,7 +95,7 @@ function updateAuthorization(text: string, source: string): void {
   if (/^\s*(yes|yep|do it|go ahead|please do|sounds good)[.!\s]*$/i.test(text)) {
     // Landing/integration are acceptance decisions, not generic secretary
     // actions. The user and secretary must name that decision explicitly.
-    authorized.add("record"); authorized.add("promote"); authorized.add("open"); authorized.add("ack"); authorized.add("review"); authorized.add("cleanup");
+    authorized.add("record"); authorized.add("promote"); authorized.add("open"); authorized.add("ack"); authorized.add("review");
   }
 }
 
