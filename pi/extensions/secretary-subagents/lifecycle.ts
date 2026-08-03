@@ -29,8 +29,7 @@ function knownJobs(state: LifecycleState): Array<{ id: string; status: string; a
 
 function targetMatches(requested: string, candidate: string): boolean {
   const left = requested.trim().replaceAll("\\", "/").split("/").pop() ?? requested;
-  if (!left || !candidate) return false;
-  return left === candidate || left.startsWith(candidate) || candidate.startsWith(left);
+  return Boolean(left && candidate && left === candidate);
 }
 
 export function actionTargetIsAuthorized(

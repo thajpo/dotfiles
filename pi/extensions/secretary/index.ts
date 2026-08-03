@@ -33,6 +33,7 @@ const CLEANUP_PLAN = Type.Object({
 
 type Authorization = "record" | "promote" | "open" | "ack" | "review" | "land" | "integrate" | "cleanup" | GitAuthorization | GitCleanupAuthorization;
 let authorized = new Set<Authorization>();
+let authorizedTargets = new Map<Authorization, string>();
 let authorizedCleanupTarget: string | null = null;
 
 function requiredEnvironment(): { projectId: string; alias: string; control: string } {
@@ -79,6 +80,7 @@ function recordWasAuthorized(value: string): boolean {
 
 function updateAuthorization(text: string, source: string): void {
   authorized = new Set();
+  authorizedTargets = new Map();
   authorizedCleanupTarget = null;
   if (source === "extension") return;
   const value = text.toLowerCase();
@@ -86,13 +88,33 @@ function updateAuthorization(text: string, source: string): void {
   for (const action of gitWriteWasAuthorized(value)) authorized.add(action);
   if (gitCleanupApplyWasAuthorized(value)) authorized.add("git-cleanup");
   if (/\b(spin|promote)\b.*\b(out|session|agent)|\b(new feature|create (an? )?agent|open (an? )?agent)\b/.test(value)) authorized.add("promote");
-  if (/\b(open|resume|focus|switch to)\b/.test(value)) authorized.add("open");
-  if (/\b(acknowledge|dismiss|clear)\b.*\b(attention|event|notification|this)\b/.test(value)) authorized.add("ack");
-  if (/\b(review|reviewer)\b.*\b(create|start|assign|open|this|it)\b|\b(create|start|assign)\b.*\breviewer\b/.test(value)) authorized.add("review");
+  const targetIds = [...new Set(value.match(/\b(?:ws|rr)-[a-z0-9][a-z0-9-]{0,59}\b|\bevt-[a-z0-9][a-z0-9-]{0,58}\b/g) ?? [])];
+  const targetFor = (prefix: "ws" | "rr" | "evt"): string | null => {
+    const matches = targetIds.filter((id) => id.startsWith(`${prefix}-`));
+    return matches.length === 1 ? matches[0] : null;
+  };
+  const openTarget = targetFor("ws");
+  if (openTarget !== null && /\b(open|resume|focus|switch to)\b/.test(value)) {
+    authorized.add("open"); authorizedTargets.set("open", openTarget);
+  }
+  const ackTarget = targetFor("evt");
+  if (ackTarget !== null && /\b(acknowledge|dismiss|clear)\b.*\b(attention|event|notification|this)\b/.test(value)) {
+    authorized.add("ack"); authorizedTargets.set("ack", ackTarget);
+  }
+  const reviewTarget = targetFor("evt");
+  if (reviewTarget !== null && /\b(review|reviewer)\b.*\b(create|start|assign|open|this|it)\b|\b(create|start|assign)\b.*\breviewer\b/.test(value)) {
+    authorized.add("review"); authorizedTargets.set("review", reviewTarget);
+  }
   const landingDenied = /\b(?:don't|do not|never|not|without|avoid|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:land|fast-forward|merge)\b/.test(value);
   const integrationDenied = /\b(?:don't|do not|never|not|without|avoid|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:integrat|integration)\w*\b/.test(value);
-  if (!landingDenied && /\b(land|fast-forward)\b.*\b(review|candidate|workstream|this|it)\b|\bmerge\b.*\b(reviewed|candidate|workstream|this|it)\b/.test(value)) authorized.add("land");
-  if (!integrationDenied && /\b(integrat|integration)\w*\b.*\b(agent|workstream|create|start|this|it)\b|\b(create|start)\b.*\bintegration\b/.test(value)) authorized.add("integrate");
+  const landTarget = targetFor("rr");
+  if (landTarget !== null && !landingDenied && /\b(land|fast-forward)\b.*\b(review|candidate|workstream|this|it)\b|\bmerge\b.*\b(reviewed|candidate|workstream|this|it)\b/.test(value)) {
+    authorized.add("land"); authorizedTargets.set("land", landTarget);
+  }
+  const integrationTarget = targetFor("rr");
+  if (integrationTarget !== null && !integrationDenied && /\b(integrat|integration)\w*\b.*\b(agent|workstream|create|start|this|it)\b|\b(create|start)\b.*\bintegration\b/.test(value)) {
+    authorized.add("integrate"); authorizedTargets.set("integrate", integrationTarget);
+  }
   const cleanupDenied = /\b(?:don't|do not|never|no|not|without|avoid|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:clean up|cleanup|remove)\b/.test(value) ||
     /\b(?:clean up|cleanup|remove)\b[\s\S]{0,60}\b(?:don't|do not|never|no|not|without|avoid|can't|cannot|shouldn't|should not)\b/.test(value);
   const cleanupTarget = value.match(/\bws-[a-z0-9][a-z0-9-]{0,59}\b/)?.[0] ??
@@ -106,13 +128,16 @@ function updateAuthorization(text: string, source: string): void {
   if (/^\s*(yes|yep|do it|go ahead|please do|sounds good)[.!\s]*$/i.test(text)) {
     // Landing/integration are acceptance decisions, not generic secretary
     // actions. The user and secretary must name that decision explicitly.
-    authorized.add("record"); authorized.add("promote"); authorized.add("open"); authorized.add("ack"); authorized.add("review");
+    authorized.add("record"); authorized.add("promote");
   }
 }
 
-function consume(kind: Authorization): void {
-  if (!authorized.has(kind)) throw new Error(`Current user turn did not authorize secretary ${kind}`);
+function consume(kind: Authorization, target?: string): void {
+  if (!authorized.has(kind) || (target !== undefined && authorizedTargets.get(kind) !== target)) {
+    throw new Error(`Current user turn did not authorize secretary ${kind} for this exact target`);
+  }
   authorized = new Set();
+  authorizedTargets = new Map();
   authorizedCleanupTarget = null;
 }
 
@@ -121,6 +146,7 @@ function consumeCleanup(workstreamId: string): void {
     throw new Error("Current user turn did not authorize cleanup of this exact workstream");
   }
   authorized = new Set();
+  authorizedTargets = new Map();
   authorizedCleanupTarget = null;
 }
 
@@ -146,7 +172,7 @@ export default function secretary(pi: ExtensionAPI): void {
         "You may use the subagent tool for read-only investigation when parallel or specialized inspection would improve the answer. Choose the number and shape of investigators according to the work rather than following a fixed fanout recipe; use their existing report formats and synthesize the results. Investigation never needs a Git worktree. " +
         "You are not a coding agent and cannot modify repository files, run shell commands, or perform arbitrary Git operations. A promoted full agent owns implementation, its task_packet, and direct technical discussion. After the current user turn explicitly authorizes commit, push, or commit-and-push, use only secretary_git_write with an explicit message and relative path list for commits; push is limited to origin and the current branch. For Git cleanup, first use secretary_git for inspection, then use secretary_git_cleanup with exact expected OIDs, owned paths, and a dry-run plan; only apply after the current user turn explicitly authorizes applying that cleanup plan. Cleanup never accepts arbitrary Git arguments, remote operations, force deletion, or product-source paths. Never fabricate a user turn or relay general agent chat. Use secretary_git for bounded read-only Git inspection; never claim Git is unavailable when that tool can answer.\n\n" +
         "## Project-status skill\n" + projectStatusSkill() +
-        "\n\nUse only the read allowlist and secretary semantic tools. User affirmation such as 'yes' is sufficient for ordinary record/open/review/workstream actions; landing or integration requires the secretary and user to explicitly decide acceptance, and Git writes/cleanup require their own explicit current-turn authorization. Never inherit a generic affirmation for landing or integration.",
+        "\n\nUse only the read allowlist and secretary semantic tools. User affirmation such as 'yes' is sufficient for creating a new workstream or recording ordinary guidance; actions against an existing workstream, review event, or review request require that exact target ID in the current user turn. Landing or integration also requires the secretary and user to explicitly decide acceptance, and Git writes/cleanup require their own explicit current-turn authorization. Never inherit a generic affirmation for a targeted or destructive action. Never inherit a generic affirmation for landing or integration.",
     };
   });
 
@@ -255,7 +281,7 @@ export default function secretary(pi: ExtensionAPI): void {
     description: "Open/focus an existing full agent after explicit user instruction.",
     parameters: Type.Object({ workstreamId: Type.String({ pattern: ID.source }) }),
     async execute(_id, params, signal) {
-      consume("open"); const { projectId } = requiredEnvironment();
+      consume("open", params.workstreamId); const { projectId } = requiredEnvironment();
       const text = await invoke(["focus-workstream", "--project-id", projectId, "--workstream-id", params.workstreamId], signal);
       return { content: [{ type: "text", text }], details: {} };
     },
@@ -265,7 +291,7 @@ export default function secretary(pi: ExtensionAPI): void {
     description: "After the secretary and user jointly decide acceptance, fast-forward-only landing of an exact current ACCEPT receipt under the target lock. A reviewer receipt never authorizes automatic merge.",
     parameters: Type.Object({ requestId: Type.String({ pattern: ID.source }) }),
     async execute(_id, params, signal) {
-      consume("land"); const { projectId } = requiredEnvironment();
+      consume("land", params.requestId); const { projectId } = requiredEnvironment();
       const text = await invoke(["land-reviewed", "--project-id", projectId, "--request-id", params.requestId], signal);
       return { content: [{ type: "text", text }], details: {} };
     },
@@ -275,7 +301,7 @@ export default function secretary(pi: ExtensionAPI): void {
     description: "After the secretary and user explicitly decide the reviewed candidate needs integration, create a separate full integration agent; never merges automatically.",
     parameters: Type.Object({ requestId: Type.String({ pattern: ID.source }) }),
     async execute(_id, params, signal) {
-      consume("integrate"); const { projectId } = requiredEnvironment();
+      consume("integrate", params.requestId); const { projectId } = requiredEnvironment();
       const text = await invoke(["integration-create", "--project-id", projectId, "--request-id", params.requestId], signal);
       return { content: [{ type: "text", text }], details: {} };
     },
@@ -295,7 +321,7 @@ export default function secretary(pi: ExtensionAPI): void {
     description: "Create and focus a distinct read-only reviewer for an exact pending review event after explicit user instruction.",
     parameters: Type.Object({ eventId: Type.String({ pattern: ID.source }) }),
     async execute(_id, params, signal) {
-      consume("review"); const { projectId } = requiredEnvironment();
+      consume("review", params.eventId); const { projectId } = requiredEnvironment();
       const text = await invoke(["review-create", "--project-id", projectId, "--event-id", params.eventId], signal);
       return { content: [{ type: "text", text }], details: {} };
     },
@@ -315,7 +341,7 @@ export default function secretary(pi: ExtensionAPI): void {
     description: "Acknowledge one exact attention event after explicit user instruction or affirmation.",
     parameters: Type.Object({ eventId: Type.String({ pattern: ID.source }) }),
     async execute(_id, params, signal) {
-      consume("ack"); const { projectId } = requiredEnvironment();
+      consume("ack", params.eventId); const { projectId } = requiredEnvironment();
       const text = await invoke(["event-ack", "--project-id", projectId, "--event-id", params.eventId], signal);
       return { content: [{ type: "text", text }], details: {} };
     },

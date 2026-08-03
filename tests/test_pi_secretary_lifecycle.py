@@ -16,6 +16,10 @@ const local = new Map([
   ["89abcdef", {{ status: "running", agents: ["researcher"] }}],
 ]);
 const one = new Map([["01234567", {{ status: "running", agents: ["scout"] }}]]);
+const collision = new Map([
+  ["01234567aa", {{ status: "running", agents: ["scout"] }}],
+  ["01234567bb", {{ status: "running", agents: ["scout"] }}],
+]);
 const results = [
   actionTargetIsAuthorized("stop", {{ id: "01234567" }}, actionAuthorization("stop run 01234567"), {{ asyncJobs: one }}),
   actionTargetIsAuthorized("stop", {{ id: "fedcba98" }}, actionAuthorization("stop run fedcba98"), {{ asyncJobs: one }}),
@@ -23,6 +27,7 @@ const results = [
   actionTargetIsAuthorized("stop", {{ id: "01234567" }}, actionAuthorization("stop the scout"), {{ asyncJobs: local }}),
   actionTargetIsAuthorized("stop", {{}}, actionAuthorization("stop the investigation"), {{ asyncJobs: one }}),
   actionTargetIsAuthorized("stop", {{}}, actionAuthorization("stop the investigation"), {{ asyncJobs: local }}),
+  actionTargetIsAuthorized("stop", {{ id: "01234567aa" }}, actionAuthorization("stop run 01234567"), {{ asyncJobs: collision }}),
 ];
 process.stdout.write(JSON.stringify(results));
 """
@@ -31,7 +36,7 @@ process.stdout.write(JSON.stringify(results));
             cwd=ROOT, text=True, capture_output=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), [True, False, True, True, True, False])
+        self.assertEqual(json.loads(result.stdout), [True, False, True, True, True, False, False])
 
 
 if __name__ == "__main__":

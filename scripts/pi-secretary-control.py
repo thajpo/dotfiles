@@ -938,6 +938,28 @@ def _cleanup_artifact_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _cleanup_artifact_digest_fd(fd: int, info: os.stat_result) -> str:
+    if info.st_size > MAX_ARTIFACT_BYTES:
+        raise SecretaryError("cleanup artifact is too large")
+    before = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    digest = hashlib.sha256()
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after_info = os.fstat(fd)
+    except OSError as error:
+        raise SecretaryError("cannot read cleanup artifact") from error
+    after = (after_info.st_dev, after_info.st_ino, after_info.st_size,
+             after_info.st_mtime_ns, after_info.st_ctime_ns)
+    if before != after:
+        raise SecretaryError("cleanup artifact changed during hashing")
+    return digest.hexdigest()
+
+
 def _artifact_quarantine_path(path: Path, plan_hash: str) -> Path:
     key = hashlib.sha256(str(path).encode()).hexdigest()[:16]
     return path.with_name(f".{path.name}.cleanup-{plan_hash}-{key}")
@@ -965,17 +987,35 @@ def _quarantine_delete_artifact(path: Path, expected_sha256: str, plan_hash: str
         actual_identity = _cleanup_inode(quarantine)
         if on_quarantine is not None:
             on_quarantine(quarantine, actual_identity)
-    # Rename is the atomic pathname transition. Hash and delete only the
-    # quarantined inode; a writer that replaces the original path after the
-    # rename cannot cause its newer artifact to be unlinked. A leftover
-    # quarantine is replayed after an interrupted cleanup.
-    _safe_lstat(quarantine, directory=False)
-    if _cleanup_artifact_digest(quarantine) != expected_sha256:
-        raise SecretaryError(f"cleanup artifact changed during apply: {path}")
+    # Hash and delete the same quarantined inode through an open descriptor.
+    # Recheck identity and metadata before unlinking so a concurrent writer or
+    # pathname replacement cannot turn this into an arbitrary-file delete.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        quarantine.unlink()
+        fd = os.open(str(quarantine), flags)
+    except OSError as error:
+        raise SecretaryError(f"could not open quarantined cleanup artifact: {path}") from error
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SecretaryError("cleanup quarantine is not a regular file")
+        digest = _cleanup_artifact_digest_fd(fd, info)
+        if digest != expected_sha256:
+            raise SecretaryError(f"cleanup artifact changed during apply: {path}")
+        current = _safe_lstat(quarantine, directory=False)
+        assert current is not None
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise SecretaryError("cleanup quarantine identity changed during apply")
+        parent_fd = os.open(str(quarantine.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                                getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.unlink(quarantine.name, dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
     except OSError as error:
         raise SecretaryError(f"could not remove quarantined cleanup artifact: {path}") from error
+    finally:
+        os.close(fd)
 
 
 def _cleanup_worktree_records(repo: Path) -> list[dict[str, Any]]:
@@ -1934,7 +1974,7 @@ def _validate_review_workspace(request: dict[str, Any], *, require_clean: bool =
         raise SecretaryError("review checkout moved from assigned commit")
     if _git(workspace, "rev-parse", "HEAD^{tree}").lower() != request["candidateTree"]:
         raise SecretaryError("review tree differs from assignment")
-    if require_clean and _git(workspace, "status", "--porcelain=v1"):
+    if require_clean and _git(workspace, "status", "--porcelain=v1", "--untracked-files=all"):
         raise SecretaryError("review checkout is dirty")
     return workspace
 
@@ -2563,12 +2603,17 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
             if any(current[name] != request[name] for name in immutable):
                 raise SecretaryError("review assignment changed during launch")
             if launch_error is not None or result is None or result.returncode:
-                current["launchState"] = "pending"
+                live = _reviewer_process_live(request, repo)
+                current["launchState"] = "launched" if live is True else "uncertain" if live is None else "pending"
                 _atomic(request_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+                if live is True:
+                    return current
                 if isinstance(launch_error, SecretaryError):
                     raise launch_error
                 if launch_error is not None:
                     raise SecretaryError(f"review launch failed: {launch_error}") from launch_error
+                if live is None:
+                    raise SecretaryError(f"review launch failed with uncertain process state: {(result.stderr or result.stdout).strip()[:260]}")
                 raise SecretaryError(f"review launch failed: {(result.stderr or result.stdout).strip()[:300]}")
             current["launchState"] = "launched"
             _atomic(request_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
@@ -2907,6 +2952,8 @@ def _managed_process_live(socket: str | None, session: str, window: str,
                           workspace: Path, session_id: str) -> bool | None:
     if not isinstance(socket, str) or not socket.startswith("/") or "\n" in socket or "\x00" in socket:
         return None
+    if not Path(socket).exists():
+        return False
     workspace = workspace.resolve(strict=False)
     try:
         if not _tmux_window_live(session, window, socket):
@@ -3169,7 +3216,7 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
             raise SecretaryError("cleanup refuses a live review process")
         with _git_worktree_index_lock(review):
             if (_git(review, "rev-parse", "HEAD^{commit}").lower() != request["candidateOid"] or
-                    _git(review, "status", "--porcelain=v1")):
+                    _git(review, "status", "--porcelain=v1", "--untracked-files=all")):
                 raise SecretaryError("cleanup refuses dirty or moved review checkout")
             common_hash = hashlib.sha256(str(Path(project_record["gitCommonDir"])).encode()).hexdigest()
             repo_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-") or "repo"
@@ -3340,12 +3387,19 @@ def launch_workstream(project_id: str, workstream_id: str) -> dict[str, Any]:
             if any(current[name] != runtime[name] for name in ("piSessionId", "tmuxSession", "tmuxWindow", "tmuxSocket")):
                 raise SecretaryError("workstream launch state changed concurrently")
             if launch_error is not None or result is None or result.returncode:
-                current["launchState"] = "pending"
+                live = _managed_process_live(runtime["tmuxSocket"], runtime["tmuxSession"], runtime["tmuxWindow"],
+                                              Path(record["workspace"]), runtime["piSessionId"])
+                current["launchState"] = "launched" if live is True else "uncertain" if live is None else "pending"
                 _atomic(runtime_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+                if live is True:
+                    record.update(current)
+                    return record
                 if isinstance(launch_error, SecretaryError):
                     raise launch_error
                 if launch_error is not None:
                     raise SecretaryError(f"workstream launch failed: {launch_error}") from launch_error
+                if live is None:
+                    raise SecretaryError(f"workstream launch failed with uncertain process state: {(result.stderr or result.stdout).strip()[:260]}")
                 raise SecretaryError(f"workstream launch failed: {(result.stderr or result.stdout).strip()[:300]}")
             current["launchState"] = "launched"
             _atomic(runtime_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
