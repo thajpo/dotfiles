@@ -22,6 +22,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Iterator
 
 # Reuse workspace policy/classify so precedence stays exactly aligned.
@@ -455,7 +456,8 @@ def _validate_project_record(path: Path, project_id: str, common: Path,
 
 
 def _project_context(repository: str | Path, capability: str | None, *,
-                     require_capability: bool = True) -> tuple[Path, Path, dict[str, Any], Path]:
+                     require_capability: bool = True,
+                     reconcile_facts: bool = True) -> tuple[Path, Path, dict[str, Any], Path]:
     repo = _canonical_repo(repository)
     project_id, common, object_format = project_identity(repo)
     root = _state_root()
@@ -465,9 +467,10 @@ def _project_context(repository: str | Path, capability: str | None, *,
     record = _validate_project_record(project / "project.json", project_id, common, object_format)
     if require_capability:
         _check_capability(root, project_id, capability, record["capabilityHash"])
-    with _project_lock(project):
-        _foundation(project)
-        _reconcile_facts_locked(project, project_id)
+    if reconcile_facts:
+        with _project_lock(project):
+            _foundation(project)
+            _reconcile_facts_locked(project, project_id)
     return root, project, record, repo
 
 
@@ -2397,7 +2400,8 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
                     registered = _registered_worktrees(repo)
                     if registered is None or not any(path == workspace.resolve(strict=True) and branch is None for path, branch in registered):
                         raise SecretaryError("review workspace already exists without an exact Git worktree registration")
-                    _validate_review_workspace(candidate_request, require_clean=True)
+                    _validate_review_worktree_identity(candidate_request, project, project_record, repo,
+                                                       require_clean=True)
                 else:
                     created = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(workspace), request["candidateOid"]],
                                              env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
@@ -2411,15 +2415,17 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
             else:
                 if request["reviewWorkspace"] is None:
                     raise SecretaryError("review assignment is incomplete")
-                _validate_review_workspace(request, require_clean=False)
+                _validate_review_worktree_identity(request, project, project_record, repo, require_clean=False)
                 if reviewer_tmux_socket is not None:
                     if request["reviewerTmuxSocket"] not in (None, reviewer_tmux_socket):
                         raise SecretaryError("reviewer tmux server changed concurrently")
                     if request["reviewerTmuxSocket"] is None:
                         request["reviewerTmuxSocket"] = reviewer_tmux_socket
                 if request["launchState"] == "launched":
-                    _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
-                    return request
+                    if request["reviewerTmuxSocket"] is None or _reviewer_process_live(request, repo):
+                        _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
+                        return request
+                    request["launchState"] = "pending"
                 request["launchState"] = "pending"
                 _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
 
@@ -2438,6 +2444,13 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
             launch_error = error
         else:
             launch_error = None
+        if launch_error is None and result is not None and result.returncode == 0 and request["reviewerTmuxSocket"] is not None:
+            if not _wait_for_reviewer_process(request, repo):
+                with _project_lock(project):
+                    current = _validate_review_request(request_path, project_id)
+                    current["launchState"] = "pending"
+                    _atomic(request_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+                raise SecretaryError("review launch did not become live")
         with _project_lock(project):
             current = _validate_review_request(request_path, project_id)
             immutable = ("projectId", "requestId", "workstreamId", "candidateOid", "candidateTree", "baseOid",
@@ -2459,11 +2472,12 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
 
 def review_launch_info(project_id: str, request_id: str) -> dict[str, Any]:
     info = launch_info(project_id, internal=True)
-    project = _record_dir(_state_root(), project_id)
+    _, project, project_record, repo = _project_context(info["primaryRepository"], info["capability"],
+                                                         reconcile_facts=False)
     request = _validate_review_request(_review_request_path(project, request_id), project_id)
     if request["reviewerSessionId"] is None or request["reviewWorkspace"] is None:
         raise SecretaryError("review request is not assigned")
-    _validate_review_workspace(request, require_clean=False)
+    _validate_review_worktree_identity(request, project, project_record, repo, require_clean=False)
     return {**request, "capability": info["capability"]}
 
 
@@ -2477,7 +2491,9 @@ def submit_review(project_id: str, request_id: str, verdict: str, summary: str, 
     if (not hmac.compare_digest(os.environ.get("PI_REVIEW_CAPABILITY", ""), request["capability"]) or
             os.environ.get("PI_REVIEW_SESSION_ID") != request["reviewerSessionId"]):
         raise SecretaryError("reviewer capability required")
-    project = _record_dir(_state_root(), project_id)
+    info = launch_info(project_id, internal=True)
+    _, project, project_record, repo = _project_context(info["primaryRepository"], info["capability"],
+                                                         reconcile_facts=False)
     request_path = _review_request_path(project, request_id)
     with _project_lock(project):
         current = _validate_review_request(request_path, project_id)
@@ -2503,6 +2519,7 @@ def submit_review(project_id: str, request_id: str, verdict: str, summary: str, 
         review_workspace = Path(current["reviewWorkspace"])
         with _git_worktree_index_lock(review_workspace):
             _validate_review_workspace(current, require_clean=True)
+            _validate_review_worktree_identity(current, project, project_record, repo, require_clean=True)
             receipt_id = "receipt-" + secrets.token_hex(16)
             receipt = {"schemaVersion": 1, "receiptId": receipt_id, "projectId": project_id,
                        "requestId": request_id, "workstreamId": current["workstreamId"],
@@ -2693,9 +2710,10 @@ def _validate_landing_provenance(project: Path, project_id: str, repo: Path,
     _validate_oid(landing["landedOid"], record["objectFormat"] if "objectFormat" in record else _git(repo, "rev-parse", "--show-object-format"))
 
 
-def _validate_review_worktree_for_cleanup(request: dict[str, Any], project: Path,
-                                          project_record: dict[str, Any], repo: Path) -> Path:
-    workspace = _validate_review_workspace(request, require_clean=True)
+def _validate_review_worktree_identity(request: dict[str, Any], project: Path,
+                                       project_record: dict[str, Any], repo: Path,
+                                       *, require_clean: bool) -> Path:
+    workspace = _validate_review_workspace(request, require_clean=require_clean)
     _, trusted_live, policy_root = _load_policy_and_classify(repo)
     if not trusted_live or not within(policy_root, workspace) or within(repo, workspace):
         raise SecretaryError("review checkout escapes policy root")
@@ -2709,6 +2727,11 @@ def _validate_review_worktree_for_cleanup(request: dict[str, Any], project: Path
     if registered is None or not any(path == workspace and branch is None for path, branch in registered):
         raise SecretaryError("review checkout is not an exact detached Git worktree")
     return workspace
+
+
+def _validate_review_worktree_for_cleanup(request: dict[str, Any], project: Path,
+                                          project_record: dict[str, Any], repo: Path) -> Path:
+    return _validate_review_worktree_identity(request, project, project_record, repo, require_clean=True)
 
 
 def _tmux_window_live(session: str, window: str, socket_path: str | None) -> bool:
@@ -2737,6 +2760,82 @@ def _tmux_window_live(session: str, window: str, socket_path: str | None) -> boo
     if any(not name or "\t" in name or "\x00" in name for name in values):
         raise SecretaryError("cleanup received malformed tmux state")
     return window in values
+
+
+def _reviewer_process_live(request: dict[str, Any], repo: Path) -> bool:
+    socket = request.get("reviewerTmuxSocket")
+    workspace_raw = request.get("reviewWorkspace")
+    session_id = request.get("reviewerSessionId")
+    if (not isinstance(socket, str) or not socket.startswith("/") or "\n" in socket or "\x00" in socket or
+            not isinstance(workspace_raw, str) or not isinstance(session_id, str)):
+        return False
+    workspace = Path(workspace_raw).resolve(strict=False)
+    common = _git_path(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    common_hash = hashlib.sha256(str(common).encode()).hexdigest()
+    repo_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-") or "repo"
+    review_name = re.sub(r"[^A-Za-z0-9_-]+", "-", workspace.name).strip("-") or "worktree"
+    session = f"pi-{repo_name}-{common_hash[:12]}"
+    window = f"w-{review_name}-{hashlib.sha256(str(workspace).encode()).hexdigest()[:12]}"
+    panes = subprocess.run(["tmux", "-S", socket, "list-panes", "-t", f"={session}:{window}",
+                            "-F", "#{pane_pid}\\t#{pane_current_path}"],
+                           env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if panes.returncode != 0:
+        return False
+    roots: list[int] = []
+    for line in panes.stdout.splitlines():
+        fields = line.split("\\t", 1)
+        if len(fields) != 2 or not fields[0].isdigit():
+            return False
+        try:
+            pane_path = Path(fields[1]).resolve(strict=False)
+        except (OSError, RuntimeError):
+            return False
+        if pane_path == workspace:
+            roots.append(int(fields[0]))
+    if not roots:
+        return False
+    processes = subprocess.run(["ps", "-eo", "pid=,ppid=,args="], env=_env(), text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if processes.returncode != 0:
+        return False
+    parents: dict[int, int] = {}
+    args_by_pid: dict[int, str] = {}
+    for line in processes.stdout.splitlines():
+        fields = line.strip().split(None, 2)
+        if len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
+            continue
+        pid, parent = int(fields[0]), int(fields[1])
+        parents[pid] = parent
+        args_by_pid[pid] = fields[2]
+    pending = list(roots)
+    seen: set[int] = set()
+    while pending:
+        pid = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        args = args_by_pid.get(pid, "")
+        tokens = args.split()
+        if ("--launch" in tokens and "--session-id" in tokens and
+                any(tokens[index + 1] == session_id for index, token in enumerate(tokens[:-1])
+                    if token == "--session-id") and
+                "--cwd" in tokens and
+                any(tokens[index + 1] == str(workspace) for index, token in enumerate(tokens[:-1])
+                    if token == "--cwd") and "pidev" in args):
+            return True
+        pending.extend(child for child, parent in parents.items() if parent == pid)
+    return False
+
+
+def _wait_for_reviewer_process(request: dict[str, Any], repo: Path, timeout: float = 10.0) -> bool:
+    if request.get("reviewerTmuxSocket") is None:
+        return True
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _reviewer_process_live(request, repo):
+            return True
+        time.sleep(0.1)
+    return _reviewer_process_live(request, repo)
 
 
 def _revalidate_cleanup_state(project_id: str, workstream_id: str, project: Path,

@@ -33,6 +33,7 @@ const CLEANUP_PLAN = Type.Object({
 
 type Authorization = "record" | "promote" | "open" | "ack" | "review" | "land" | "integrate" | "cleanup" | GitAuthorization | GitCleanupAuthorization;
 let authorized = new Set<Authorization>();
+let authorizedCleanupTarget: string | null = null;
 
 function requiredEnvironment(): { projectId: string; alias: string; control: string } {
   const projectId = process.env.PI_SECRETARY_PROJECT_ID ?? "";
@@ -78,6 +79,7 @@ function recordWasAuthorized(value: string): boolean {
 
 function updateAuthorization(text: string, source: string): void {
   authorized = new Set();
+  authorizedCleanupTarget = null;
   if (source === "extension") return;
   const value = text.toLowerCase();
   if (recordWasAuthorized(value)) authorized.add("record");
@@ -91,7 +93,16 @@ function updateAuthorization(text: string, source: string): void {
   const integrationDenied = /\b(?:don't|do not|never|not|without|avoid|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:integrat|integration)\w*\b/.test(value);
   if (!landingDenied && /\b(land|fast-forward)\b.*\b(review|candidate|workstream|this|it)\b|\bmerge\b.*\b(reviewed|candidate|workstream|this|it)\b/.test(value)) authorized.add("land");
   if (!integrationDenied && /\b(integrat|integration)\w*\b.*\b(agent|workstream|create|start|this|it)\b|\b(create|start)\b.*\bintegration\b/.test(value)) authorized.add("integrate");
-  if (/\b(clean up|cleanup|remove)\b.*\b(workstream|agent|resources|this|it)\b/.test(value)) authorized.add("cleanup");
+  const cleanupDenied = /\b(?:don't|do not|never|not|without|avoid|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:clean up|cleanup|remove)\b/.test(value) ||
+    /\b(?:clean up|cleanup|remove)\b[\s\S]{0,60}\b(?:don't|do not|never|not|without|avoid|can't|cannot|shouldn't|should not)\b/.test(value);
+  const cleanupTarget = value.match(/\bws-[a-z0-9][a-z0-9-]{0,59}\b/)?.[0] ??
+    value.match(/[\u0060\"']([a-z0-9][a-z0-9-]{0,62})[\u0060\"']/)?.[1] ?? null;
+  const cleanupIntent = /\b(clean up|cleanup|remove)\b[\s\S]{0,80}\b(?:workstream|agent|resources?|this|it)\b/.test(value) ||
+    (cleanupTarget !== null && /\b(clean up|cleanup|remove)\b/.test(value));
+  if (!cleanupDenied && cleanupTarget !== null && cleanupIntent) {
+    authorized.add("cleanup");
+    authorizedCleanupTarget = cleanupTarget;
+  }
   if (/^\s*(yes|yep|do it|go ahead|please do|sounds good)[.!\s]*$/i.test(text)) {
     // Landing/integration are acceptance decisions, not generic secretary
     // actions. The user and secretary must name that decision explicitly.
@@ -102,6 +113,15 @@ function updateAuthorization(text: string, source: string): void {
 function consume(kind: Authorization): void {
   if (!authorized.has(kind)) throw new Error(`Current user turn did not authorize secretary ${kind}`);
   authorized = new Set();
+  authorizedCleanupTarget = null;
+}
+
+function consumeCleanup(workstreamId: string): void {
+  if (!authorized.has("cleanup") || authorizedCleanupTarget !== workstreamId) {
+    throw new Error("Current user turn did not authorize cleanup of this exact workstream");
+  }
+  authorized = new Set();
+  authorizedCleanupTarget = null;
 }
 
 export default function secretary(pi: ExtensionAPI): void {
@@ -265,7 +285,7 @@ export default function secretary(pi: ExtensionAPI): void {
     description: "Guarded cleanup of exact-owned landed resources after explicit user instruction. Refuses dirty, live, moved, uncertain, or unlanded state and never forces.",
     parameters: Type.Object({ workstreamId: Type.String({ pattern: ID.source }) }),
     async execute(_id, params, signal) {
-      consume("cleanup"); const { projectId } = requiredEnvironment();
+      consumeCleanup(params.workstreamId); const { projectId } = requiredEnvironment();
       const text = await invoke(["workstream-cleanup", "--project-id", projectId, "--workstream-id", params.workstreamId], signal);
       return { content: [{ type: "text", text }], details: {} };
     },

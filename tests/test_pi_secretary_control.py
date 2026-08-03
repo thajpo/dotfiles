@@ -476,6 +476,7 @@ class SecretaryControlTests(unittest.TestCase):
                 secretary.create_reviewer(registered["projectId"], event["eventId"])
         fake.write_text("#!/bin/sh\nexit 0\n")
         with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
+             mock.patch.object(secretary, "_wait_for_reviewer_process", return_value=True), \
              mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability}, clear=False):
             request = secretary.create_reviewer(registered["projectId"], event["eventId"])
         review_workspace = Path(request["reviewWorkspace"])
@@ -608,6 +609,7 @@ class SecretaryControlTests(unittest.TestCase):
             fake = Path(self.tmp.name) / f"{workstream_id}.pidev"
             fake.write_text("#!/bin/sh\nexit 0\n"); fake.chmod(0o700)
             with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
+                 mock.patch.object(secretary, "_wait_for_reviewer_process", return_value=True), \
                  mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability}, clear=False):
                 request = secretary.create_reviewer(registered["projectId"], event["eventId"])
             with mock.patch.dict(os.environ, {"PI_REVIEW_CAPABILITY": self.capability,
