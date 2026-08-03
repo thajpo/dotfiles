@@ -598,6 +598,58 @@ class SecretaryControlTests(unittest.TestCase):
             with self.assertRaisesRegex(secretary.SecretaryError, "cannot prove"):
                 secretary._tmux_window_live("pi-project", "w-feature", "/tmp/custom-tmux")
 
+    def test_worktree_recovery_is_bound_and_fails_closed_on_unknown_tmux(self):
+        branch = "side-agent/recovery-bound"
+        git(self.source, "branch", branch)
+        worktree_root = Path(self.tmp.name) / "worktrees"
+        worktree_root.mkdir()
+        original = worktree_root / "recovery-bound"
+        git(self.source, "worktree", "add", str(original), branch)
+        oid = git(self.source, "rev-parse", branch)
+        quarantine = secretary._worktree_quarantine_path(original, "candidate")
+        git(self.source, "worktree", "move", str(original), str(quarantine))
+        expected = {
+            "kind": "candidate", "originalPath": str(original), "workstreamId": "ws-recovery-bound",
+            "requestId": None, "branch": branch, "expectedOid": oid,
+            "tmuxSession": "pi-test", "tmuxWindow": "w-candidate", "tmuxSocket": "/tmp/missing-tmux",
+            "sessionId": "ws-recovery-bound", "state": "moved",
+        }
+        with self.assertRaisesRegex(secretary.SecretaryError, "not bound"):
+            secretary._resume_quarantined_worktree(self.source, quarantine.with_name("other"),
+                                                   worktree_root, expected)
+        with mock.patch.object(secretary, "_tmux_window_live",
+                               side_effect=secretary.SecretaryError("socket unavailable")), \
+             mock.patch.object(secretary, "_cleanup_worktree_has_live_process", return_value=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "socket unavailable"):
+                secretary._resume_quarantined_worktree(self.source, quarantine, worktree_root, expected)
+        with mock.patch.object(secretary, "_tmux_window_live", return_value=False), \
+             mock.patch.object(secretary, "_cleanup_worktree_has_live_process", return_value=False):
+            self.assertTrue(secretary._resume_quarantined_worktree(self.source, quarantine, worktree_root, expected))
+        self.assertFalse(quarantine.exists())
+
+    def test_artifact_recovery_rejects_reappeared_source(self):
+        agent_dir = self.home / ".pi" / "agent"
+        artifact = agent_dir / "sessions" / "race" / "subagent-artifacts" / "artifact.json"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("original\n")
+        artifact.chmod(0o600)
+        expected = secretary._cleanup_lstat(artifact, directory=False)
+        assert expected is not None
+        expected_identity = secretary._cleanup_artifact_identity(expected)
+        parent_identity = secretary._cleanup_inode(artifact.parent, directory=True)
+        plan_hash = "a" * 64
+        quarantine = secretary._artifact_quarantine_path(artifact, plan_hash)
+        quarantine.write_text("original\n")
+        quarantine.chmod(0o600)
+        with self.assertRaisesRegex(secretary.SecretaryError, "source reappeared"):
+            secretary._quarantine_delete_artifact(
+                artifact, __import__("hashlib").sha256(b"original\n").hexdigest(),
+                expected_identity, parent_identity, plan_hash,
+                owned_quarantine=secretary._cleanup_artifact_identity(quarantine.lstat()),
+            )
+        self.assertTrue(artifact.exists())
+        self.assertTrue(quarantine.exists())
+
     def test_fast_forward_landing_integration_escalation_and_guarded_cleanup(self):
         registered = secretary.register_project(self.source, "landing-project")
         import hashlib

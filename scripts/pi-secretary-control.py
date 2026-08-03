@@ -1063,6 +1063,7 @@ def _artifact_quarantine_path(path: Path, plan_hash: str) -> Path:
 def _quarantine_delete_artifact(path: Path, expected_sha256: str,
                                 expected_identity: str, expected_parent_identity: str,
                                 plan_hash: str, *, owned_quarantine: str | None = None,
+                                on_intent: Any | None = None,
                                 on_quarantine: Any | None = None) -> None:
     quarantine = _artifact_quarantine_path(path, plan_hash)
     parent_fd = _cleanup_parent_fd(path.parent, expected_parent_identity)
@@ -1074,6 +1075,11 @@ def _quarantine_delete_artifact(path: Path, expected_sha256: str,
             q_info = None
         except OSError as error:
             raise SecretaryError(f"cannot inspect cleanup quarantine: {quarantine}") from error
+        source_info = _cleanup_lstat(path, directory=False, missing=True)
+        if q_info is not None and source_info is not None:
+            raise SecretaryError(f"cleanup artifact source reappeared beside quarantine: {path}")
+        if q_info is None and source_info is None:
+            raise SecretaryError(f"cleanup artifact source and quarantine are both missing: {path}")
         if q_info is not None:
             if (not stat.S_ISREG(q_info.st_mode) or
                     _cleanup_artifact_identity(q_info) != expected_identity or
@@ -1093,6 +1099,8 @@ def _quarantine_delete_artifact(path: Path, expected_sha256: str,
                 digest = _cleanup_artifact_digest_fd(source_fd, source_info)
                 if digest != expected_sha256:
                     raise SecretaryError(f"cleanup artifact changed during apply: {path}")
+                if on_intent is not None:
+                    on_intent(quarantine, expected_identity)
                 _rename_cleanup_noreplace(parent_fd, path.name, parent_fd, quarantine.name)
             finally:
                 os.close(source_fd)
@@ -1474,22 +1482,28 @@ def _cleanup_recovery_path(project: Path, kind: str, identifier: str) -> Path:
 def _write_cleanup_recovery(path: Path, *, kind: str, identifier: str, plan_hash: str,
                             phase: str, completed_worktrees: list[str] | None = None,
                             pending_worktrees: list[str] | None = None,
+                            worktree_metadata: dict[str, dict[str, Any]] | None = None,
                             completed_artifacts: list[str] | None = None,
                             pending_artifacts: list[str] | None = None,
                             quarantine_artifacts: dict[str, str] | None = None,
                             refs_applied: bool = False, refs_pending: bool = False,
                             error: str | None = None) -> None:
-    if quarantine_artifacts is None and path.exists() and not path.is_symlink():
+    if (quarantine_artifacts is None or worktree_metadata is None) and path.exists() and not path.is_symlink():
         try:
             previous = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(previous, dict) and isinstance(previous.get("quarantineArtifacts"), dict):
+            if quarantine_artifacts is None and isinstance(previous, dict) and isinstance(previous.get("quarantineArtifacts"), dict):
                 quarantine_artifacts = {str(key): str(value) for key, value in previous["quarantineArtifacts"].items()}
+            if worktree_metadata is None and isinstance(previous, dict) and isinstance(previous.get("worktreeMetadata"), dict):
+                worktree_metadata = {str(key): dict(value) for key, value in previous["worktreeMetadata"].items()
+                                     if isinstance(value, dict)}
         except (OSError, UnicodeError, json.JSONDecodeError):
-            quarantine_artifacts = {}
+            quarantine_artifacts = {} if quarantine_artifacts is None else quarantine_artifacts
+            worktree_metadata = {} if worktree_metadata is None else worktree_metadata
     value = {"schemaVersion": 1, "kind": kind, "identifier": identifier,
              "planHash": plan_hash, "phase": phase,
              "completedWorktrees": sorted(completed_worktrees or []),
              "pendingWorktrees": sorted(pending_worktrees or []),
+             "worktreeMetadata": worktree_metadata or {},
              "completedArtifacts": sorted(completed_artifacts or []),
              "pendingArtifacts": sorted(pending_artifacts or []),
              "quarantineArtifacts": quarantine_artifacts or {},
@@ -1503,12 +1517,13 @@ def _read_cleanup_recovery(path: Path, *, kind: str, identifier: str, plan_hash:
     if not path.exists() and not path.is_symlink():
         return None
     fields = {"schemaVersion", "kind", "identifier", "planHash", "phase", "completedWorktrees",
-              "pendingWorktrees", "completedArtifacts", "pendingArtifacts", "quarantineArtifacts",
-              "refsApplied", "refsPending", "updatedAt", "error"}
+              "pendingWorktrees", "worktreeMetadata", "completedArtifacts", "pendingArtifacts",
+              "quarantineArtifacts", "refsApplied", "refsPending", "updatedAt", "error"}
     value = _read_json(path, fields, required={"schemaVersion", "kind", "identifier", "planHash", "phase",
                                                  "completedWorktrees", "pendingWorktrees", "completedArtifacts",
                                                  "pendingArtifacts", "quarantineArtifacts", "refsApplied",
                                                  "refsPending", "updatedAt"})
+    value.setdefault("worktreeMetadata", {})
     if (value["schemaVersion"] != 1 or value["kind"] != kind or value["identifier"] != identifier or
             value["planHash"] != plan_hash or value["phase"] not in {"prepared", "worktrees", "reviews",
             "candidate", "worktree-pending", "refs-pending", "refs-applied", "artifact-pending",
@@ -1517,6 +1532,9 @@ def _read_cleanup_recovery(path: Path, *, kind: str, identifier: str, plan_hash:
             not all(isinstance(item, str) for item in value["completedWorktrees"]) or
             not isinstance(value["pendingWorktrees"], list) or
             not all(isinstance(item, str) for item in value["pendingWorktrees"]) or
+            not isinstance(value["worktreeMetadata"], dict) or
+            not all(isinstance(key, str) and isinstance(item, dict)
+                    for key, item in value["worktreeMetadata"].items()) or
             not isinstance(value["completedArtifacts"], list) or
             not all(isinstance(item, str) for item in value["completedArtifacts"]) or
             not isinstance(value["pendingArtifacts"], list) or
@@ -1574,6 +1592,21 @@ def _inspect_cleanup_recovery(project_id: str, repo: Path, original_plan: dict[s
         if (info is not None and
                 quarantine_artifacts.get(artifact_path) == _cleanup_artifact_identity(info)):
             owned_quarantines.add(artifact_path)
+    # If the process died after deleting the exact quarantined inode but
+    # before recording completion, the durable intent plus absence of both
+    # source and quarantine is an idempotent completed state. No new pathname
+    # is touched; this only prevents a safe cleanup from being stranded.
+    for item in normalized["artifacts"]:
+        if item["path"] not in pending_artifacts or item["path"] in completed_artifacts:
+            continue
+        quarantine = _artifact_quarantine_path(Path(item["path"]), recovery["planHash"])
+        if quarantine_artifacts.get(item["path"]) != item["expectedIdentity"]:
+            continue
+        source_info = _cleanup_lstat(Path(item["path"]), directory=False, missing=True)
+        quarantine_info = _cleanup_lstat(quarantine, directory=False, missing=True)
+        if source_info is None and quarantine_info is None:
+            completed_artifacts.add(item["path"])
+
     remaining = {"version": 1,
                  "renames": [] if recovery["refsApplied"] else normalized["renames"],
                  "deletions": [] if recovery["refsApplied"] else normalized["deletions"],
@@ -1595,6 +1628,8 @@ def _inspect_cleanup_recovery(project_id: str, repo: Path, original_plan: dict[s
         _cleanup_artifact_allowed(path, item["kind"], repo, policy_root)
         quarantine = _artifact_quarantine_path(path, recovery["planHash"])
         if item["path"] in pending_artifacts and item["path"] in owned_quarantines:
+            if _cleanup_lstat(path, directory=False, missing=True) is not None:
+                raise SecretaryError(f"cleanup recovery found a reappeared artifact source: {path}")
             digest = _cleanup_artifact_snapshot(quarantine, item["expectedIdentity"],
                                                 item["expectedParentIdentity"])
         elif path.is_file() and not path.is_symlink():
@@ -1606,6 +1641,8 @@ def _inspect_cleanup_recovery(project_id: str, repo: Path, original_plan: dict[s
             raise SecretaryError(f"cleanup recovery artifact changed: {path}")
         actions.append({"kind": "artifact-delete", "path": str(path), "sha256": item["expectedSha256"],
                         "identity": item["expectedIdentity"]})
+    recovery["completedArtifacts"] = sorted(completed_artifacts)
+    recovery["pendingArtifacts"] = sorted(pending_artifacts - completed_artifacts)
     return {"plan": remaining, "reportedPlan": normalized, "planHash": recovery["planHash"],
             "actions": actions, "counts": {"renames": len(remaining["renames"]),
             "deletions": len(remaining["deletions"]), "worktrees": len(remaining["worktrees"]),
@@ -1732,7 +1769,8 @@ def _apply_cleanup(repo: Path, inspected: dict[str, Any], recovery_path: Path,
             _quarantine_delete_artifact(
                 path, item["expectedSha256"], item["expectedIdentity"],
                 item["expectedParentIdentity"], inspected["planHash"],
-                owned_quarantine=quarantine_artifacts.get(item["path"]), on_quarantine=mark_quarantine)
+                owned_quarantine=quarantine_artifacts.get(item["path"]),
+                on_intent=mark_quarantine, on_quarantine=mark_quarantine)
             if item["path"] not in completed_artifacts:
                 completed_artifacts.append(item["path"])
             if item["path"] in pending_artifacts:
@@ -3028,22 +3066,28 @@ def _validate_review_worktree_for_cleanup(request: dict[str, Any], project: Path
     return _validate_review_worktree_identity(request, project, project_record, repo, require_clean=True)
 
 
+def _worktree_quarantine_path(workspace: Path, label: str) -> Path:
+    workspace = workspace.resolve(strict=False)
+    key = hashlib.sha256(f"{label}\0{workspace}".encode()).hexdigest()[:24]
+    return workspace.parent / f".pi-secretary-{label}-quarantine-{key}"
+
+
 def _remove_worktree_with_process_guard(repo: Path, workspace: Path, label: str,
-                                        on_quarantine: Any) -> None:
+                                        on_quarantine: Any, *,
+                                        on_quarantine_state: Any | None = None) -> None:
     if _cleanup_worktree_has_live_process(workspace):
         raise SecretaryError(f"cleanup refuses a live {label} process")
-    quarantine: Path | None = None
-    for _ in range(8):
-        candidate = workspace.parent / f".pi-secretary-{label}-quarantine-{secrets.token_hex(12)}"
-        if not candidate.exists() and not candidate.is_symlink():
-            quarantine = candidate
-            break
-    if quarantine is None:
-        raise SecretaryError(f"cleanup cannot allocate {label} quarantine")
+    quarantine = _worktree_quarantine_path(workspace, label)
+    if quarantine.exists() or quarantine.is_symlink():
+        raise SecretaryError(f"cleanup quarantine already exists for {label}: {quarantine}")
+    if on_quarantine_state is not None:
+        on_quarantine_state(quarantine, "planned")
     moved = subprocess.run(["git", "-C", str(repo), "worktree", "move", str(workspace), str(quarantine)],
                            env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if moved.returncode:
         raise SecretaryError(f"could not quarantine clean {label} worktree")
+    if on_quarantine_state is not None:
+        on_quarantine_state(quarantine, "moved")
     try:
         if workspace.exists() or workspace.is_symlink():
             raise SecretaryError(f"cleanup found a reappeared {label} path during quarantine")
@@ -3052,10 +3096,14 @@ def _remove_worktree_with_process_guard(repo: Path, workspace: Path, label: str,
         registered = _registered_worktrees(repo)
         if registered is None or not any(path == quarantine for path, _ in registered):
             raise SecretaryError(f"cleanup lost {label} quarantine registration")
+        if on_quarantine_state is not None:
+            on_quarantine_state(quarantine, "remove-pending")
         removed = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(quarantine)],
                                  env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if removed.returncode:
             raise SecretaryError(f"could not remove quarantined {label} worktree")
+        if on_quarantine_state is not None:
+            on_quarantine_state(quarantine, "removed")
         if workspace.exists() or workspace.is_symlink() or _cleanup_worktree_has_live_process(quarantine):
             raise SecretaryError(f"cleanup found a {label} process or path after removal")
     except Exception as error:
@@ -3063,33 +3111,79 @@ def _remove_worktree_with_process_guard(repo: Path, workspace: Path, label: str,
         raise
 
 
-def _resume_quarantined_worktree(repo: Path, quarantine: Path, policy_root: Path, label: str) -> None:
-    if not quarantine.is_absolute():
-        raise SecretaryError(f"cleanup recovery quarantine is not absolute: {quarantine}")
+def _resume_quarantined_worktree(repo: Path, quarantine: Path, policy_root: Path,
+                                  expected: dict[str, Any]) -> bool:
+    required = {"kind", "originalPath", "workstreamId", "requestId", "branch", "expectedOid",
+                "tmuxSession", "tmuxWindow", "tmuxSocket", "sessionId", "state"}
+    if set(expected) != required or expected["kind"] not in {"candidate", "review"} or \
+            not isinstance(expected["originalPath"], str) or not isinstance(expected["workstreamId"], str) or \
+            (expected["requestId"] is not None and not isinstance(expected["requestId"], str)) or \
+            (expected["branch"] is not None and not isinstance(expected["branch"], str)) or \
+            not isinstance(expected["expectedOid"], str) or not re.fullmatch(r"[0-9a-f]{40,64}", expected["expectedOid"]) or \
+            not isinstance(expected["tmuxSession"], str) or not isinstance(expected["tmuxWindow"], str) or \
+            not isinstance(expected["tmuxSocket"], str) or not isinstance(expected["sessionId"], str) or \
+            expected["state"] not in {"planned", "moved", "remove-pending", "removed"}:
+        raise SecretaryError("cleanup recovery has invalid bound worktree metadata")
+    original = Path(expected["originalPath"])
+    quarantine = Path(quarantine)
+    if not original.is_absolute() or not quarantine.is_absolute():
+        raise SecretaryError("cleanup recovery worktree paths must be absolute")
+    _no_symlink_path(original)
     _no_symlink_path(quarantine)
+    original = original.resolve(strict=False)
     quarantine = quarantine.resolve(strict=False)
+    if quarantine != _worktree_quarantine_path(original, expected["kind"]):
+        raise SecretaryError("cleanup recovery quarantine is not bound to its original worktree")
     if (not within(policy_root, quarantine) or within(repo, quarantine) or
-            within(quarantine, repo) or quarantine.is_symlink() or not quarantine.is_dir()):
+            within(quarantine, repo) or quarantine.is_symlink()):
         raise SecretaryError(f"cleanup recovery quarantine is outside the managed worktree root: {quarantine}")
-    registered = _registered_worktrees(repo)
-    if registered is None or not any(path == quarantine for path, _ in registered):
+    if original.exists() or original.is_symlink():
         if quarantine.exists() or quarantine.is_symlink():
-            raise SecretaryError(f"cleanup recovery lost Git registration for {label}: {quarantine}")
-        _assert_worktree_registration_absent(repo, quarantine, label)
-        return
+            raise SecretaryError("cleanup recovery found both original and quarantined worktrees")
+    records = _cleanup_worktree_records(repo)
+    by_path = {item["path"]: item for item in records}
+    original_record = by_path.get(original)
+    quarantine_record = by_path.get(quarantine)
+    if quarantine_record is None:
+        if quarantine.exists() or quarantine.is_symlink():
+            raise SecretaryError(f"cleanup recovery found an unregistered quarantine: {quarantine}")
+        if original_record is not None:
+            if (expected["state"] != "planned" or original_record.get("branch") != expected["branch"] or
+                    original_record.get("head") != expected["expectedOid"]):
+                raise SecretaryError("cleanup recovery found a changed original worktree")
+            return False
+        if original.exists() or original.is_symlink() or expected["state"] not in {"remove-pending", "removed"}:
+            raise SecretaryError("cleanup recovery cannot prove the worktree quarantine outcome")
+        if _tmux_window_live(expected["tmuxSession"], expected["tmuxWindow"], expected["tmuxSocket"]):
+            raise SecretaryError("cleanup recovery refuses an established worktree window")
+        if _cleanup_worktree_has_live_process(original):
+            raise SecretaryError("cleanup recovery refuses a live removed-worktree process")
+        return True
+    if original.exists() or original.is_symlink():
+        raise SecretaryError("cleanup recovery found a reappeared original worktree")
+    if (quarantine_record.get("branch") != expected["branch"] or
+            quarantine_record.get("head") != expected["expectedOid"] or
+            quarantine_record.get("locked") or quarantine_record.get("prunable") or
+            not quarantine.is_dir() or quarantine.is_symlink()):
+        raise SecretaryError("cleanup recovery quarantine identity changed")
+    # Recovery is an established process state, not a fresh launch. A missing
+    # or unreadable tmux socket therefore remains uncertain and blocks removal.
+    if _tmux_window_live(expected["tmuxSession"], expected["tmuxWindow"], expected["tmuxSocket"]):
+        raise SecretaryError("cleanup recovery refuses a live quarantined worktree window")
+    if _cleanup_worktree_has_live_process(quarantine):
+        raise SecretaryError("cleanup recovery refuses a live quarantined worktree process")
     with _git_worktree_index_lock(quarantine):
-        if _cleanup_worktree_has_live_process(quarantine):
-            raise SecretaryError(f"cleanup recovery refuses a live {label} process: {quarantine}")
         if _git(quarantine, "status", "--porcelain=v1", "--untracked-files=all"):
-            raise SecretaryError(f"cleanup recovery refuses a dirty {label} worktree: {quarantine}")
+            raise SecretaryError("cleanup recovery refuses a dirty quarantined worktree")
         removed = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(quarantine)],
                                  env=_env(), text=True, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, check=False)
         if removed.returncode:
-            raise SecretaryError(f"cleanup recovery could not remove quarantined {label} worktree")
+            raise SecretaryError("cleanup recovery could not remove quarantined worktree")
         if quarantine.exists() or quarantine.is_symlink():
-            raise SecretaryError(f"cleanup recovery found a reappeared {label} quarantine: {quarantine}")
-        _assert_worktree_registration_absent(repo, quarantine, label)
+            raise SecretaryError("cleanup recovery found a reappeared quarantine")
+        _assert_worktree_registration_absent(repo, quarantine, "recovered")
+    return True
 
 
 def _tmux_window_live(session: str, window: str, socket_path: str | None) -> bool:
@@ -3322,25 +3416,8 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
     previous_recovery = _read_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
                                                plan_hash=plan_hash)
     recovered_worktrees: list[str] = list(previous_recovery["completedWorktrees"] if previous_recovery else [])
-    if previous_recovery and previous_recovery["pendingWorktrees"]:
-        _, trusted_live, policy_root = _load_policy_and_classify(repo)
-        if not trusted_live:
-            raise SecretaryError("cleanup recovery requires a trusted-live repository")
-        pending = list(previous_recovery["pendingWorktrees"])
-        for index, pending_path in enumerate(pending):
-            try:
-                _resume_quarantined_worktree(repo, Path(pending_path), policy_root, "recovered")
-            except Exception as error:
-                _write_cleanup_recovery(
-                    recovery_path, kind="workstream", identifier=workstream_id,
-                    plan_hash=plan_hash, phase="worktree-pending",
-                    completed_worktrees=recovered_worktrees, pending_worktrees=pending[index:],
-                    error=str(error))
-                raise
-            recovered_worktrees.append(str(Path(pending_path).resolve(strict=False)))
-        _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
-                                plan_hash=plan_hash, phase="worktrees",
-                                completed_worktrees=recovered_worktrees, pending_worktrees=[])
+    if record["closedAt"] is not None and previous_recovery and previous_recovery["pendingWorktrees"]:
+        raise SecretaryError("closed cleanup has an unresolved bound worktree quarantine")
     if record["closedAt"] is not None:
         expected_reviews: dict[str, dict[str, Any]] = {}
         for request_path in (project / "reviews" / "requests").glob("*.json"):
@@ -3374,16 +3451,123 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
             raise SecretaryError("cleanup refuses a live workstream process")
         _assert_worktree_registration_absent(repo, workspace, "candidate")
 
+    _, trusted_live, policy_root = _load_policy_and_classify(repo)
+    if not trusted_live:
+        raise SecretaryError("cleanup recovery requires a trusted-live repository")
+    recovery_assignments: dict[str, dict[str, Any]] = {}
+    runtime_for_recovery = _workstream_runtime(project, repo, record)
+    candidate_original = str(Path(record["workspace"]).resolve(strict=False))
+    recovery_assignments[candidate_original] = {
+        "kind": "candidate", "originalPath": candidate_original,
+        "workstreamId": workstream_id, "requestId": None,
+        "branch": record["branch"], "expectedOid": record["currentOid"],
+        "tmuxSession": runtime_for_recovery["tmuxSession"],
+        "tmuxWindow": runtime_for_recovery["tmuxWindow"],
+        "tmuxSocket": runtime_for_recovery["tmuxSocket"],
+        "sessionId": runtime_for_recovery["piSessionId"],
+    }
+    common_hash = hashlib.sha256(str(Path(project_record["gitCommonDir"])).encode()).hexdigest()
+    repo_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-") or "repo"
+    for request_path in (project / "reviews" / "requests").glob("*.json"):
+        request = _validate_review_request(request_path, project_id)
+        if request["workstreamId"] != workstream_id or request["reviewWorkspace"] is None:
+            continue
+        review_original = str(Path(request["reviewWorkspace"]).resolve(strict=False))
+        review_name = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(review_original).name).strip("-") or "worktree"
+        recovery_assignments[review_original] = {
+            "kind": "review", "originalPath": review_original,
+            "workstreamId": workstream_id, "requestId": request["requestId"],
+            "branch": None, "expectedOid": request["candidateOid"],
+            "tmuxSession": f"pi-{repo_name}-{common_hash[:12]}",
+            "tmuxWindow": f"w-{review_name}-{hashlib.sha256(review_original.encode()).hexdigest()[:12]}",
+            "tmuxSocket": request["reviewerTmuxSocket"],
+            "sessionId": request["reviewerSessionId"],
+        }
     completed_worktrees: list[str] = list(dict.fromkeys(recovered_worktrees))
     pending_quarantines: list[str] = []
+    active_metadata: dict[str, Any] | None = None
+    worktree_metadata: dict[str, dict[str, Any]] = {}
+    if previous_recovery and previous_recovery["pendingWorktrees"]:
+        old_pending = list(previous_recovery["pendingWorktrees"])
+        old_metadata = previous_recovery["worktreeMetadata"]
+        for index, pending_path in enumerate(old_pending):
+            raw_pending = Path(pending_path)
+            if not raw_pending.is_absolute():
+                raise SecretaryError("cleanup recovery has a non-absolute quarantine path")
+            _no_symlink_path(raw_pending)
+            canonical_pending = str(raw_pending.resolve(strict=False))
+            metadata = old_metadata.get(pending_path) or old_metadata.get(canonical_pending)
+            if not isinstance(metadata, dict):
+                raise SecretaryError("cleanup recovery lacks bound worktree metadata")
+            original_raw = metadata.get("originalPath")
+            if not isinstance(original_raw, str) or not Path(original_raw).is_absolute():
+                raise SecretaryError("cleanup recovery lacks a bound original worktree")
+            _no_symlink_path(Path(original_raw))
+            original_key = str(Path(original_raw).resolve(strict=False))
+            assignment = recovery_assignments.get(original_key)
+            if assignment is None:
+                raise SecretaryError("cleanup recovery worktree is not assigned to this workstream")
+            bound = dict(assignment)
+            bound["state"] = metadata.get("state")
+            if any(metadata.get(key) != value for key, value in assignment.items()):
+                raise SecretaryError("cleanup recovery worktree identity does not match assignment")
+            try:
+                result = _resume_quarantined_worktree(repo, raw_pending, policy_root, bound)
+            except Exception as error:
+                remaining_metadata = {str(item): old_metadata[item] for item in old_pending[index:]
+                                      if item in old_metadata and isinstance(old_metadata[item], dict)}
+                _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
+                                        plan_hash=plan_hash, phase="worktree-pending",
+                                        completed_worktrees=completed_worktrees,
+                                        pending_worktrees=old_pending[index:],
+                                        worktree_metadata=remaining_metadata, error=str(error))
+                raise
+            if result:
+                completed_worktrees.append(assignment["originalPath"])
+            # A planned move that did not happen is retried by the normal
+            # cleanup path; a completed quarantine is already gone.
+        _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
+                                plan_hash=plan_hash, phase="worktrees",
+                                completed_worktrees=completed_worktrees, pending_worktrees=[],
+                                worktree_metadata={})
     _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
-                            plan_hash=plan_hash, phase="prepared")
-    def quarantine_failure(path: Path, error: str) -> None:
-        pending_quarantines.append(str(path))
+                            plan_hash=plan_hash, phase="prepared", worktree_metadata={})
+    def quarantine_state(path: Path, state: str) -> None:
+        if active_metadata is None:
+            raise SecretaryError("cleanup quarantine state has no assigned worktree")
+        key = str(path.resolve(strict=False))
+        if key not in pending_quarantines:
+            pending_quarantines.append(key)
+        metadata = dict(active_metadata)
+        metadata["state"] = state
+        worktree_metadata[key] = metadata
         _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
                                 plan_hash=plan_hash, phase="worktree-pending",
                                 completed_worktrees=completed_worktrees,
-                                pending_worktrees=pending_quarantines, error=error)
+                                pending_worktrees=pending_quarantines,
+                                worktree_metadata=worktree_metadata)
+
+    def quarantine_failure(path: Path, error: str) -> None:
+        quarantine_state(path, worktree_metadata.get(str(path.resolve(strict=False)), {}).get("state", "moved"))
+        _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
+                                plan_hash=plan_hash, phase="worktree-pending",
+                                completed_worktrees=completed_worktrees,
+                                pending_worktrees=pending_quarantines,
+                                worktree_metadata=worktree_metadata, error=error)
+
+    def clear_quarantine(path: Path) -> None:
+        key = str(path.resolve(strict=False))
+        if key in pending_quarantines:
+            pending_quarantines.remove(key)
+        worktree_metadata.pop(key, None)
+
+    def clear_active_quarantine() -> None:
+        if active_metadata is None:
+            return
+        for key in list(worktree_metadata):
+            if worktree_metadata[key].get("originalPath") == active_metadata.get("originalPath"):
+                clear_quarantine(Path(key))
+
     removed_review_paths: list[str] = []
     expected_reviews: dict[str, dict[str, Any]] = {}
     for request_path in (project / "reviews" / "requests").glob("*.json"):
@@ -3415,12 +3599,18 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
                 raise SecretaryError("cleanup refuses a live review window")
             if _cleanup_worktree_has_live_process(review):
                 raise SecretaryError("cleanup refuses a live review process")
-            _remove_worktree_with_process_guard(repo, review, "review", quarantine_failure)
+            active_metadata = dict(recovery_assignments[str(review.resolve(strict=False))])
+            _remove_worktree_with_process_guard(repo, review, "review", quarantine_failure,
+                                                on_quarantine_state=quarantine_state)
+            clear_active_quarantine()
+            active_metadata = None
             removed_review_paths.append(str(review))
             completed_worktrees.append(str(review))
             _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
                                     plan_hash=hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest(),
-                                    phase="reviews", completed_worktrees=completed_worktrees)
+                                    phase="reviews", completed_worktrees=completed_worktrees,
+                                    pending_worktrees=pending_quarantines,
+                                    worktree_metadata=worktree_metadata)
     if workspace.exists() or workspace.is_symlink():
         with _git_worktree_index_lock(workspace):
             record = _validate_workstream_record(record_path, project, repo, project_record["objectFormat"], project_record["gitCommonDir"])
@@ -3432,11 +3622,17 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
                 raise SecretaryError("cleanup refuses a live workstream window")
             if _cleanup_worktree_has_live_process(workspace):
                 raise SecretaryError("cleanup refuses a live workstream process")
-            _remove_worktree_with_process_guard(repo, workspace, "candidate", quarantine_failure)
+            active_metadata = dict(recovery_assignments[candidate_original])
+            _remove_worktree_with_process_guard(repo, workspace, "candidate", quarantine_failure,
+                                                on_quarantine_state=quarantine_state)
+            clear_active_quarantine()
+            active_metadata = None
             completed_worktrees.append(str(workspace))
             _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
                                     plan_hash=hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest(),
-                                    phase="candidate", completed_worktrees=completed_worktrees)
+                                    phase="candidate", completed_worktrees=completed_worktrees,
+                                    pending_worktrees=pending_quarantines,
+                                    worktree_metadata=worktree_metadata)
     else:
         _assert_worktree_registration_absent(repo, workspace, "candidate")
     branch_ref = f"refs/heads/{record['branch']}"
