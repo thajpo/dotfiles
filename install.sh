@@ -162,29 +162,37 @@ npm ci --prefix "$STAGING_DIR/npm" --legacy-peer-deps --no-audit --no-fund
 # packages owned by the dedicated core to the isolated extension tree. Without
 # this, jiti resolves an extension from ~/.pi/agent/npm but cannot see the
 # core's nested peer packages and fails closed at runtime.
-PI_CORE_REAL=$(realpath "$PI_CORE_DIR")
-PI_SDK_PEERS="$PI_CORE_REAL/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works"
-PI_SDK_CORE="$PI_CORE_REAL/node_modules/@earendil-works/pi-coding-agent"
+PI_CORE_PARENT=$(CDPATH= cd -- "$(dirname "$PI_CORE_DIR")" && pwd -P)
+PI_CORE_REAL="$PI_CORE_PARENT/$(basename "$PI_CORE_DIR")"
+if [ -n "$CORE_STAGING" ]; then
+    PI_SDK_SOURCE_CORE=$(realpath "$CORE_STAGING")
+else
+    PI_SDK_SOURCE_CORE=$(realpath "$PI_CORE_REAL")
+fi
+PI_SDK_SOURCE_PEERS="$PI_SDK_SOURCE_CORE/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works"
+PI_SDK_LINK_PEERS="$PI_CORE_REAL/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works"
+PI_SDK_SOURCE_CORE_PACKAGE="$PI_SDK_SOURCE_CORE/node_modules/@earendil-works/pi-coding-agent"
+PI_SDK_LINK_CORE_PACKAGE="$PI_CORE_REAL/node_modules/@earendil-works/pi-coding-agent"
 for peer in pi-agent-core pi-ai pi-coding-agent pi-tui; do
     if [ "$peer" = pi-coding-agent ]; then
-        peer_path="$PI_SDK_CORE"
+        peer_path="$PI_SDK_SOURCE_CORE_PACKAGE"
     else
-        peer_path="$PI_SDK_PEERS/$peer"
+        peer_path="$PI_SDK_SOURCE_PEERS/$peer"
     fi
     [ -d "$peer_path" ] || { echo "Pi SDK peer is missing from the dedicated core: $peer_path" >&2; exit 1; }
     peer_real=$(realpath "$peer_path")
-    case "$peer_real" in "$PI_CORE_REAL"|"$PI_CORE_REAL"/*) ;; *) echo "Pi SDK peer escapes the dedicated core: $peer_path" >&2; exit 1 ;; esac
+    case "$peer_real" in "$PI_SDK_SOURCE_CORE"|"$PI_SDK_SOURCE_CORE"/*) ;; *) echo "Pi SDK peer escapes the dedicated core: $peer_path" >&2; exit 1 ;; esac
     peer_version=$(node -p 'require(process.argv[1]).version' "$peer_path/package.json")
     [ "$peer_version" = "$PI_VERSION" ] || { echo "Pi SDK peer version mismatch: $peer_path ($peer_version)" >&2; exit 1; }
 done
 mkdir -p "$STAGING_DIR/npm/node_modules/@earendil-works"
 for peer in pi-agent-core pi-ai pi-coding-agent pi-tui; do
     if [ "$peer" = pi-coding-agent ]; then
-        peer_path="$PI_SDK_CORE"
+        link_path="$PI_SDK_LINK_CORE_PACKAGE"
     else
-        peer_path="$PI_SDK_PEERS/$peer"
+        link_path="$PI_SDK_LINK_PEERS/$peer"
     fi
-    ln -s "$peer_path" "$STAGING_DIR/npm/node_modules/@earendil-works/$peer"
+    ln -s "$link_path" "$STAGING_DIR/npm/node_modules/@earendil-works/$peer"
 done
 install -m 600 "$SCRIPT_DIR/pi/pi-image-tools.json" "$STAGING_DIR/npm/node_modules/pi-image-tools/config.json"
 PI_CODING_AGENT_DIR="$STAGING_DIR" "$SCRIPT_DIR/scripts/pi-patch-subagents"

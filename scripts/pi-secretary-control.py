@@ -1114,27 +1114,85 @@ def _apply_cleanup_ref_transaction(repo: Path, plan: dict[str, Any]) -> None:
         raise SecretaryError("Git cleanup ref transaction failed")
 
 
-def _apply_cleanup(repo: Path, inspected: dict[str, Any]) -> dict[str, Any]:
+def _cleanup_recovery_path(project: Path, kind: str, identifier: str) -> Path:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,95}", identifier):
+        raise SecretaryError("invalid cleanup recovery identifier")
+    return project / "operations" / f"cleanup-{kind}-{identifier}.json"
+
+
+def _write_cleanup_recovery(path: Path, *, kind: str, identifier: str, plan_hash: str,
+                            phase: str, completed_worktrees: list[str] | None = None,
+                            completed_artifacts: list[str] | None = None,
+                            refs_applied: bool = False, error: str | None = None) -> None:
+    value = {"schemaVersion": 1, "kind": kind, "identifier": identifier,
+             "planHash": plan_hash, "phase": phase,
+             "completedWorktrees": sorted(completed_worktrees or []),
+             "completedArtifacts": sorted(completed_artifacts or []),
+             "refsApplied": refs_applied, "updatedAt": _utc_now()}
+    if error:
+        value["error"] = error[:500]
+    _atomic(path, json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def _apply_cleanup(repo: Path, inspected: dict[str, Any], recovery_path: Path) -> dict[str, Any]:
     plan = inspected["plan"]
+    completed_worktrees: list[str] = []
+    completed_artifacts: list[str] = []
+    _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
+                            plan_hash=inspected["planHash"], phase="worktrees")
     for item in plan["worktrees"]:
         worktree = Path(item["path"])
-        if _cleanup_worktree_has_live_process(worktree):
-            raise SecretaryError(f"cleanup worktree became live during apply: {worktree}")
-        if _git(worktree, "status", "--porcelain=v1", "--untracked-files=all"):
-            raise SecretaryError(f"cleanup worktree became dirty during apply: {worktree}")
-        result = run(["git", "worktree", "remove", item["path"]], repo, check=False)
-        if result.returncode:
-            raise SecretaryError(f"could not remove owned cleanup worktree: {item['path']}")
-    _apply_cleanup_ref_transaction(repo, plan)
+        try:
+            if _cleanup_worktree_has_live_process(worktree):
+                raise SecretaryError(f"cleanup worktree became live during apply: {worktree}")
+            if _git(worktree, "status", "--porcelain=v1", "--untracked-files=all"):
+                raise SecretaryError(f"cleanup worktree became dirty during apply: {worktree}")
+            result = run(["git", "worktree", "remove", item["path"]], repo, check=False)
+            if result.returncode:
+                raise SecretaryError(f"could not remove owned cleanup worktree: {item['path']}")
+            completed_worktrees.append(item["path"])
+            _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
+                                    plan_hash=inspected["planHash"], phase="worktrees",
+                                    completed_worktrees=completed_worktrees)
+        except Exception as error:
+            _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
+                                    plan_hash=inspected["planHash"], phase="error",
+                                    completed_worktrees=completed_worktrees, error=str(error))
+            raise
+    try:
+        _apply_cleanup_ref_transaction(repo, plan)
+    except Exception as error:
+        _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
+                                plan_hash=inspected["planHash"], phase="error",
+                                completed_worktrees=completed_worktrees, error=str(error))
+        raise
+    _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
+                            plan_hash=inspected["planHash"], phase="refs-applied",
+                            completed_worktrees=completed_worktrees, refs_applied=True)
     for item in plan["artifacts"]:
         path = Path(item["path"])
-        if _cleanup_artifact_digest(path) != item["expectedSha256"]:
-            raise SecretaryError(f"cleanup artifact changed during apply: {path}")
         try:
+            if _cleanup_artifact_digest(path) != item["expectedSha256"]:
+                raise SecretaryError(f"cleanup artifact changed during apply: {path}")
             path.unlink()
-        except OSError as error:
-            raise SecretaryError(f"could not remove cleanup artifact: {path}") from error
+            completed_artifacts.append(item["path"])
+            _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
+                                    plan_hash=inspected["planHash"], phase="artifacts",
+                                    completed_worktrees=completed_worktrees,
+                                    completed_artifacts=completed_artifacts, refs_applied=True)
+        except Exception as error:
+            _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
+                                    plan_hash=inspected["planHash"], phase="error",
+                                    completed_worktrees=completed_worktrees,
+                                    completed_artifacts=completed_artifacts, refs_applied=True,
+                                    error=str(error))
+            raise
+    _write_cleanup_recovery(recovery_path, kind="git", identifier=inspected["planHash"],
+                            plan_hash=inspected["planHash"], phase="complete",
+                            completed_worktrees=completed_worktrees,
+                            completed_artifacts=completed_artifacts, refs_applied=True)
     return {"applied": True, "planHash": inspected["planHash"],
+            "recoveryPath": str(recovery_path),
             "renamedBranches": [item["from"] + " -> " + item["to"] for item in plan["renames"]],
             "deletedBranches": [item["branch"] for item in plan["deletions"]],
             "removedWorktrees": [item["path"] for item in plan["worktrees"]],
@@ -1156,13 +1214,19 @@ def git_cleanup(project_id: str, operation: str, plan: dict[str, Any],
         return {"projectId": project_id, "operation": "plan", **inspected}
     if not isinstance(plan_hash, str) or not hmac.compare_digest(plan_hash, inspected["planHash"]):
         raise SecretaryError("cleanup plan hash does not match")
+    project = _record_dir(_state_root(), project_id)
+    recovery_path = _cleanup_recovery_path(project, "git", plan_hash)
     with _git_write_lock(common):
         # Re-read all OIDs, worktree state, and artifact digests while holding
-        # the common-dir lock so an approved plan cannot silently drift.
+        # the common-dir lock so an approved plan cannot silently drift. The
+        # durable recovery manifest is written before the first deletion and
+        # after each phase; a failed apply therefore has an explicit resume /
+        # inspection point instead of an unexplained partial state.
         current = _inspect_cleanup_plan(project_id, repo, plan, object_format, policy_root)
         if not hmac.compare_digest(current["planHash"], plan_hash):
             raise SecretaryError("cleanup plan changed before apply")
-        return {"projectId": project_id, "operation": "apply", **_apply_cleanup(repo, current)}
+        return {"projectId": project_id, "operation": "apply",
+                **_apply_cleanup(repo, current, recovery_path)}
 
 
 @contextlib.contextmanager
@@ -2081,44 +2145,56 @@ def _record_landing(project: Path, project_id: str, workstream_id: str, request_
 
 def land_reviewed(project_id: str, request_id: str) -> dict[str, Any]:
     info = _require_secretary(project_id)
-    status = review_status(project_id, request_id)
-    receipt = status.get("receipt")
-    if not isinstance(receipt, dict) or receipt.get("verdict") != "accept" or status["stale"]:
+    initial = review_status(project_id, request_id)
+    initial_receipt = initial.get("receipt")
+    if not isinstance(initial_receipt, dict) or initial_receipt.get("verdict") != "accept" or initial["stale"]:
         raise SecretaryError("an exact current ACCEPT receipt is required")
     _, project, project_record, repo = _project_context(info["primaryRepository"], info["capability"])
-    workstream = open_workstream(repo, info["capability"], status["workstreamId"])
-    target_name = workstream["targetRef"]
-    target_ref = _git(repo, "rev-parse", "--symbolic-full-name", target_name)
-    if not target_ref.startswith("refs/heads/"):
-        raise SecretaryError("landing target is not a branch")
-    target = _target_worktree(repo, target_ref)
-    candidate = status["candidateOid"]
-    expected = status["baseOid"]
+    initial_workstream = open_workstream(repo, info["capability"], initial["workstreamId"])
+    candidate_workspace = Path(initial_workstream["workspace"])
     lock_path = Path(project_record["gitCommonDir"]) / "pi-secretary-target.lock"
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         os.fchmod(fd, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
-        actual = _git(repo, "rev-parse", f"{target_ref}^{{commit}}").lower()
-        if actual == candidate:
+        # Hold the candidate worktree's Git index lock while revalidating the
+        # receipt and performing the target fast-forward. A concurrent worker
+        # commit therefore fails closed instead of landing an unreviewed tip.
+        with _git_worktree_index_lock(candidate_workspace):
+            status = review_status(project_id, request_id)
+            receipt = status.get("receipt")
+            if not isinstance(receipt, dict) or receipt.get("verdict") != "accept" or status["stale"]:
+                raise SecretaryError("an exact current ACCEPT receipt is required")
+            workstream = open_workstream(repo, info["capability"], status["workstreamId"])
+            if Path(workstream["workspace"]) != candidate_workspace:
+                raise SecretaryError("workstream workspace changed during landing")
+            target_name = workstream["targetRef"]
+            target_ref = _git(repo, "rev-parse", "--symbolic-full-name", target_name)
+            if not target_ref.startswith("refs/heads/"):
+                raise SecretaryError("landing target is not a branch")
+            target = _target_worktree(repo, target_ref)
+            candidate = status["candidateOid"]
+            expected = status["baseOid"]
+            actual = _git(repo, "rev-parse", f"{target_ref}^{{commit}}").lower()
+            if actual == candidate:
+                return _record_landing(project, project_id, workstream["workstreamId"], request_id,
+                                       receipt["receiptId"], target_ref, expected, candidate)
+            if actual != expected:
+                return {"landed": False, "requiresIntegration": True, "reason": "target-moved",
+                        "expectedTargetOid": expected, "actualTargetOid": actual, "candidateOid": candidate}
+            if not _is_ancestor(repo, actual, candidate):
+                return {"landed": False, "requiresIntegration": True, "reason": "not-fast-forward",
+                        "expectedTargetOid": expected, "actualTargetOid": actual, "candidateOid": candidate}
+            if _git(target, "status", "--porcelain=v1"):
+                raise SecretaryError("target worktree is dirty")
+            if _git(target, "branch", "--show-current") != target_ref.removeprefix("refs/heads/"):
+                raise SecretaryError("target worktree branch changed")
+            merged = subprocess.run(["git", "-C", str(target), "merge", "--ff-only", "--no-edit", candidate],
+                                    env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if merged.returncode or _git(repo, "rev-parse", f"{target_ref}^{{commit}}").lower() != candidate:
+                raise SecretaryError("fast-forward landing failed")
             return _record_landing(project, project_id, workstream["workstreamId"], request_id,
                                    receipt["receiptId"], target_ref, expected, candidate)
-        if actual != expected:
-            return {"landed": False, "requiresIntegration": True, "reason": "target-moved",
-                    "expectedTargetOid": expected, "actualTargetOid": actual, "candidateOid": candidate}
-        if not _is_ancestor(repo, actual, candidate):
-            return {"landed": False, "requiresIntegration": True, "reason": "not-fast-forward",
-                    "expectedTargetOid": expected, "actualTargetOid": actual, "candidateOid": candidate}
-        if _git(target, "status", "--porcelain=v1"):
-            raise SecretaryError("target worktree is dirty")
-        if _git(target, "branch", "--show-current") != target_ref.removeprefix("refs/heads/"):
-            raise SecretaryError("target worktree branch changed")
-        merged = subprocess.run(["git", "-C", str(target), "merge", "--ff-only", "--no-edit", candidate],
-                                env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        if merged.returncode or _git(repo, "rev-parse", f"{target_ref}^{{commit}}").lower() != candidate:
-            raise SecretaryError("fast-forward landing failed")
-        return _record_landing(project, project_id, workstream["workstreamId"], request_id,
-                               receipt["receiptId"], target_ref, expected, candidate)
     finally:
         os.close(fd)
 
@@ -2183,13 +2259,17 @@ def _tmux_window_live(session: str, window: str, socket_path: str | None) -> boo
 
 
 def cleanup_workstream(project_id: str, workstream_id: str) -> dict[str, Any]:
+    info = _require_secretary(project_id)
+    repo = _canonical_repo(info["primaryRepository"])
+    _, common, _ = project_identity(repo)
     project = _record_dir(_state_root(), project_id)
     lock_path = project / "operations" / "cleanup.lock"
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         os.fchmod(fd, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
-        return _cleanup_workstream_locked(project_id, workstream_id)
+        with _git_write_lock(common):
+            return _cleanup_workstream_locked(project_id, workstream_id)
     finally:
         os.close(fd)
 
@@ -2218,7 +2298,12 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
         if _tmux_window_live(runtime["tmuxSession"], runtime["tmuxWindow"], runtime["tmuxSocket"]):
             raise SecretaryError("cleanup refuses a live workstream window")
 
-    removed_reviews = 0
+    recovery_path = _cleanup_recovery_path(project, "workstream", workstream_id)
+    completed_worktrees: list[str] = []
+    _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
+                            plan_hash=hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest(),
+                            phase="prepared")
+    removed_review_paths: list[str] = []
     for request_path in (project / "reviews" / "requests").glob("*.json"):
         request = _validate_review_request(request_path, project_id)
         if request["workstreamId"] != workstream_id or request["reviewWorkspace"] is None:
@@ -2241,7 +2326,11 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
                                      text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             if removed.returncode:
                 raise SecretaryError("could not remove clean owned review worktree")
-            removed_reviews += 1
+            removed_review_paths.append(str(review))
+            completed_worktrees.append(str(review))
+            _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
+                                    plan_hash=hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest(),
+                                    phase="reviews", completed_worktrees=completed_worktrees)
     if workspace.exists() or workspace.is_symlink():
         with _git_worktree_index_lock(workspace):
             record = _validate_workstream_record(record_path, project, repo, project_record["objectFormat"], project_record["gitCommonDir"])
@@ -2255,6 +2344,10 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
                                      text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             if removed.returncode:
                 raise SecretaryError("could not remove clean owned worktree")
+            completed_worktrees.append(str(workspace))
+            _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
+                                    plan_hash=hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest(),
+                                    phase="candidate", completed_worktrees=completed_worktrees)
     branch_ref = f"refs/heads/{raw['branch']}"
     branch = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", branch_ref], env=_env(),
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
@@ -2267,14 +2360,23 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
             raise SecretaryError("could not delete exact landed branch")
     elif branch.returncode != 1:
         raise SecretaryError("could not inspect owned branch")
+    _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
+                            plan_hash=hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest(),
+                            phase="branch-deleted", completed_worktrees=completed_worktrees,
+                            refs_applied=True)
     with _project_lock(project):
         current = _read_json(record_path, WORKSTREAM_FIELDS, required=WORKSTREAM_FIELDS)
         if current["closedAt"] is not None or current["workspace"] != raw["workspace"] or current["branch"] != raw["branch"]:
             raise SecretaryError("workstream state changed during cleanup")
         current["closedAt"] = _utc_now()
         _atomic(record_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+    _write_cleanup_recovery(recovery_path, kind="workstream", identifier=workstream_id,
+                            plan_hash=hashlib.sha256(f"workstream:{workstream_id}".encode()).hexdigest(),
+                            phase="complete", completed_worktrees=completed_worktrees,
+                            refs_applied=True)
     return {"workstreamId": workstream_id, "closedAt": current["closedAt"],
-            "landedOid": landing["landedOid"], "removedReviewWorktrees": removed_reviews}
+            "landedOid": landing["landedOid"], "removedReviewWorktrees": len(removed_review_paths),
+            "recoveryPath": str(recovery_path)}
 
 
 def record_process_exit(workspace: str | Path, exit_code: int) -> dict[str, Any]:
