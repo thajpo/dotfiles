@@ -9,12 +9,17 @@
  import { TEMP_ROOT_DIR } from "../../shared/types.ts";
  
  export const SESSION_LEASES_DIR = path.join(TEMP_ROOT_DIR, "session-leases");
-@@ -40,6 +40,48 @@
+@@ -40,6 +40,53 @@
  	release(): void;
  }
  
 +export const SANDBOX_CHILD_LEASE_DIR = "subagent-sandbox-leases";
 +export const SANDBOX_PARENT_TRANSITION_FILE = "parent-transition.json";
++
++function sandboxLeaseRoot(canonicalRoute: string): string {
++	const routeKey = createHash("sha256").update(canonicalRoute).digest("hex");
++	return path.join(path.dirname(canonicalRoute), SANDBOX_CHILD_LEASE_DIR, routeKey);
++}
 +
 +export interface SandboxParentTransitionOwner {
 +	version: 1;
@@ -58,10 +63,52 @@
  interface SessionLeaseOptions {
  	rootDir?: string;
  	now?: () => number;
-@@ -138,6 +180,86 @@
+@@ -68,7 +115,7 @@
+ 			const commandEnd = stat.lastIndexOf(")");
+ 			if (commandEnd === -1) return undefined;
+ 			const fields = stat.slice(commandEnd + 1).trim().split(/\s+/);
+-			const startTicks = fields[19];
++			const startTicks = fields.length > 19 && /^\d+$/.test(fields[19]) ? fields[19] : undefined;
+ 			return startTicks ? `linux:${startTicks}` : undefined;
+ 		} catch {
+ 			return undefined;
+@@ -138,6 +185,137 @@
  	}
  }
  
++function hasDirectoryReclaimMarker(directory: string): boolean {
++	try {
++		return fs.readdirSync(directory).some((entry) => entry.startsWith(".reclaim-"));
++	} catch (error) {
++		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
++		throw error;
++	}
++}
++
++function tryReclaimDirectory(directory: string, expectedToken: string, readToken: (directory: string) => string | undefined): boolean {
++	const marker = path.join(directory, `.reclaim-${expectedToken.replace(/[^A-Za-z0-9._-]/g, "-")}`);
++	try {
++		fs.writeFileSync(marker, expectedToken, { encoding: "utf-8", mode: 0o600, flag: "wx" });
++	} catch (error) {
++		const code = (error as NodeJS.ErrnoException).code;
++		if (code === "EEXIST" || code === "ENOENT") return false;
++		throw error;
++	}
++	let moved = false;
++	try {
++		if (readToken(directory) !== expectedToken) return false;
++		const tombstone = `${directory}.stale-${expectedToken.replace(/[^A-Za-z0-9._-]/g, "-")}-${randomUUID()}`;
++		fs.renameSync(directory, tombstone);
++		moved = true;
++		return true;
++	} catch (error) {
++		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
++		throw error;
++	} finally {
++		if (!moved) fs.rmSync(marker, { force: true });
++	}
++}
++
 +function readSandboxChildLeaseOwner(leaseDir: string): SandboxChildLeaseOwner | undefined {
 +	try {
 +		const value = JSON.parse(fs.readFileSync(path.join(leaseDir, "owner.json"), "utf-8")) as Partial<SandboxChildLeaseOwner>;
@@ -136,7 +183,25 @@
 +	const owner = readSandboxParentTransition(transitionPath);
 +	if (!owner) throw new Error(`Sandbox parent transition metadata is invalid: ${transitionPath}`);
 +	if (sandboxProcessOwnerIsStale(owner, hostname, getIdentity)) {
-+		fs.rmSync(transitionPath, { force: true });
++		const marker = `${transitionPath}.reclaim-${owner.token.replace(/[^A-Za-z0-9._-]/g, "-")}`;
++		try {
++			fs.writeFileSync(marker, owner.token, { encoding: "utf-8", mode: 0o600, flag: "wx" });
++		} catch (error) {
++			if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`Sandbox parent transition reclamation is already in progress: ${transitionPath}`);
++			throw error;
++		}
++		let moved = false;
++		try {
++			const current = readSandboxParentTransition(transitionPath);
++			if (current?.token !== owner.token) return;
++			const tombstone = `${transitionPath}.stale-${owner.token.replace(/[^A-Za-z0-9._-]/g, "-")}-${randomUUID()}`;
++			fs.renameSync(transitionPath, tombstone);
++			moved = true;
++		} catch (error) {
++			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
++		} finally {
++			if (!moved) fs.rmSync(marker, { force: true });
++		}
 +		return;
 +	}
 +	throw new Error(`Sandbox parent is moving the task ref (${owner.operation}); child start is blocked until it finishes`);
@@ -145,7 +210,7 @@
  function conflictMessage(canonicalSessionFile: string, owner: SessionLeaseOwner | undefined): string {
  	if (!owner) {
  		return `Direct revival of session '${canonicalSessionFile}' is blocked by an existing lease with unreadable owner metadata. Refusing to reclaim it without proof that the owner is stale.`;
-@@ -186,6 +308,77 @@
+@@ -186,6 +364,77 @@
  	}
  }
  
@@ -155,7 +220,7 @@
 +	if (!configuredRoute) return undefined;
 +	if (!request.runId || request.runId.length > 512) throw new Error("Sandbox child lease run id is invalid");
 +	const routePath = fs.realpathSync.native(path.resolve(configuredRoute));
-+	const rootDir = path.join(path.dirname(routePath), SANDBOX_CHILD_LEASE_DIR);
++	const rootDir = sandboxLeaseRoot(routePath);
 +	let rootInfo: fs.Stats;
 +	try {
 +		rootInfo = fs.lstatSync(rootDir);
@@ -196,7 +261,7 @@
 +			try {
 +				ensureNoSandboxParentTransition(rootDir, hostname, getIdentity);
 +			} catch (error) {
-+				fs.rmSync(leaseDir, { recursive: true, force: true });
++				tryReclaimDirectory(leaseDir, owner.token, (directory) => readSandboxChildLeaseOwner(directory)?.token);
 +				throw error;
 +			}
 +			return {
@@ -204,7 +269,7 @@
 +				owner,
 +				release() {
 +					const current = readSandboxChildLeaseOwner(leaseDir);
-+					if (!current || current.token !== owner.token) return;
++					if (!current || current.token !== owner.token || hasDirectoryReclaimMarker(leaseDir)) return;
 +					fs.rmSync(leaseDir, { recursive: true, force: true });
 +				},
 +			};
@@ -214,7 +279,7 @@
 +			if (!existing || !sandboxChildLeaseIsStale(existing, owner.hostname, getIdentity)) {
 +				throw new Error(`Sandbox child lease is already held for run '${request.runId}'`);
 +			}
-+			fs.rmSync(leaseDir, { recursive: true, force: true });
++			if (!tryReclaimDirectory(leaseDir, existing.token, (directory) => readSandboxChildLeaseOwner(directory)?.token)) continue;
 +		}
 +	}
 +	throw new Error(`Could not acquire sandbox child lease for run '${request.runId}'`);
@@ -223,3 +288,33 @@
  export function acquireSessionLease(request: SessionLeaseRequest, options: SessionLeaseOptions = {}): SessionLeaseHandle {
  	const canonicalSessionFile = canonicalSessionFilePath(request.sessionFile);
  	const rootDir = options.rootDir ?? SESSION_LEASES_DIR;
+@@ -251,7 +500,7 @@
+ 				},
+ 				release() {
+ 					const currentOwner = readLeaseOwner(leaseDir);
+-					if (!currentOwner || currentOwner.token !== owner.token) return;
++					if (!currentOwner || currentOwner.token !== owner.token || hasDirectoryReclaimMarker(leaseDir)) return;
+ 					fs.rmSync(leaseDir, { recursive: true, force: true });
+ 				},
+ 			};
+@@ -261,17 +510,9 @@
+ 		if (!existingOwner || !demonstrablyStale(existingOwner, staleOptions)) {
+ 			throw new SessionLeaseConflictError(conflictMessage(canonicalSessionFile, existingOwner), existingOwner);
+ 		}
+-		// The per-owner tombstone is retained. Every contender that observed this
+-		// stale token targets the same occupied destination, so only the first can
+-		// rename it and later contenders cannot move a successor lease by mistake.
+-		const tombstone = `${leaseDir}.stale-${existingOwner.token.replace(/[^A-Za-z0-9._-]/g, "-")}`;
+-		try {
+-			fs.renameSync(leaseDir, tombstone);
+-		} catch (error) {
+-			const code = (error as NodeJS.ErrnoException).code;
+-			if (code === "ENOENT" || fs.existsSync(tombstone)) continue;
+-			throw error;
+-		}
++		// A deterministic token marker serializes stale reclamation before the
++		// directory is renamed, so a successor lease cannot be moved by a loser.
++		if (!tryReclaimDirectory(leaseDir, existingOwner.token, (directory) => readLeaseOwner(directory)?.token)) continue;
+ 	}
+ 
+ 	const existingOwner = readLeaseOwner(leaseDir);

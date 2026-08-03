@@ -5,7 +5,7 @@
  import { spawn, spawnSync } from "node:child_process";
  import { createHash, randomBytes } from "node:crypto";
 -import { createWriteStream, existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-+import { createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync } from "node:fs";
++import { createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
  import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 -import { homedir, tmpdir } from "node:os";
 +import { homedir, hostname, tmpdir } from "node:os";
@@ -20,16 +20,17 @@
 +		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
 +		const commandEnd = stat.lastIndexOf(")");
 +		const fields = commandEnd === -1 ? [] : stat.slice(commandEnd + 1).trim().split(/\s+/);
-+		return fields[19] ? `linux:${fields[19]}` : "unavailable";
++		return fields.length > 19 && /^\d+$/.test(fields[19]) ? `linux:${fields[19]}` : "unavailable";
  	} catch {
  		if (process.platform === "darwin") {
  			const result = spawnSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" });
-@@ -429,6 +432,99 @@
+@@ -429,6 +432,185 @@
  	}
  }
  
 +interface SandboxChildLeaseRecord {
 +	version: 1;
++	token: string;
 +	routePath: string;
 +	runId: string;
 +	sessionId?: string;
@@ -103,6 +104,8 @@
 +	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
 +	const owner = value as Partial<SandboxChildLeaseRecord>;
 +	if (owner.version !== 1
++		|| typeof owner.token !== "string"
++		|| owner.token.length === 0
 +		|| typeof owner.routePath !== "string"
 +		|| !path.isAbsolute(owner.routePath)
 +		|| typeof owner.runId !== "string"
@@ -121,10 +124,93 @@
 +	return owner as SandboxChildLeaseRecord;
 +}
 +
++function sandboxLeaseRoot(canonicalRoute: string): string {
++	const routeKey = createHash("sha256").update(canonicalRoute).digest("hex");
++	return path.join(path.dirname(canonicalRoute), "subagent-sandbox-leases", routeKey);
++}
++
++function hasDirectoryReclaimMarker(directory: string, token: string): boolean {
++	try {
++		return readdirSync(directory).some((entry) => {
++			if (!entry.startsWith(".reclaim-")) return false;
++			try { return readFileSync(path.join(directory, entry), "utf8").trim() === token; } catch { return true; }
++		});
++	} catch (error) {
++		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
++		throw error;
++	}
++}
++
++function tryReclaimDirectory(directory: string, expectedToken: string, readToken: (directory: string) => string | undefined): boolean {
++	const marker = path.join(directory, `.reclaim-${expectedToken.replace(/[^A-Za-z0-9._-]/g, "-")}`);
++	try {
++		writeFileSync(marker, expectedToken, { encoding: "utf8", mode: 0o600, flag: "wx" });
++	} catch (error) {
++		const code = (error as NodeJS.ErrnoException).code;
++		if (code === "EEXIST" || code === "ENOENT") return false;
++		throw error;
++	}
++	let moved = false;
++	try {
++		if (readToken(directory) !== expectedToken) return false;
++		const tombstone = `${directory}.stale-${expectedToken.replace(/[^A-Za-z0-9._-]/g, "-")}-${randomBytes(4).toString("hex")}`;
++		renameSync(directory, tombstone);
++		moved = true;
++		return true;
++	} catch (error) {
++		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
++		throw error;
++	} finally {
++		if (!moved) rmSync(marker, { force: true });
++	}
++}
++
++function tryReclaimFile(metadataPath: string, expectedToken: string, readToken: () => string | undefined): boolean {
++	const marker = `${metadataPath}.reclaim-${expectedToken.replace(/[^A-Za-z0-9._-]/g, "-")}`;
++	try {
++		writeFileSync(marker, expectedToken, { encoding: "utf8", mode: 0o600, flag: "wx" });
++	} catch (error) {
++		const code = (error as NodeJS.ErrnoException).code;
++		if (code === "EEXIST" || code === "ENOENT") return false;
++		throw error;
++	}
++	let moved = false;
++	try {
++		if (readToken() !== expectedToken) return false;
++		const tombstone = `${metadataPath}.stale-${expectedToken.replace(/[^A-Za-z0-9._-]/g, "-")}-${randomBytes(4).toString("hex")}`;
++		renameSync(metadataPath, tombstone);
++		moved = true;
++		return true;
++	} catch (error) {
++		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
++		throw error;
++	} finally {
++		if (!moved) rmSync(marker, { force: true });
++	}
++}
++
++function hasFileReclaimMarker(metadataPath: string, token: string): boolean {
++	const directory = path.dirname(metadataPath);
++	const prefix = `${path.basename(metadataPath)}.reclaim-`;
++	try {
++		return readdirSync(directory).some((entry) => {
++			if (!entry.startsWith(prefix)) return false;
++			try { return readFileSync(path.join(directory, entry), "utf8").trim() === token; } catch { return true; }
++		});
++	} catch (error) {
++		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
++		throw error;
++	}
++}
++
++function staleTombstone(name: string): boolean {
++	return name.includes(".stale-");
++}
++
  function syncGit(cwd: string, args: string[]): string {
  	const result = spawnSync("git", args, {
  		cwd,
-@@ -1075,6 +1171,7 @@
+@@ -1075,6 +1257,7 @@
  	private runtimeInfo: RuntimeInfo | undefined;
  	private routePath: string | undefined;
  	private checkpointTail: Promise<unknown> = Promise.resolve();
@@ -132,14 +218,14 @@
  
  	constructor(private readonly pi: ExtensionAPI) {}
  
-@@ -1116,6 +1213,196 @@
+@@ -1116,6 +1299,214 @@
  		return this.gitRefState;
  	}
  
 +	private activeChildLeases(): SandboxChildLeaseRecord[] {
 +		if (!this.routePath || !this.route) return [];
 +		const canonicalRoute = realpathSync(this.routePath);
-+		const leaseRoot = path.join(path.dirname(canonicalRoute), "subagent-sandbox-leases");
++		const leaseRoot = sandboxLeaseRoot(canonicalRoute);
 +		let rootInfo: ReturnType<typeof lstatSync>;
 +		try {
 +			rootInfo = lstatSync(leaseRoot);
@@ -153,6 +239,24 @@
 +		}
 +		const active: SandboxChildLeaseRecord[] = [];
 +		for (const entry of readdirSync(leaseRoot, { withFileTypes: true })) {
++			if (entry.name.startsWith("parent-transition.json.reclaim-")) {
++				const markerPath = path.join(leaseRoot, entry.name);
++				const markerInfo = lstatSync(markerPath);
++				if (markerInfo.isSymbolicLink() || !markerInfo.isFile() || (markerInfo.mode & 0o077) !== 0) throw new Error(`Sandbox parent transition reclaim marker is unsafe: ${markerPath}`);
++				continue;
++			}
++			if (entry.name.startsWith("parent-transition.json.stale-")) {
++				const tombstonePath = path.join(leaseRoot, entry.name);
++				const tombstoneInfo = lstatSync(tombstonePath);
++				if (tombstoneInfo.isSymbolicLink() || !tombstoneInfo.isFile() || (tombstoneInfo.mode & 0o077) !== 0) throw new Error(`Sandbox parent transition tombstone is unsafe: ${tombstonePath}`);
++				continue;
++			}
++			if (staleTombstone(entry.name)) {
++				const tombstonePath = path.join(leaseRoot, entry.name);
++				const tombstoneInfo = lstatSync(tombstonePath);
++				if (tombstoneInfo.isSymbolicLink() || !tombstoneInfo.isDirectory() || (tombstoneInfo.mode & 0o077) !== 0) throw new Error(`Sandbox child lease tombstone is unsafe: ${tombstonePath}`);
++				continue;
++			}
 +			if (entry.name === "parent-transition.json") {
 +				const transitionPath = path.join(leaseRoot, entry.name);
 +				const transitionInfo = lstatSync(transitionPath);
@@ -184,7 +288,7 @@
 +				throw new Error(`Sandbox child lease metadata is invalid or belongs to another task: ${ownerPath}`);
 +			}
 +			if (childLeaseIsStale(owner)) {
-+				rmSync(leaseDir, { recursive: true, force: true });
++				tryReclaimDirectory(leaseDir, owner.token, (directory) => parseSandboxChildLease(JSON.parse(readFileSync(path.join(directory, "owner.json"), "utf8")))?.token);
 +				continue;
 +			}
 +			active.push(owner);
@@ -202,14 +306,14 @@
 +					transition.depth -= 1;
 +					if (transition.depth > 0 || this.parentTransition !== transition) return;
 +					const current = parseSandboxParentTransition(readFileSync(transition.path, "utf8"));
-+					if (current?.token === transition.owner.token) rmSync(transition.path, { force: true });
++					if (current?.token === transition.owner.token && !hasFileReclaimMarker(transition.path, transition.owner.token)) rmSync(transition.path, { force: true });
 +					this.parentTransition = undefined;
 +				},
 +			};
 +		}
 +		if (!operation || operation.length > 128) throw new Error("Sandbox child lifecycle transition operation is invalid");
 +		const canonicalRoute = realpathSync(this.routePath);
-+		const leaseRoot = path.join(path.dirname(canonicalRoute), "subagent-sandbox-leases");
++		const leaseRoot = sandboxLeaseRoot(canonicalRoute);
 +		mkdirSync(leaseRoot, { recursive: true, mode: 0o700 });
 +		const uid = process.getuid?.();
 +		const rootInfo = lstatSync(leaseRoot);
@@ -246,7 +350,7 @@
 +				if (!existing || !childProcessOwnerIsStale(existing)) {
 +					throw new Error(`Sandbox parent transition is already active: ${transitionPath}`);
 +				}
-+				rmSync(transitionPath, { force: true });
++				if (!tryReclaimFile(transitionPath, existing.token, () => parseSandboxParentTransition(JSON.parse(readFileSync(transitionPath, "utf8")))?.token)) continue;
 +			}
 +		}
 +		if (!transitionCreated) throw new Error(`Could not acquire sandbox parent transition: ${transitionPath}`);
@@ -265,7 +369,7 @@
 +			if (this.parentTransition === transition) this.parentTransition = undefined;
 +			try {
 +				const current = parseSandboxParentTransition(readFileSync(transitionPath, "utf8"));
-+				if (current?.token === owner.token) rmSync(transitionPath, { force: true });
++				if (current?.token === owner.token && !hasFileReclaimMarker(transitionPath, owner.token)) rmSync(transitionPath, { force: true });
 +			} catch {
 +				// Preserve the original failure; an unreadable transition remains fail-closed.
 +			}
@@ -276,7 +380,7 @@
 +			transition.depth -= 1;
 +			if (transition.depth > 0 || this.parentTransition !== transition) return;
 +			const current = parseSandboxParentTransition(readFileSync(transition.path, "utf8"));
-+			if (current?.token === transition.owner.token) rmSync(transition.path, { force: true });
++			if (current?.token === transition.owner.token && !hasFileReclaimMarker(transition.path, transition.owner.token)) rmSync(transition.path, { force: true });
 +			this.parentTransition = undefined;
 +		},
 +		};
@@ -285,7 +389,7 @@
 +	private activeParentTransition(): SandboxParentTransitionRecord | undefined {
 +		if (!this.routePath || !this.route) return undefined;
 +		const canonicalRoute = realpathSync(this.routePath);
-+		const transitionPath = path.join(path.dirname(canonicalRoute), "subagent-sandbox-leases", "parent-transition.json");
++		const transitionPath = path.join(sandboxLeaseRoot(canonicalRoute), "parent-transition.json");
 +		let info: ReturnType<typeof lstatSync>;
 +		try {
 +			info = lstatSync(transitionPath);
@@ -302,7 +406,7 @@
 +		}
 +		if (!owner || owner.routePath !== canonicalRoute) throw new Error(`Sandbox parent transition metadata is invalid: ${transitionPath}`);
 +		if (childProcessOwnerIsStale(owner)) {
-+			rmSync(transitionPath, { force: true });
++			tryReclaimFile(transitionPath, owner.token, () => parseSandboxParentTransition(JSON.parse(readFileSync(transitionPath, "utf8")))?.token);
 +			return undefined;
 +		}
 +		return owner;
@@ -329,7 +433,7 @@
  	private repoIdentity(repoRoot: string): string {
  		return createHash("sha256").update(repoRoot).digest("hex").slice(0, 10);
  	}
-@@ -1834,6 +2121,10 @@
+@@ -1834,6 +2225,10 @@
  
  	private async prepareGitRefWorkspace(ctx?: ExtensionContext) {
  		if (!this.containerName) throw new Error("Sandbox container is not running");
@@ -340,7 +444,7 @@
  		const state = await this.ensureGitRefState(ctx);
  		if (this.getMode() === "trusted-live") {
  			if (!(await this.containerHasGitRepo(state.repoRoot))) throw new Error("Trusted-live bind is not a usable Git worktree inside the container");
-@@ -1859,13 +2150,25 @@
+@@ -1859,13 +2254,25 @@
  				.trim();
  			if (containerHead !== hostHead) {
  				const workspaceStatus = await this.containerWorkspaceStatus();
@@ -367,7 +471,7 @@
  				}
  			}
  			if (!reseedExistingWorkspace) {
-@@ -1910,6 +2213,9 @@
+@@ -1910,6 +2317,9 @@
  		} finally {
  			await rm(temp, { recursive: true, force: true });
  		}
@@ -377,7 +481,7 @@
  	}
  
  	private async copyDirectoryToContainer(sourceDir: string, targetDir: string) {
-@@ -2279,7 +2585,7 @@
+@@ -2279,7 +2689,7 @@
  		state: GitRefState,
  		sandboxHead: string,
  		baseCommit: string,
@@ -386,7 +490,7 @@
  		useImportedHead: (importedHead: string) => Promise<T>,
  	): Promise<T> {
  		if (!this.containerName) throw new Error("Sandbox container is not running");
-@@ -2405,16 +2711,21 @@
+@@ -2405,16 +2815,21 @@
  		if (this.getMode() === "trusted-live") return { committed: false, imported: false, message: "Trusted-live changes are already visible; no checkpoint or import was performed" };
  		if (isChildProcess()) throw new Error("Collaborating children cannot checkpoint or publish the parent task");
  		if (this.pendingRebase) throw new Error("Sandbox rebase is pending; complete or abort it before checkpointing");
@@ -418,7 +522,7 @@
  	}
  
  	async checkpointGitRef(ctx?: ExtensionContext): Promise<GitRefCheckpointResult> {
-@@ -2429,12 +2740,15 @@
+@@ -2429,12 +2844,15 @@
  	}
  
  	private async containerRebaseInProgress(): Promise<boolean> {
@@ -438,7 +542,7 @@
  		], { timeoutMs: 10_000 });
  		return result.code === 0;
  	}
-@@ -2617,7 +2931,9 @@
+@@ -2617,7 +3035,9 @@
  
  	async rebaseHost(ctx?: ExtensionContext): Promise<RebaseResult> {
  		if (this.getMode() === "trusted-live") throw new Error("Use ordinary Git directly in trusted-live mode; no promotion rebase exists");
@@ -449,7 +553,7 @@
  		if (this.pendingRebase) return this.rebaseStatus();
  
  		// Capture all current work before selecting the old sandbox tip.
-@@ -2658,18 +2974,22 @@
+@@ -2658,18 +3078,22 @@
  		})).stdout.toString().trim());
  		if (!Number.isSafeInteger(expectedCommitCount) || expectedCommitCount < 0) throw new Error("Could not determine sandbox commit count");
  
@@ -479,7 +583,7 @@
  		await this.ensure(ctx);
  		if (await this.containerRebaseInProgress()) {
  			const conflictFiles = await this.rebaseConflictFiles();
-@@ -2721,6 +3041,9 @@
+@@ -2721,6 +3145,9 @@
  		await this.completeRebaseState(state, pending, pending.newBase);
  		ctx?.ui.setStatus("sandbox-rebase", undefined);
  		return { completed: true, conflicted: false, message: `Rebased ${pending.expectedCommitCount} commit(s) onto ${state.baseBranch} @ ${pending.newBase.slice(0, 12)}` };
@@ -489,7 +593,7 @@
  	}
  
  	async rebaseStatus(): Promise<RebaseResult> {
-@@ -2747,6 +3070,8 @@
+@@ -2747,6 +3174,8 @@
  	async abortRebase(ctx?: ExtensionContext): Promise<string> {
  		const pending = this.pendingRebase;
  		if (!pending) return "No sandbox rebase is pending";
@@ -498,7 +602,7 @@
  		await this.ensure(ctx);
  		if (await this.containerRebaseInProgress()) {
  			await this.containerGit(["-c", "core.hooksPath=/dev/null", "rebase", "--abort"], { timeoutMs: 120_000 }).catch(() => undefined);
-@@ -2756,6 +3081,9 @@
+@@ -2756,6 +3185,9 @@
  		this.setPendingRebase(undefined);
  		ctx?.ui.setStatus("sandbox-rebase", undefined);
  		return `Aborted sandbox rebase; restored ${pending.oldSandboxTip.slice(0, 12)}`;
@@ -508,7 +612,7 @@
  	}
  
  	async assertReadyForAgentTurn() {
-@@ -2764,6 +3092,11 @@
+@@ -2764,6 +3196,11 @@
  
  	async autoCheckpointSandboxChanges(ctx?: ExtensionContext) {
  		if (!this.isEnabled() || this.pendingRebase || this.getMode() === "trusted-live" || isChildProcess()) return;
@@ -520,7 +624,7 @@
  		const result = await this.checkpointGitRef(ctx);
  		if (result.committed || result.imported) ctx?.ui.notify(result.message, "info");
  	}
-@@ -2795,26 +3128,47 @@
+@@ -2795,26 +3232,47 @@
  			this.dockerPortMappings = [];
  			return;
  		}
@@ -560,14 +664,14 @@
 +					} else if (explicitStop || this.config.lifecycle === "stopped") {
 +						await this.runtimeExec(["stop", containerToCleanup]).catch(() => undefined);
 +					}
- 				}
++				}
 +				if (!preserveContainer) {
 +					ctx?.ui.setStatus("sandbox", undefined);
 +					this.containerName = undefined;
 +					this.started = false;
 +					this.dockerPortMappings = [];
 +					this.depsInstalled = false;
-+				}
+ 				}
 +			} finally {
 +				transition?.release();
  			}
@@ -579,7 +683,7 @@
  		}
  	}
  }
-@@ -2838,6 +3192,7 @@
+@@ -2838,6 +3296,7 @@
  	isEnabled() { return this.engine.isEnabled(); }
  	getConfig() { return this.engine.getConfig(); }
  	getRuntimeInfo() { return this.engine.getRuntimeInfo(); }
@@ -587,7 +691,7 @@
  	getMode() { return this.engine.getMode(); }
  	getRoute() { return this.engine.getRoute(); }
  	getGitRefState() { return this.engine.getGitRefState(); }
-@@ -3647,6 +4002,7 @@
+@@ -3647,6 +4106,7 @@
  					const target = parseTarget(config.target, "target");
  					const gitRefState = sandbox.workspace.getGitRefState();
  					const targetLock = sandbox.workspace.getTargetLockStatus();
@@ -595,7 +699,7 @@
  					const dockerPorts = formatDockerPortMappings(sandbox.lifecycle.getDockerPortMappings());
  					ctx.ui.notify(
  						[
-@@ -3672,6 +4028,12 @@
+@@ -3672,6 +4132,12 @@
  							`Container lifecycle: ${config.lifecycle}`,
  								`Package cache volume: ${PACKAGE_CACHE_VOLUME} scoped by task or dependency environment -> ${PACKAGE_CACHE_ROOT}`,
  							`Rebase pending: ${sandbox.workspace.hasPendingRebase()}`,

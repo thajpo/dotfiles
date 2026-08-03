@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import path from "node:path";
@@ -16,13 +17,14 @@ function routeFixture() {
   const root = mkdtempSync(path.join(tmpdir(), "pi-child-lease-test-"));
   const route = path.join(root, "route.json");
   writeFileSync(route, JSON.stringify({ session: "test-session" }) + "\n", { mode: 0o600 });
-  mkdirSync(path.join(root, "subagent-sandbox-leases"), { mode: 0o700 });
-  return { root, route };
+  const routeKey = createHash("sha256").update(route).digest("hex");
+  mkdirSync(path.join(root, "subagent-sandbox-leases", routeKey), { recursive: true, mode: 0o700 });
+  return { root, route, routeKey };
 }
 
 test("child lease rejects malformed live parent transition without reclaiming it", { skip: typeof acquireSandboxChildLease !== "function" }, () => {
-  const { root, route } = routeFixture();
-  const transition = path.join(root, "subagent-sandbox-leases", "parent-transition.json");
+  const { root, route, routeKey } = routeFixture();
+  const transition = path.join(root, "subagent-sandbox-leases", routeKey, "parent-transition.json");
   writeFileSync(transition, JSON.stringify({
     version: 1,
     token: "transition-token",

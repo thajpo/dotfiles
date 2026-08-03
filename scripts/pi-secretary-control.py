@@ -683,6 +683,33 @@ def _git_write_lock(common: Path) -> Iterator[None]:
         os.close(fd)
 
 
+@contextlib.contextmanager
+def _git_worktree_index_lock(worktree: Path) -> Iterator[None]:
+    index_value = _git(worktree, "rev-parse", "--git-path", "index")
+    index_path = Path(index_value)
+    if not index_path.is_absolute():
+        index_path = (worktree / index_path).resolve(strict=False)
+    lock_path = Path(f"{index_path}.lock")
+    token = secrets.token_hex(16).encode("ascii")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(lock_path), flags, 0o600)
+    except FileExistsError as error:
+        raise SecretaryError("Git worktree is busy") from error
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, token)
+        os.fsync(fd)
+        yield
+    finally:
+        os.close(fd)
+        try:
+            if lock_path.read_bytes() == token:
+                lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def git_write(project_id: str, operation: str, message: str | None = None,
               paths: list[str] | None = None) -> dict[str, Any]:
     """Commit and/or push only the registered repository's current branch."""
@@ -1313,6 +1340,16 @@ def _require_workstream(project_id: str, workstream_id: str) -> tuple[dict[str, 
     return info, repo, record
 
 
+def _revalidate_workstream_unlocked(project_id: str, workstream_id: str, repo: Path) -> dict[str, Any]:
+    project = _record_dir(_state_root(), project_id)
+    actual_project_id, common, object_format = project_identity(repo)
+    if actual_project_id != project_id:
+        raise SecretaryError("workstream project identity changed")
+    project_record = _validate_project_record(project / "project.json", project_id, common, object_format)
+    return _validate_workstream_record(_workstream_path(project, workstream_id), project, repo,
+                                       project_record["objectFormat"], project_record["gitCommonDir"])
+
+
 def _validate_feature_route(record: dict[str, Any]) -> None:
     route_path = os.environ.get("PI_TASK_ROUTE_FILE", "")
     capability = os.environ.get("PI_TASK_ROUTE_CAPABILITY", "")
@@ -1446,9 +1483,7 @@ def append_event(project_id: str, workstream_id: str, kind: str, summary: str,
                  details: str = "", *, source: str = "agent", validate_route: bool = True) -> dict[str, Any]:
     if kind not in EVENT_KINDS or (source == "agent" and kind == "process-exit"):
         raise SecretaryError("invalid event kind")
-    _, _, record = _require_workstream(project_id, workstream_id)
-    if validate_route:
-        _validate_feature_route(record)
+    _, repo, record = _require_workstream(project_id, workstream_id)
     summary = _line(summary, "event summary", 500)
     if not isinstance(details, str) or len(details.encode()) > 4096:
         raise SecretaryError("invalid event details")
@@ -1458,8 +1493,11 @@ def append_event(project_id: str, workstream_id: str, kind: str, summary: str,
              "workstreamId": workstream_id, "kind": kind, "summary": summary,
              "details": details, "source": source, "createdAt": _utc_now(), "acknowledgedAt": None}
     with _project_lock(project):
+        current_record = _revalidate_workstream_unlocked(project_id, workstream_id, repo)
+        if validate_route:
+            _validate_feature_route(current_record)
         if kind == "review-requested":
-            request = _create_review_request(project_id, workstream_id, record)
+            request = _create_review_request(project_id, workstream_id, current_record)
             value["details"] = json.dumps({"reviewRequestId": request["requestId"]}, separators=(",", ":"))
         _atomic(_event_path(project, event_id), json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
     return value
@@ -2180,7 +2218,7 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
         if _tmux_window_live(runtime["tmuxSession"], runtime["tmuxWindow"], runtime["tmuxSocket"]):
             raise SecretaryError("cleanup refuses a live workstream window")
 
-    review_paths: list[Path] = []
+    removed_reviews = 0
     for request_path in (project / "reviews" / "requests").glob("*.json"):
         request = _validate_review_request(request_path, project_id)
         if request["workstreamId"] != workstream_id or request["reviewWorkspace"] is None:
@@ -2188,28 +2226,35 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
         review = Path(request["reviewWorkspace"])
         if not review.exists() and not review.is_symlink():
             continue
-        if (_git(review, "rev-parse", "HEAD^{commit}").lower() != request["candidateOid"] or
-                _git(review, "status", "--porcelain=v1")):
-            raise SecretaryError("cleanup refuses dirty or moved review checkout")
-        common_hash = hashlib.sha256(str(Path(project_record["gitCommonDir"])).encode()).hexdigest()
-        repo_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-") or "repo"
-        review_name = re.sub(r"[^A-Za-z0-9_-]+", "-", review.name).strip("-") or "worktree"
-        session = f"pi-{repo_name}-{common_hash[:12]}"
-        window = f"w-{review_name}-{hashlib.sha256(str(review).encode()).hexdigest()[:12]}"
-        if _tmux_window_live(session, window, request["reviewerTmuxSocket"]):
-            raise SecretaryError("cleanup refuses a live review window")
-        review_paths.append(review)
-
-    for review in review_paths:
-        removed = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(review)], env=_env(),
-                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        if removed.returncode:
-            raise SecretaryError("could not remove clean owned review worktree")
+        with _git_worktree_index_lock(review):
+            if (_git(review, "rev-parse", "HEAD^{commit}").lower() != request["candidateOid"] or
+                    _git(review, "status", "--porcelain=v1")):
+                raise SecretaryError("cleanup refuses dirty or moved review checkout")
+            common_hash = hashlib.sha256(str(Path(project_record["gitCommonDir"])).encode()).hexdigest()
+            repo_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-") or "repo"
+            review_name = re.sub(r"[^A-Za-z0-9_-]+", "-", review.name).strip("-") or "worktree"
+            session = f"pi-{repo_name}-{common_hash[:12]}"
+            window = f"w-{review_name}-{hashlib.sha256(str(review).encode()).hexdigest()[:12]}"
+            if _tmux_window_live(session, window, request["reviewerTmuxSocket"]):
+                raise SecretaryError("cleanup refuses a live review window")
+            removed = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(review)], env=_env(),
+                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if removed.returncode:
+                raise SecretaryError("could not remove clean owned review worktree")
+            removed_reviews += 1
     if workspace.exists() or workspace.is_symlink():
-        removed = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(workspace)], env=_env(),
-                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        if removed.returncode:
-            raise SecretaryError("could not remove clean owned worktree")
+        with _git_worktree_index_lock(workspace):
+            record = _validate_workstream_record(record_path, project, repo, project_record["objectFormat"], project_record["gitCommonDir"])
+            _assert_review_candidate_ready(record)
+            if record["currentOid"] != landing["landedOid"]:
+                raise SecretaryError("cleanup refuses dirty or moved workstream")
+            runtime = _workstream_runtime(project, repo, record)
+            if _tmux_window_live(runtime["tmuxSession"], runtime["tmuxWindow"], runtime["tmuxSocket"]):
+                raise SecretaryError("cleanup refuses a live workstream window")
+            removed = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(workspace)], env=_env(),
+                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if removed.returncode:
+                raise SecretaryError("could not remove clean owned worktree")
     branch_ref = f"refs/heads/{raw['branch']}"
     branch = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", branch_ref], env=_env(),
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
@@ -2229,7 +2274,7 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
         current["closedAt"] = _utc_now()
         _atomic(record_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
     return {"workstreamId": workstream_id, "closedAt": current["closedAt"],
-            "landedOid": landing["landedOid"], "removedReviewWorktrees": len(review_paths)}
+            "landedOid": landing["landedOid"], "removedReviewWorktrees": removed_reviews}
 
 
 def record_process_exit(workspace: str | Path, exit_code: int) -> dict[str, Any]:

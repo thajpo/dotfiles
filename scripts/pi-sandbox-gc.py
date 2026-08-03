@@ -38,12 +38,18 @@ def inspect(kind: str, identifier: str) -> dict[str, Any]:
 
 def owner_identity(pid: int) -> str | None:
     try:
-        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
-        return f"linux:{fields[21]}"
-    except (OSError, IndexError):
-        result = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "lstart="], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
-        value = result.stdout.strip()
-        return f"darwin:{value}" if result.returncode == 0 and value else None
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        command_end = stat_text.rfind(")")
+        fields = stat_text[command_end + 1:].strip().split() if command_end >= 0 else []
+        if len(fields) > 19 and fields[19].isdigit():
+            return f"linux:{fields[19]}"
+    except OSError:
+        pass
+    if sys.platform.startswith("linux"):
+        return None
+    result = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "lstart="], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    value = result.stdout.strip()
+    return f"darwin:{value}" if result.returncode == 0 and value else None
 
 
 def owner_status(labels: dict[str, str]) -> bool | None:

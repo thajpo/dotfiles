@@ -230,24 +230,28 @@ def repository_root(cwd: pathlib.Path) -> pathlib.Path:
 
 def process_start_ticks(pid: int) -> str:
     try:
-        fields = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
-        return f"linux:{fields[21]}"
-    except (OSError, IndexError):
-        if platform.system() == "Darwin":
-            try:
-                result = subprocess.run(
-                    ["/bin/ps", "-p", str(pid), "-o", "lstart="],
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-            except OSError:
-                return "unavailable"
-            value = result.stdout.strip()
-            if value:
-                return f"darwin:{value}"
-        return "unavailable"
+        stat_text = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        command_end = stat_text.rfind(")")
+        fields = stat_text[command_end + 1:].strip().split() if command_end >= 0 else []
+        if len(fields) > 19 and fields[19].isdigit():
+            return f"linux:{fields[19]}"
+    except OSError:
+        pass
+    if platform.system() == "Darwin":
+        try:
+            result = subprocess.run(
+                ["/bin/ps", "-p", str(pid), "-o", "lstart="],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError:
+            return "unavailable"
+        value = result.stdout.strip()
+        if value:
+            return f"darwin:{value}"
+    return "unavailable"
 
 
 def container_platform() -> str:

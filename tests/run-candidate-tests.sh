@@ -17,3 +17,5 @@ PI_TEST_PACKAGE_ROOT="$temporary/npm" \
   "$temporary/npm/node_modules/.bin/jiti" "$root/tests/pi-candidate-worktrees.mjs"
 PI_TEST_PACKAGE_ROOT="$temporary/npm" \
   "$temporary/npm/node_modules/.bin/jiti" "$root/tests/pi-child-lease.mjs"
+PI_TEST_PACKAGE_ROOT="$temporary/npm" \
+  "$temporary/npm/node_modules/.bin/jiti" "$root/tests/pi-session-lease.mjs"

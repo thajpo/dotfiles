@@ -158,6 +158,34 @@ STAGING_DIR=$(mktemp -d "$PI_CONFIG_DIR/.install.XXXXXX")
 mkdir -p "$STAGING_DIR/npm" "$STAGING_DIR/control"
 cp "$SCRIPT_DIR/pi/npm/package.json" "$SCRIPT_DIR/pi/npm/package-lock.json" "$STAGING_DIR/npm/"
 npm ci --prefix "$STAGING_DIR/npm" --legacy-peer-deps --no-audit --no-fund
+# Pi extensions declare the SDK as peer dependencies; expose the exact SDK
+# packages owned by the dedicated core to the isolated extension tree. Without
+# this, jiti resolves an extension from ~/.pi/agent/npm but cannot see the
+# core's nested peer packages and fails closed at runtime.
+PI_CORE_REAL=$(realpath "$PI_CORE_DIR")
+PI_SDK_PEERS="$PI_CORE_REAL/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works"
+PI_SDK_CORE="$PI_CORE_REAL/node_modules/@earendil-works/pi-coding-agent"
+for peer in pi-agent-core pi-ai pi-coding-agent pi-tui; do
+    if [ "$peer" = pi-coding-agent ]; then
+        peer_path="$PI_SDK_CORE"
+    else
+        peer_path="$PI_SDK_PEERS/$peer"
+    fi
+    [ -d "$peer_path" ] || { echo "Pi SDK peer is missing from the dedicated core: $peer_path" >&2; exit 1; }
+    peer_real=$(realpath "$peer_path")
+    case "$peer_real" in "$PI_CORE_REAL"|"$PI_CORE_REAL"/*) ;; *) echo "Pi SDK peer escapes the dedicated core: $peer_path" >&2; exit 1 ;; esac
+    peer_version=$(node -p 'require(process.argv[1]).version' "$peer_path/package.json")
+    [ "$peer_version" = "$PI_VERSION" ] || { echo "Pi SDK peer version mismatch: $peer_path ($peer_version)" >&2; exit 1; }
+done
+mkdir -p "$STAGING_DIR/npm/node_modules/@earendil-works"
+for peer in pi-agent-core pi-ai pi-coding-agent pi-tui; do
+    if [ "$peer" = pi-coding-agent ]; then
+        peer_path="$PI_SDK_CORE"
+    else
+        peer_path="$PI_SDK_PEERS/$peer"
+    fi
+    ln -s "$peer_path" "$STAGING_DIR/npm/node_modules/@earendil-works/$peer"
+done
 install -m 600 "$SCRIPT_DIR/pi/pi-image-tools.json" "$STAGING_DIR/npm/node_modules/pi-image-tools/config.json"
 PI_CODING_AGENT_DIR="$STAGING_DIR" "$SCRIPT_DIR/scripts/pi-patch-subagents"
 
