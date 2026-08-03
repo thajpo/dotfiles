@@ -3294,9 +3294,15 @@ def _managed_process_live(socket: str | None, session: str, window: str,
         pid, parent = int(fields[0]), int(fields[1])
         parents[pid] = parent
         args_by_pid[pid] = fields[2]
-    allowed_launchers = {
-        str(Path(__file__).resolve().parents[1] / "bin" / "pidev"),
-        str(Path.home() / ".local" / "bin" / "pidev"),
+    # The pidev --launch shell is only a supervisor. It can remain alive
+    # after its Pi child failed, so accepting that command line would produce
+    # a false "launched" state. Require the managed Pi wrapper or the exact
+    # installed pinned core executable instead.
+    allowed_pi = {
+        str(Path(__file__).resolve().parents[1] / "bin" / "pi"),
+        str(Path.home() / ".local" / "bin" / "pi"),
+        str(Path.home() / ".local" / "share" / "pi" / "core" / "node_modules" / "@earendil-works" /
+            "pi-coding-agent" / "dist" / "cli.js"),
     }
     pending = list(roots)
     seen: set[int] = set()
@@ -3312,8 +3318,8 @@ def _managed_process_live(socket: str | None, session: str, window: str,
             tokens = shlex.split(args)
         except ValueError:
             return None
-        launcher_present = any(token in allowed_launchers for token in tokens)
-        if (launcher_present and "--launch" in tokens and "--session-id" in tokens and
+        pi_present = any(token in allowed_pi for token in tokens)
+        if (pi_present and "--launch" not in tokens and "--session-id" in tokens and
                 any(tokens[index + 1] == session_id for index, token in enumerate(tokens[:-1])
                     if token == "--session-id")):
             return True
