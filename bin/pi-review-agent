@@ -56,7 +56,34 @@ extension="$agent_dir/extensions/review-receipt/index.ts"
 export PI_REVIEW_PROJECT_ID="$project_id" PI_REVIEW_REQUEST_ID="$request_id" PI_REVIEW_SESSION_ID="$session_id"
 export PI_REVIEW_CANDIDATE_OID="$candidate_oid" PI_REVIEW_BASE_OID="$base_oid" PI_REVIEW_CAPABILITY="$capability" PI_REVIEW_CONTROL="$control"
 cd "$workspace"
-exec "$real_pi" --no-extensions --no-skills --no-context-files --no-prompt-templates \
+# Review cleanup takes the matching exclusive lease before removing this
+# checkout. Keep the shared lease held by the Pi process, not just this shell.
+state_root=${XDG_STATE_HOME:-$HOME/.local/state}
+[[ "$state_root" == /* ]] || { printf 'pi-review-agent: XDG_STATE_HOME must be absolute\n' >&2; exit 1; }
+common=$(git rev-parse --path-format=absolute --git-common-dir)
+common=$(realpath "$common")
+if command -v sha256sum >/dev/null 2>&1; then
+  lease_key=$(printf '%s\0%s' "$common" "$workspace" | sha256sum | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  lease_key=$(printf '%s\0%s' "$common" "$workspace" | shasum -a 256 | awk '{print $1}')
+else
+  printf 'pi-review-agent: no SHA-256 utility found for worktree lease\n' >&2
+  exit 1
+fi
+lease_dir="$state_root/pi/worktree-leases"
+mkdir -p "$lease_dir"
+chmod 700 "$state_root" "$state_root/pi" "$lease_dir"
+lease_path="$lease_dir/$lease_key.lock"
+python3 - "$lease_path" "$real_pi" \
+  --no-extensions --no-skills --no-context-files --no-prompt-templates \
   --model "openai-codex/gpt-5.6-luna" --thinking high \
   -e "$sandbox" -e "$extension" --tools read,grep,find,ls,submit_review_receipt \
-  --session-id "$session_id" --session-dir "$agent_dir/sessions/review/$project_id" --name "review-${request_id}"
+  --session-id "$session_id" --session-dir "$agent_dir/sessions/review/$project_id" --name "review-${request_id}" <<'PY2'
+import fcntl
+import os
+import sys
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+os.fchmod(fd, 0o600)
+fcntl.flock(fd, fcntl.LOCK_SH)
+os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
+PY2
