@@ -62,15 +62,7 @@ exec_pinned_pi() {
     exit 1
   fi
   lease_path="$lease_dir/$lease_key.lock"
-  python3 - "$lease_path" "$@" <<'PY'
-import fcntl
-import os
-import sys
-fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-os.fchmod(fd, 0o600)
-fcntl.flock(fd, fcntl.LOCK_SH)
-os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
-PY
+  python3 -c 'import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600); os.fchmod(fd, 0o600); fcntl.flock(fd, fcntl.LOCK_SH); os.execvpe(sys.argv[2], sys.argv[2:], os.environ)' "$lease_path" "$@"
 }
 case "${1:-}" in
   -h|--help|-v|--version)

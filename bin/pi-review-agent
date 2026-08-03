@@ -74,16 +74,8 @@ lease_dir="$state_root/pi/worktree-leases"
 mkdir -p "$lease_dir"
 chmod 700 "$state_root" "$state_root/pi" "$lease_dir"
 lease_path="$lease_dir/$lease_key.lock"
-python3 - "$lease_path" "$real_pi" \
+python3 -c 'import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600); os.fchmod(fd, 0o600); fcntl.flock(fd, fcntl.LOCK_SH); os.execvpe(sys.argv[2], sys.argv[2:], os.environ)' "$lease_path" "$real_pi" \
   --no-extensions --no-skills --no-context-files --no-prompt-templates \
   --model "openai-codex/gpt-5.6-luna" --thinking high \
   -e "$sandbox" -e "$extension" --tools read,grep,find,ls,submit_review_receipt \
-  --session-id "$session_id" --session-dir "$agent_dir/sessions/review/$project_id" --name "review-${request_id}" <<'PY2'
-import fcntl
-import os
-import sys
-fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-os.fchmod(fd, 0o600)
-fcntl.flock(fd, fcntl.LOCK_SH)
-os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
-PY2
+  --session-id "$session_id" --session-dir "$agent_dir/sessions/review/$project_id" --name "review-${request_id}"
