@@ -3304,6 +3304,31 @@ def _managed_process_live(socket: str | None, session: str, window: str,
         str(Path.home() / ".local" / "share" / "pi" / "core" / "node_modules" / "@earendil-works" /
             "pi-coding-agent" / "dist" / "cli.js"),
     }
+    proc_root = Path("/proc")
+
+    def environment_matches(pid: int) -> bool | None:
+        if not proc_root.is_dir():
+            return None
+        try:
+            raw = (proc_root / str(pid) / "environ").read_bytes()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return None
+        values: dict[str, str] = {}
+        for item in raw.split(b"\x00"):
+            if b"=" not in item:
+                continue
+            key, value = item.split(b"=", 1)
+            values[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+        task_workspace = values.get("PI_TASK_WORKTREE", "")
+        try:
+            task_workspace_path = Path(task_workspace).resolve(strict=False)
+        except (OSError, RuntimeError):
+            return None
+        return (values.get("PI_PIDEV_SESSION_ID") == session_id or
+                values.get("PI_REVIEW_SESSION_ID") == session_id) and task_workspace_path == workspace
+
     pending = list(roots)
     seen: set[int] = set()
     while pending:
@@ -3323,6 +3348,12 @@ def _managed_process_live(socket: str | None, session: str, window: str,
                 any(tokens[index + 1] == session_id for index, token in enumerate(tokens[:-1])
                     if token == "--session-id")):
             return True
+        if args.strip() == "pi":
+            managed_environment = environment_matches(pid)
+            if managed_environment is None:
+                return None
+            if managed_environment:
+                return True
         pending.extend(child for child, parent in parents.items() if parent == pid)
     return False
 
