@@ -416,6 +416,22 @@ def _project_lock(project: Path) -> Iterator[None]:
         os.close(fd)
 
 
+@contextlib.contextmanager
+def _review_launch_lock(project: Path, request_id: str) -> Iterator[None]:
+    directory = project / "reviews" / "launch-locks"
+    _ensure_dir(directory)
+    path = directory / f"{_id(request_id, 'review request id')}.lock"
+    if path.exists() or path.is_symlink():
+        _safe_lstat(path, directory=False)
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 # --- Project context (revalidates identity, capability, policy) ---
 
 def _validate_project_record(path: Path, project_id: str, common: Path,
@@ -2357,59 +2373,56 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
             before["reviewerTmuxSocket"] != reviewer_tmux_socket):
         raise SecretaryError("reviewer belongs to a different tmux server")
     _, project, project_record, repo = _project_context(info["primaryRepository"], info["capability"])
-    with _project_lock(project):
-        current_event = _validate_event(event_path, project_id)
-        if current_event["kind"] != "review-requested" or current_event["acknowledgedAt"] is not None:
-            raise SecretaryError("event is not an open review request")
-        try:
-            current_request_id = json.loads(current_event["details"])["reviewRequestId"]
-        except (KeyError, TypeError, json.JSONDecodeError) as error:
-            raise SecretaryError("review event is malformed") from error
-        if current_request_id != request_id:
-            raise SecretaryError("review event changed concurrently")
-        request = _validate_review_request(request_path, project_id)
-        launch_reviewer = False
-        if request["reviewerSessionId"] is None:
-            workstream = _validate_workstream_record(_workstream_path(project, request["workstreamId"]), project, repo,
-                                                      project_record["objectFormat"], project_record["gitCommonDir"])
-            parent = Path(workstream["workspace"]).parent
-            workspace = parent / f"review-{request_id}"
-            if workspace.exists() or workspace.is_symlink():
-                if workspace.is_symlink() or not workspace.is_dir():
-                    raise SecretaryError("review workspace already exists and is unsafe")
-                candidate_request = {**request, "reviewWorkspace": str(workspace.resolve(strict=True))}
-                registered = _registered_worktrees(repo)
-                if registered is None or not any(path == workspace.resolve(strict=True) and branch is None for path, branch in registered):
-                    raise SecretaryError("review workspace already exists without an exact Git worktree registration")
-                _validate_review_workspace(candidate_request, require_clean=True)
-            else:
-                created = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(workspace), request["candidateOid"]],
-                                         env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-                if created.returncode:
-                    raise SecretaryError("could not create exact review worktree")
-            request["reviewerSessionId"] = "rv-" + secrets.token_hex(24)
-            request["reviewWorkspace"] = str(workspace.resolve(strict=True))
-            request["reviewerTmuxSocket"] = reviewer_tmux_socket
-            request["launchState"] = "pending"
-            _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
-            launch_reviewer = True
-        else:
-            if request["reviewWorkspace"] is None:
-                raise SecretaryError("review assignment is incomplete")
-            _validate_review_workspace(request, require_clean=False)
-            if reviewer_tmux_socket is not None:
-                if request["reviewerTmuxSocket"] not in (None, reviewer_tmux_socket):
-                    raise SecretaryError("reviewer tmux server changed concurrently")
-                if request["reviewerTmuxSocket"] is None:
-                    request["reviewerTmuxSocket"] = reviewer_tmux_socket
-            if request["launchState"] == "launched":
+    with _review_launch_lock(project, request_id):
+        with _project_lock(project):
+            current_event = _validate_event(event_path, project_id)
+            if current_event["kind"] != "review-requested" or current_event["acknowledgedAt"] is not None:
+                raise SecretaryError("event is not an open review request")
+            try:
+                current_request_id = json.loads(current_event["details"])["reviewRequestId"]
+            except (KeyError, TypeError, json.JSONDecodeError) as error:
+                raise SecretaryError("review event is malformed") from error
+            if current_request_id != request_id:
+                raise SecretaryError("review event changed concurrently")
+            request = _validate_review_request(request_path, project_id)
+            if request["reviewerSessionId"] is None:
+                workstream = _validate_workstream_record(_workstream_path(project, request["workstreamId"]), project, repo,
+                                                          project_record["objectFormat"], project_record["gitCommonDir"])
+                parent = Path(workstream["workspace"]).parent
+                workspace = parent / f"review-{request_id}"
+                if workspace.exists() or workspace.is_symlink():
+                    if workspace.is_symlink() or not workspace.is_dir():
+                        raise SecretaryError("review workspace already exists and is unsafe")
+                    candidate_request = {**request, "reviewWorkspace": str(workspace.resolve(strict=True))}
+                    registered = _registered_worktrees(repo)
+                    if registered is None or not any(path == workspace.resolve(strict=True) and branch is None for path, branch in registered):
+                        raise SecretaryError("review workspace already exists without an exact Git worktree registration")
+                    _validate_review_workspace(candidate_request, require_clean=True)
+                else:
+                    created = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(workspace), request["candidateOid"]],
+                                             env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                    if created.returncode:
+                        raise SecretaryError("could not create exact review worktree")
+                request["reviewerSessionId"] = "rv-" + secrets.token_hex(24)
+                request["reviewWorkspace"] = str(workspace.resolve(strict=True))
+                request["reviewerTmuxSocket"] = reviewer_tmux_socket
+                request["launchState"] = "pending"
                 _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
-                return request
-            request["launchState"] = "pending"
-            _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
-            launch_reviewer = True
-        if not launch_reviewer:
-            return request
+            else:
+                if request["reviewWorkspace"] is None:
+                    raise SecretaryError("review assignment is incomplete")
+                _validate_review_workspace(request, require_clean=False)
+                if reviewer_tmux_socket is not None:
+                    if request["reviewerTmuxSocket"] not in (None, reviewer_tmux_socket):
+                        raise SecretaryError("reviewer tmux server changed concurrently")
+                    if request["reviewerTmuxSocket"] is None:
+                        request["reviewerTmuxSocket"] = reviewer_tmux_socket
+                if request["launchState"] == "launched":
+                    _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
+                    return request
+                request["launchState"] = "pending"
+                _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
+
         environment = _env()
         for name in ("TMUX", "TERM", "COLORTERM", "PI_CODING_AGENT_DIR"):
             if os.environ.get(name): environment[name] = os.environ[name]
@@ -2421,18 +2434,27 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
             result = subprocess.run([str(_pidev_path())], cwd=request["reviewWorkspace"], env=environment,
                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         except (OSError, SecretaryError) as error:
-            request["launchState"] = "pending"
-            _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
-            if isinstance(error, SecretaryError):
-                raise
-            raise SecretaryError(f"review launch failed: {error}") from error
-        if result.returncode:
-            request["launchState"] = "pending"
-            _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
-            raise SecretaryError(f"review launch failed: {(result.stderr or result.stdout).strip()[:300]}")
-        request["launchState"] = "launched"
-        _atomic(request_path, json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
-        return request
+            result = None
+            launch_error = error
+        else:
+            launch_error = None
+        with _project_lock(project):
+            current = _validate_review_request(request_path, project_id)
+            immutable = ("projectId", "requestId", "workstreamId", "candidateOid", "candidateTree", "baseOid",
+                         "reviewerSessionId", "reviewWorkspace")
+            if any(current[name] != request[name] for name in immutable):
+                raise SecretaryError("review assignment changed during launch")
+            if launch_error is not None or result is None or result.returncode:
+                current["launchState"] = "pending"
+                _atomic(request_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+                if isinstance(launch_error, SecretaryError):
+                    raise launch_error
+                if launch_error is not None:
+                    raise SecretaryError(f"review launch failed: {launch_error}") from launch_error
+                raise SecretaryError(f"review launch failed: {(result.stderr or result.stdout).strip()[:300]}")
+            current["launchState"] = "launched"
+            _atomic(request_path, json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n")
+            return current
 
 
 def review_launch_info(project_id: str, request_id: str) -> dict[str, Any]:
