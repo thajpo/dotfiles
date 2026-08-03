@@ -419,9 +419,9 @@ def _project_lock(project: Path) -> Iterator[None]:
 
 @contextlib.contextmanager
 def _review_launch_lock(project: Path, request_id: str) -> Iterator[None]:
-    directory = project / "reviews" / "launch-locks"
+    directory = project / "operations"
     _ensure_dir(directory)
-    path = directory / f"{_id(request_id, 'review request id')}.lock"
+    path = directory / "cleanup.lock"
     if path.exists() or path.is_symlink():
         _safe_lstat(path, directory=False)
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -435,9 +435,25 @@ def _review_launch_lock(project: Path, request_id: str) -> Iterator[None]:
 
 @contextlib.contextmanager
 def _workstream_launch_lock(project: Path, workstream_id: str) -> Iterator[None]:
-    directory = project / "workstream-launch-locks"
+    directory = project / "operations"
     _ensure_dir(directory)
-    path = directory / f"{_id(workstream_id, 'workstream id')}.lock"
+    path = directory / "cleanup.lock"
+    if path.exists() or path.is_symlink():
+        _safe_lstat(path, directory=False)
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _workstream_cleanup_lock(project: Path) -> Iterator[None]:
+    directory = project / "operations"
+    _ensure_dir(directory)
+    path = directory / "cleanup.lock"
     if path.exists() or path.is_symlink():
         _safe_lstat(path, directory=False)
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -1037,7 +1053,10 @@ def _cleanup_worktree_has_live_process(path: Path) -> bool:
         if not entry.name.isdigit():
             continue
         try:
-            cwd = Path(os.readlink(entry / "cwd")).resolve(strict=False)
+            raw_cwd = os.readlink(entry / "cwd")
+            if raw_cwd.endswith(" (deleted)"):
+                raw_cwd = raw_cwd[:-10]
+            cwd = Path(raw_cwd).resolve(strict=False)
         except OSError:
             continue
         if cwd == path or within(path, cwd):
@@ -2838,10 +2857,7 @@ def _managed_process_live(socket: str | None, session: str, window: str,
         tokens = args.split()
         if ("--launch" in tokens and "--session-id" in tokens and
                 any(tokens[index + 1] == session_id for index, token in enumerate(tokens[:-1])
-                    if token == "--session-id") and
-                "--cwd" in tokens and
-                any(tokens[index + 1] == str(workspace) for index, token in enumerate(tokens[:-1])
-                    if token == "--cwd") and "pidev" in args):
+                    if token == "--session-id") and "pidev" in args):
             return True
         pending.extend(child for child, parent in parents.items() if parent == pid)
     return False
@@ -2917,6 +2933,8 @@ def _revalidate_cleanup_state(project_id: str, workstream_id: str, project: Path
     workspace = Path(current["workspace"])
     if workspace.exists() or workspace.is_symlink():
         raise SecretaryError("cleanup found a reappeared candidate worktree")
+    if _cleanup_worktree_has_live_process(workspace):
+        raise SecretaryError("cleanup found a live candidate process")
     _assert_worktree_registration_absent(repo, workspace, "candidate")
 
     seen_reviews: set[str] = set()
@@ -2937,6 +2955,8 @@ def _revalidate_cleanup_state(project_id: str, workstream_id: str, project: Path
             review = Path(request["reviewWorkspace"])
             if review.exists() or review.is_symlink():
                 raise SecretaryError("cleanup found a reappeared review worktree")
+            if _cleanup_worktree_has_live_process(review):
+                raise SecretaryError("cleanup found a live review process")
             _assert_worktree_registration_absent(repo, review, "review")
     if seen_reviews != set(expected_reviews):
         raise SecretaryError("review assignment disappeared during cleanup")
@@ -2956,15 +2976,9 @@ def cleanup_workstream(project_id: str, workstream_id: str) -> dict[str, Any]:
     repo = _canonical_repo(info["primaryRepository"])
     _, common, _ = project_identity(repo)
     project = _record_dir(_state_root(), project_id)
-    lock_path = project / "operations" / "cleanup.lock"
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+    with _workstream_cleanup_lock(project):
         with _git_write_lock(common):
             return _cleanup_workstream_locked(project_id, workstream_id)
-    finally:
-        os.close(fd)
 
 
 def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str, Any]:
@@ -2999,7 +3013,11 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
         runtime = _workstream_runtime(project, repo, record)
         if _tmux_window_live(runtime["tmuxSession"], runtime["tmuxWindow"], runtime["tmuxSocket"]):
             raise SecretaryError("cleanup refuses a live workstream window")
+        if _cleanup_worktree_has_live_process(workspace):
+            raise SecretaryError("cleanup refuses a live workstream process")
     else:
+        if _cleanup_worktree_has_live_process(workspace):
+            raise SecretaryError("cleanup refuses a live workstream process")
         _assert_worktree_registration_absent(repo, workspace, "candidate")
 
     recovery_path = _cleanup_recovery_path(project, "workstream", workstream_id)
@@ -3018,9 +3036,13 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
             continue
         review = Path(request["reviewWorkspace"])
         if not review.exists() and not review.is_symlink():
+            if _cleanup_worktree_has_live_process(review):
+                raise SecretaryError("cleanup refuses a live review process")
             _assert_worktree_registration_absent(repo, review, "review")
             continue
         _validate_review_worktree_for_cleanup(request, project, project_record, repo)
+        if _cleanup_worktree_has_live_process(review):
+            raise SecretaryError("cleanup refuses a live review process")
         with _git_worktree_index_lock(review):
             if (_git(review, "rev-parse", "HEAD^{commit}").lower() != request["candidateOid"] or
                     _git(review, "status", "--porcelain=v1")):
@@ -3032,6 +3054,8 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
             window = f"w-{review_name}-{hashlib.sha256(str(review).encode()).hexdigest()[:12]}"
             if _tmux_window_live(session, window, request["reviewerTmuxSocket"]):
                 raise SecretaryError("cleanup refuses a live review window")
+            if _cleanup_worktree_has_live_process(review):
+                raise SecretaryError("cleanup refuses a live review process")
             removed = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(review)], env=_env(),
                                      text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             if removed.returncode:
@@ -3050,6 +3074,8 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
             runtime = _workstream_runtime(project, repo, record)
             if _tmux_window_live(runtime["tmuxSession"], runtime["tmuxWindow"], runtime["tmuxSocket"]):
                 raise SecretaryError("cleanup refuses a live workstream window")
+            if _cleanup_worktree_has_live_process(workspace):
+                raise SecretaryError("cleanup refuses a live workstream process")
             removed = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(workspace)], env=_env(),
                                      text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             if removed.returncode:
