@@ -1,6 +1,8 @@
 # Pi Harness Observability Contract
 
-Status: design-first, implementation pending.
+Status: read-only Inspector slice implemented; metrics/trace planes remain design-first.
+
+Human-facing inspector plan: `OBSERVABILITY_UI_PLAN.md`.
 
 This document defines the observability boundary for a custom Pi build. The
 purpose is to make the harness itself understandable and measurable before
@@ -29,7 +31,21 @@ The harness should answer, for every meaningful run:
 A metric without provenance is not sufficient. Every derived number must say
 whether it is provider-reported, locally measured, or estimated.
 
-## 2. Non-goals
+## 2. Model freedom and anti-slop
+
+Observability must not become a hidden completion throttle. Spawned agents have
+no automatic elapsed-time, assistant-turn, provider-token, or tool-call limit.
+The harness records observed duration, turns, tokens, and tool calls but does not
+use those measurements as arbitrary stop conditions. Explicit user interrupt or
+stop remains available.
+
+The constraint is semantic: task packets, contracts, authority/tool boundaries,
+acceptance criteria, and durable evidence should make slop visible and rejectable
+without cutting off a model that is still making useful progress. The Inspector
+shows those explicit instructions and outcomes; it never exposes hidden
+chain-of-thought.
+
+## 3. Non-goals
 
 This phase does not:
 
@@ -40,7 +56,7 @@ This phase does not:
 - treat token count as a quality metric by itself;
 - claim that model-reported cost is an invoice or billing authority.
 
-## 3. Three data planes
+## 4. Three data planes
 
 Keep these separate so raw evidence can be retained or discarded without
 changing metric definitions.
@@ -110,7 +126,7 @@ Examples:
 - `task.retries`
 - `task.terminal_status`
 
-## 4. Correlation model
+## 5. Correlation model
 
 Pi's session ID is not enough for custom diagnostics. Use explicit IDs:
 
@@ -129,7 +145,7 @@ Task boundaries should be explicit where possible. Prompt inference can be a
 fallback, but inferred task boundaries must be marked as inferred rather than
 presented as fact.
 
-## 5. Event taxonomy
+## 6. Event taxonomy
 
 ### Run and task
 
@@ -263,7 +279,7 @@ serialization_time
 stdout_drain_time
 ```
 
-## 6. Usage and cache semantics
+## 7. Usage and cache semantics
 
 Each usage field must carry provenance:
 
@@ -299,7 +315,7 @@ For retries, preserve both:
 Rollups must avoid double-counting unless the report explicitly asks for
 physical spend.
 
-## 7. Failure and incompleteness
+## 8. Failure and incompleteness
 
 A run is not successful merely because the process exited zero. Terminal status
 must distinguish:
@@ -335,7 +351,7 @@ Flush a terminal diagnostic record on:
 Use a small launch-time or parent-side journal so a process that dies before
 Pi persists its final session message still leaves an incomplete-run marker.
 
-## 8. Storage and privacy modes
+## 9. Storage and privacy modes
 
 Recommended modes:
 
@@ -372,7 +388,7 @@ Never capture raw authorization headers or API keys. Treat prompts, system
 prompts, tool schemas, arguments, results, file paths, stderr, images, and
 provider payloads as sensitive unless the user explicitly chooses trace mode.
 
-## 9. Current Pi substrate and gaps
+## 10. Current Pi substrate and gaps
 
 Upstream Pi already supplies the hooks and session data needed for this design:
 
@@ -402,7 +418,7 @@ Important gaps remain:
 - no task-level rollup joining parent, child, provider, tool, and UX time;
 - no query/report layer for comparing task attempts.
 
-## 10. Minimum vertical slice
+## 11. Minimum vertical slice
 
 Implement one diagnostic slice before broad instrumentation:
 
@@ -421,7 +437,7 @@ Implement one diagnostic slice before broad instrumentation:
 Only after this slice is reliable should file byte accounting, subagents,
 provider payload metadata, and exporters be added.
 
-## 11. Validation matrix
+## 12. Validation matrix
 
 The disposable matrix should cover:
 
@@ -447,7 +463,7 @@ For each case, compare the session JSONL, JSON events, diagnostic journal,
 subagent artifacts, exit status, and final report. The contract is not met if a
 known failure can only be inferred from silence.
 
-## 12. Open decisions
+## 13. Open decisions
 
 Before implementation, choose:
 
@@ -461,7 +477,7 @@ Before implementation, choose:
 - whether provider payload metadata is stored locally;
 - which TUI surfaces are required in the first vertical slice.
 
-## 13. Red-team decision
+## 14. Red-team decision
 
 Fresh independent reviews converged on a conditional **yes**:
 
@@ -510,7 +526,7 @@ recovery guarantees cannot be enforced, or when routine Pi upgrades require
 repeated fork-specific repair. Expand only when a trace changes a concrete
 engineering decision or materially reduces diagnosis time.
 
-## 14. Outcome and experiment contract
+## 15. Outcome and experiment contract
 
 Mechanism metrics are not outcomes. A task that uses more tokens, tools, or
 files may simply be harder. Any claim that an instrumentation-guided change
@@ -554,7 +570,7 @@ stratification. A first value experiment should compare the same task and
 provider/model under baseline and one intervention, with a predeclared primary
 outcome and overhead/privacy budget.
 
-## 15. Clock and completeness semantics
+## 16. Clock and completeness semantics
 
 Every process that emits timing data must include a clock-domain descriptor:
 
@@ -585,7 +601,7 @@ completeness and missingness:
   recorded;
 - parent and child records join through explicit task-attempt IDs.
 
-## 16. User interaction model
+## 17. User interaction model
 
 The event ledger is not the primary user interface. Users should interact with
 three layers:
@@ -642,7 +658,7 @@ pi bench compare runs/baseline runs/intervention
 The raw event ledger remains available for diagnosis; the report is the normal
 interaction surface.
 
-## 17. Benchmark task model
+## 18. Benchmark task model
 
 A benchmark task is a reproducible starting state plus an independent evaluator,
 not just a prompt:
@@ -678,7 +694,7 @@ Use three different benchmark layers:
    useful for finding unknown failure modes but are confounded and should not be
    treated as causal benchmark results.
 
-## 18. What “the model was faster” should mean
+## 19. What “the model was faster” should mean
 
 Avoid a single speed number. Report a vector conditioned on task class, model,
 provider, and outcome:
@@ -701,7 +717,7 @@ at the task. The primary comparison should usually be **time-to-accepted** or
 **accepted work per unit cost**, with provider/tool/token metrics explaining
 why the result changed.
 
-## 19. Boundary: Pi runtime versus benchmark harness
+## 20. Boundary: Pi runtime versus benchmark harness
 
 Most benchmark functionality should not live inside Pi. Pi should expose a
 small, stable measurement surface; the benchmark harness should own experiment

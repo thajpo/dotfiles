@@ -102,6 +102,9 @@ success notice has `display: false` and `triggerTurn: true`, and the root model
 receives the result for synthesis. Inject a controlled failure or attention
 signal and confirm it remains visible. `/subagents-fleet` must remain available
 as an explicit inspection surface while no async widget is shown by default.
+Open `/observe` (or `Ctrl+I`) and confirm the read-only Inspector shows the
+active task packet, every child, exact explicit instructions, context summary,
+status, and result/error messages. Confirm it does not display hidden reasoning.
 
 ## Context audit setup
 
@@ -144,6 +147,9 @@ Ask Luna to explain FAST, RIP, BUILD, and MAJOR in one sentence each and to
 separate work mode from learning level. Confirm the loaded context-file hash is
 `c9fc282049e8a7f9f88d07fad9f73a979531b02edd3abc7b7966c27dbd1cac5b`.
 Confirm no old default-feature/Fable workflow is presented as mandatory.
+Confirm spawned agents have no automatic elapsed-time, assistant-turn,
+provider-token, or tool-call cutoff; contracts and acceptance evidence, not
+premature limits, provide the anti-slop constraint.
 
 ### 2. FAST
 
@@ -222,7 +228,8 @@ the nested child tool diagnostic or manifest: it must contain only
 `read`, `grep`, `find`, `ls`, and optional `contact_supervisor`; it must not have
 shell, write/edit, worktree, persistence, artifact, or further-spawn authority.
 Confirm the parent still owns acceptance and the worker remains the only writer
-in its assigned worktree.
+in its assigned worktree. Do not set a timeout, turn budget, or token budget for
+the child.
 
 ### 12. Context size
 

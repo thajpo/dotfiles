@@ -17,17 +17,42 @@ pidev="$HOME/.local/bin/pidev"
 
 usage() {
   printf '%s\n' \
-    'usage: pi-start [personal|secretary|project [DIR]|host|all|help]' \
+    'usage: pi-start [--mobile|-mobile] [personal|secretary|project [DIR]|host|all|help]' \
     '       default: start tmux, ensure pi-personal, and attach to it' >&2
 }
 
 command -v tmux >/dev/null 2>&1 || { printf 'pi-start: tmux is required\n' >&2; exit 127; }
 
+mobile_layout=0
+mobile_flag_seen=0
+filtered_args=()
+while (( $# )); do
+  case "$1" in
+    --mobile|-mobile)
+      (( mobile_flag_seen == 0 )) || { printf 'pi-start: duplicate mobile flag\n' >&2; exit 2; }
+      mobile_flag_seen=1
+      mobile_layout=1
+      shift
+      ;;
+    --)
+      filtered_args+=("$@")
+      break
+      ;;
+    *)
+      filtered_args+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${filtered_args[@]}"
 action=${1:-personal}
 case "$action" in
   personal|secretary|project|host|all|help) ;;
   *) usage; exit 2 ;;
 esac
+if (( mobile_layout )); then
+  export PI_TMUX_LAYOUT=mobile
+fi
 
 if [[ "$action" == help ]]; then
   exec "$self_dir/pi-help-custom"
@@ -55,22 +80,22 @@ fi
 
 case "$action" in
   personal)
-    "$personal" --ensure
+    if (( mobile_layout )); then "$personal" --ensure --mobile; else "$personal" --ensure; fi
     ;;
   secretary)
-    exec "$pisec"
+    if (( mobile_layout )); then exec "$pisec" --mobile; else exec "$pisec"; fi
     ;;
   project)
     directory=${2:-$PWD}
     [[ $# -le 2 ]] || { usage; exit 2; }
     [[ -d "$directory" ]] || { printf 'pi-start: missing project directory: %s\n' "$directory" >&2; exit 1; }
     cd -- "$directory"
-    exec "$pidev"
+    if (( mobile_layout )); then exec "$pidev" --mobile; else exec "$pidev"; fi
     ;;
   host|all)
-    "$personal" --ensure
+    if (( mobile_layout )); then "$personal" --ensure --mobile; else "$personal" --ensure; fi
     if [[ "$action" == all ]]; then
-      exec "$pisec"
+      if (( mobile_layout )); then exec "$pisec" --mobile; else exec "$pisec"; fi
     fi
     ;;
 esac

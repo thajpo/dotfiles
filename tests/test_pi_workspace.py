@@ -126,9 +126,113 @@ class WorkspacePreparationTests(unittest.TestCase):
     def prepare_home(self, root: Path, branch="main"):
         home = root / "home"
         home.mkdir()
+        self.make_fake_pi_core(home)
         repo = make_repo(root / "source", branch)
         write_policy(home, repo, control=True)
         return home, repo
+
+    def make_fake_pi_core(self, home: Path):
+        package = home / ".local/share/pi/core/node_modules/@earendil-works/pi-coding-agent"
+        (package / "docs").mkdir(parents=True, exist_ok=True)
+        (package / "examples").mkdir(exist_ok=True)
+        (package / "dist").mkdir(exist_ok=True)
+        (package / "package.json").write_text('{"name":"@earendil-works/pi-coding-agent","version":"0.83.0"}\n')
+        executable = package / "dist/cli.js"
+        executable.write_text("#!/usr/bin/env node\n")
+        launcher = package.parent.parent / ".bin/pi"
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        if not launcher.exists():
+            launcher.symlink_to(executable)
+        return executable, [str(package / "docs"), str(package / "examples")]
+
+    def test_control_plane_route_derives_only_pinned_pi_docs_and_examples(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, repo = self.prepare_home(Path(tmp), branch="feature")
+            executable, expected = self.make_fake_pi_core(home)
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False), \
+                 mock.patch.object(ws, "container_platform", return_value="linux/amd64"):
+                prepared = ws.prepare(repo, os.getpid(), executable)
+            route = json.loads(Path(prepared["route"]).read_text())
+            self.assertEqual(route["controlPlaneResources"], expected)
+            self.assertIn("Control-plane read-only resources:", Path(route["hostContext"]).read_text())
+
+    def test_non_control_plane_route_has_no_pi_resource_mounts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            repo = make_repo(root / "source", branch="feature")
+            write_policy(home, repo, control=False)
+            executable, _ = self.make_fake_pi_core(home)
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False), \
+                 mock.patch.object(ws, "container_platform", return_value="linux/amd64"):
+                prepared = ws.prepare(repo, os.getpid(), executable)
+            route = json.loads(Path(prepared["route"]).read_text())
+            self.assertEqual(route["controlPlaneResources"], [])
+
+    def test_each_explicit_control_plane_repository_gets_the_allowlist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            self.make_fake_pi_core(home)
+            first = make_repo(root / "first", branch="feature")
+            second = make_repo(root / "second", branch="feature")
+            policy = home / ".config/pi/repository-policy.json"
+            policy.parent.mkdir(parents=True)
+            policy.write_text(json.dumps({
+                "version": 1,
+                "defaultMode": "isolated",
+                "trustedRoots": [str(first), str(second)],
+                "isolatedRoots": [],
+                "controlPlaneRepositories": [str(first), str(second)],
+                "protectedBranches": ["main", "master"],
+                "worktreeRoot": str(home / ".local/share/pi/worktrees"),
+            }))
+            policy.chmod(0o600)
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False), \
+                 mock.patch.object(ws, "container_platform", return_value="linux/amd64"):
+                for repo in (first, second):
+                    prepared = ws.prepare(repo, os.getpid())
+                    route = json.loads(Path(prepared["route"]).read_text())
+                    self.assertTrue(route["controlPlane"])
+                    self.assertEqual(route["controlPlaneResources"], [
+                        str(home / ".local/share/pi/core/node_modules/@earendil-works/pi-coding-agent/docs"),
+                        str(home / ".local/share/pi/core/node_modules/@earendil-works/pi-coding-agent/examples"),
+                    ])
+
+    def test_control_plane_route_fails_closed_without_pinned_pi_core(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            repo = make_repo(root / "source", branch="feature")
+            write_policy(home, repo, control=True)
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False), \
+                 mock.patch.object(ws, "container_platform", return_value="linux/amd64"):
+                with self.assertRaisesRegex(ws.WorkspaceError, "pinned Pi core package is unavailable"):
+                    ws.prepare(repo, os.getpid())
+
+    def test_control_plane_resource_rejects_symlink_and_writable_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            executable, expected = self.make_fake_pi_core(home)
+            outside = root / "outside"
+            outside.mkdir()
+            (home / ".local/share/pi/core/node_modules/@earendil-works/pi-coding-agent/docs").rmdir()
+            (home / ".local/share/pi/core/node_modules/@earendil-works/pi-coding-agent/docs").symlink_to(outside, target_is_directory=True)
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                with self.assertRaisesRegex(ws.WorkspaceError, "regular directory"):
+                    ws.control_plane_resources(True, executable)
+                docs = home / ".local/share/pi/core/node_modules/@earendil-works/pi-coding-agent/docs"
+                docs.unlink()
+                docs.mkdir()
+                docs.chmod(0o777)
+                with self.assertRaisesRegex(ws.WorkspaceError, "group/other writable"):
+                    ws.control_plane_resources(True, executable)
+            self.assertEqual(expected[1], str(home / ".local/share/pi/core/node_modules/@earendil-works/pi-coding-agent/examples"))
 
     def test_read_only_prepare_uses_dirty_protected_checkout_without_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:

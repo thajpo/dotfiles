@@ -39,12 +39,35 @@ esac
 dotfiles_dir=${PI_PERSONAL_DOTFILES_DIR:-"$HOME/dotfiles"}
 session=pi-personal
 window_prefix=personal-
+mobile_layout=0
+mobile_flag_seen=0
+[[ ${PI_TMUX_LAYOUT:-} == mobile ]] && mobile_layout=1
+filtered_args=()
+while (( $# )); do
+  case "$1" in
+    --mobile|-mobile)
+      (( mobile_flag_seen == 0 )) || { printf 'pi-personal: duplicate mobile flag\n' >&2; exit 2; }
+      mobile_flag_seen=1
+      mobile_layout=1
+      shift
+      ;;
+    --)
+      filtered_args+=("$@")
+      break
+      ;;
+    *)
+      filtered_args+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${filtered_args[@]}"
 action=${1:-open}
 case "$action" in
   --ensure|ensure) [[ $# -eq 1 ]] || exit 2 ; ensure_only=1 ;;
   open|launch) [[ $# -eq 1 ]] || exit 2 ; ensure_only=0 ;;
   *)
-    printf '%s\n' 'usage: pi-personal [open|launch|--ensure]' >&2
+    printf '%s\n' 'usage: pi-personal [--mobile|-mobile] [open|launch|--ensure]' >&2
     exit 2
     ;;
 esac
@@ -101,8 +124,15 @@ host_session_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/sessions/host-maintena
 
 labels=(mlre-transition financials dotfiles pi-host)
 directories=("$mlre_dir" "$financials_dir" "$dotfiles_dir" "$HOME")
-window_count=$(( (${#labels[@]} + 1) / 2 ))
+if (( mobile_layout )); then
+  window_count=${#labels[@]}
+else
+  window_count=$(( (${#labels[@]} + 1) / 2 ))
+fi
 window_name_for_index() { printf '%s%d' "$window_prefix" "$(( $1 + 1 ))"; }
+window_index_for_role() {
+  if (( mobile_layout )); then printf '%s\n' "$1"; else printf '%s\n' "$(( $1 / 2 ))"; fi
+}
 session_ids=(personal-mlre-transition personal-financials personal-dotfiles personal-host)
 workspace_paths=(
   "$(git -C "$mlre_dir" rev-parse --show-toplevel 2>/dev/null || realpath "$mlre_dir")"
@@ -181,10 +211,10 @@ role_index() {
   return 1
 }
 
-# A personal window is deliberately limited to two side-by-side panes. Four
-# roles therefore produce two windows, and future roles produce more windows
-# rather than a tiled quad. A layout change is activated by pi-restart so live
-# conversations are not moved or killed implicitly by an ensure operation.
+# Desktop mode is deliberately limited to two side-by-side panes. Mobile mode
+# gives every role its own full-width window. A layout change is activated by
+# pi-restart so live conversations are not moved or killed implicitly by an
+# ensure operation.
 declare -a window_ids_by_index=()
 declare -A pane_for_role=() dead_for_role=() window_for_role=()
 if tmux has-session -t "=$session" 2>/dev/null; then
@@ -203,10 +233,17 @@ if tmux has-session -t "=$session" 2>/dev/null; then
     window_ids_by_index[$window_index]=$window_id
     configure_window "$window_id"
     mapfile -t panes < <(pane_rows "$window_id")
-    (( ${#panes[@]} >= 1 && ${#panes[@]} <= 2 )) || {
-      printf 'pi-personal: each window must contain one or two panes; run pi-restart\n' >&2
-      exit 1
-    }
+    if (( mobile_layout )); then
+      (( ${#panes[@]} == 1 )) || {
+        printf 'pi-personal: mobile windows must contain exactly one pane; run pi-restart --mobile\n' >&2
+        exit 1
+      }
+    else
+      (( ${#panes[@]} >= 1 && ${#panes[@]} <= 2 )) || {
+        printf 'pi-personal: each window must contain one or two panes; run pi-restart\n' >&2
+        exit 1
+      }
+    fi
     for pane_row in "${panes[@]}"; do
       IFS='|' read -r pane_id pane_title pane_dead pane_role pane_path pane_command pane_pid current_command <<< "$pane_row"
       [[ "$pane_id" =~ ^% && "$pane_dead" =~ ^[01]$ ]] || { printf 'pi-personal: invalid pane state\n' >&2; exit 1; }
@@ -275,7 +312,7 @@ if tmux has-session -t "=$session" 2>/dev/null; then
   for index in "${!labels[@]}"; do
     role=${labels[$index]}
     if [[ -n "${window_for_role[$role]+set}" ]]; then
-      expected_window=${window_ids_by_index[$((index / 2))]}
+      expected_window=${window_ids_by_index[$(window_index_for_role "$index")]}
       [[ "${window_for_role[$role]}" == "$expected_window" ]] || {
         printf 'pi-personal: role %s is in the wrong window; run pi-restart\n' "$role" >&2
         exit 1
@@ -313,14 +350,21 @@ if tmux has-session -t "=$session" 2>/dev/null; then
     fi
   done
 
-  for window_id in "${window_ids_by_index[@]}"; do
-    tmux select-layout -t "$window_id" even-horizontal || { printf 'pi-personal: cannot arrange panes\n' >&2; exit 1; }
-  done
+  if (( ! mobile_layout )); then
+    for window_id in "${window_ids_by_index[@]}"; do
+      tmux select-layout -t "$window_id" even-horizontal || { printf 'pi-personal: cannot arrange panes\n' >&2; exit 1; }
+    done
+  fi
 else
-  # Fresh boot: create one side-by-side pair per window, preserving the stable
-  # role/session IDs used for conversation resume.
+  # Fresh boot: desktop mode creates one side-by-side pair per window;
+  # mobile mode creates one full-width conversation per window, preserving the
+  # stable role/session IDs used for conversation resume.
   for ((window_index = 0; window_index < window_count; window_index++)); do
-    first_index=$((window_index * 2))
+    if (( mobile_layout )); then
+      first_index=$window_index
+    else
+      first_index=$((window_index * 2))
+    fi
     first_role=${labels[$first_index]}
     current_window_name=$(window_name_for_index "$window_index")
     if (( window_index == 0 )); then
@@ -344,7 +388,7 @@ else
     configure_pane "$first_pane" "$first_role"
 
     second_index=$((first_index + 1))
-    if (( second_index < ${#labels[@]} )); then
+    if (( ! mobile_layout && second_index < ${#labels[@]} )); then
       second_role=${labels[$second_index]}
       pane_id=$(tmux split-window -h -d -P -F '#{pane_id}' -t "$window_id" -c "${directories[$second_index]}" "$(launch_command "$second_index")") || {
         printf 'pi-personal: cannot create %s pane\n' "$second_role" >&2
@@ -353,7 +397,9 @@ else
       [[ "$pane_id" =~ ^% ]] || { printf 'pi-personal: invalid tmux pane id\n' >&2; exit 1; }
       configure_pane "$pane_id" "$second_role"
     fi
-    tmux select-layout -t "$window_id" even-horizontal || { printf 'pi-personal: cannot arrange panes\n' >&2; exit 1; }
+    if (( ! mobile_layout )); then
+      tmux select-layout -t "$window_id" even-horizontal || { printf 'pi-personal: cannot arrange panes\n' >&2; exit 1; }
+    fi
   done
 fi
 

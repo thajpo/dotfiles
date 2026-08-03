@@ -43,7 +43,7 @@ class HarnessStaticTests(unittest.TestCase):
         worker_frontmatter = worker.split("---", 2)[1]
         self.assertIn("model: openai-codex/gpt-5.6-luna", worker_frontmatter)
         self.assertIn("acceptanceRole: writer", worker_frontmatter)
-        self.assertIn("tools: read, write, edit, bash, grep, find, ls, contact_supervisor, subagent", worker_frontmatter)
+        self.assertIn("tools: read, write, edit, bash, grep, find, ls, contact_supervisor, host_command, subagent", worker_frontmatter)
         config = json.loads((ROOT / "pi/extensions/subagent/config.json").read_text())
         self.assertTrue(config["asyncByDefault"])
         self.assertFalse(config["asyncWidget"])
@@ -53,6 +53,10 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertEqual(config["completionVisibility"], "hidden-success")
         self.assertEqual(config["waitTool"], {"enabled": False})
         self.assertNotIn("globalConcurrencyLimit", config)
+        self.assertNotIn("timeoutMs", config)
+        self.assertNotIn("maxRuntimeMs", config)
+        self.assertNotIn("turnBudget", config)
+        self.assertNotIn("toolBudget", config)
         self.assertEqual(config["parallel"]["maxTasks"], 0)
         self.assertEqual(config["maxSubagentSpawnsPerSession"], 0)
         self.assertEqual(config["maxSubagentDepth"], 2)
@@ -71,6 +75,44 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('display: false', continuation)
         self.assertIn('triggerTurn: true', continuation)
         self.assertIn('Context compaction has completed', continuation)
+        harness_readme = (ROOT / "pi/README.md").read_text()
+        self.assertIn("no automatic elapsed-time,\nassistant-turn", harness_readme)
+        self.assertIn("Anti-slop means", harness_readme)
+        self.assertIn("/observe", harness_readme)
+        root_readme = (ROOT / "README.md").read_text()
+        self.assertIn("no automatic turn,\n  elapsed-time, token, or tool-call limit", root_readme)
+        self.assertNotIn("default is ten automatic responses", root_readme)
+        host_command = (ROOT / "pi/extensions/host-command/index.ts").read_text()
+        host_core = (ROOT / "pi/extensions/host-command/core.mjs").read_text()
+        self.assertIn('name: "host_command"', host_command)
+        self.assertIn("Reason:", host_command)
+        self.assertIn("Description:", host_command)
+        self.assertIn("ctx.ui.confirm", host_command)
+        self.assertIn("parentRuntimeId", host_core)
+        self.assertIn("expiresAt", host_core)
+        for agent_path in (ROOT / "pi/agents").glob("*.md"):
+            self.assertIn("host_command", agent_path.read_text(), agent_path.name)
+        self.assertIn("pi-subagents-0.35.1-host-command-fanout.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+
+    def test_observability_inspector_is_read_only_and_activated(self):
+        extension = (ROOT / "pi/extensions/observability/index.ts").read_text()
+        core = (ROOT / "pi/extensions/observability/core.mjs").read_text()
+        self.assertIn('pi.registerCommand(OBSERVE_COMMAND', extension)
+        self.assertIn('Key.ctrl("i")', extension)
+        self.assertIn('overlay: true', extension)
+        self.assertIn('SUBAGENT_ASYNC_STARTED_EVENT', extension)
+        self.assertIn('SUBAGENT_FOREGROUND_STARTED_EVENT', extension)
+        self.assertIn('SUBAGENT_FOREGROUND_COMPLETE_EVENT', extension)
+        self.assertIn('extractActivePacket', extension)
+        self.assertIn('read-only', extension)
+        self.assertIn('validatePacket', core)
+        self.assertIn('redacted', core)
+        self.assertIn('MAX_MESSAGES', core)
+        foreground_patch = "\n".join([
+            (ROOT / "pi/patches/pi-subagents-0.35.1-observability-foreground-start-types.patch").read_text(),
+            (ROOT / "pi/patches/pi-subagents-0.35.1-observability-foreground-start-executor.patch").read_text(),
+        ])
+        self.assertIn("SUBAGENT_FOREGROUND_STARTED_EVENT", foreground_patch)
 
     def test_secretary_investigators_are_mechanically_read_only(self):
         wrapper = (ROOT / "pi/extensions/secretary-subagents/index.ts").read_text()
@@ -83,8 +125,8 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('const TARGETED_ACTIONS', lifecycle)
         self.assertIn('selected = candidates.find', lifecycle)
         self.assertIn('discoverAgents(cwd, scope).agents.filter(isReadOnlyAgent)', wrapper)
-        self.assertIn('const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "secretary_git", "contact_supervisor"]', wrapper)
-        self.assertIn('subagentOnlyExtensions: [gitExtension, autoContinueExtension]', wrapper)
+        self.assertIn('const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "secretary_git", "contact_supervisor", "host_command"]', wrapper)
+        self.assertIn('subagentOnlyExtensions: [gitExtension, autoContinueExtension, hostCommandExtension]', wrapper)
         self.assertIn('extensions: []', wrapper)
         self.assertIn('mcpDirectTools: []', wrapper)
         self.assertIn('memory: undefined', wrapper)
@@ -191,9 +233,15 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("executionTarget", sandbox)
         self.assertIn("skill-resource", sandbox)
         self.assertIn("environment-key", sandbox)
+        self.assertIn("version: 2", sandbox)
+        workspace = (ROOT / "scripts/pi-workspace.py").read_text()
+        self.assertIn('PI_CORE_PACKAGE_NAME = "@earendil-works/pi-coding-agent"', workspace)
+        self.assertIn('PI_CORE_PACKAGE_VERSION = "0.83.0"', workspace)
+        self.assertIn("refusing control-plane route preparation", workspace)
 
     def test_sandbox_patch_contains_required_boundaries(self):
         patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-task-routing.patch").read_text()
+        control_plane_patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-control-plane-resources.patch").read_text()
         ownership_patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-user-workspace.patch").read_text()
         for evidence in [
             "Missing host-owned Pi task route",
@@ -233,6 +281,17 @@ class HarnessStaticTests(unittest.TestCase):
             'dest.stdin.on("error", reject)',
         ]:
             self.assertIn(evidence, patch)
+        for evidence in [
+            "controlPlaneResources",
+            "controlPlanePackageRoot",
+            "Control-plane routes must expose the pinned Pi docs and examples",
+            "validateControlPlanePackageRoot",
+            "CONTROL_PLANE_PI_PACKAGE_VERSION",
+            "metadata.uid",
+            "contains an escaping symlink",
+            "readonly=true,bind-propagation=rprivate",
+        ]:
+            self.assertIn(evidence, control_plane_patch)
         self.assertIn("candidatePrefix", patch)
         self.assertIn("/^[1-9][0-9]*$/.test(candidateNumber)", patch)
         self.assertNotIn("safe.directory=*", patch)
@@ -262,9 +321,13 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("pi-subagents-0.35.1-hidden-success.patch", installer)
         self.assertIn("pi-subagents-0.35.1-hidden-success-extension.patch", installer)
         self.assertIn("pi-subagents-0.35.1-worker-read-only-fanout.patch", installer)
+        self.assertIn("pi-subagents-0.35.1-host-command-fanout.patch", installer)
         self.assertIn("pi-subagents-0.35.1-failure-events.patch", installer)
+        self.assertIn("pi-subagents-0.35.1-observability-foreground-start-types.patch", installer)
+        self.assertIn("pi-subagents-0.35.1-observability-foreground-start-executor.patch", installer)
         self.assertIn("pi-sandbox-0.2.0-user-workspace.patch", installer)
         self.assertIn("pi-sandbox-0.2.0-runtime-contract.patch", installer)
+        self.assertIn("pi-sandbox-0.2.0-control-plane-resources.patch", installer)
         install_script = (ROOT / "install.sh").read_text()
         self.assertIn("pi-runtime.py", install_script)
         self.assertIn("pi-sandbox-gc.py", install_script)
@@ -328,13 +391,14 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('local source=$1 target=$2 rollback_dir backup=""', installer)
         self.assertIn('rollback_dir=${3:-$(dirname "$target")}', installer)
         self.assertIn("pi-sandbox-gc", installer)
-        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,subagent,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea", "--session", "--name"]:
+        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,host_command,subagent,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea", "--session", "--name"]:
             self.assertIn(flag, launcher)
         self.assertNotIn("subagent_wait", launcher)
-        self.assertEqual(launcher.count("-e \"$"), 5)
+        self.assertEqual(launcher.count("-e \"$"), 6)
         self.assertIn('fast_mode_extension="$agent_dir/extensions/fast-mode/index.ts"', launcher)
         self.assertIn('root_session_extension="$agent_dir/extensions/root-session/index.ts"', launcher)
         self.assertIn('auto_continue_extension="$agent_dir/extensions/auto-continue/index.ts"', launcher)
+        self.assertIn('host_command_extension="$agent_dir/extensions/host-command/index.ts"', launcher)
         root_extension = (ROOT / "pi/extensions/root-session/index.ts").read_text()
         self.assertIn('register-existing', root_extension)
         self.assertIn('PI_SUBAGENT_CHILD', root_extension)
@@ -367,7 +431,7 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertNotIn("sendUserMessage", channel_extension)
         self.assertNotIn("registerCommand", channel_extension)
         reviewer = (ROOT / "bin/pi-review-agent").read_text()
-        self.assertIn("--tools read,grep,find,ls,submit_review_receipt", reviewer)
+        self.assertIn("--tools read,grep,find,ls,host_command,submit_review_receipt", reviewer)
         self.assertIn("--no-extensions", reviewer)
         self.assertNotIn("bash,", reviewer)
         receipt_extension = (ROOT / "pi/extensions/review-receipt/index.ts").read_text()
@@ -550,7 +614,7 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
 
     def test_global_agents_hash_and_removed_legacy_orchestrators(self):
         agents = (ROOT / "agent/AGENTS.md").read_bytes()
-        self.assertEqual(hashlib.sha256(agents).hexdigest(), "c9fc282049e8a7f9f88d07fad9f73a979531b02edd3abc7b7966c27dbd1cac5b")
+        self.assertEqual(hashlib.sha256(agents).hexdigest(), "5f1209abcdc5f44c571bb7fd18c63be99565f986bea7fbb30a7bd4f45408d8e7")
         policy = agents.decode()
         for heading in ["### FAST", "### RIP", "### BUILD", "### MAJOR", "### OFF", "### LIGHT", "### DEEP"]:
             self.assertIn(heading, policy)
@@ -573,7 +637,7 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
         self.assertIn("function acceptanceEventFields", failure_events)
         self.assertIn("acceptanceFailedChecks", failure_events)
         self.assertIn('process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim() === "worker"', fanout)
-        self.assertIn('WORKER_READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "contact_supervisor"]', fanout)
+        self.assertIn('WORKER_READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "contact_supervisor", "host_command"]', fanout)
         self.assertIn('async: true', fanout)
         self.assertIn('acceptance: WORKER_READ_ONLY_ACCEPTANCE', fanout)
         for path in agent_dir.glob("*.md"):

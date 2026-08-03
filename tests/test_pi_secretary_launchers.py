@@ -65,6 +65,7 @@ class SecretaryLauncherTests(unittest.TestCase):
                 agent_dir / "extensions/secretary-subagents/index.ts",
                 agent_dir / "extensions/secretary-investigator-git/index.ts",
                 agent_dir / "extensions/fast-mode/index.ts",
+                agent_dir / "extensions/host-command/index.ts",
                 agent_dir / "skills/project-status/SKILL.md",
             ]:
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,10 +94,10 @@ pathlib.Path(os.environ['FAKE_PI_OUTPUT']).write_text(json.dumps({
             self.assertEqual(invocation["cwd"], str(repos[0]))
             args = invocation["args"]
             self.assertEqual(args[args.index("--tools") + 1],
-                             "read,grep,find,ls,subagent,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea,secretary_create_workstream,secretary_open_workstream,secretary_list_workstreams,secretary_list_attention,secretary_acknowledge_attention,secretary_create_reviewer,secretary_land_reviewed,secretary_create_integration,secretary_cleanup_workstream")
+                             "read,grep,find,ls,host_command,subagent,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea,secretary_create_workstream,secretary_open_workstream,secretary_list_workstreams,secretary_list_attention,secretary_acknowledge_attention,secretary_create_reviewer,secretary_land_reviewed,secretary_create_integration,secretary_cleanup_workstream")
             for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--session"]:
                 self.assertIn(flag, args)
-            self.assertEqual(args.count("-e"), 5)
+            self.assertEqual(args.count("-e"), 6)
             self.assertNotIn("--session-id", args)
             session_file = Path(args[args.index("--session") + 1])
             self.assertTrue(session_file.is_file())

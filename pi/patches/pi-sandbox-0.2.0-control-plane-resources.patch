@@ -1,0 +1,227 @@
+--- a/index.ts	2026-08-03 02:04:05.500554123 +0000
++++ b/index.ts	2026-08-03 02:04:05.502554294 +0000
+@@ -30,7 +30,7 @@
+ import { createHash, randomBytes } from "node:crypto";
+ import { createWriteStream, existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+ import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+-import { tmpdir } from "node:os";
++import { homedir, tmpdir } from "node:os";
+ import path from "node:path";
+ import { pathToFileURL } from "node:url";
+ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+@@ -74,6 +74,8 @@
+ type CheckpointFrequency = "turn" | "agent" | "settled";
+ type LifecycleMode = "remove" | "stopped" | "running";
+ type WorkspaceMode = "trusted-live" | "isolated";
++const CONTROL_PLANE_PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
++const CONTROL_PLANE_PI_PACKAGE_VERSION = "0.83.0";
+ 
+ interface TaskRoute {
+ 	version: 2;
+@@ -105,6 +107,8 @@
+ 	capabilityHash: string;
+ 	createdAt: number;
+ 	controlPlane?: boolean;
++	controlPlanePackageRoot?: string;
++	controlPlaneResources?: string[];
+ }
+ 
+ interface GitRefState {
+@@ -346,6 +350,72 @@
+ 	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+ }
+ 
++function validateControlPlanePackageRoot(source: string): string {
++	const metadata = lstatSync(source);
++	const canonical = realpathSync(source);
++	const expectedCoreRoot = path.resolve(homedir(), ".local/share/pi/core");
++	if (
++		canonical !== source ||
++		path.basename(canonical) !== "pi-coding-agent" ||
++		path.basename(path.dirname(canonical)) !== "@earendil-works" ||
++		path.basename(path.dirname(path.dirname(canonical))) !== "node_modules" ||
++		path.dirname(path.dirname(path.dirname(canonical))) !== expectedCoreRoot ||
++		!metadata.isDirectory() ||
++		metadata.isSymbolicLink() ||
++		(metadata.uid !== (process.getuid?.() ?? metadata.uid) && metadata.uid !== 0) ||
++		(metadata.mode & 0o022) !== 0
++	) {
++		throw new Error(`Pi task control-plane package root is unsafe: ${source}`);
++	}
++	const packageJsonPath = path.join(canonical, "package.json");
++	const packageJsonMetadata = lstatSync(packageJsonPath);
++	if (
++		realpathSync(packageJsonPath) !== packageJsonPath ||
++		!packageJsonMetadata.isFile() ||
++		packageJsonMetadata.isSymbolicLink() ||
++		(packageJsonMetadata.uid !== (process.getuid?.() ?? packageJsonMetadata.uid) && packageJsonMetadata.uid !== 0) ||
++		(packageJsonMetadata.mode & 0o022) !== 0
++	) {
++		throw new Error(`Pi task control-plane package metadata is unsafe: ${packageJsonPath}`);
++	}
++	let packageValue: unknown;
++	try {
++		packageValue = JSON.parse(readFileSync(packageJsonPath, "utf8"));
++	} catch {
++		throw new Error(`Pi task control-plane package metadata is invalid: ${packageJsonPath}`);
++	}
++	if (
++		!packageValue || typeof packageValue !== "object" || Array.isArray(packageValue) ||
++		(packageValue as { name?: unknown }).name !== CONTROL_PLANE_PI_PACKAGE_NAME ||
++		(packageValue as { version?: unknown }).version !== CONTROL_PLANE_PI_PACKAGE_VERSION
++	) {
++		throw new Error(`Pi task control-plane package identity is not pinned: ${packageJsonPath}`);
++	}
++	return canonical;
++}
++
++function validateControlPlaneResource(source: string, expectedPackageRoot: string): string {
++	const metadata = lstatSync(source);
++	const canonical = realpathSync(source);
++	if (
++		canonical !== source ||
++		path.dirname(canonical) !== expectedPackageRoot ||
++		!metadata.isDirectory() ||
++		metadata.isSymbolicLink() ||
++		(metadata.uid !== (process.getuid?.() ?? metadata.uid) && metadata.uid !== 0) ||
++		(metadata.mode & 0o022) !== 0
++	) {
++		throw new Error(`Pi task control-plane resource is unsafe: ${source}`);
++	}
++	const links = spawnSync("find", [source, "-type", "l", "-print"], { encoding: "utf8" });
++	if (links.status !== 0 || typeof links.stdout !== "string") throw new Error(`Could not inspect Pi task control-plane resource: ${source}`);
++	for (const link of links.stdout.split("\n").filter(Boolean)) {
++		const target = realpathSync(link);
++		if (!containedPath(canonical, target)) throw new Error(`Pi task control-plane resource contains an escaping symlink: ${link}`);
++	}
++	return canonical;
++}
++
+ function processStartTicks(pid: number): string {
+ 	try {
+ 		return `linux:${readFileSync(`/proc/${pid}/stat`, "utf8").split(/\s+/)[21] ?? "unavailable"}`;
+@@ -433,6 +503,51 @@
+ 	for (const key of ["repository", "worktree", "gitCommonDir", "gitDir", "worktreeRoot", "hostContext", "gitConfig"] as const) {
+ 		if (!path.isAbsolute(route[key]!)) throw new Error(`Pi task route ${key} must be absolute`);
+ 	}
++	if (route.controlPlane !== undefined && typeof route.controlPlane !== "boolean") throw new Error("Malformed Pi task control-plane flag");
++	if (route.controlPlanePackageRoot !== undefined && (typeof route.controlPlanePackageRoot !== "string" || !path.isAbsolute(route.controlPlanePackageRoot))) {
++		throw new Error("Malformed Pi task control-plane package root");
++	}
++	if (route.controlPlaneResources !== undefined && !Array.isArray(route.controlPlaneResources)) {
++		throw new Error("Malformed Pi task control-plane resources");
++	}
++	const controlPlaneResources = route.controlPlaneResources ?? [];
++	if (controlPlaneResources.some((value) => typeof value !== "string" || !value)) {
++		throw new Error("Malformed Pi task control-plane resources");
++	}
++	let packageRoot: string | undefined;
++	if (route.controlPlane !== true) {
++		if (controlPlaneResources.length > 0 || route.controlPlanePackageRoot !== undefined) {
++			throw new Error("Control-plane resources require a trusted-live control-plane route");
++		}
++	} else {
++		if (route.mode !== "trusted-live" || controlPlaneResources.length !== 2 || !route.controlPlanePackageRoot) {
++			throw new Error("Control-plane routes must expose the pinned Pi docs and examples");
++		}
++		packageRoot = validateControlPlanePackageRoot(route.controlPlanePackageRoot);
++		if (
++			new Set(controlPlaneResources.map((resource) => path.basename(resource))).size !== 2 ||
++			!controlPlaneResources.every((resource) =>
++				["docs", "examples"].includes(path.basename(resource)) &&
++				path.basename(path.dirname(resource)) === "pi-coding-agent" &&
++				path.basename(path.dirname(path.dirname(resource))) === "@earendil-works" &&
++				path.dirname(resource) === packageRoot,
++			)
++		) {
++			throw new Error("Control-plane routes must expose only the pinned Pi docs and examples");
++		}
++		const seenControlPlaneResources = new Set<string>();
++		for (const resourcePath of controlPlaneResources) {
++			if (!path.isAbsolute(resourcePath)) throw new Error("Pi task control-plane resources must be absolute");
++			const canonical = validateControlPlaneResource(resourcePath, packageRoot);
++			if (seenControlPlaneResources.has(canonical)) throw new Error(`Pi task control-plane resource is duplicated: ${resourcePath}`);
++			if ([route.worktree, route.gitCommonDir, route.gitDir, route.worktreeRoot].some((protectedPath) =>
++				containedPath(protectedPath!, canonical) || containedPath(canonical, protectedPath!),
++			)) {
++				throw new Error(`Pi task control-plane resource overlaps a task path: ${resourcePath}`);
++			}
++			seenControlPlaneResources.add(canonical);
++		}
++	}
+ 	for (const key of ["hostContext", "gitConfig"] as const) {
+ 		const resourcePath = route[key]!;
+ 		const resource = lstatSync(resourcePath);
+@@ -1421,6 +1536,8 @@
+ 			runtimeMode: this.runtimeInfo?.mode ?? "pending",
+ 			environmentKey: this.runtimeInfo?.environmentKey ?? "pending",
+ 			packageCache: this.packageCacheHostRoot(),
++			controlPlanePackageRoot: route.controlPlanePackageRoot ?? null,
++			controlPlaneResources: this.controlPlaneResourceSources().sort(),
+ 			mode: route.mode,
+ 			worktree: route.worktree,
+ 			gitCommonDir: route.gitCommonDir,
+@@ -1522,6 +1639,19 @@
+ 		]);
+ 	}
+ 
++	private controlPlaneResourceSources(): string[] {
++		const route = this.getRoute();
++		if (route.controlPlane !== true || route.mode !== "trusted-live" || !route.controlPlanePackageRoot) return [];
++		const packageRoot = validateControlPlanePackageRoot(route.controlPlanePackageRoot);
++		return uniq((route.controlPlaneResources ?? []).map((source) => validateControlPlaneResource(source, packageRoot)));
++	}
++
++	private controlPlaneResourceArgs(): string[] {
++		return this.controlPlaneResourceSources().flatMap((source) => [
++			"--mount", `type=bind,src=${source},dst=${source},readonly=true,bind-propagation=rprivate`,
++		]);
++	}
++
+ 	private async inspectContainer(name: string): Promise<ContainerInspectData> {
+ 		const inspected = await this.runtimeExecChecked(["inspect", name], { timeoutMs: 30_000, maxCaptureBytes: 2 * 1024 * 1024 });
+ 		if (inspected.stdoutTruncated) throw new Error(`Container metadata is too large to validate: ${name}`);
+@@ -1559,6 +1689,10 @@
+ 		const bindMounts = mounts.filter((mount) => (mount.type ?? mount.Type) === "bind");
+ 		const expectedBinds = this.trustedBindSources().map((source) => path.resolve(source));
+ 		const expectedSkillBinds = this.skillBindSources().map((source) => path.resolve(source));
++		const expectedControlPlaneBinds = this.controlPlaneResourceSources().map((source) => path.resolve(source));
++		if (expectedControlPlaneBinds.some((source) => expectedBinds.includes(source) || expectedSkillBinds.includes(source))) {
++			throw new Error(`Existing sandbox container ${name} has overlapping control-plane resource binds`);
++		}
+ 		const contextSource = path.resolve(route.hostContext);
+ 		const gitConfigSource = path.resolve(route.gitConfig);
+ 		for (const mount of bindMounts) {
+@@ -1571,11 +1705,13 @@
+ 				if (destination !== "/run/pi/GIT_CONFIG_GLOBAL" || mount.RW !== false) throw new Error(`Existing sandbox container ${name} has an unsafe Git-identity mount`);
+ 			} else if (expectedSkillBinds.includes(source)) {
+ 				if (destination !== source || mount.RW !== false) throw new Error(`Existing sandbox container ${name} has an unsafe skill-resource mount ${source}`);
++			} else if (expectedControlPlaneBinds.includes(source)) {
++				if (destination !== source || mount.RW !== false) throw new Error(`Existing sandbox container ${name} has an unsafe control-plane resource mount ${source}`);
+ 			} else if (!expectedBinds.includes(source) || destination !== source || mount.RW !== true) {
+ 				throw new Error(`Existing sandbox container ${name} exposes unexpected host bind ${source} -> ${destination}`);
+ 			}
+ 		}
+-		if (bindMounts.length !== expectedBinds.length + expectedSkillBinds.length + 2) throw new Error(`Existing sandbox container ${name} has an unexpected bind-mount count`);
++		if (bindMounts.length !== expectedBinds.length + expectedSkillBinds.length + expectedControlPlaneBinds.length + 2) throw new Error(`Existing sandbox container ${name} has an unexpected bind-mount count`);
+ 		if (bindMounts.filter((mount) => path.resolve(String(mount.source ?? mount.Source ?? "")) === contextSource).length !== 1) throw new Error(`Existing sandbox container ${name} must have exactly one read-only host context`);
+ 		if (bindMounts.filter((mount) => path.resolve(String(mount.source ?? mount.Source ?? "")) === gitConfigSource).length !== 1) throw new Error(`Existing sandbox container ${name} must have exactly one read-only Git identity`);
+ 		const allowedTmpfsMount = (mount: ContainerInspectMount) => (mount.type ?? mount.Type) === "tmpfs" && (mount.destination ?? mount.Destination) === "/tmp/pi-home";
+@@ -1586,6 +1722,9 @@
+ 		for (const source of expectedSkillBinds) {
+ 			if (!bindMounts.some((mount) => path.resolve(String(mount.source ?? mount.Source ?? "")) === source)) throw new Error(`Existing sandbox container ${name} is missing skill-resource bind ${source}`);
+ 		}
++		for (const source of expectedControlPlaneBinds) {
++			if (!bindMounts.some((mount) => path.resolve(String(mount.source ?? mount.Source ?? "")) === source)) throw new Error(`Existing sandbox container ${name} is missing control-plane resource bind ${source}`);
++		}
+ 		const labels = (appleConfig?.labels ?? dockerConfig?.Labels ?? item?.Labels ?? {}) as Record<string, string>;
+ 		if (labels["pi.container-sandbox.managed"] !== "true") throw new Error(`Existing container ${name} is not owned by the Pi task harness`);
+ 		for (const [key, expected] of Object.entries(this.containerLabels(state))) {
+@@ -1857,6 +1996,7 @@
+ 				: []),
+ 			...this.trustedBindArgs(),
+ 			...this.skillBindArgs(),
++			...this.controlPlaneResourceArgs(),
+ 			"--mount", `type=bind,src=${route.hostContext},dst=/run/pi/HOST_CONTEXT.md,readonly=true,bind-propagation=rprivate`,
+ 			"--mount", `type=bind,src=${route.gitConfig},dst=/run/pi/GIT_CONFIG_GLOBAL,readonly=true,bind-propagation=rprivate`,
+ 			"--mount", `type=volume,src=${this.packageCacheHostRoot()},dst=${PACKAGE_CACHE_ROOT}`,

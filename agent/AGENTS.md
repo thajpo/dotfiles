@@ -77,6 +77,11 @@ Do not request approval for routine project-local shell or Git operations.
 Remote publication, deployment, production mutation, and activation of new
 host-executing Pi control-plane code require explicit user intent.
 
+If a sandboxed model genuinely needs a host-only operation, use `host_command`
+with the exact command, a concise reason, and a description of the expected
+result. The user must approve each request; never claim that it ran before the
+result is returned, and do not use it for routine project-local work.
+
 ## Work modes
 
 Every task uses one current work mode:

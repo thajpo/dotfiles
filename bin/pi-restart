@@ -13,6 +13,17 @@ pi_start="$HOME/.local/bin/pi-start"
 [[ -x "$pi_start" ]] || pi_start="$self_dir/pi-start"
 [[ -x "$pi_start" ]] || { printf 'pi-restart: pi-start is missing\n' >&2; exit 1; }
 
+mobile_layout=0
+if (( $# == 1 )); then
+  case "$1" in
+    --mobile|-mobile) mobile_layout=1 ;;
+    *) printf 'usage: pi-restart [--mobile|-mobile]\n' >&2; exit 2 ;;
+  esac
+elif (( $# != 0 )); then
+  printf 'usage: pi-restart [--mobile|-mobile]\n' >&2
+  exit 2
+fi
+
 # Killing the server also kills the pane containing this command. Preserve the
 # attached terminal and ignore the server's hangup long enough to boot a new
 # server. A detached or non-interactive tmux invocation is refused rather than
@@ -27,7 +38,11 @@ if [[ -n "${TMUX:-}" ]]; then
   trap '' HUP
 fi
 
-printf 'pi-restart: stopping all tmux sessions and starting pi-start all\n' >&2
+if (( mobile_layout )); then
+  printf 'pi-restart: stopping all tmux sessions and starting pi-start all --mobile\n' >&2
+else
+  printf 'pi-restart: stopping all tmux sessions and starting pi-start all\n' >&2
+fi
 # Tell the freshly started tmux server to skip tmux-resurrect/continuum restore.
 # Pi conversations still resume through their stable session IDs; restoring the
 # old pane layout as well would race pi-start and duplicate managed panes.
@@ -37,6 +52,8 @@ unset TMUX
 trap - HUP
 
 if [[ -n "$client_tty" ]]; then
+  if (( mobile_layout )); then exec "$pi_start" all --mobile <"$client_tty" >"$client_tty" 2>&1; fi
   exec "$pi_start" all <"$client_tty" >"$client_tty" 2>&1
 fi
+if (( mobile_layout )); then exec "$pi_start" all --mobile; fi
 exec "$pi_start" all

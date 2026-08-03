@@ -78,6 +78,15 @@ apply_verified_patch \
   "$patch_dir/pi-subagents-0.35.1-worker-read-only-fanout.patch"
 
 apply_verified_patch \
+  pi-subagents-host-command-fanout \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/extension/fanout-child.ts" \
+  0.35.1 \
+  bce5d9ee261a86fba34b9e421be745a5fca8a91d6a755c3c44d790e3c3df9727 \
+  8c28be64f679220d9ee1cfc2d44f67230b4b2fa50b3cefd338f8d7c0fab609aa \
+  "$patch_dir/pi-subagents-0.35.1-host-command-fanout.patch"
+
+apply_verified_patch \
   pi-subagents-no-host-verify \
   "$agent_dir/npm/node_modules/pi-subagents" \
   "$agent_dir/npm/node_modules/pi-subagents/src/runs/shared/acceptance.ts" \
@@ -122,7 +131,7 @@ apply_verified_patch \
   bbdc07d40727b6799e56b4236cf10354a1e62b4aff40db1c47e3b56b8021dcbd \
   f382fcf5bdc1bbbc2730ad5c1d37fb4d82b9655a8fc2ccbbb3895e33eb84c37f \
   "$patch_dir/pi-subagents-0.35.1-task-cwd.patch" \
-  f6365f211cf56c4201454678ef96fe99ac4c55cd058d098d0b60285e4db3c800
+  f6365f211cf56c4201454678ef96fe99ac4c55cd058d098d0b60285e4db3c800,e43cb1832c920b01e4baa50958144e5a216b44e4049cd27161b37831d59b0c4d
 
 apply_verified_patch \
   pi-subagents-skill \
@@ -150,7 +159,7 @@ apply_verified_patch \
   fcc5244d55fb2853175b52f0befdb30debb57048b56c7f5fda5614f7450109f4 \
   2ee8c82c8ff5de72c514de0fc3637d4fcb4b176e84f5c91a81f8fd2ab91da2b3 \
   "$patch_dir/pi-sandbox-0.2.0-task-routing.patch" \
-  73149dce5452eb243f0644a788988c714ad06e46a48efcc02498c452836a4217,2e168773fc5bc6140ebc2b83dd7e97a6984e01230fc64c995c489ba0110d2cc2
+  73149dce5452eb243f0644a788988c714ad06e46a48efcc02498c452836a4217,2e168773fc5bc6140ebc2b83dd7e97a6984e01230fc64c995c489ba0110d2cc2,ac17d426b3f975cce31b2b0cf3c9b026c21b2cad38fac48ff99efcfbf1dca032
 
 apply_verified_patch \
   pi-sandbox-user-workspace \
@@ -160,7 +169,7 @@ apply_verified_patch \
   2ee8c82c8ff5de72c514de0fc3637d4fcb4b176e84f5c91a81f8fd2ab91da2b3 \
   73149dce5452eb243f0644a788988c714ad06e46a48efcc02498c452836a4217 \
   "$patch_dir/pi-sandbox-0.2.0-user-workspace.patch" \
-  2e168773fc5bc6140ebc2b83dd7e97a6984e01230fc64c995c489ba0110d2cc2
+  2e168773fc5bc6140ebc2b83dd7e97a6984e01230fc64c995c489ba0110d2cc2,ac17d426b3f975cce31b2b0cf3c9b026c21b2cad38fac48ff99efcfbf1dca032
 
 apply_verified_patch \
   pi-sandbox-runtime-contract \
@@ -169,7 +178,17 @@ apply_verified_patch \
   0.2.0 \
   73149dce5452eb243f0644a788988c714ad06e46a48efcc02498c452836a4217 \
   2e168773fc5bc6140ebc2b83dd7e97a6984e01230fc64c995c489ba0110d2cc2 \
-  "$patch_dir/pi-sandbox-0.2.0-runtime-contract.patch"
+  "$patch_dir/pi-sandbox-0.2.0-runtime-contract.patch" \
+  ac17d426b3f975cce31b2b0cf3c9b026c21b2cad38fac48ff99efcfbf1dca032
+
+apply_verified_patch \
+  pi-sandbox-control-plane-resources \
+  "$agent_dir/npm/node_modules/@kjrjay/pi-sandbox" \
+  "$agent_dir/npm/node_modules/@kjrjay/pi-sandbox/index.ts" \
+  0.2.0 \
+  2e168773fc5bc6140ebc2b83dd7e97a6984e01230fc64c995c489ba0110d2cc2 \
+  ac17d426b3f975cce31b2b0cf3c9b026c21b2cad38fac48ff99efcfbf1dca032 \
+  "$patch_dir/pi-sandbox-0.2.0-control-plane-resources.patch"
 
 apply_verified_patch \
   pi-subagents-model-policy \
@@ -196,13 +215,14 @@ apply_verified_patch \
   0.35.1 \
   8c817542e4b249a016a9e7554b00bb08e8e3d7e9d8f0766413919fb1ef759175 \
   ca2a7fe28ec231d93a6a1662382c4b44d061c6124ff178df526a2093835f5407 \
-  "$patch_dir/pi-subagents-0.35.1-unbounded-parallel.patch"
+  "$patch_dir/pi-subagents-0.35.1-unbounded-parallel.patch" \
+  996af3c6ef8538bbbb93ffbf6d368011735440a52e0336d3522286af8897e784
 
 verify_model_policy_file() {
-  local relative=$1 expected=$2 path="$agent_dir/npm/node_modules/pi-subagents/$1" actual
+  local relative=$1 expected=$2 compatible=${3:-} path="$agent_dir/npm/node_modules/pi-subagents/$1" actual
   [[ -f $path ]] || { printf 'pi-subagents-model-policy: source missing: %s\n' "$path" >&2; exit 1; }
   actual=$(hash_file "$path")
-  [[ $actual == "$expected" ]] || {
+  [[ $actual == "$expected" || "$actual" == "$compatible" ]] || {
     printf 'pi-subagents-model-policy: incomplete patch at %s: %s\n' "$relative" "$actual" >&2
     exit 1
   }
@@ -212,6 +232,26 @@ verify_model_policy_file src/runs/background/async-resume.ts df29d4b27aedd92d563
 verify_model_policy_file src/runs/background/subagent-runner.ts ece4fc0f43896a0d8193c68d73d10dc217c9d8e77154b57d2dacea1945a6fc87
 verify_model_policy_file src/runs/foreground/chain-execution.ts 0565a3a72250b73ca17a71e0f500f48f7b2bedc2cb14fbed2f2fe1d9b28075c6
 verify_model_policy_file src/runs/foreground/execution.ts c409ea5f40a0cd2bf1954c77ef8e531f2fe160cd24c4e4fcc8c7610ab59d513e
-verify_model_policy_file src/runs/foreground/subagent-executor.ts f6365f211cf56c4201454678ef96fe99ac4c55cd058d098d0b60285e4db3c800
+verify_model_policy_file src/runs/foreground/subagent-executor.ts f6365f211cf56c4201454678ef96fe99ac4c55cd058d098d0b60285e4db3c800 e43cb1832c920b01e4baa50958144e5a216b44e4049cd27161b37831d59b0c4d
 verify_model_policy_file src/runs/shared/model-fallback.ts 4eea20bba866f28359b59cf143476800771e4f5a27cbe0db5249dafa91f92ebf
-verify_model_policy_file src/shared/types.ts ca2a7fe28ec231d93a6a1662382c4b44d061c6124ff178df526a2093835f5407
+verify_model_policy_file src/shared/types.ts ca2a7fe28ec231d93a6a1662382c4b44d061c6124ff178df526a2093835f5407 996af3c6ef8538bbbb93ffbf6d368011735440a52e0336d3522286af8897e784
+
+apply_verified_patch \
+  pi-subagents-observability-foreground-start-types \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/shared/types.ts" \
+  0.35.1 \
+  ca2a7fe28ec231d93a6a1662382c4b44d061c6124ff178df526a2093835f5407 \
+  996af3c6ef8538bbbb93ffbf6d368011735440a52e0336d3522286af8897e784 \
+  "$patch_dir/pi-subagents-0.35.1-observability-foreground-start-types.patch" \
+  996af3c6ef8538bbbb93ffbf6d368011735440a52e0336d3522286af8897e784
+
+apply_verified_patch \
+  pi-subagents-observability-foreground-start-executor \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/runs/foreground/subagent-executor.ts" \
+  0.35.1 \
+  f6365f211cf56c4201454678ef96fe99ac4c55cd058d098d0b60285e4db3c800 \
+  e43cb1832c920b01e4baa50958144e5a216b44e4049cd27161b37831d59b0c4d \
+  "$patch_dir/pi-subagents-0.35.1-observability-foreground-start-executor.patch" \
+  e43cb1832c920b01e4baa50958144e5a216b44e4049cd27161b37831d59b0c4d

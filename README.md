@@ -172,8 +172,10 @@ Core loop:
 - Use Luna as the persistent Pi parent and decision authority.
 - Select FAST, RIP, BUILD, or MAJOR from uncertainty and consequence; select
   OFF, LIGHT, or DEEP learning independently.
-- Delegate bounded fresh-context scouts and workers through `pi-subagents`; fork
-  only when the complete parent history is explicitly required.
+- Delegate fresh-context scouts and workers through `pi-subagents`; the brief and
+  contract are bounded for anti-slop, but spawned models have no automatic turn,
+  elapsed-time, token, or tool-call limit. Fork only when the complete parent
+  history is explicitly required.
 - Keep current task state in Pi's session-scoped task packet and keep detailed
   artifacts outside repositories.
 - Let the host policy select trusted-live for authored repositories and isolated
@@ -208,7 +210,7 @@ threshold is `-55 dBFS`. Override calibration with
 - Session persistence (survives reboot)
 - Catppuccin Mocha theme
 - Status bar: session | windows | directory | git | app | time
-- `pidev` opens or attaches a repo-scoped session with Neovim on the left and Pi on the right
+- `pidev` opens or attaches a repo-scoped session with Neovim on the left and Pi on the right; `pidev --mobile` opens Pi in a full-width window without a split
 
 ### Neovim
 - LazyVim base config
@@ -224,10 +226,13 @@ threshold is `-55 dBFS`. Override calibration with
 - `pidev` is the managed Pi development launcher; it records the canonical project directory and uses a stable session store so tmux-resurrect can reopen the same conversation even after a temporary worktree disappears
 - In Pi, `Ctrl-g` enters conversation browse mode: use `j/k`, `Ctrl-u/d`, `gg/G`, `v`, and `y`; press `i`, `q`, or `Esc` to return to the pinned prompt
 - `/fast` enables OpenAI's priority service tier for the current session; use `/fast off` to disable it
-- `/goal <objective>` uses pi-goal for bounded same-session continuation; the default is ten automatic responses with a three-run no-progress guard
+- `/goal <objective>` uses pi-goal for same-session continuation until the task
+  completes, blocks on an external dependency, or the user stops it; no default
+  response-count, elapsed-time, or no-progress cutoff is imposed
+- `/observe` or `Ctrl+I` opens a read-only Task/Fleet/Messages Inspector for explicit task packets, child instructions, context summaries, status, results, and failures
 - Interactive subagent runs return control instead of blocking on `subagent_wait`; completion notifications and status/control actions remain available
-- `pisec` opens the default three secretary projects (`vla-lens`, `csv-agent`, `SleepyDreamyV3`) without restarting live panes; `pisec launch` is the explicit idle-pane repair path; secretaries may fan out to any useful number of existing read-only investigator agents without creating Git worktrees, while implementation still requires an explicit full workstream; with an odd active count `pisec` gives the first project its own window and puts the remaining projects into two side-by-side panes; use `pisec activate ALIAS ...` or `pisec swap OLD_ALIAS NEW_ALIAS` to change the active set
-- `pi-personal` maintains a separate session with at most two side-by-side panes per window for `mlre-transition`, the financial workbook (`investing/investment-os`), dotfiles, and an explicit `pi-host` session; additional roles get additional windows, and `Ctrl-a p` switches to it
+- `pisec` opens the default three secretary projects (`vla-lens`, `csv-agent`, `SleepyDreamyV3`) without restarting live panes; `pisec launch` is the explicit idle-pane repair path; secretaries may fan out to any useful number of existing read-only investigator agents without creating Git worktrees, while implementation still requires an explicit full workstream; with an odd active count `pisec` gives the first project its own window and puts the remaining projects into two side-by-side panes; use `pisec activate ALIAS ...` or `pisec swap OLD_ALIAS NEW_ALIAS` to change the active set; add `--mobile` for one full-width conversation per window
+- `pi-personal` maintains a separate session with at most two side-by-side panes per window for `mlre-transition`, the financial workbook (`investing/investment-os`), dotfiles, and an explicit `pi-host` session; additional roles get additional windows, and `Ctrl-a p` switches to it; `pi-personal --mobile` gives each role its own full-width window
 - Installs to `~/.pi/agent` without tracking credentials, sessions, or runtime state
 
 ### Tools installed
@@ -239,6 +244,7 @@ threshold is `-55 dBFS`. Override calibration with
 | Keys | Action |
 |------|--------|
 | `Ctrl-a h/j/k/l` | Navigate panes |
+| `Ctrl-a n/p` | Next/previous conversation window in mobile mode |
 | `Ctrl-a \|` | Split vertical |
 | `Ctrl-a _` | Split horizontal |
 | `Ctrl-a \` | Toggle last session |

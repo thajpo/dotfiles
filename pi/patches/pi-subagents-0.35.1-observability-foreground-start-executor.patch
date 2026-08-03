@@ -1,0 +1,37 @@
+--- a/src/runs/foreground/subagent-executor.ts	2026-08-03 02:43:22.395433897 +0000
++++ b/src/runs/foreground/subagent-executor.ts	2026-08-03 02:43:22.406434026 +0000
+@@ -107,6 +107,7 @@
+ 	SUBAGENT_CONTROL_EVENT,
+ 	SUBAGENT_CONTROL_INTERCOM_EVENT,
+ 	SUBAGENT_FOREGROUND_COMPLETE_EVENT,
++	SUBAGENT_FOREGROUND_STARTED_EVENT,
+ 	checkSubagentDepth,
+ 	resolveTopLevelParallelConcurrency,
+ 	resolveTopLevelParallelMaxTasks,
+@@ -3819,6 +3820,26 @@
+ 		if (foregroundControl) {
+ 			deps.state.foregroundControls.set(runId, foregroundControl);
+ 			deps.state.lastForegroundControlId = runId;
++			const startedTasks = effectiveParams.tasks
++				? effectiveParams.tasks.map((task) => ({ agent: task.agent, task: task.task }))
++				: effectiveParams.chain
++					? effectiveParams.chain.flatMap((step) => isParallelStep(step)
++						? step.parallel.map((task) => ({ agent: task.agent, task: task.task }))
++						: [{ agent: step.agent, task: step.task }])
++					: effectiveParams.agent
++						? [{ agent: effectiveParams.agent, task: effectiveParams.task }]
++						: [];
++			const startedAgents = startedTasks.map((task) => task.agent);
++			deps.pi.events.emit(SUBAGENT_FOREGROUND_STARTED_EVENT, {
++				id: runId,
++				runId,
++				source: "foreground",
++				mode: foregroundMode,
++				sessionId: deps.state.currentSessionId,
++				agents: startedAgents,
++				tasks: startedTasks,
++				startedAt: foregroundControl.startedAt,
++			});
+ 		}
+ 
+ 		const writeNestedForegroundEvent = (type: "subagent.nested.started" | "subagent.nested.completed", result?: AgentToolResult<Details>): void => {

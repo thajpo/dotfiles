@@ -25,6 +25,10 @@ POLICY_PATH = pathlib.Path("~/.config/pi/repository-policy.json")
 DEFAULT_WORKTREE_ROOT = pathlib.Path("~/.local/share/pi/worktrees")
 DEFAULT_IMAGE = "pi-tool-sandbox:node22-bookworm-20260728"
 DEFAULT_RUNTIME_HELPER = pathlib.Path("~/.local/share/pi/control/pi-runtime.py")
+DEFAULT_PI_CORE_EXECUTABLE = pathlib.Path("~/.local/share/pi/core/node_modules/.bin/pi")
+PI_CORE_PACKAGE_NAME = "@earendil-works/pi-coding-agent"
+PI_CORE_PACKAGE_VERSION = "0.83.0"
+CONTROL_PLANE_RESOURCE_NAMES = ("docs", "examples")
 ROUTE_ENV = "PI_TASK_ROUTE_FILE"
 CAPABILITY_ENV = "PI_TASK_ROUTE_CAPABILITY"
 ALLOWED_POLICY_KEYS = {
@@ -374,6 +378,60 @@ def resolve_pi(self_path: pathlib.Path, cwd: pathlib.Path) -> pathlib.Path:
     return candidate
 
 
+def pi_core_package_root(pi_executable: pathlib.Path | None) -> pathlib.Path | None:
+    if pi_executable is None:
+        pi_executable = DEFAULT_PI_CORE_EXECUTABLE.expanduser()
+    expected_core_root = DEFAULT_PI_CORE_EXECUTABLE.expanduser().parent.parent.parent.resolve(strict=False)
+    try:
+        executable = pi_executable.resolve(strict=True)
+    except OSError:
+        return None
+    for parent in (executable.parent, *executable.parents):
+        if (
+            parent.name != "pi-coding-agent" or
+            parent.parent.name != "@earendil-works" or
+            parent.parent.parent.name != "node_modules" or
+            parent.parent.parent.parent != expected_core_root
+        ):
+            continue
+        package_json = parent / "package.json"
+        try:
+            value = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        if value.get("name") != PI_CORE_PACKAGE_NAME or value.get("version") != PI_CORE_PACKAGE_VERSION:
+            return None
+        return parent
+    return None
+
+
+def control_plane_resources(control_plane: bool, pi_executable: pathlib.Path | None) -> list[str]:
+    if not control_plane:
+        return []
+    package_root = pi_core_package_root(pi_executable)
+    if package_root is None:
+        raise WorkspaceError("pinned Pi core package is unavailable; refusing control-plane resource access")
+    core_root = package_root.parent.parent.parent
+    resources: list[str] = []
+    for resource_name in CONTROL_PLANE_RESOURCE_NAMES:
+        candidate = package_root / resource_name
+        try:
+            info = candidate.lstat()
+            canonical = candidate.resolve(strict=True)
+        except OSError as error:
+            raise WorkspaceError(f"control-plane resource is missing: {candidate}") from error
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise WorkspaceError(f"control-plane resource must be a regular directory: {candidate}")
+        if info.st_uid not in {os.getuid(), 0}:
+            raise WorkspaceError(f"control-plane resource has an unexpected owner: {candidate}")
+        if info.st_mode & 0o022:
+            raise WorkspaceError(f"control-plane resource is group/other writable: {candidate}")
+        if not within(core_root, canonical) or canonical.parent != package_root:
+            raise WorkspaceError(f"control-plane resource escapes the Pi core: {candidate}")
+        resources.append(str(canonical))
+    return resources
+
+
 def first_line(command: list[str]) -> str:
     try:
         result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5, check=False)
@@ -450,6 +508,11 @@ def host_context(route: dict[str, Any], pi_executable: pathlib.Path | None) -> s
         if route["mode"] == "trusted-live"
         else "private clone; publication only through isolated checkpoint branch; no host source bind"
     )
+    resource_line = route.get("controlPlaneResources", [])
+    if resource_line:
+        resource_context = f"- Control-plane read-only resources: {', '.join(resource_line)}"
+    else:
+        resource_context = "- Control-plane read-only resources: none"
     return "\n".join(
         [
             "# Generated host context",
@@ -470,6 +533,7 @@ def host_context(route: dict[str, Any], pi_executable: pathlib.Path | None) -> s
             f"- Starting OID: {route['startingOid']}",
             f"- Container image: {route['image']}",
             f"- Container identity: {route['container']}",
+            resource_context,
             "- Loopback development ports: 8000-8010",
             "- Development resource aliases: none",
             f"- Known limitations: {limitations}",
@@ -522,6 +586,10 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
     git_config_path = task_resource_root / "GIT_CONFIG_GLOBAL"
     write_git_identity_config(git_config_path, identity_name, identity_email)
     git_config_path = git_config_path.resolve(strict=True)
+    control_plane_package_root = pi_core_package_root(pi_executable) if control_plane else None
+    if control_plane and control_plane_package_root is None:
+        raise WorkspaceError("pinned Pi core package is unavailable; refusing control-plane route preparation")
+    control_plane_resource_paths = control_plane_resources(control_plane, pi_executable)
     route: dict[str, Any] = {
         "version": 2,
         "task": session,
@@ -551,11 +619,14 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
         "policyHash": policy.get("policyHash", "invalid"),
         "policyValid": bool(policy.get("policyValid")),
         "controlPlane": control_plane,
+        "controlPlaneResources": control_plane_resource_paths,
         "parentOwned": True,
         "readOnly": read_only,
         "capabilityHash": hashlib.sha256(capability.encode()).hexdigest(),
         "createdAt": int(time.time()),
     }
+    if control_plane_package_root:
+        route["controlPlanePackageRoot"] = str(control_plane_package_root)
     context = host_context(route, pi_executable)
     atomic_write(machine_context_path, context, 0o600)
     atomic_write(context_path, context, 0o600)
@@ -579,6 +650,8 @@ def prepare(cwd: pathlib.Path, owner_pid: int, pi_executable: pathlib.Path | Non
         "container": container,
         "worktreeRoot": policy["worktreeRoot"],
         "controlPlane": control_plane,
+        "controlPlanePackageRoot": str(control_plane_package_root) if control_plane_package_root else None,
+        "controlPlaneResources": control_plane_resource_paths,
         "policyValid": bool(policy.get("policyValid")),
         "readOnly": read_only,
     }

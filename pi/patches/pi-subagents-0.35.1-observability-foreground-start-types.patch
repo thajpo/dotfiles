@@ -1,0 +1,10 @@
+--- a/src/shared/types.ts	2026-08-03 02:43:22.394433886 +0000
++++ b/src/shared/types.ts	2026-08-03 02:43:22.406434026 +0000
+@@ -1076,6 +1076,7 @@
+ export const SUBAGENT_ASYNC_STARTED_EVENT = "subagent:async-started";
+ export const SUBAGENT_ASYNC_COMPLETE_EVENT = "subagent:async-complete";
+ export const SUBAGENT_FOREGROUND_COMPLETE_EVENT = "subagent:foreground-complete";
++export const SUBAGENT_FOREGROUND_STARTED_EVENT = "subagent:foreground-started";
+ export const SUBAGENT_CONTROL_EVENT = "subagent:control-event";
+ export const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
+ export const SUBAGENT_STEERING_NOTICE_EVENT = "subagent:steering-notice";

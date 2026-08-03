@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Open or attach a project-scoped tmux workspace: Neovim left, Pi right.
-# A project is the Git common directory; each canonical worktree gets one
-# stable named window and one stable Pi conversation.
+# Open or attach a project-scoped tmux workspace: Neovim left, Pi right by
+# default, or one full-width Pi window with --mobile/-mobile. A project is the
+# Git common directory; each canonical worktree gets one stable named window
+# and one stable Pi conversation.
 set -euo pipefail
 
 self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -13,6 +14,9 @@ if [[ ${PI_SUBAGENT_CHILD:-0} == 1 ]]; then
   printf 'pidev: refusing ordinary invocation from a Pi subagent\n' >&2
   exit 2
 fi
+
+mobile_layout=0
+mobile_flag_seen=0
 
 # This is the only process-resurrection entry point. Keep pidev as its parent
 # so tmux-resurrect can save the exact --session-id command line.
@@ -28,6 +32,11 @@ if [[ ${1:-} == --launch ]]; then
   filtered_args=()
   for ((i=0; i<${#launch_args[@]}; i++)); do
     case ${launch_args[i]} in
+      --mobile|-mobile)
+        (( mobile_flag_seen == 0 )) || exit 2
+        mobile_flag_seen=1
+        mobile_layout=1
+        ;;
       --review-project-id) (( i + 1 < ${#launch_args[@]} )) || exit 2; review_project=${launch_args[i+1]}; i=$((i+1)) ;;
       --review-request-id) (( i + 1 < ${#launch_args[@]} )) || exit 2; review_request=${launch_args[i+1]}; i=$((i+1)) ;;
       --cwd)
@@ -62,6 +71,27 @@ if [[ ${1:-} == --launch ]]; then
   fi
   exit "$launch_status"
 fi
+
+filtered_args=()
+while (( $# )); do
+  case "$1" in
+    --mobile|-mobile)
+      (( mobile_flag_seen == 0 )) || { printf 'pidev: duplicate mobile flag\n' >&2; exit 2; }
+      mobile_flag_seen=1
+      mobile_layout=1
+      shift
+      ;;
+    --)
+      filtered_args+=("$@")
+      break
+      ;;
+    *)
+      filtered_args+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${filtered_args[@]}"
 
 if ! command -v tmux >/dev/null 2>&1; then
   printf 'pidev: tmux is required\n' >&2
@@ -434,10 +464,139 @@ if [[ -n $review_project ]]; then
   agent_name="$repo: $worktree — exact-OID review"
   review_args=(--review-project-id "$review_project" --review-request-id "$review_request")
 fi
-for argument in --launch --session-id "$session_id" --cwd "$cwd" --name "$agent_name" "${review_args[@]}" "$@"; do
+launch_args=(--launch --session-id "$session_id" --cwd "$cwd")
+if (( mobile_layout )); then launch_args+=(--mobile); fi
+launch_args+=(--name "$agent_name" "${review_args[@]}" "$@")
+for argument in "${launch_args[@]}"; do
   printf -v quoted ' %q' "$argument"
   pi_cmd+=$quoted
 done
+
+run_mobile_layout() {
+  local target_window="" window_matches=0 panes pane_count=0
+  local pane_id pane_index pane_pid pane_command pane_mode rc
+
+  persist_mobile_state() {
+    local tmp dir
+    dir=$(dirname -- "$state_file")
+    tmp=$(mktemp "$dir/.${state_base}.tmp.XXXXXX") || fail "cannot create state temp file"
+    chmod 600 "$tmp"
+    if ! printf '%s\n' "$session_id" > "$tmp"; then
+      rm -f -- "$tmp"
+      fail "cannot write state file"
+    fi
+    if ! python3 - "$tmp" "$state_file" "$dir" <<'PY'
+import os
+import sys
+path, target, directory = sys.argv[1:]
+fd = os.open(path, os.O_WRONLY)
+os.fsync(fd)
+os.close(fd)
+os.replace(path, target)
+dfd = os.open(directory, os.O_RDONLY)
+os.fsync(dfd)
+os.close(dfd)
+PY
+    then
+      rm -f -- "$tmp"
+      fail "cannot atomically persist state"
+    fi
+  }
+
+  if tmux_has_session "$project_session"; then
+    if ! rows=$(window_rows "$project_session"); then
+      fail "cannot query project windows"
+    fi
+    while IFS=$'\t' read -r id name; do
+      [[ -n "$id" ]] || continue
+      if [[ "$name" == "$window_name" ]]; then
+        window_matches=$((window_matches + 1))
+        target_window=$id
+      fi
+    done <<< "$rows"
+    (( window_matches <= 1 )) || fail "duplicate project windows named $window_name"
+    if (( window_matches == 0 )); then
+      persist_mobile_state
+      target_window=$(tmux new-window -d -P -F '#{window_id}' -t "=$project_session" -c "$cwd" -n "$window_name" "$pi_cmd") ||
+        fail "cannot create mobile Pi window"
+      [[ "$target_window" =~ ^@ ]] || fail "tmux returned no mobile window ID"
+      pane_mode=new
+    else
+      if ! panes=$(pane_rows "$target_window"); then
+        fail "cannot query mobile Pi window panes"
+      fi
+      pane_count=0
+      nvim_pane=""
+      pi_pane=""
+      while IFS=$'\t' read -r pane_id pane_index pane_pid pane_command; do
+        [[ -n "$pane_id" ]] || continue
+        pane_count=$((pane_count + 1))
+        (( pane_count <= 2 )) || fail "mobile Pi window has too many panes"
+        if pane_is_nvim "$pane_command" "$pane_pid"; then
+          [[ -z "$nvim_pane" ]] || fail "mobile Pi window has multiple Neovim panes"
+          nvim_pane=$pane_id
+          continue
+        fi
+        [[ -z "$pi_pane" ]] || fail "mobile Pi window has multiple non-Neovim panes"
+        pi_pane=$pane_id
+        if process_tree_has_session "$pane_pid" "$session_id"; then
+          pane_mode=existing
+        else
+          rc=$?
+          (( rc == 1 )) || fail "cannot inspect mobile Pi pane"
+          if process_tree_has_any_session "$pane_pid"; then
+            fail "mobile Pi window runs a different Pi session"
+          else
+            rc=$?
+            (( rc == 1 )) || fail "cannot inspect mobile Pi pane"
+            if pane_is_idle_shell "$pane_command" "$pane_pid"; then
+              pane_mode=idle
+            else
+              rc=$?
+              (( rc == 1 )) || fail "cannot inspect mobile Pi pane"
+              fail "mobile Pi window contains an unknown process"
+            fi
+          fi
+        fi
+      done <<< "$panes"
+      if (( pane_count == 2 )) && [[ -n "$nvim_pane" && -n "$pi_pane" ]]; then
+        editor_window_name="${window_name}-editor"
+        editor_matches=0
+        while IFS=$'\t' read -r id name; do
+          [[ -n "$id" ]] || continue
+          [[ "$name" == "$editor_window_name" ]] && editor_matches=$((editor_matches + 1))
+        done <<< "$rows"
+        (( editor_matches == 0 )) || fail "mobile editor window already exists: $editor_window_name"
+        tmux break-pane -d -s "$nvim_pane" -n "$editor_window_name" || fail "cannot move Neovim into its own mobile editor window"
+        pane_count=1
+      fi
+      (( pane_count == 1 )) && [[ -n "$pi_pane" ]] || fail "mobile Pi window must contain one Pi pane"
+    fi
+  else
+    persist_mobile_state
+    target_window=$(tmux new-session -d -P -F '#{window_id}' -s "$project_session" -c "$cwd" -n "$window_name" "$pi_cmd") ||
+      fail "cannot create mobile Pi session"
+    [[ "$target_window" =~ ^@ ]] || fail "tmux returned no mobile window ID"
+    pane_mode=new
+  fi
+
+  if [[ "$pane_mode" == idle ]]; then
+    persist_mobile_state
+    tmux send-keys -t "$target_window" "$pi_cmd" C-m || fail "cannot start mobile Pi conversation"
+  elif [[ "$pane_mode" == existing && ! -e "$state_file" ]]; then
+    persist_mobile_state
+  fi
+
+  tmux select-window -t "$target_window" || fail "cannot select mobile Pi window"
+  eval "exec ${worktree_lock_fd}>&-"
+  eval "exec ${project_lock_fd}>&-"
+  release_lock_dirs
+  if [[ -n ${TMUX:-} ]]; then
+    exec tmux switch-client -t "=$project_session"
+  else
+    exec tmux attach-session -t "=$project_session"
+  fi
+}
 
 # A has-session failure other than tmux's normal status 1 is an observation
 # failure; it must not be interpreted as a missing session.
@@ -491,6 +650,10 @@ if (( legacy_exists )); then
     tmux rename-session -t "=$legacy_session" "$project_session"
     tmux rename-window -t "$legacy_editor" "$window_name"
   fi
+fi
+
+if (( mobile_layout )); then
+  run_mobile_layout
 fi
 
 # Creating a session/window only starts Neovim. Pi is started later, after all

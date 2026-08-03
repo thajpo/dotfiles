@@ -54,7 +54,7 @@ worktree, persistence, and further-spawn capabilities.
 Its fixed tool allowlist is:
 
 ```text
-read, grep, find, ls, subagent,
+read, grep, find, ls, host_command, subagent,
 secretary_git, secretary_git_write, secretary_git_cleanup,
 secretary_record_idea, secretary_create_workstream,
 secretary_open_workstream, secretary_list_workstreams,
@@ -67,7 +67,7 @@ It intentionally does not expose `bash`, `write`, or `edit`. Child secretary
 investigators receive an even smaller hardened list:
 
 ```text
-read, grep, find, ls, secretary_git, contact_supervisor
+read, grep, find, ls, secretary_git, contact_supervisor, host_command
 ```
 
 They receive no write/edit/shell/subagent tool, no ordinary extensions, and no
@@ -168,8 +168,12 @@ handoff.
 The checked-in `worker` definition has:
 
 ```text
-read, write, edit, bash, grep, find, ls, contact_supervisor, subagent
+read, write, edit, bash, grep, find, ls, contact_supervisor, host_command, subagent
 ```
+
+`host_command` is request-only: a worker or investigator may propose an exact
+host shell command with a reason and description, but the host parent displays
+it to the user and executes it only after that request is explicitly approved.
 
 It loads the container-sandbox extension and the child-only workflow-state and
 auto-continue extensions. `write`, `edit`, and `bash` are routed through the
@@ -181,11 +185,12 @@ The normal read-only roles (`scout`, `context-builder`, `delegate`, `oracle`,
 `planner`, `researcher`, and `reviewer`) have:
 
 ```text
-read, bash, grep, find, ls, contact_supervisor
+read, bash, grep, find, ls, contact_supervisor, host_command
 ```
 
 Their `acceptanceRole: read-only` is an acceptance/coordination contract, not a
-filesystem authority boundary. In normal parent runs their sandboxed `bash`
+filesystem authority boundary. `host_command` does not grant direct host
+execution; it only creates a user-approved request. In normal parent runs their sandboxed `bash`
 can still mutate a task workspace, so the parent must inspect the delta. The
 secretary wrapper removes that risk for secretary investigators by replacing
 their tools with the hardened read-only list above.
@@ -250,6 +255,18 @@ The dedicated review launcher has only read/search tools plus
 notifications. The interactive parent normally gets control immediately and
 receives a completion wake-up; status/fleet views remain available for explicit
 inspection. Failures, pauses, stops, and attention events remain visible.
+
+There are no automatic elapsed-time, assistant-turn, provider-token, or
+tool-call limits on spawned agents. The configuration omits timeout and budget
+defaults, and the secretary explicitly strips caller/configured limits before
+launching its read-only investigators. `maxSubagentSpawnsPerSession: 0` and
+`parallel.maxTasks: 0` mean unlimited; concurrency staging and child-depth/tool
+allowlists are safety/authority boundaries, not model-completion cutoffs. A
+user may still explicitly interrupt or stop a run.
+
+This is deliberate anti-slop design: contracts, task packets, acceptance gates,
+relevant context, role/tool authority, and observable results constrain meaning
+without forcing a model to stop before it has finished the work.
 
 The acceptance layer only evaluates criterion status for `checked` and stronger
 levels. At `attested`, it validates the report shape but does not reject a

@@ -3,7 +3,7 @@
 This directory contains the reproducible, non-secret Pi harness:
 
 - Pi `0.83.0` and exact npm package pins;
-- `@narumitw/pi-goal@0.43.0` for bounded, same-session `/goal` continuation;
+- `@narumitw/pi-goal@0.43.0` for same-session `/goal` continuation;
 - `pi-subagents` as the sole coding-agent orchestrator;
 - deterministic trusted-live and isolated Docker workspaces;
 - `pi-btw` routed through the active task execution plane;
@@ -38,6 +38,16 @@ projects without the lock pair use a task-local environment at
 
 Active `SKILL.md` directories are mounted read-only at their original absolute
 paths so the model can load them without exposing the host home directory.
+For an explicitly configured control-plane route, the host mounts the pinned
+Pi core's `docs/` and `examples/` directories read-only at their original paths.
+The host-owned `controlPlaneRepositories` policy list is the authority for
+which repositories receive this capability. The route derives those two
+directories from the resolved Pi executable, and
+the sandbox revalidates canonical directories, ownership, permissions, contained
+symlinks, fixed package names, read-only flags, and `rprivate` propagation both
+when creating and reusing a container. Ordinary trusted repositories receive
+neither resource; host sessions, credentials, `.local/bin`, sockets, and the
+Docker socket remain outside the task container.
 
 ## Image attachments
 
@@ -54,6 +64,31 @@ Automatic or manual compaction does not end an active task. The global
 `auto-continue` extension queues a hidden follow-up with `triggerTurn: true`
 after the compaction lifecycle unwinds; overflow recovery that Pi already
 retries is not duplicated.
+
+## Host command requests
+
+All normal parent and child models may call `host_command` when the sandbox
+cannot perform a needed operation. The request must include the exact shell
+command, a reason, and a description. Pi shows the user the requester, command,
+working directory, reason, description, and a warning that the command runs as
+the host user. The command runs only after the user approves that specific
+request; rejection is returned to the model as a failed tool result.
+
+Host commands are one-shot approvals. Pi does not persist an allow rule, routes
+child requests through a user-owned request directory, binds them to the live
+parent session/runtime, expires them, and rejects stale requests after restart
+or resume. Output is bounded and marked sensitive. For example:
+
+```text
+host_command({
+  command: "xclip -selection clipboard -o",
+  reason: "Inspect the message the user copied",
+  description: "Read the host text clipboard so I can help with the message."
+})
+```
+
+`pi-host` remains a separate explicit maintenance mode and does not use this
+request mechanism.
 
 ## Workspace modes
 
@@ -143,9 +178,8 @@ mechanically restricted to read-only agents with read/search/supervisor tools;
 it cannot create worktrees, write, edit, run shell commands, or spawn again.
 
 `/goal <objective>` uses pi-goal to continue the same session after a settled
-turn until `goal_complete`, `goal_blocked`, pause, no-progress detection, or a
-provider/runtime stop. This harness configures no automatic response-count or
-no-progress turn limit. Use `/goal --tokens <budget> ...` only when an explicit
+turn until `goal_complete`, `goal_blocked`, pause, or a provider/runtime stop.
+This harness configures no automatic response-count or no-progress turn limit. Use `/goal --tokens <budget> ...` only when an explicit
 provider-token bound is desired.
 Investigator count is selected from the task rather than a fixed fanout recipe;
 report-only parallelism does not create Git worktrees. Secretary investigators
@@ -153,8 +187,8 @@ run asynchronously with only read/search and bounded read-only Git tools; they
 inherit neither shell/write tools nor ordinary extensions. Interactive
 sessions keep `subagent_wait` non-blocking: completion notifications and
 `subagent({ action: "status" })` remain available without holding the parent
-turn open. Secretary investigations impose no elapsed-time, assistant-turn, or
-tool-call budget; their observed duration and token usage are appended to
+turn open. Secretary investigations impose no elapsed-time, assistant-turn,
+token, or tool-call budget; their observed duration and token usage are appended to
 `~/.pi/agent/secretary-stats.jsonl` (or the configured `PI_CODING_AGENT_DIR`).
 Each record omits prompts, task text, paths, and outputs. Run
 `pi-secretary-stats` (or add `--json`) to aggregate duration, tokens, turns,
@@ -204,6 +238,25 @@ accepted decisions, boundaries, evidence, and stop conditions in the child
 assignment. Detailed subagent sessions and artifacts stay outside repositories.
 Forked context is an explicit exception because it contains the complete parent
 history rather than a filtered brief.
+
+### Model freedom and anti-slop contracts
+
+Spawned agents and subagents are not artificially crippled. The checked-in
+subagent configuration deliberately omits `timeoutMs`, `maxRuntimeMs`,
+`turnBudget`, `toolBudget`, and token budgets: there is no automatic elapsed-time,
+assistant-turn, provider-token, or tool-call cutoff. `0` for the cumulative spawn
+and parallel task-count settings means unlimited; the normal scheduler may still
+stage concurrency, which is a host resource policy rather than a model
+completion limit. A user can explicitly interrupt or stop a run.
+
+Freedom is constrained by meaning and authority, not arbitrary impatience:
+every consequential worker brief carries a task packet, contract, relevant
+boundaries, acceptance evidence, and stop/escalation conditions. Role/tool
+allowlists, repository policy, child depth, worktree ownership, read-only
+investigator boundaries, and acceptance checks remain enforced. Anti-slop means
+better contracts and observable evidence—not premature timeout or turn caps.
+The Inspector (`/observe` or `Ctrl+I`) makes those instructions, constraints,
+status, and results visible without exposing hidden reasoning.
 
 Report-only roles omit `write` and `edit`, but their sandboxed `bash` can still
 mutate the worktree. `acceptanceRole: read-only` controls acceptance inference;

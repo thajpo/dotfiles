@@ -22,12 +22,12 @@ if [[ -f "$HOME/.local/share/pi/control/pi-secretary-control.py" ]]; then contro
 
 declare -a default_aliases=(vla-lens csv-agent SleepyDreamyV3)
 usage() {
-  printf '%s\n' 'usage: pisec [register --alias ALIAS [REPOSITORY] | list | launch-info PROJECT_ID | open | launch]'
+  printf '%s\n' 'usage: pisec [--mobile|-mobile] [register --alias ALIAS [REPOSITORY] | list | launch-info PROJECT_ID | open | launch]'
   printf '%s\n' '       pisec                 (open the default three projects)'
   printf '%s\n' '       pisec launch          (repair the grid when panes are idle)'
   printf '%s\n' '       pisec activate ALIAS [ALIAS ...]'
   printf '%s\n' '       pisec swap ACTIVE_ALIAS INACTIVE_ALIAS'
-  printf '%s\n' '       each projects-N window contains at most two side-by-side secretary panes'
+  printf '%s\n' '       desktop: at most two side-by-side panes; --mobile: one conversation per window'
 }
 
 registry_json() { python3 "$control" registry-list; }
@@ -45,6 +45,29 @@ print(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)).deco
 PY
 }
 
+mobile_layout=0
+mobile_flag_seen=0
+[[ ${PI_TMUX_LAYOUT:-} == mobile ]] && mobile_layout=1
+filtered_args=()
+while (( $# )); do
+  case "$1" in
+    --mobile|-mobile)
+      (( mobile_flag_seen == 0 )) || { printf 'pisec: duplicate mobile flag\n' >&2; exit 2; }
+      mobile_flag_seen=1
+      mobile_layout=1
+      shift
+      ;;
+    --)
+      filtered_args+=("$@")
+      break
+      ;;
+    *)
+      filtered_args+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${filtered_args[@]}"
 action=${1:-default}
 declare -a requested_aliases=()
 swap_old=""; swap_new=""
@@ -136,7 +159,8 @@ fail() { printf 'pisec: %s\n' "$1" >&2; exit 1; }
 
 session=pisec
 self_launch="$self_dir/pi-secretary"
-# Each projects-N window is a small, predictable two-pane side-by-side group.
+# Each projects-N window is a small, predictable two-pane side-by-side group
+# in desktop mode, or one full-width secretary conversation in mobile mode.
 tmux_has() { tmux has-session -t "=$session" >/dev/null 2>&1; }
 window_rows() { tmux list-windows -t "=$session" -F $'#{window_id}\t#{window_name}' 2>/dev/null; }
 pane_rows() { tmux list-panes -t "$1" -F $'#{pane_id}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_title}' 2>/dev/null; }
@@ -239,6 +263,7 @@ pane_idle_shell() {
 # authoritative; idle shells are allowed as placeholders during a restore.
 declare -a pane_ids=() pane_pids=() pane_commands=() pane_titles=() pane_window_ids=()
 declare -a mapped=() live_indices=()
+existing_mobile_layout=1
 for _id in "${ids[@]}"; do mapped+=(0); done
 for window_id in "${window_ids[@]}"; do
   panes=$(pane_rows "$window_id") || fail 'cannot query projects panes'
@@ -274,6 +299,7 @@ for window_id in "${window_ids[@]}"; do
     fi
   done <<< "$panes"
   (( window_pane_count > 0 )) || fail 'projects window has no panes'
+  (( window_pane_count <= 1 )) || existing_mobile_layout=0
 done
 
 # Resolve the desired active set. The order supplied to activate is also the
@@ -340,6 +366,11 @@ switch_to_grid() {
   fi
 }
 
+if (( mobile_layout && session_exists == 1 && ${#live_indices[@]} > 0 && existing_mobile_layout == 0 )) &&
+   [[ "$action" == default || "$action" == open || "$action" == "" || "$action" == launch ]]; then
+  fail 'mobile layout conflicts with a live desktop grid; run pi-restart --mobile before opening mobile windows'
+fi
+
 # `pisec`/`pisec open` are safe return-to-grid operations. The old behavior
 # rebuilt every window on each invocation, which killed a secretary that could
 # still be thinking; its in-memory user turn then appeared to vanish on the
@@ -360,11 +391,15 @@ fi
 
 # Rebuild the pane layout without killing the pisec session itself. Creating
 # replacement windows first keeps attached clients alive while old windows are
-# retired, and Pi session history remains on disk across the restart. With an
-# odd project count, the first window is a single pane so the first project can
-# stand alone; remaining windows contain up to two side-by-side panes.
+# retired, and Pi session history remains on disk across the restart. Desktop
+# mode groups up to two projects per window; mobile mode gives every project a
+# single full-width window.
 declare -a old_windows=("${window_ids[@]}") rebuilt_windows=() pending_panes=() pending_projects=()
-window_count=$(( (target_count + 1) / 2 ))
+if (( mobile_layout )); then
+  window_count=$target_count
+else
+  window_count=$(( (target_count + 1) / 2 ))
+fi
 for ((w=1; w<=window_count; w++)); do
   temporary_name="__pisec-rebuild-$w"
   rebuilt=$(tmux new-window -d -P -F '#{window_id}' -t "=$session" -n "$temporary_name" -c "$HOME" 'exec sh') || fail 'cannot create pisec window'
@@ -375,7 +410,9 @@ for ((w=1; w<=window_count; w++)); do
     [[ -n "$pane_id" ]] && { first_pane=$pane_id; break; }
   done < <(tmux list-panes -t "$rebuilt" -F $'#{pane_id}\t#{pane_index}')
   [[ "$first_pane" =~ ^% ]] || fail 'tmux returned no initial project pane'
-  if (( target_count % 2 == 1 && w == 1 )); then
+  if (( mobile_layout )); then
+    group_start=$((w - 1)); group_size=1
+  elif (( target_count % 2 == 1 && w == 1 )); then
     group_start=0; group_size=1
   elif (( target_count % 2 == 1 )); then
     group_start=$((1 + (w - 2) * 2)); group_size=2
@@ -395,7 +432,9 @@ for ((w=1; w<=window_count; w++)); do
     tmux select-pane -t "$pane_target" -T "${aliases[${target_indices[$target_position]}]}" || fail 'cannot title secretary pane'
     pending_panes+=("$pane_target"); pending_projects+=("${target_indices[$target_position]}")
   done
-  tmux select-layout -t "$rebuilt" even-horizontal || fail 'cannot arrange projects window'
+  if (( ! mobile_layout )); then
+    tmux select-layout -t "$rebuilt" even-horizontal || fail 'cannot arrange projects window'
+  fi
 done
 for old_window in "${old_windows[@]}"; do
   tmux kill-window -t "$old_window" || fail 'cannot retire old pisec window'
