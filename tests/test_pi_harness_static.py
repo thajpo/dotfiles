@@ -326,6 +326,7 @@ class HarnessStaticTests(unittest.TestCase):
             "workspace must be clean",
             "child cannot rebind",
             "history must descend from the recorded host OID",
+            "Sandbox child lease metadata is incomplete",
         ]:
             self.assertIn(evidence, child_lifecycle_patch)
         for evidence in [

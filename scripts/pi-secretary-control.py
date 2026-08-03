@@ -1414,7 +1414,21 @@ def _validate_review_workspace(request: dict[str, Any], *, require_clean: bool =
     return workspace
 
 
+def _assert_review_candidate_ready(record: dict[str, Any]) -> None:
+    workspace = Path(record["workspace"])
+    if _git(workspace, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise SecretaryError("review candidate worktree is dirty")
+    for state in ("rebase-merge", "rebase-apply"):
+        raw = _git(workspace, "rev-parse", "--git-path", state)
+        path = Path(raw)
+        if not path.is_absolute():
+            path = workspace / path
+        if path.exists() or path.is_symlink():
+            raise SecretaryError("review candidate worktree has an unfinished rebase")
+
+
 def _create_review_request(project_id: str, workstream_id: str, record: dict[str, Any]) -> dict[str, Any]:
+    _assert_review_candidate_ready(record)
     project = _record_dir(_state_root(), project_id)
     workspace = Path(record["workspace"])
     candidate = _git(workspace, "rev-parse", "HEAD^{commit}").lower()
@@ -1982,6 +1996,7 @@ def submit_review(project_id: str, request_id: str, verdict: str, summary: str, 
 def review_status(project_id: str, request_id: str) -> dict[str, Any]:
     request = review_launch_info(project_id, request_id)
     _, _, workstream = _require_workstream(project_id, request["workstreamId"])
+    _assert_review_candidate_ready(workstream)
     current_oid = _git(Path(workstream["workspace"]), "rev-parse", "HEAD^{commit}").lower()
     receipt = None
     if request["receiptId"] is not None:
@@ -2158,7 +2173,8 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
     workspace = Path(raw["workspace"])
     if workspace.exists() or workspace.is_symlink():
         record = _validate_workstream_record(record_path, project, repo, project_record["objectFormat"], project_record["gitCommonDir"])
-        if record["currentOid"] != landing["landedOid"] or _git(workspace, "status", "--porcelain=v1"):
+        _assert_review_candidate_ready(record)
+        if record["currentOid"] != landing["landedOid"]:
             raise SecretaryError("cleanup refuses dirty or moved workstream")
         runtime = _workstream_runtime(project, repo, record)
         if _tmux_window_live(runtime["tmuxSession"], runtime["tmuxWindow"], runtime["tmuxSocket"]):

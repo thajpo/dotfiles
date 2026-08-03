@@ -486,6 +486,15 @@ class SecretaryControlTests(unittest.TestCase):
             with self.assertRaisesRegex(secretary.SecretaryError, "changed during"):
                 secretary.submit_review(registered["projectId"], request_id, "accept", "Looks good", "No findings")
         request_path.write_text(json.dumps(request)); request_path.chmod(0o600)
+        @contextlib.contextmanager
+        def workspace_races_after_lock(project):
+            with real_lock(project):
+                git(review_workspace, "checkout", "--detach", request["baseOid"])
+                yield
+        with mock.patch.dict(os.environ, review_env, clear=False), mock.patch.object(secretary, "_project_lock", workspace_races_after_lock):
+            with self.assertRaisesRegex(secretary.SecretaryError, "moved"):
+                secretary.submit_review(registered["projectId"], request_id, "accept", "Looks good", "No findings")
+        git(review_workspace, "checkout", "--detach", request["candidateOid"])
         with mock.patch.dict(os.environ, review_env, clear=False):
             receipt = secretary.submit_review(registered["projectId"], request_id, "accept", "Looks good", "No findings")
         self.assertEqual(receipt["candidateOid"], request["candidateOid"])
@@ -504,6 +513,34 @@ class SecretaryControlTests(unittest.TestCase):
         with self.assertRaisesRegex(secretary.SecretaryError, "exact assignment"):
             secretary.review_status(registered["projectId"], request_id)
         receipt_path.write_text(json.dumps(original)); receipt_path.chmod(0o600)
+
+    def test_review_request_rejects_dirty_or_rebasing_candidate(self):
+        registered = secretary.register_project(self.source, "review-readiness")
+        brief = self._brief("Review readiness", "candidate boundaries")
+        workstream = self._workstream(brief["briefId"], "Ready candidate", workstream_id="ready-candidate")
+        feature = Path(workstream["workspace"])
+        route_cap = "review-readiness-route"
+        route = Path(self.tmp.name) / "review-readiness-route.json"
+        route.write_text(json.dumps({"uid": os.getuid(), "capabilityHash": __import__("hashlib").sha256(route_cap.encode()).hexdigest(),
+                                     "readOnly": False, "worktree": workstream["workspace"]}))
+        route.chmod(0o600)
+        with mock.patch.dict(os.environ, {"PI_TASK_ROUTE_FILE": str(route),
+                                          "PI_TASK_ROUTE_CAPABILITY": route_cap}, clear=False):
+            (feature / "dirty-candidate").write_text("do not review\n")
+            with self.assertRaisesRegex(secretary.SecretaryError, "candidate worktree is dirty"):
+                secretary.append_event(registered["projectId"], workstream["workstreamId"],
+                                       "review-requested", "Ready")
+            (feature / "dirty-candidate").unlink()
+            rebase_merge = Path(git(feature, "rev-parse", "--git-path", "rebase-merge"))
+            if not rebase_merge.is_absolute():
+                rebase_merge = feature / rebase_merge
+            rebase_merge.mkdir(parents=True)
+            try:
+                with self.assertRaisesRegex(secretary.SecretaryError, "unfinished rebase"):
+                    secretary.append_event(registered["projectId"], workstream["workstreamId"],
+                                           "review-requested", "Ready")
+            finally:
+                shutil.rmtree(rebase_merge)
 
     def test_tmux_cleanup_probe_preserves_server_and_fails_closed(self):
         calls = []

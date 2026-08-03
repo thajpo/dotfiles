@@ -132,7 +132,7 @@
  
  	constructor(private readonly pi: ExtensionAPI) {}
  
-@@ -1116,6 +1213,194 @@
+@@ -1116,6 +1213,196 @@
  		return this.gitRefState;
  	}
  
@@ -166,7 +166,9 @@
 +			try {
 +				ownerInfo = lstatSync(ownerPath);
 +			} catch (error) {
-+				if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
++				if ((error as NodeJS.ErrnoException).code === "ENOENT") {
++					throw new Error(`Sandbox child lease metadata is incomplete: ${ownerPath}`);
++				}
 +				throw error;
 +			}
 +			if (ownerInfo.isSymbolicLink() || !ownerInfo.isFile() || (uid !== undefined && ownerInfo.uid !== uid) || (ownerInfo.mode & 0o077) !== 0) {
@@ -327,7 +329,7 @@
  	private repoIdentity(repoRoot: string): string {
  		return createHash("sha256").update(repoRoot).digest("hex").slice(0, 10);
  	}
-@@ -1834,6 +2119,10 @@
+@@ -1834,6 +2121,10 @@
  
  	private async prepareGitRefWorkspace(ctx?: ExtensionContext) {
  		if (!this.containerName) throw new Error("Sandbox container is not running");
@@ -338,7 +340,7 @@
  		const state = await this.ensureGitRefState(ctx);
  		if (this.getMode() === "trusted-live") {
  			if (!(await this.containerHasGitRepo(state.repoRoot))) throw new Error("Trusted-live bind is not a usable Git worktree inside the container");
-@@ -1859,13 +2148,25 @@
+@@ -1859,13 +2150,25 @@
  				.trim();
  			if (containerHead !== hostHead) {
  				const workspaceStatus = await this.containerWorkspaceStatus();
@@ -365,7 +367,7 @@
  				}
  			}
  			if (!reseedExistingWorkspace) {
-@@ -1910,6 +2211,9 @@
+@@ -1910,6 +2213,9 @@
  		} finally {
  			await rm(temp, { recursive: true, force: true });
  		}
@@ -375,7 +377,7 @@
  	}
  
  	private async copyDirectoryToContainer(sourceDir: string, targetDir: string) {
-@@ -2279,7 +2583,7 @@
+@@ -2279,7 +2585,7 @@
  		state: GitRefState,
  		sandboxHead: string,
  		baseCommit: string,
@@ -384,7 +386,7 @@
  		useImportedHead: (importedHead: string) => Promise<T>,
  	): Promise<T> {
  		if (!this.containerName) throw new Error("Sandbox container is not running");
-@@ -2405,16 +2709,21 @@
+@@ -2405,16 +2711,21 @@
  		if (this.getMode() === "trusted-live") return { committed: false, imported: false, message: "Trusted-live changes are already visible; no checkpoint or import was performed" };
  		if (isChildProcess()) throw new Error("Collaborating children cannot checkpoint or publish the parent task");
  		if (this.pendingRebase) throw new Error("Sandbox rebase is pending; complete or abort it before checkpointing");
@@ -416,7 +418,7 @@
  	}
  
  	async checkpointGitRef(ctx?: ExtensionContext): Promise<GitRefCheckpointResult> {
-@@ -2429,12 +2738,15 @@
+@@ -2429,12 +2740,15 @@
  	}
  
  	private async containerRebaseInProgress(): Promise<boolean> {
@@ -436,7 +438,7 @@
  		], { timeoutMs: 10_000 });
  		return result.code === 0;
  	}
-@@ -2617,7 +2929,9 @@
+@@ -2617,7 +2931,9 @@
  
  	async rebaseHost(ctx?: ExtensionContext): Promise<RebaseResult> {
  		if (this.getMode() === "trusted-live") throw new Error("Use ordinary Git directly in trusted-live mode; no promotion rebase exists");
@@ -447,7 +449,7 @@
  		if (this.pendingRebase) return this.rebaseStatus();
  
  		// Capture all current work before selecting the old sandbox tip.
-@@ -2658,18 +2972,22 @@
+@@ -2658,18 +2974,22 @@
  		})).stdout.toString().trim());
  		if (!Number.isSafeInteger(expectedCommitCount) || expectedCommitCount < 0) throw new Error("Could not determine sandbox commit count");
  
@@ -477,7 +479,7 @@
  		await this.ensure(ctx);
  		if (await this.containerRebaseInProgress()) {
  			const conflictFiles = await this.rebaseConflictFiles();
-@@ -2721,6 +3039,9 @@
+@@ -2721,6 +3041,9 @@
  		await this.completeRebaseState(state, pending, pending.newBase);
  		ctx?.ui.setStatus("sandbox-rebase", undefined);
  		return { completed: true, conflicted: false, message: `Rebased ${pending.expectedCommitCount} commit(s) onto ${state.baseBranch} @ ${pending.newBase.slice(0, 12)}` };
@@ -487,7 +489,7 @@
  	}
  
  	async rebaseStatus(): Promise<RebaseResult> {
-@@ -2747,6 +3068,8 @@
+@@ -2747,6 +3070,8 @@
  	async abortRebase(ctx?: ExtensionContext): Promise<string> {
  		const pending = this.pendingRebase;
  		if (!pending) return "No sandbox rebase is pending";
@@ -496,7 +498,7 @@
  		await this.ensure(ctx);
  		if (await this.containerRebaseInProgress()) {
  			await this.containerGit(["-c", "core.hooksPath=/dev/null", "rebase", "--abort"], { timeoutMs: 120_000 }).catch(() => undefined);
-@@ -2756,6 +3079,9 @@
+@@ -2756,6 +3081,9 @@
  		this.setPendingRebase(undefined);
  		ctx?.ui.setStatus("sandbox-rebase", undefined);
  		return `Aborted sandbox rebase; restored ${pending.oldSandboxTip.slice(0, 12)}`;
@@ -506,7 +508,7 @@
  	}
  
  	async assertReadyForAgentTurn() {
-@@ -2764,6 +3090,11 @@
+@@ -2764,6 +3092,11 @@
  
  	async autoCheckpointSandboxChanges(ctx?: ExtensionContext) {
  		if (!this.isEnabled() || this.pendingRebase || this.getMode() === "trusted-live" || isChildProcess()) return;
@@ -518,7 +520,7 @@
  		const result = await this.checkpointGitRef(ctx);
  		if (result.committed || result.imported) ctx?.ui.notify(result.message, "info");
  	}
-@@ -2795,26 +3126,47 @@
+@@ -2795,26 +3128,47 @@
  			this.dockerPortMappings = [];
  			return;
  		}
@@ -577,7 +579,7 @@
  		}
  	}
  }
-@@ -2838,6 +3190,7 @@
+@@ -2838,6 +3192,7 @@
  	isEnabled() { return this.engine.isEnabled(); }
  	getConfig() { return this.engine.getConfig(); }
  	getRuntimeInfo() { return this.engine.getRuntimeInfo(); }
@@ -585,7 +587,7 @@
  	getMode() { return this.engine.getMode(); }
  	getRoute() { return this.engine.getRoute(); }
  	getGitRefState() { return this.engine.getGitRefState(); }
-@@ -3647,6 +4000,7 @@
+@@ -3647,6 +4002,7 @@
  					const target = parseTarget(config.target, "target");
  					const gitRefState = sandbox.workspace.getGitRefState();
  					const targetLock = sandbox.workspace.getTargetLockStatus();
@@ -593,7 +595,7 @@
  					const dockerPorts = formatDockerPortMappings(sandbox.lifecycle.getDockerPortMappings());
  					ctx.ui.notify(
  						[
-@@ -3672,6 +4026,12 @@
+@@ -3672,6 +4028,12 @@
  							`Container lifecycle: ${config.lifecycle}`,
  								`Package cache volume: ${PACKAGE_CACHE_VOLUME} scoped by task or dependency environment -> ${PACKAGE_CACHE_ROOT}`,
  							`Rebase pending: ${sandbox.workspace.hasPendingRebase()}`,
