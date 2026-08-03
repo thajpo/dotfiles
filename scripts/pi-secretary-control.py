@@ -1395,6 +1395,25 @@ def _validate_review_request(path: Path, project_id: str) -> dict[str, Any]:
     return value
 
 
+def _validate_review_workspace(request: dict[str, Any], *, require_clean: bool = True) -> Path:
+    raw = request.get("reviewWorkspace")
+    if not isinstance(raw, str) or not raw or not Path(raw).is_absolute():
+        raise SecretaryError("review request has no valid workspace")
+    workspace_path = Path(raw)
+    if workspace_path.is_symlink():
+        raise SecretaryError("review checkout path is a symlink")
+    workspace = workspace_path.resolve(strict=True)
+    if workspace != workspace_path:
+        raise SecretaryError("review checkout path is not canonical")
+    if _git(workspace, "rev-parse", "HEAD^{commit}").lower() != request["candidateOid"]:
+        raise SecretaryError("review checkout moved from assigned commit")
+    if _git(workspace, "rev-parse", "HEAD^{tree}").lower() != request["candidateTree"]:
+        raise SecretaryError("review tree differs from assignment")
+    if require_clean and _git(workspace, "status", "--porcelain=v1"):
+        raise SecretaryError("review checkout is dirty")
+    return workspace
+
+
 def _create_review_request(project_id: str, workstream_id: str, record: dict[str, Any]) -> dict[str, Any]:
     project = _record_dir(_state_root(), project_id)
     workspace = Path(record["workspace"])
@@ -1917,9 +1936,7 @@ def review_launch_info(project_id: str, request_id: str) -> dict[str, Any]:
     request = _validate_review_request(_review_request_path(project, request_id), project_id)
     if request["reviewerSessionId"] is None or request["reviewWorkspace"] is None:
         raise SecretaryError("review request is not assigned")
-    workspace = Path(request["reviewWorkspace"]).resolve(strict=True)
-    if _git(workspace, "rev-parse", "HEAD^{commit}").lower() != request["candidateOid"]:
-        raise SecretaryError("review checkout moved from assigned commit")
+    _validate_review_workspace(request, require_clean=False)
     return {**request, "capability": info["capability"]}
 
 
@@ -1933,11 +1950,6 @@ def submit_review(project_id: str, request_id: str, verdict: str, summary: str, 
     if (not hmac.compare_digest(os.environ.get("PI_REVIEW_CAPABILITY", ""), request["capability"]) or
             os.environ.get("PI_REVIEW_SESSION_ID") != request["reviewerSessionId"]):
         raise SecretaryError("reviewer capability required")
-    workspace = Path(request["reviewWorkspace"])
-    if _git(workspace, "rev-parse", "HEAD^{tree}").lower() != request["candidateTree"]:
-        raise SecretaryError("review tree differs from assignment")
-    if _git(workspace, "status", "--porcelain=v1"):
-        raise SecretaryError("review checkout is dirty")
     project = _record_dir(_state_root(), project_id)
     request_path = _review_request_path(project, request_id)
     with _project_lock(project):
@@ -1951,11 +1963,15 @@ def submit_review(project_id: str, request_id: str, verdict: str, summary: str, 
             if (existing["verdict"], existing["summary"], existing["findings"]) != (verdict, summary, findings):
                 raise SecretaryError("conflicting review receipt already exists")
             return existing
+        # The pre-lock validation above is only an early failure. Revalidate the
+        # exact detached checkout while holding the assignment lock immediately
+        # before creating the immutable receipt.
+        _validate_review_workspace(current, require_clean=True)
         receipt_id = "receipt-" + secrets.token_hex(16)
         receipt = {"schemaVersion": 1, "receiptId": receipt_id, "projectId": project_id,
-                   "requestId": request_id, "workstreamId": request["workstreamId"],
-                   "candidateOid": request["candidateOid"], "candidateTree": request["candidateTree"],
-                   "baseOid": request["baseOid"], "reviewerSessionId": request["reviewerSessionId"],
+                   "requestId": request_id, "workstreamId": current["workstreamId"],
+                   "candidateOid": current["candidateOid"], "candidateTree": current["candidateTree"],
+                   "baseOid": current["baseOid"], "reviewerSessionId": current["reviewerSessionId"],
                    "verdict": verdict, "summary": summary, "findings": findings, "reviewedAt": _utc_now()}
         _atomic(_review_receipt_path(project, receipt_id), json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n")
         current["receiptId"] = receipt_id
