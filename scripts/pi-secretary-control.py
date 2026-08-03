@@ -1130,7 +1130,26 @@ def _quarantine_delete_artifact(path: Path, expected_sha256: str,
             current = os.stat(quarantine.name, dir_fd=parent_fd, follow_symlinks=False)
             if _cleanup_artifact_identity(current) != _cleanup_artifact_identity(info):
                 raise SecretaryError("cleanup quarantine identity changed during apply")
+            # Recheck the original name through the pinned parent immediately
+            # before deletion; a source recreated after the first check must
+            # never be silently left behind as a successful cleanup.
+            try:
+                reappeared = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                reappeared = None
+            except OSError as error:
+                raise SecretaryError("cannot recheck cleanup artifact source") from error
+            if reappeared is not None:
+                raise SecretaryError(f"cleanup artifact source reappeared during delete: {path}")
             os.unlink(quarantine.name, dir_fd=parent_fd)
+            try:
+                source_after = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                source_after = None
+            except OSError as error:
+                raise SecretaryError("cannot verify cleanup artifact source after delete") from error
+            if source_after is not None:
+                raise SecretaryError(f"cleanup artifact source reappeared during delete: {path}")
         except OSError as error:
             raise SecretaryError(f"could not remove quarantined cleanup artifact: {path}") from error
         finally:
@@ -1240,28 +1259,20 @@ def _cleanup_worktree_has_live_process(path: Path) -> bool:
         if not entry.name.isdigit():
             continue
         try:
-            if entry.stat().st_uid != os.getuid():
-                continue
+            entry.stat()
         except FileNotFoundError:
             continue
         except OSError as error:
             raise SecretaryError("cleanup cannot inspect process ownership") from error
         try:
+            # Inspect every UID. A foreign process can still hold a managed
+            # worktree cwd; skipping it would turn an unknown observation into
+            # destructive absence.
             raw_cwd = os.readlink(entry / "cwd")
         except FileNotFoundError:
             continue
         except PermissionError as error:
-            try:
-                command = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
-            except OSError as command_error:
-                raise SecretaryError("cleanup cannot inspect a process cwd") from command_error
-            # Linux user-systemd intentionally hides its cwd even from the
-            # same UID; it cannot be a Pi worktree process unless its command
-            # identity says otherwise. All other unreadable processes fail closed.
-            if not ((command.startswith("/usr/lib/systemd/systemd") and "--user" in command) or
-                    command.startswith("(sd-pam)")):
-                raise SecretaryError("cleanup cannot inspect a process cwd") from error
-            continue
+            raise SecretaryError("cleanup cannot inspect a process cwd") from error
         except OSError as error:
             raise SecretaryError("cleanup cannot inspect a process cwd") from error
         if raw_cwd.endswith(" (deleted)"):
