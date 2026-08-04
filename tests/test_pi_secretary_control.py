@@ -1,4 +1,6 @@
 import contextlib
+import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -296,6 +298,40 @@ class SecretaryControlTests(unittest.TestCase):
         self.assertEqual(git(self.source, "rev-parse", "feature/rq024-evidence-index"), oid)
         self.assertEqual(git(self.source, "status", "--porcelain=v1", "--untracked-files=all"), "")
         self.assertEqual((self.source / "tracked").read_text(), source_before)
+
+    def test_secretary_git_cleanup_refuses_active_shared_worktree_lease(self):
+        registered = secretary.register_project(self.source, "cleanup-active-lease")
+        project_id = registered["projectId"]
+        branch = "side-agent/leased"
+        side_path = Path(self.tmp.name) / "worktrees" / "side-agent-leased"
+        git(self.source, "branch", branch)
+        git(self.source, "worktree", "add", str(side_path), branch)
+        oid = git(self.source, "rev-parse", branch)
+        plan = {"version": 1, "deletions": [{"branch": branch, "expectedOid": oid}],
+                "worktrees": [{"path": str(side_path), "branch": branch, "expectedOid": oid}]}
+        common = secretary._git_path(self.source, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        key = hashlib.sha256(f"{common}\0{side_path.resolve()}".encode()).hexdigest()
+        lease_root = Path(self.env["XDG_STATE_HOME"]) / "pi" / "worktree-leases"
+        lease_root.mkdir(parents=True, mode=0o700)
+        for path in (lease_root.parent.parent, lease_root.parent, lease_root):
+            path.chmod(0o700)
+        lease_path = lease_root / f"{key}.lock"
+        lease_fd = os.open(lease_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(lease_fd, fcntl.LOCK_SH)
+        try:
+            with mock.patch.object(secretary, "_cleanup_worktree_has_live_process", return_value=False), \
+                 mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability}, clear=False):
+                planned = secretary.git_cleanup(project_id, "plan", plan)
+                with self.assertRaisesRegex(secretary.SecretaryError, "active Pi lease"):
+                    secretary.git_cleanup(project_id, "apply", planned["plan"], planned["planHash"])
+            self.assertTrue(side_path.exists())
+        finally:
+            os.close(lease_fd)
+        with mock.patch.object(secretary, "_cleanup_worktree_has_live_process", return_value=False), \
+             mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability}, clear=False):
+            applied = secretary.git_cleanup(project_id, "apply", planned["plan"], planned["planHash"])
+        self.assertTrue(applied["applied"])
+        self.assertFalse(side_path.exists())
 
     def test_secretary_git_cleanup_replays_after_worktree_side_effect_before_refs(self):
         registered = secretary.register_project(self.source, "cleanup-replay")
