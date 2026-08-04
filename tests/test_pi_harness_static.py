@@ -43,7 +43,7 @@ class HarnessStaticTests(unittest.TestCase):
         worker_frontmatter = worker.split("---", 2)[1]
         self.assertIn("model: openai-codex/gpt-5.6-luna", worker_frontmatter)
         self.assertIn("acceptanceRole: writer", worker_frontmatter)
-        self.assertIn("tools: read, write, edit, bash, grep, find, ls, contact_supervisor, host_command, subagent", worker_frontmatter)
+        self.assertIn("tools: read, write, edit, bash, grep, find, ls, web_search, fetch_content, get_search_content, source_check, contact_supervisor, intercom, host_command, subagent", worker_frontmatter)
         config = json.loads((ROOT / "pi/extensions/subagent/config.json").read_text())
         self.assertTrue(config["asyncByDefault"])
         self.assertFalse(config["asyncWidget"])
@@ -91,8 +91,22 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("parentRuntimeId", host_core)
         self.assertIn("expiresAt", host_core)
         for agent_path in (ROOT / "pi/agents").glob("*.md"):
-            self.assertIn("host_command", agent_path.read_text(), agent_path.name)
+            text = agent_path.read_text()
+            frontmatter = text.split("---", 2)[1]
+            self.assertIn("host_command", text, agent_path.name)
+            self.assertIn("memory:\n  scope: user\n  path: pi-harness", frontmatter, agent_path.name)
+            self.assertIn("agent-feedback.v1", text, agent_path.name)
+            self.assertIn("AGENT_FEEDBACK", text, agent_path.name)
+        harness_readme = (ROOT / "pi/README.md").read_text()
+        self.assertIn("Agent feedback and intake", harness_readme)
+        self.assertIn("~/.pi/agent/agent-memory/pi-harness/MEMORY.md", harness_readme)
+        self.assertIn("secretary_record_idea", harness_readme)
+        acceptance = (ROOT / "pi/WORKFLOW_ACCEPTANCE.md").read_text()
+        self.assertIn("agent-feedback.v1", acceptance)
+        self.assertIn("AGENT_FEEDBACK", acceptance)
+        self.assertIn("can reply with a structured", acceptance)
         self.assertIn("pi-subagents-0.35.1-host-command-fanout.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+        self.assertIn("pi-subagents-0.35.1-web-access-fanout.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
 
     def test_observability_inspector_is_read_only_and_activated(self):
         extension = (ROOT / "pi/extensions/observability/index.ts").read_text()
@@ -125,8 +139,8 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('const TARGETED_ACTIONS', lifecycle)
         self.assertIn('selected = candidates.find', lifecycle)
         self.assertIn('discoverAgents(cwd, scope).agents.filter(isReadOnlyAgent)', wrapper)
-        self.assertIn('const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "secretary_git", "contact_supervisor", "host_command"]', wrapper)
-        self.assertIn('subagentOnlyExtensions: [gitExtension, autoContinueExtension, hostCommandExtension]', wrapper)
+        self.assertIn('const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "secretary_git", "contact_supervisor", "intercom", "host_command"]', wrapper)
+        self.assertIn('subagentOnlyExtensions: [gitExtension, autoContinueExtension, hostCommandExtension, webAccessExtension]', wrapper)
         self.assertIn('extensions: []', wrapper)
         self.assertIn('mcpDirectTools: []', wrapper)
         self.assertIn('memory: undefined', wrapper)
@@ -429,10 +443,10 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('local source=$1 target=$2 rollback_dir backup=""', installer)
         self.assertIn('rollback_dir=${3:-$(dirname "$target")}', installer)
         self.assertIn("pi-sandbox-gc", installer)
-        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,host_command,subagent,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea", "--session", "--name"]:
+        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,host_command,subagent,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea", "--session", "--name"]:
             self.assertIn(flag, launcher)
         self.assertNotIn("subagent_wait", launcher)
-        self.assertEqual(launcher.count("-e \"$"), 6)
+        self.assertEqual(launcher.count("-e \"$"), 7)
         self.assertIn('fast_mode_extension="$agent_dir/extensions/fast-mode/index.ts"', launcher)
         self.assertIn('root_session_extension="$agent_dir/extensions/root-session/index.ts"', launcher)
         self.assertIn('auto_continue_extension="$agent_dir/extensions/auto-continue/index.ts"', launcher)
@@ -444,7 +458,7 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertNotIn("--tools read,grep,find,ls,bash", launcher)
         for forbidden in ["task_packet", "--edit", "--write"]:
             self.assertNotIn(forbidden, launcher)
-        self.assertEqual(extension.count("pi.registerTool"), 13)
+        self.assertEqual(extension.count("pi.registerTool"), 14)
         self.assertIn("Current user turn did not authorize", extension)
         self.assertIn("Natural-language requests to log", extension)
         self.assertIn("log|note|capture|document", extension)
@@ -469,7 +483,7 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertNotIn("sendUserMessage", channel_extension)
         self.assertNotIn("registerCommand", channel_extension)
         reviewer = (ROOT / "bin/pi-review-agent").read_text()
-        self.assertIn("--tools read,grep,find,ls,submit_review_receipt", reviewer)
+        self.assertIn("--tools read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,submit_review_receipt", reviewer)
         self.assertNotIn("host_command", reviewer)
         self.assertIn("--no-extensions", reviewer)
         self.assertIn('--model "openai-codex/gpt-5.6-luna" --thinking high', reviewer)
@@ -681,7 +695,7 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
         self.assertIn("function acceptanceEventFields", failure_events)
         self.assertIn("acceptanceFailedChecks", failure_events)
         self.assertIn('process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim() === "worker"', fanout)
-        self.assertIn('WORKER_READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "contact_supervisor", "host_command"]', fanout)
+        self.assertIn('WORKER_READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "contact_supervisor", "intercom", "host_command"]', fanout)
         self.assertIn('async: true', fanout)
         self.assertIn('acceptance: WORKER_READ_ONLY_ACCEPTANCE', fanout)
         for path in agent_dir.glob("*.md"):
@@ -692,7 +706,10 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
             self.assertIn("inheritSkills: false", frontmatter, path.name)
             self.assertIn("subagentOnlyExtensions: __PI_AGENT_DIR__/extensions/workflow-state/index.ts", frontmatter, path.name)
             self.assertIn("__PI_AGENT_DIR__/extensions/auto-continue/index.ts", frontmatter, path.name)
+            self.assertIn("__PI_AGENT_DIR__/npm/node_modules/pi-web-access/index.ts", frontmatter, path.name)
             tools = re.search(r"^tools: (.+)$", frontmatter, re.MULTILINE).group(1).split(", ")
+            for web_tool in ("web_search", "fetch_content", "get_search_content", "source_check"):
+                self.assertIn(web_tool, tools, path.name)
             if path.stem == "worker":
                 self.assertIn("write", tools)
                 self.assertIn("edit", tools)

@@ -23,7 +23,7 @@ import { addSecretaryUsage, emptySecretaryUsage, recordSecretarySessionStats, re
 
 type SafeAction = "list" | "doctor" | "status" | "interrupt" | "stop" | "resume" | "steer";
 const SAFE_ACTIONS = new Set<SafeAction>(["list", "doctor", "status", "interrupt", "stop", "resume", "steer"]);
-const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "secretary_git", "contact_supervisor", "host_command"];
+const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "secretary_git", "contact_supervisor", "intercom", "host_command"];
 function getSubagentSessionRoot(parentSessionFile: string | null): string {
   const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
   if (parentSessionFile) {
@@ -66,14 +66,14 @@ function isReadOnlyAgent(agent: { acceptanceRole?: string; tools?: string[] }): 
   return !agent.tools.some((tool) => tool === "edit" || tool === "write" || tool === "subagent");
 }
 
-function hardenAgent<T extends { tools?: string[] }>(agent: T, gitExtension: string, autoContinueExtension: string, hostCommandExtension: string): T {
+function hardenAgent<T extends { tools?: string[] }>(agent: T, gitExtension: string, autoContinueExtension: string, hostCommandExtension: string, webAccessExtension: string): T {
   const tools = INVESTIGATOR_TOOLS.filter((tool) => tool !== "contact_supervisor" || agent.tools?.includes(tool));
   return {
     ...agent,
     tools,
     mcpDirectTools: [],
     extensions: [],
-    subagentOnlyExtensions: [gitExtension, autoContinueExtension, hostCommandExtension],
+    subagentOnlyExtensions: [gitExtension, autoContinueExtension, hostCommandExtension, webAccessExtension],
     inheritProjectContext: false,
     inheritSkills: false,
     output: undefined,
@@ -159,9 +159,11 @@ export default function secretarySubagents(pi: ExtensionAPI): void {
   const gitExtension = path.join(agentDir, "extensions", "secretary-investigator-git", "index.ts");
   const autoContinueExtension = path.join(agentDir, "extensions", "auto-continue", "index.ts");
   const hostCommandExtension = path.join(agentDir, "extensions", "host-command", "index.ts");
+  const webAccessExtension = path.join(agentDir, "npm", "node_modules", "pi-web-access", "index.ts");
   if (!fs.existsSync(gitExtension)) throw new Error("secretary investigator Git extension is unavailable");
   if (!fs.existsSync(autoContinueExtension)) throw new Error("auto-continue extension is unavailable");
   if (!fs.existsSync(hostCommandExtension)) throw new Error("host-command extension is unavailable");
+  if (!fs.existsSync(webAccessExtension)) throw new Error("pi-web-access extension is unavailable");
   // Investigator count is intentionally policy-free. Runtime concurrency is a
   // scheduler, not a workflow prescription, and remains caller-selectable.
   // Interactive secretary sessions must fail closed: an older or missing
@@ -259,7 +261,7 @@ export default function secretarySubagents(pi: ExtensionAPI): void {
       const discovered = discoverAgents(cwd, scope);
       return {
         ...discovered,
-        agents: discovered.agents.filter(isReadOnlyAgent).map((agent) => hardenAgent(agent, gitExtension, autoContinueExtension, hostCommandExtension)),
+        agents: discovered.agents.filter(isReadOnlyAgent).map((agent) => hardenAgent(agent, gitExtension, autoContinueExtension, hostCommandExtension, webAccessExtension)),
       };
     },
     allowMutatingManagementActions: false,

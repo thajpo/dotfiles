@@ -12,6 +12,7 @@
     "pi-image-tools": "1.4.0",
     "pi-nvim": "0.2.4",
     "pi-subagents": "0.35.1",
+    "pi-web-access": "0.18.0",
     "pi-vim": "0.14.1",
     "pisesh": "0.1.12",
     "typebox": "1.1.38"

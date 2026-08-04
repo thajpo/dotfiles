@@ -105,6 +105,11 @@ as an explicit inspection surface while no async widget is shown by default.
 Open `/observe` (or `Ctrl+I`) and confirm the read-only Inspector shows the
 active task packet, every child, exact explicit instructions, context summary,
 status, and result/error messages. Confirm it does not display hidden reasoning.
+Have a child issue an `agent-feedback.v1` `interview_request` for a missing
+capability and confirm the parent receives it, can reply with a structured
+review decision, and does not silently grant new authority. Have another child
+send a non-blocking `AGENT_FEEDBACK` progress update and confirm it is visible
+without requiring a reply.
 
 ## Context audit setup
 

@@ -81,6 +81,9 @@ ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$")
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 BRANCH_RE = re.compile(r"^pi/[a-z0-9][a-z0-9-]{0,62}$")
+HERDR_SESSION = "pi-secretary"
+HERDR_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$")
+SECRETARY_BACKENDS = {"tmux", "herdr"}
 
 class SecretaryError(RuntimeError):
     pass
@@ -2360,31 +2363,298 @@ def _default_tmux_socket() -> str:
     return str(Path(raw_dir) / f"tmux-{os.getuid()}" / "default")
 
 
+def _active_secretary_backend() -> str:
+    """Return the backend selected by the active secretary surface.
+
+    The absence of the variable intentionally means the historical tmux
+    backend.  Herdr is opt-in and is set by the Herdr surface itself; a
+    workstream record pins the choice so a later surface switch cannot silently
+    migrate a live worker.
+    """
+    value = os.environ.get("PI_SECRETARY_BACKEND", "tmux")
+    if value not in SECRETARY_BACKENDS:
+        raise SecretaryError("invalid secretary backend selection")
+    return value
+
+
+def _validated_executable(raw: str | None, label: str) -> Path:
+    if not isinstance(raw, str) or not raw.startswith("/") or "\n" in raw or "\x00" in raw:
+        raise SecretaryError(f"{label} is not an absolute path")
+    path = Path(raw)
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise SecretaryError(f"{label} is unavailable") from error
+    group_write_is_private = info.st_gid == os.getgid() and info.st_uid == os.getuid()
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or
+            info.st_uid not in {os.getuid(), 0} or not (info.st_mode & stat.S_IXUSR) or
+            info.st_mode & 0o002 or (info.st_mode & 0o020 and not group_write_is_private)):
+        raise SecretaryError(f"{label} has an unsafe identity or mode")
+    return path.resolve(strict=True)
+
+
+def _herdr_path() -> Path:
+    configured = os.environ.get("PI_SECRETARY_HERDR_BIN")
+    if configured:
+        return _validated_executable(configured, "Herdr executable")
+    candidates = [
+        Path.home() / ".local" / "bin" / "herdr",
+        Path("/usr/local/bin/herdr"), Path("/usr/bin/herdr"),
+    ]
+    for candidate in candidates:
+        try:
+            return _validated_executable(str(candidate), "Herdr executable")
+        except SecretaryError:
+            continue
+    raise SecretaryError("Herdr executable is unavailable for the Herdr secretary backend")
+
+
+def _herdr_worker_path() -> Path:
+    configured = os.environ.get("PI_SECRETARY_HERDR_WORKER")
+    if configured:
+        return _validated_executable(configured, "Herdr workstream launcher")
+    candidates = [Path(__file__).resolve().parents[1] / "bin" / "pi-herdr-workstream",
+                  Path.home() / ".local" / "bin" / "pi-herdr-workstream"]
+    for candidate in candidates:
+        try:
+            return _validated_executable(str(candidate), "Herdr workstream launcher")
+        except SecretaryError:
+            continue
+    raise SecretaryError("guarded Herdr workstream launcher is unavailable")
+
+
+def _herdr_environment() -> dict[str, str]:
+    environment = _env()
+    # Herdr may derive its named-session socket from the XDG runtime/config
+    # roots. Preserve only absolute, control-free roots; do not pass through a
+    # caller's general environment to the host-control subprocess.
+    for name in ("XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME"):
+        value = os.environ.get(name)
+        if value:
+            if not value.startswith("/") or any(ord(char) < 32 for char in value):
+                raise SecretaryError(f"malformed {name}")
+            environment[name] = value
+    config = os.environ.get("HERDR_CONFIG_PATH") or os.environ.get("PI_SECRETARY_HERDR_CONFIG")
+    if config:
+        if not config.startswith("/") or any(ord(char) < 32 for char in config):
+            raise SecretaryError("malformed Herdr config path")
+        environment["HERDR_CONFIG_PATH"] = config
+    # Never inherit a caller-selected socket/session from an outer Herdr
+    # client.  The named session is part of every command below.
+    environment.pop("HERDR_SOCKET_PATH", None)
+    environment.pop("HERDR_SESSION", None)
+    environment["HERDR_ENV"] = "1"
+    return environment
+
+
+def _herdr_json(args: list[str], label: str) -> dict[str, Any]:
+    try:
+        result = subprocess.run([str(_herdr_path()), "--session", HERDR_SESSION, *args],
+                                env=_herdr_environment(), text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    except OSError as error:
+        raise SecretaryError(f"Herdr {label} is unavailable") from error
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise SecretaryError(f"Herdr {label} failed: {detail[:300]}")
+    try:
+        payload = json.loads(result.stdout)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise SecretaryError(f"Herdr {label} returned invalid JSON") from error
+    if not isinstance(payload, dict) or not isinstance(payload.get("result"), dict):
+        raise SecretaryError(f"Herdr {label} returned an invalid JSON response")
+    return payload["result"]
+
+
+def _herdr_ok(args: list[str], label: str) -> None:
+    try:
+        result = subprocess.run([str(_herdr_path()), "--session", HERDR_SESSION, *args],
+                                env=_herdr_environment(), text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    except OSError as error:
+        raise SecretaryError(f"Herdr {label} is unavailable") from error
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise SecretaryError(f"Herdr {label} failed: {detail[:300]}")
+
+
+def _herdr_id(value: Any, label: str, *, allow_none: bool = False) -> str | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str) or not HERDR_ID_RE.fullmatch(value):
+        raise SecretaryError(f"malformed Herdr {label}")
+    return value
+
+
+def _herdr_process_tokens(process: dict[str, Any]) -> list[str]:
+    argv = process.get("argv")
+    if isinstance(argv, list) and all(isinstance(item, str) for item in argv):
+        return list(argv)
+    cmdline = process.get("cmdline")
+    if isinstance(cmdline, str):
+        try:
+            return shlex.split(cmdline)
+        except ValueError:
+            return []
+    return []
+
+
+def _herdr_shell_process(process: dict[str, Any]) -> bool:
+    names = {"bash", "zsh", "sh", "dash", "fish", "nu", "ksh"}
+    name = process.get("name")
+    if isinstance(name, str) and Path(name).name in names:
+        return True
+    tokens = _herdr_process_tokens(process)
+    return bool(tokens and Path(tokens[0]).name in names)
+
+
+def _herdr_reported_cwd(pane: dict[str, Any]) -> Path | None:
+    for key in ("cwd", "foreground_cwd"):
+        value = pane.get(key)
+        if isinstance(value, str) and value:
+            try:
+                return Path(value).resolve(strict=False)
+            except (OSError, RuntimeError):
+                return None
+    return None
+
+
+def _herdr_workspace_records(result: dict[str, Any]) -> list[dict[str, Any]]:
+    value = result.get("workspaces")
+    if not isinstance(value, list):
+        raise SecretaryError("Herdr workspace list omitted workspaces")
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise SecretaryError("Herdr workspace list contains an invalid workspace")
+        workspace_id = _herdr_id(item.get("workspace_id"), "workspace id")
+        assert workspace_id is not None
+        if workspace_id in seen:
+            raise SecretaryError("Herdr workspace list contains a duplicate workspace")
+        seen.add(workspace_id)
+        if not isinstance(item.get("label"), str) or not item["label"]:
+            raise SecretaryError("Herdr workspace list contains an invalid label")
+        records.append(item)
+    return records
+
+
+def _herdr_pane_records(result: dict[str, Any]) -> list[dict[str, Any]]:
+    value = result.get("panes")
+    if not isinstance(value, list):
+        raise SecretaryError("Herdr pane list omitted panes")
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise SecretaryError("Herdr pane list contains an invalid pane")
+        pane_id = _herdr_id(item.get("pane_id"), "pane id")
+        assert pane_id is not None
+        if pane_id in seen:
+            raise SecretaryError("Herdr pane list contains a duplicate pane")
+        seen.add(pane_id)
+        _herdr_id(item.get("workspace_id"), "pane workspace id")
+        _herdr_id(item.get("tab_id"), "tab id")
+        records.append(item)
+    return records
+
+
+def _secretary_lock_is_held(project_id: str) -> bool:
+    agent_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", "~/.pi/agent")).expanduser()
+    project_dir = agent_dir / "sessions" / "secretary" / project_id
+    lock_directory = project_dir / ".active.lock.d"
+    if lock_directory.is_symlink():
+        raise SecretaryError("secretary active lock directory must not be a symlink")
+    if lock_directory.exists():
+        if not lock_directory.is_dir():
+            raise SecretaryError("secretary active lock directory is not a directory")
+        return True
+    lock_path = project_dir / ".active.lock"
+    if lock_path.is_symlink():
+        raise SecretaryError("secretary active lock must not be a symlink")
+    if not lock_path.exists():
+        return False
+    try:
+        fd = os.open(lock_path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
 def _workstream_runtime_path(project: Path, workstream_id: str) -> Path:
     return project / "workstream-runtime" / f"{_id(workstream_id, 'workstream id')}.json"
 
 
 def _workstream_runtime(project: Path, repo: Path, record: dict[str, Any]) -> dict[str, Any]:
     path = _workstream_runtime_path(project, record["workstreamId"])
-    fields = {"schemaVersion", "workstreamId", "piSessionId", "tmuxSession", "tmuxWindow", "tmuxSocket", "launchState", "seededAt"}
+    fields = {
+        "schemaVersion", "workstreamId", "backend", "piSessionId", "tmuxSession",
+        "tmuxWindow", "tmuxSocket", "herdrSession", "herdrWorkspace", "herdrTab",
+        "herdrSecretaryPane", "herdrPane", "herdrAgent", "launchState", "seededAt",
+    }
     if path.exists() or path.is_symlink():
-        value = _read_json(path, fields, required=fields - {"tmuxSocket", "launchState"})
+        # Runtime schema 1 is the pre-Herdr tmux format.  Reading it as tmux
+        # preserves existing workers and deliberately does not migrate them.
+        value = _read_json(path, fields, required={
+            "schemaVersion", "workstreamId", "piSessionId", "tmuxSession",
+            "tmuxWindow", "seededAt",
+        })
+        value.setdefault("backend", "tmux")
         value.setdefault("tmuxSocket", None)
+        value.setdefault("herdrSession", None)
+        value.setdefault("herdrWorkspace", None)
+        value.setdefault("herdrTab", None)
+        value.setdefault("herdrSecretaryPane", None)
+        value.setdefault("herdrPane", None)
+        value.setdefault("herdrAgent", None)
         value.setdefault("launchState", "pending")
-        if (value.get("schemaVersion") != 1 or value.get("workstreamId") != record["workstreamId"] or
+        if (value.get("schemaVersion") not in {1, 2} or
+                value.get("workstreamId") != record["workstreamId"] or
+                value.get("backend") not in SECRETARY_BACKENDS or
                 not isinstance(value.get("piSessionId"), str) or
                 not SESSION_RE.fullmatch(value["piSessionId"]) or
-                not isinstance(value.get("tmuxSession"), str) or
-                not re.fullmatch(r"[A-Za-z0-9_-]{1,300}", value["tmuxSession"]) or
-                not isinstance(value.get("tmuxWindow"), str) or
-                not re.fullmatch(r"[A-Za-z0-9_-]{1,300}", value["tmuxWindow"]) or
+                (value.get("backend") == "tmux" and
+                 (not isinstance(value.get("tmuxSession"), str) or
+                  not re.fullmatch(r"[A-Za-z0-9_-]{1,300}", value["tmuxSession"]) or
+                  not isinstance(value.get("tmuxWindow"), str) or
+                  not re.fullmatch(r"[A-Za-z0-9_-]{1,300}", value["tmuxWindow"]))) or
+                (value.get("backend") == "herdr" and
+                 (value.get("tmuxSession") is not None or value.get("tmuxWindow") is not None)) or
                 (value.get("tmuxSocket") is not None and
                  (not isinstance(value.get("tmuxSocket"), str) or not value["tmuxSocket"].startswith("/"))) or
                 value.get("launchState") not in {"pending", "launched", "uncertain"} or
-                (value.get("seededAt") is not None and not isinstance(value.get("seededAt"), str))):
+                (value.get("seededAt") is not None and not isinstance(value["seededAt"], str))):
             raise SecretaryError("malformed workstream runtime record")
         if value["seededAt"] is not None:
             _timestamp(value["seededAt"], "seededAt")
+        for name in ("herdrSession", "herdrWorkspace", "herdrTab", "herdrSecretaryPane", "herdrPane"):
+            _herdr_id(value.get(name), name, allow_none=True)
+        if value.get("herdrAgent") is not None and (
+                not isinstance(value["herdrAgent"], str) or
+                not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value["herdrAgent"])):
+            raise SecretaryError("malformed Herdr agent name in workstream runtime")
+        if value["backend"] == "tmux":
+            if any(value.get(name) is not None for name in
+                   ("herdrSession", "herdrWorkspace", "herdrTab", "herdrSecretaryPane", "herdrPane", "herdrAgent")):
+                raise SecretaryError("tmux workstream runtime contains Herdr identity")
+        else:
+            if (value.get("tmuxSocket") is not None or
+                    not isinstance(value.get("herdrSession"), str) or
+                    value["herdrSession"] != HERDR_SESSION or
+                    not isinstance(value.get("herdrWorkspace"), str) or
+                    not isinstance(value.get("herdrTab"), str) or
+                    not isinstance(value.get("herdrSecretaryPane"), str) or
+                    (value.get("herdrPane") is not None and
+                     value.get("herdrPane") == value.get("herdrSecretaryPane"))):
+                raise SecretaryError("Herdr workstream runtime lacks its bound surface identity")
         return value
     workspace = Path(record["workspace"]).resolve(strict=True)
     common = _git_path(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -2392,13 +2662,283 @@ def _workstream_runtime(project: Path, repo: Path, record: dict[str, Any]) -> di
     worktree_name = re.sub(r"[^A-Za-z0-9_-]+", "-", workspace.name).strip("-") or "worktree"
     common_hash = hashlib.sha256(str(common).encode()).hexdigest()
     worktree_hash = hashlib.sha256(str(workspace).encode()).hexdigest()
-    value = {"schemaVersion": 1, "workstreamId": record["workstreamId"],
-             "piSessionId": "ws-" + secrets.token_hex(24),
-             "tmuxSession": f"pi-{repo_name}-{common_hash[:12]}",
-             "tmuxWindow": f"w-{worktree_name}-{worktree_hash[:12]}",
-             "tmuxSocket": _current_tmux_socket(), "launchState": "pending", "seededAt": None}
+    backend = _active_secretary_backend()
+    value: dict[str, Any] = {"schemaVersion": 2, "workstreamId": record["workstreamId"],
+             "backend": backend, "piSessionId": "ws-" + secrets.token_hex(24),
+             "tmuxSession": None, "tmuxWindow": None, "tmuxSocket": None,
+             "herdrSession": None, "herdrWorkspace": None, "herdrTab": None,
+             "herdrSecretaryPane": None, "herdrPane": None, "herdrAgent": None,
+             "launchState": "pending", "seededAt": None}
+    if backend == "tmux":
+        value.update({"tmuxSession": f"pi-{repo_name}-{common_hash[:12]}",
+                      "tmuxWindow": f"w-{worktree_name}-{worktree_hash[:12]}",
+                      "tmuxSocket": _current_tmux_socket()})
+    else:
+        # Herdr injects these exact caller IDs into every managed pane.  Do
+        # not guess from sidebar order: a missing or malformed identity makes
+        # a Herdr workstream unsafe to launch.
+        workspace_id = _herdr_id(os.environ.get("HERDR_WORKSPACE_ID"), "workspace id")
+        tab_id = _herdr_id(os.environ.get("HERDR_TAB_ID"), "tab id")
+        pane_id = _herdr_id(os.environ.get("HERDR_PANE_ID"), "secretary pane id")
+        assert workspace_id is not None and tab_id is not None and pane_id is not None
+        value.update({"herdrSession": HERDR_SESSION, "herdrWorkspace": workspace_id,
+                      "herdrTab": tab_id, "herdrSecretaryPane": pane_id})
     _atomic(path, json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
     return value
+
+
+def _herdr_secretary_launcher_paths() -> list[Path]:
+    return [Path(__file__).resolve().parents[1] / "bin" / "pi-secretary",
+            Path.home() / ".local" / "bin" / "pi-secretary"]
+
+
+def _herdr_process_executable(tokens: list[str]) -> str | None:
+    if not tokens:
+        return None
+    first = Path(tokens[0]).name
+    if first == "env":
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "--":
+                index += 1
+                break
+            if token.startswith("-"):
+                return None
+            if "=" in token:
+                index += 1
+                continue
+            break
+        return tokens[index] if index < len(tokens) else None
+    if first in {"bash", "zsh", "sh", "dash", "fish", "nu", "ksh"}:
+        if len(tokens) > 1 and tokens[1] != "-c":
+            return tokens[1]
+        return None
+    return tokens[0]
+
+
+def _herdr_process_is_launcher(process: dict[str, Any], paths: list[Path], *,
+                               project_id: str | None, worker_id: str | None = None) -> bool:
+    tokens = _herdr_process_tokens(process)
+    executable = _herdr_process_executable(tokens)
+    if executable is None:
+        return False
+    try:
+        matches_path = any(Path(executable).resolve(strict=False) == path.resolve(strict=False)
+                           for path in paths)
+    except (OSError, RuntimeError):
+        return False
+    if not matches_path:
+        return False
+    def argument_value(name: str) -> str | None:
+        try:
+            index = tokens.index(name)
+        except ValueError:
+            return None
+        return tokens[index + 1] if index + 1 < len(tokens) else None
+    if project_id is not None and argument_value("--project-id") != project_id:
+        return False
+    if worker_id is not None:
+        return argument_value("--workstream-id") == worker_id and argument_value("--project-id") is not None
+    return "--internal-launch" in tokens
+
+
+def _herdr_process_info(pane_id: str, label: str) -> list[dict[str, Any]]:
+    result = _herdr_json(["pane", "process-info", "--pane", pane_id], label)
+    process_info = result.get("process_info")
+    if not isinstance(process_info, dict):
+        raise SecretaryError(f"Herdr {label} omitted process information")
+    processes = process_info.get("foreground_processes")
+    if not isinstance(processes, list) or any(not isinstance(item, dict) for item in processes):
+        raise SecretaryError(f"Herdr {label} returned malformed process information")
+    return list(processes)
+
+
+def _herdr_surface(runtime: dict[str, Any], info: dict[str, Any], repo: Path,
+                   project_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if (runtime.get("herdrSession") != HERDR_SESSION or
+            not isinstance(runtime.get("herdrWorkspace"), str) or
+            not isinstance(runtime.get("herdrTab"), str) or
+            not isinstance(runtime.get("herdrSecretaryPane"), str)):
+        raise SecretaryError("Herdr workstream lacks a complete bound secretary surface")
+    workspace_id = runtime["herdrWorkspace"]
+    workspace_result = _herdr_json(["workspace", "list"], "workspace identity")
+    workspaces = _herdr_workspace_records(workspace_result)
+    matches = [item for item in workspaces if item.get("workspace_id") == workspace_id]
+    if len(matches) != 1:
+        raise SecretaryError("Herdr workstream workspace identity is missing or ambiguous")
+    workspace = matches[0]
+    expected_label = f"secretary/{info['alias']}"
+    if workspace.get("label") != expected_label:
+        raise SecretaryError("Herdr workstream workspace label does not match the registered project")
+    pane_result = _herdr_json(["pane", "list", "--workspace", workspace_id],
+                              f"workspace {workspace_id} panes")
+    panes = _herdr_pane_records(pane_result)
+    secretary_id = runtime["herdrSecretaryPane"]
+    secretary_matches = [item for item in panes if item.get("pane_id") == secretary_id]
+    if len(secretary_matches) != 1:
+        raise SecretaryError("Herdr secretary pane identity is missing or ambiguous")
+    secretary = secretary_matches[0]
+    if (secretary.get("workspace_id") != workspace_id or secretary.get("tab_id") != runtime["herdrTab"] or
+            _herdr_reported_cwd(secretary) != repo.resolve(strict=False) or
+            secretary.get("label") != expected_label):
+        raise SecretaryError("Herdr secretary pane identity does not match the project")
+    # The lock proves project ownership, but not which terminal owns it: a
+    # tmux secretary could hold the same lock while this pane is a shell. The
+    # exact Herdr pane must therefore also expose the guarded launcher argv;
+    # never accept an arbitrary `agent == pi` label or a lock alone.
+    processes = _herdr_process_info(secretary_id, "secretary pane")
+    guarded = any(_herdr_process_is_launcher(process, _herdr_secretary_launcher_paths(),
+                                              project_id=project_id)
+                  for process in processes)
+    if not guarded:
+        raise SecretaryError("Herdr project pane is not owned by the guarded secretary launcher")
+    return workspace, panes
+
+
+def _herdr_worker_state(runtime: dict[str, Any], panes: list[dict[str, Any]],
+                        workspace: Path, project_id: str, workstream_id: str) -> str:
+    pane_id = runtime.get("herdrPane")
+    if pane_id is None:
+        return "missing"
+    matches = [item for item in panes if item.get("pane_id") == pane_id]
+    if len(matches) > 1:
+        raise SecretaryError("Herdr workstream pane identity is ambiguous")
+    if not matches:
+        return "missing"
+    pane = matches[0]
+    if (pane.get("workspace_id") != runtime.get("herdrWorkspace") or
+            pane.get("tab_id") != runtime.get("herdrTab") or
+            _herdr_reported_cwd(pane) != workspace.resolve(strict=False)):
+        raise SecretaryError("Herdr workstream pane identity does not match its assigned worktree")
+    processes = _herdr_process_info(pane_id, f"workstream pane {pane_id}")
+    if any(_herdr_process_is_launcher(process, [_herdr_worker_path()],
+                                      project_id=project_id, worker_id=workstream_id)
+           for process in processes):
+        return "live"
+    if pane.get("agent") == "pi":
+        raise SecretaryError("Herdr workstream pane contains Pi without the guarded worker launcher")
+    if processes and all(_herdr_shell_process(process) for process in processes):
+        return "shell"
+    raise SecretaryError("Herdr workstream pane contains an unexpected process")
+
+
+def _herdr_worker_command(runtime: dict[str, Any], project_id: str, workstream_id: str) -> str:
+    worker = _herdr_worker_path()
+    assignments = [
+        "PI_SECRETARY_BACKEND=herdr",
+        f"PI_SECRETARY_HERDR_BIN={_herdr_path()}",
+        f"PI_SECRETARY_HERDR_WORKER={worker}",
+        "HERDR_ENV=1",
+        f"HERDR_WORKSPACE_ID={runtime['herdrWorkspace']}",
+        f"HERDR_TAB_ID={runtime['herdrTab']}",
+        f"HERDR_PANE_ID={runtime['herdrPane']}",
+    ]
+    config = os.environ.get("HERDR_CONFIG_PATH") or os.environ.get("PI_SECRETARY_HERDR_CONFIG")
+    if config:
+        assignments.append(f"HERDR_CONFIG_PATH={config}")
+    return shlex.join(["env", *assignments, str(worker), "--project-id", project_id,
+                       "--workstream-id", workstream_id])
+
+
+def _herdr_launch_workstream(project_id: str, info: dict[str, Any], record: dict[str, Any],
+                             runtime: dict[str, Any], project: Path,
+                             runtime_path: Path) -> dict[str, Any]:
+    workspace = Path(record["workspace"])
+    surface, panes = _herdr_surface(runtime, info, Path(info["primaryRepository"]), project_id)
+    state = _herdr_worker_state(runtime, panes, workspace, project_id, record["workstreamId"])
+    if state == "live":
+        runtime["launchState"] = "launched"
+        _atomic(runtime_path, json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n")
+        return runtime
+    if state == "missing":
+        result = _herdr_json([
+            "pane", "split", "--pane", runtime["herdrSecretaryPane"],
+            "--direction", "right", "--cwd", str(workspace), "--no-focus",
+        ], "workstream pane creation")
+        pane = result.get("pane")
+        if not isinstance(pane, dict):
+            raise SecretaryError("Herdr workstream pane creation omitted its pane")
+        pane_id = _herdr_id(pane.get("pane_id"), "workstream pane id")
+        pane_workspace = _herdr_id(pane.get("workspace_id"), "workstream pane workspace id")
+        pane_tab = _herdr_id(pane.get("tab_id"), "workstream tab id")
+        if pane_id is None or pane_workspace is None or pane_tab is None:
+            raise SecretaryError("Herdr workstream pane creation returned incomplete identity")
+        if (pane_id == runtime["herdrSecretaryPane"] or
+                pane_workspace != runtime["herdrWorkspace"] or pane_tab != runtime["herdrTab"]):
+            raise SecretaryError("Herdr created a workstream pane in the wrong project surface")
+        runtime["herdrPane"] = pane_id
+        runtime["herdrAgent"] = "pi"
+        runtime["launchState"] = "pending"
+        _atomic(runtime_path, json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n")
+        _herdr_ok(["pane", "rename", pane_id, f"workstream/{record['workstreamId']}"],
+                  "workstream pane labeling")
+    elif state == "shell":
+        runtime["herdrAgent"] = "pi"
+        runtime["launchState"] = "pending"
+        _atomic(runtime_path, json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n")
+    else:
+        raise SecretaryError("Herdr workstream launch reached an unknown pane state")
+
+    command = _herdr_worker_command(runtime, project_id, record["workstreamId"])
+    try:
+        _herdr_ok(["pane", "run", runtime["herdrPane"], command], "workstream launch")
+    except SecretaryError:
+        # A command can be accepted by Herdr immediately before the CLI
+        # reports an error. Re-observe the exact pane before deciding whether
+        # this is a retryable failure or an uncertain live process.
+        try:
+            _, current_panes = _herdr_surface(runtime, info, Path(info["primaryRepository"]), project_id)
+            observed = _herdr_worker_state(runtime, current_panes, workspace, project_id, record["workstreamId"])
+        except SecretaryError:
+            runtime["launchState"] = "uncertain"
+            _atomic(runtime_path, json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n")
+            raise
+        if observed == "live":
+            runtime["launchState"] = "launched"
+            _atomic(runtime_path, json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n")
+            return runtime
+        runtime["launchState"] = "pending"
+        _atomic(runtime_path, json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n")
+        raise
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        _, current_panes = _herdr_surface(runtime, info, Path(info["primaryRepository"]), project_id)
+        observed = _herdr_worker_state(runtime, current_panes, workspace, project_id, record["workstreamId"])
+        if observed == "live":
+            runtime["launchState"] = "launched"
+            _atomic(runtime_path, json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n")
+            return runtime
+        time.sleep(0.1)
+    _, current_panes = _herdr_surface(runtime, info, Path(info["primaryRepository"]), project_id)
+    observed = _herdr_worker_state(runtime, current_panes, workspace, project_id, record["workstreamId"])
+    runtime["launchState"] = "launched" if observed == "live" else "pending"
+    _atomic(runtime_path, json.dumps(runtime, sort_keys=True, separators=(",", ":")) + "\n")
+    if observed != "live":
+        raise SecretaryError("Herdr workstream launch did not become live")
+    return runtime
+
+
+def _herdr_cleanup_worker(project_id: str, info: dict[str, Any], record: dict[str, Any],
+                          runtime: dict[str, Any]) -> None:
+    """Close only a proven idle Herdr worker pane before worktree removal."""
+    _, panes = _herdr_surface(runtime, info, Path(info["primaryRepository"]), project_id)
+    state = _herdr_worker_state(runtime, panes, Path(record["workspace"]), project_id,
+                                record["workstreamId"])
+    if state == "live":
+        raise SecretaryError("cleanup refuses a live Herdr workstream pane")
+    if state == "missing":
+        return
+    if state != "shell":
+        raise SecretaryError("cleanup refuses an unknown Herdr workstream pane state")
+    pane_id = runtime.get("herdrPane")
+    if not isinstance(pane_id, str):
+        raise SecretaryError("cleanup lacks the Herdr workstream pane identity")
+    _herdr_ok(["pane", "close", pane_id], "close idle Herdr workstream pane")
+    _, remaining = _herdr_surface(runtime, info, Path(info["primaryRepository"]), project_id)
+    if any(item.get("pane_id") == pane_id for item in remaining):
+        raise SecretaryError("cleanup could not prove Herdr workstream pane removal")
 
 
 def _workstream_id(title: str, role: str, brief_id: str) -> str:
@@ -3147,6 +3687,54 @@ def _remove_worktree_with_process_guard_unlocked(repo: Path, workspace: Path, la
         raise
 
 
+def _herdr_recovery_worker_absent(expected: dict[str, Any]) -> None:
+    workspace_id = expected.get("herdrWorkspace")
+    tab_id = expected.get("herdrTab")
+    pane_id = expected.get("herdrPane")
+    if pane_id is None:
+        return
+    if (not isinstance(workspace_id, str) or not isinstance(tab_id, str) or
+            not isinstance(pane_id, str)):
+        raise SecretaryError("Herdr cleanup recovery lacks its bound pane identity")
+    _herdr_id(workspace_id, "recovery workspace id")
+    _herdr_id(tab_id, "recovery tab id")
+    _herdr_id(pane_id, "recovery pane id")
+    workspaces = _herdr_workspace_records(_herdr_json(["workspace", "list"], "cleanup recovery workspace"))
+    if not any(item.get("workspace_id") == workspace_id for item in workspaces):
+        raise SecretaryError("cleanup recovery cannot prove the Herdr workspace exists")
+    panes = _herdr_pane_records(_herdr_json(["pane", "list", "--workspace", workspace_id],
+                                            "cleanup recovery panes"))
+    matches = [item for item in panes if item.get("pane_id") == pane_id]
+    if not matches:
+        return
+    if len(matches) != 1:
+        raise SecretaryError("cleanup recovery found an ambiguous Herdr worker pane")
+    pane = matches[0]
+    if pane.get("workspace_id") != workspace_id or pane.get("tab_id") != tab_id:
+        raise SecretaryError("cleanup recovery found a worker pane in the wrong Herdr surface")
+    processes = _herdr_process_info(pane_id, "cleanup recovery worker pane")
+    worker_id = expected.get("workstreamId")
+    if not isinstance(worker_id, str):
+        raise SecretaryError("cleanup recovery lacks its workstream identity")
+    worker_path = _herdr_worker_path()
+    if any(_herdr_process_is_launcher(process, [worker_path],
+                                      project_id=None, worker_id=worker_id)
+           for process in processes):
+        # Cleanup recovery intentionally does not copy the project capability
+        # into its quarantine manifest, but it can still prove the exact
+        # guarded worker path plus the exact workstream argument.
+        raise SecretaryError("cleanup recovery refuses a live Herdr worker")
+    if pane.get("agent") == "pi":
+        raise SecretaryError("cleanup recovery refuses an unverified Herdr Pi pane")
+    if not processes or not all(_herdr_shell_process(process) for process in processes):
+        raise SecretaryError("cleanup recovery found an unexpected Herdr worker process")
+    _herdr_ok(["pane", "close", pane_id], "close recovered idle Herdr worker pane")
+    remaining = _herdr_pane_records(_herdr_json(["pane", "list", "--workspace", workspace_id],
+                                                "verify cleanup recovery panes"))
+    if any(item.get("pane_id") == pane_id for item in remaining):
+        raise SecretaryError("cleanup recovery could not prove Herdr worker removal")
+
+
 def _resume_quarantined_worktree(repo: Path, quarantine: Path, policy_root: Path,
                                   expected: dict[str, Any]) -> bool:
     original_raw = expected.get("originalPath") if isinstance(expected, dict) else None
@@ -3158,17 +3746,40 @@ def _resume_quarantined_worktree(repo: Path, quarantine: Path, policy_root: Path
 
 def _resume_quarantined_worktree_unlocked(repo: Path, quarantine: Path, policy_root: Path,
                                           expected: dict[str, Any]) -> bool:
-    required = {"kind", "originalPath", "workstreamId", "requestId", "branch", "expectedOid",
-                "tmuxSession", "tmuxWindow", "tmuxSocket", "sessionId", "state"}
-    if set(expected) != required or expected["kind"] not in {"candidate", "review"} or \
+    legacy_required = {"kind", "originalPath", "workstreamId", "requestId", "branch", "expectedOid",
+                       "tmuxSession", "tmuxWindow", "tmuxSocket", "sessionId", "state"}
+    herdr_required = legacy_required | {"backend", "herdrSession", "herdrWorkspace", "herdrTab",
+                                       "herdrSecretaryPane", "herdrPane", "herdrAgent"}
+    if (set(expected) != legacy_required and set(expected) != herdr_required) or expected["kind"] not in {"candidate", "review"} or \
             not isinstance(expected["originalPath"], str) or not isinstance(expected["workstreamId"], str) or \
             (expected["requestId"] is not None and not isinstance(expected["requestId"], str)) or \
             (expected["branch"] is not None and not isinstance(expected["branch"], str)) or \
             not isinstance(expected["expectedOid"], str) or not re.fullmatch(r"[0-9a-f]{40,64}", expected["expectedOid"]) or \
-            not isinstance(expected["tmuxSession"], str) or not isinstance(expected["tmuxWindow"], str) or \
-            not isinstance(expected["tmuxSocket"], str) or not isinstance(expected["sessionId"], str) or \
+            not isinstance(expected["sessionId"], str) or \
             expected["state"] not in {"planned", "moved", "remove-pending", "removed"}:
         raise SecretaryError("cleanup recovery has invalid bound worktree metadata")
+    backend = expected.get("backend", "tmux")
+    if backend not in SECRETARY_BACKENDS:
+        raise SecretaryError("cleanup recovery has an invalid presentation backend")
+    if backend == "tmux":
+        if (not isinstance(expected["tmuxSession"], str) or not isinstance(expected["tmuxWindow"], str) or
+                not isinstance(expected["tmuxSocket"], str) or
+                any(expected.get(name) is not None for name in
+                    ("herdrSession", "herdrWorkspace", "herdrTab", "herdrSecretaryPane", "herdrPane", "herdrAgent"))):
+            raise SecretaryError("cleanup recovery has invalid tmux identity")
+    else:
+        if (expected["tmuxSession"] is not None or expected["tmuxWindow"] is not None or
+                expected["tmuxSocket"] is not None or expected.get("herdrSession") != HERDR_SESSION or
+                not isinstance(expected.get("herdrWorkspace"), str) or
+                not isinstance(expected.get("herdrTab"), str) or
+                not isinstance(expected.get("herdrSecretaryPane"), str) or
+                (expected.get("herdrPane") is not None and
+                 (not isinstance(expected.get("herdrPane"), str) or
+                  expected.get("herdrPane") == expected.get("herdrSecretaryPane")))):
+            raise SecretaryError("cleanup recovery has invalid Herdr identity")
+        for name in ("herdrWorkspace", "herdrTab", "herdrSecretaryPane", "herdrPane"):
+            if expected.get(name) is not None:
+                _herdr_id(expected[name], f"recovery {name}")
     original = Path(expected["originalPath"])
     quarantine = Path(quarantine)
     if not original.is_absolute() or not quarantine.is_absolute():
@@ -3199,7 +3810,9 @@ def _resume_quarantined_worktree_unlocked(repo: Path, quarantine: Path, policy_r
             return False
         if original.exists() or original.is_symlink() or expected["state"] not in {"remove-pending", "removed"}:
             raise SecretaryError("cleanup recovery cannot prove the worktree quarantine outcome")
-        if _tmux_window_live(expected["tmuxSession"], expected["tmuxWindow"], expected["tmuxSocket"]):
+        if backend == "herdr":
+            _herdr_recovery_worker_absent(expected)
+        elif _tmux_window_live(expected["tmuxSession"], expected["tmuxWindow"], expected["tmuxSocket"]):
             raise SecretaryError("cleanup recovery refuses an established worktree window")
         if _cleanup_worktree_has_live_process(original):
             raise SecretaryError("cleanup recovery refuses a live removed-worktree process")
@@ -3212,8 +3825,10 @@ def _resume_quarantined_worktree_unlocked(repo: Path, quarantine: Path, policy_r
             not quarantine.is_dir() or quarantine.is_symlink()):
         raise SecretaryError("cleanup recovery quarantine identity changed")
     # Recovery is an established process state, not a fresh launch. A missing
-    # or unreadable tmux socket therefore remains uncertain and blocks removal.
-    if _tmux_window_live(expected["tmuxSession"], expected["tmuxWindow"], expected["tmuxSocket"]):
+    # or unreadable presentation identity remains uncertain and blocks removal.
+    if backend == "herdr":
+        _herdr_recovery_worker_absent(expected)
+    elif _tmux_window_live(expected["tmuxSession"], expected["tmuxWindow"], expected["tmuxSocket"]):
         raise SecretaryError("cleanup recovery refuses a live quarantined worktree window")
     if _cleanup_worktree_has_live_process(quarantine):
         raise SecretaryError("cleanup recovery refuses a live quarantined worktree process")
@@ -3528,7 +4143,9 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
         if record["currentOid"] != landing["landedOid"]:
             raise SecretaryError("cleanup refuses dirty or moved workstream")
         runtime = _workstream_runtime(project, repo, record)
-        if _tmux_window_live(runtime["tmuxSession"], runtime["tmuxWindow"], runtime["tmuxSocket"]):
+        if runtime.get("backend", "tmux") == "herdr":
+            _herdr_cleanup_worker(project_id, info, record, runtime)
+        elif _tmux_window_live(runtime["tmuxSession"], runtime["tmuxWindow"], runtime["tmuxSocket"]):
             raise SecretaryError("cleanup refuses a live workstream window")
         if _cleanup_worktree_has_live_process(workspace):
             raise SecretaryError("cleanup refuses a live workstream process")
@@ -3551,6 +4168,13 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
         "tmuxWindow": runtime_for_recovery["tmuxWindow"],
         "tmuxSocket": runtime_for_recovery["tmuxSocket"],
         "sessionId": runtime_for_recovery["piSessionId"],
+        "backend": runtime_for_recovery.get("backend", "tmux"),
+        "herdrSession": runtime_for_recovery.get("herdrSession"),
+        "herdrWorkspace": runtime_for_recovery.get("herdrWorkspace"),
+        "herdrTab": runtime_for_recovery.get("herdrTab"),
+        "herdrSecretaryPane": runtime_for_recovery.get("herdrSecretaryPane"),
+        "herdrPane": runtime_for_recovery.get("herdrPane"),
+        "herdrAgent": runtime_for_recovery.get("herdrAgent"),
     }
     common_hash = hashlib.sha256(str(Path(project_record["gitCommonDir"])).encode()).hexdigest()
     repo_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-") or "repo"
@@ -3568,6 +4192,9 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
             "tmuxWindow": f"w-{review_name}-{hashlib.sha256(review_original.encode()).hexdigest()[:12]}",
             "tmuxSocket": request["reviewerTmuxSocket"],
             "sessionId": request["reviewerSessionId"],
+            "backend": "tmux", "herdrSession": None, "herdrWorkspace": None,
+            "herdrTab": None, "herdrSecretaryPane": None, "herdrPane": None,
+            "herdrAgent": None,
         }
     completed_worktrees: list[str] = list(dict.fromkeys(recovered_worktrees))
     pending_quarantines: list[str] = []
@@ -3704,7 +4331,9 @@ def _cleanup_workstream_locked(project_id: str, workstream_id: str) -> dict[str,
             if record["currentOid"] != landing["landedOid"]:
                 raise SecretaryError("cleanup refuses dirty or moved workstream")
             runtime = _workstream_runtime(project, repo, record)
-            if _tmux_window_live(runtime["tmuxSession"], runtime["tmuxWindow"], runtime["tmuxSocket"]):
+            if runtime.get("backend", "tmux") == "herdr":
+                _herdr_cleanup_worker(project_id, info, record, runtime)
+            elif _tmux_window_live(runtime["tmuxSession"], runtime["tmuxWindow"], runtime["tmuxSocket"]):
                 raise SecretaryError("cleanup refuses a live workstream window")
             if _cleanup_worktree_has_live_process(workspace):
                 raise SecretaryError("cleanup refuses a live workstream process")
@@ -3794,12 +4423,24 @@ def launch_workstream(project_id: str, workstream_id: str) -> dict[str, Any]:
     info = launch_info(project_id, internal=True)
     repo = Path(info["primaryRepository"])
     project = _record_dir(_state_root(), project_id)
+    selected_backend = _active_secretary_backend()
     with _workstream_launch_lock(project, workstream_id):
         record = open_workstream(repo, info["capability"], workstream_id)
-        current_socket = _current_tmux_socket()
         runtime_path = _workstream_runtime_path(project, workstream_id)
         with _project_lock(project):
             runtime = _workstream_runtime(project, repo, record)
+            recorded_backend = runtime.get("backend", "tmux")
+            if recorded_backend != selected_backend:
+                raise SecretaryError(
+                    f"workstream belongs to the {recorded_backend} secretary surface; "
+                    f"the {selected_backend} surface will not migrate it automatically")
+            if selected_backend == "herdr":
+                runtime = _herdr_launch_workstream(project_id, info, record, runtime,
+                                                   project, runtime_path)
+                record.update(runtime)
+                return record
+
+            current_socket = _current_tmux_socket()
             if (runtime["tmuxSocket"] is not None and current_socket is not None and
                     runtime["tmuxSocket"] != current_socket):
                 raise SecretaryError("workstream belongs to a different tmux server")
@@ -3877,6 +4518,76 @@ def launch_workstream(project_id: str, workstream_id: str) -> dict[str, Any]:
             return record
 
 
+def relaunch_workstream_herdr(project_id: str, workstream_id: str) -> dict[str, Any]:
+    """Explicitly rebind a stopped tmux worker to the Herdr backend.
+
+    This is not used by normal focus/recovery. It requires the authoritative
+    tmux resource to be absent and the worktree process to be absent before
+    changing the pinned runtime, so a failed switch never kills or migrates a
+    live tmux worker.
+    """
+    info = _require_secretary(project_id)
+    if _active_secretary_backend() != "herdr":
+        raise SecretaryError("Herdr relaunch must be requested from the Herdr secretary surface")
+    repo = Path(info["primaryRepository"])
+    project = _record_dir(_state_root(), project_id)
+    with _workstream_launch_lock(project, workstream_id):
+        record = open_workstream(repo, info["capability"], workstream_id)
+        runtime_path = _workstream_runtime_path(project, workstream_id)
+        with _project_lock(project):
+            runtime = _workstream_runtime(project, repo, record)
+            if runtime.get("backend", "tmux") == "herdr":
+                return _herdr_launch_workstream(project_id, info, record, runtime, project, runtime_path) | record
+            if runtime.get("backend", "tmux") != "tmux":
+                raise SecretaryError("workstream has an invalid presentation backend")
+            socket = runtime.get("tmuxSocket")
+            if not isinstance(socket, str):
+                raise SecretaryError("cannot prove the existing tmux worker server identity")
+            live = _managed_process_live(socket, runtime["tmuxSession"], runtime["tmuxWindow"],
+                                          Path(record["workspace"]), runtime["piSessionId"])
+            if live is not False:
+                raise SecretaryError("existing tmux worker is live or its state is uncertain; stop it and retry")
+            if _tmux_window_live(runtime["tmuxSession"], runtime["tmuxWindow"], socket):
+                raise SecretaryError("close the exact idle tmux workstream window before Herdr relaunch")
+            if _cleanup_worktree_has_live_process(Path(record["workspace"])):
+                raise SecretaryError("cannot prove the existing workstream process has exited")
+            workspace_id = _herdr_id(os.environ.get("HERDR_WORKSPACE_ID"), "workspace id")
+            tab_id = _herdr_id(os.environ.get("HERDR_TAB_ID"), "tab id")
+            secretary_pane = _herdr_id(os.environ.get("HERDR_PANE_ID"), "secretary pane id")
+            assert workspace_id is not None and tab_id is not None and secretary_pane is not None
+            rebound = {"schemaVersion": 2, "workstreamId": workstream_id,
+                       "backend": "herdr", "piSessionId": runtime["piSessionId"],
+                       "tmuxSession": None, "tmuxWindow": None, "tmuxSocket": None,
+                       "herdrSession": HERDR_SESSION, "herdrWorkspace": workspace_id,
+                       "herdrTab": tab_id, "herdrSecretaryPane": secretary_pane,
+                       "herdrPane": None, "herdrAgent": None,
+                       "launchState": "pending", "seededAt": runtime["seededAt"]}
+            _herdr_surface(rebound, info, repo, project_id)
+            _atomic(runtime_path, json.dumps(rebound, sort_keys=True, separators=(",", ":")) + "\n")
+        rebound_record = {**record, **rebound}
+    return launch_workstream(project_id, workstream_id)
+
+
+def workstream_launch_info(project_id: str, workstream_id: str) -> dict[str, Any]:
+    """Return the exact host assignment consumed by the guarded Herdr worker.
+
+    This is intentionally an internal identity lookup: it returns no
+    capability and cannot allocate, migrate, or mutate a workstream.
+    """
+    info = launch_info(project_id, internal=True)
+    record = open_workstream(Path(info["primaryRepository"]), info["capability"], workstream_id)
+    brief_path = _brief_path(_record_dir(_state_root(), project_id), record["briefId"])
+    _safe_lstat(brief_path, directory=False)
+    return {"projectId": project_id, "workstreamId": workstream_id,
+            "workspace": record["workspace"], "branch": record["branch"],
+            "piSessionId": record["piSessionId"], "briefPath": str(brief_path),
+            "backend": record.get("backend", "tmux"),
+            "herdrSession": record.get("herdrSession"),
+            "herdrWorkspace": record.get("herdrWorkspace"),
+            "herdrTab": record.get("herdrTab"), "herdrPane": record.get("herdrPane"),
+            "currentOid": record.get("currentOid")}
+
+
 def record_idea(project_id: str, title: str, brief_text: str) -> dict[str, Any]:
     info = launch_info(project_id, internal=True)
     return create_brief(info["primaryRepository"], info["capability"], title, brief_text)
@@ -3935,6 +4646,9 @@ def _cli() -> int:
     p.add_argument("--title", required=True); p.add_argument("--brief", required=True)
     p.add_argument("--role", required=True); p.add_argument("--brief-id"); p.add_argument("--workstream-id")
     p = sub.add_parser("focus-workstream"); p.add_argument("--project-id", required=True); p.add_argument("--workstream-id", required=True)
+    p = sub.add_parser("workstream-launch-info"); p.add_argument("--project-id", required=True); p.add_argument("--workstream-id", required=True)
+    p.add_argument("--internal-launch", action="store_true")
+    p = sub.add_parser("relaunch-herdr"); p.add_argument("--project-id", required=True); p.add_argument("--workstream-id", required=True)
     p = sub.add_parser("project-workstreams"); p.add_argument("--project-id", required=True)
     p = sub.add_parser("notify"); p.add_argument("--project-id", required=True); p.add_argument("--workstream-id", required=True)
     p.add_argument("--kind", required=True); p.add_argument("--summary", required=True); p.add_argument("--details", default="")
@@ -3999,6 +4713,12 @@ def _cli() -> int:
                                         args.brief_id, args.workstream_id)
         elif args.command == "focus-workstream":
             result = launch_workstream(args.project_id, args.workstream_id)
+        elif args.command == "workstream-launch-info":
+            if not args.internal_launch:
+                raise SecretaryError("workstream launch info is internal-only")
+            result = workstream_launch_info(args.project_id, args.workstream_id)
+        elif args.command == "relaunch-herdr":
+            result = relaunch_workstream_herdr(args.project_id, args.workstream_id)
         elif args.command == "project-workstreams":
             info = launch_info(args.project_id, internal=True)
             result = list_workstreams(info["primaryRepository"], info["capability"])

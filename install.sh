@@ -356,8 +356,9 @@ install -m 755 "$SCRIPT_DIR/scripts/pi-sandbox-gc.py" "$STAGING_DIR/control/pi-s
 install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-control.py" "$STAGING_DIR/control/pi-secretary-control.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-root-session.py" "$STAGING_DIR/control/pi-root-session.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-stats.py" "$STAGING_DIR/control/pi-secretary-stats.py"
+install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-herdr.py" "$STAGING_DIR/control/pi-secretary-herdr.py"
 cp -a "$SCRIPT_DIR/skills/project-status" "$STAGING_DIR/control/project-status-skill"
-for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-root-session pi-secretary-stats pi-review-agent pi-sandbox-gc pi-restart; do
+for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-secretary-herdr pi-herdr-workstream pi-root-session pi-secretary-stats pi-review-agent pi-sandbox-gc pi-restart; do
     install -m 755 "$SCRIPT_DIR/bin/$launcher" "$STAGING_DIR/control/$launcher"
 done
 python3 - "$STAGING_DIR/control/pi" "$STAGING_DIR/control/pi-host" <<'PY'
@@ -427,6 +428,7 @@ activate_path "$STAGING_DIR/control/pi-sandbox-gc.py" "$HOME/.local/share/pi/con
 activate_path "$STAGING_DIR/control/pi-secretary-control.py" "$HOME/.local/share/pi/control/pi-secretary-control.py"
 activate_path "$STAGING_DIR/control/pi-root-session.py" "$HOME/.local/share/pi/control/pi-root-session.py"
 activate_path "$STAGING_DIR/control/pi-secretary-stats.py" "$HOME/.local/share/pi/control/pi-secretary-stats.py"
+activate_path "$STAGING_DIR/control/pi-secretary-herdr.py" "$HOME/.local/share/pi/control/pi-secretary-herdr.py"
 if [ -n "$MACHINE_PROFILE" ]; then
     mkdir -p -m 700 "$MACHINE_CONFIG_DIR"
     chmod 700 "$MACHINE_CONFIG_DIR"
@@ -434,7 +436,7 @@ if [ -n "$MACHINE_PROFILE" ]; then
 fi
 skill_rollback_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pi/rollback/skills"
 activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status" "$skill_rollback_dir"
-for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-root-session pi-secretary-stats pi-review-agent pi-sandbox-gc pi-restart; do
+for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-secretary pi-secretary-herdr pi-herdr-workstream pi-root-session pi-secretary-stats pi-review-agent pi-sandbox-gc pi-restart; do
     activate_path "$STAGING_DIR/control/$launcher" "$HOME/.local/bin/$launcher"
 done
 

@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import fs from "node:fs";
 import path from "node:path";
-import { gitCleanupApplyWasAuthorized, gitWriteWasAuthorized, type GitAuthorization, type GitCleanupAuthorization } from "./authorization.ts";
+import { gitCleanupApplyWasAuthorized, gitWriteWasAuthorized, promotionWasAuthorized, type GitAuthorization, type GitCleanupAuthorization } from "./authorization.ts";
 
 const PROJECT_ID = /^[0-9a-f]{64}$/;
 const ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/;
@@ -33,7 +33,7 @@ const CLEANUP_PLAN = Type.Object({
   }), { maxItems: 256 })),
 });
 
-type Authorization = "record" | "promote" | "open" | "ack" | "review" | "land" | "integrate" | "cleanup" | GitAuthorization | GitCleanupAuthorization;
+type Authorization = "record" | "promote" | "open" | "relaunch" | "ack" | "review" | "land" | "integrate" | "cleanup" | GitAuthorization | GitCleanupAuthorization;
 let authorized = new Set<Authorization>();
 let authorizedTargets = new Map<Authorization, string>();
 let authorizedCleanupTarget: string | null = null;
@@ -89,7 +89,7 @@ function updateAuthorization(text: string, source: string): void {
   if (recordWasAuthorized(value)) authorized.add("record");
   for (const action of gitWriteWasAuthorized(value)) authorized.add(action);
   if (gitCleanupApplyWasAuthorized(value)) authorized.add("git-cleanup");
-  if (/\b(spin|promote)\b.*\b(out|session|agent)|\b(new feature|create (an? )?agent|open (an? )?agent)\b/.test(value)) authorized.add("promote");
+  if (promotionWasAuthorized(value)) authorized.add("promote");
   const targetIds = [...new Set(value.match(/\b(?:ws|rr)-[a-z0-9][a-z0-9-]{0,59}\b|\bevt-[a-z0-9][a-z0-9-]{0,58}\b/g) ?? [])];
   const targetFor = (prefix: "ws" | "rr" | "evt"): string | null => {
     const matches = targetIds.filter((id) => id.startsWith(`${prefix}-`));
@@ -98,6 +98,14 @@ function updateAuthorization(text: string, source: string): void {
   const openTarget = targetFor("ws");
   if (openTarget !== null && /\b(open|resume|focus|switch to)\b/.test(value)) {
     authorized.add("open"); authorizedTargets.set("open", openTarget);
+  }
+  const relaunchDenied = /\b(?:don't|do not|never|not|without|avoid|refus(?:e|es|ed|ing)|won't|will not|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:relaunch|migrat|switch)\w*\b/.test(value);
+  const relaunchDiscussion = value.includes("?") ||
+    /\b(?:can|could|should|would|may)\s+(?:we|you|i|it)\b[\s\S]{0,100}\b(?:relaunch|restart|switch|move)\w*\b/.test(value) ||
+    /\b(?:propos|recommend|discuss|consider|what\s+happens\s+if|what\s+if)\w*\b[\s\S]{0,100}\b(?:relaunch|restart|switch|move)\w*\b/.test(value);
+  if (openTarget !== null && !relaunchDenied && !relaunchDiscussion &&
+      /\b(?:relaunch|restart|switch|move)\w*\b[\s\S]{0,100}\b(?:herdr|herdr\s+backend|herdr\s+surface)\b/.test(value)) {
+    authorized.add("relaunch"); authorizedTargets.set("relaunch", openTarget);
   }
   const ackTarget = targetFor("evt");
   if (ackTarget !== null && /\b(acknowledge|dismiss|clear)\b.*\b(attention|event|notification|this)\b/.test(value)) {
@@ -285,6 +293,16 @@ export default function secretary(pi: ExtensionAPI): void {
     async execute(_id, params, signal) {
       consume("open", params.workstreamId); const { projectId } = requiredEnvironment();
       const text = await invoke(["focus-workstream", "--project-id", projectId, "--workstream-id", params.workstreamId], signal);
+      return { content: [{ type: "text", text }], details: {} };
+    },
+  });
+  pi.registerTool({
+    name: "secretary_relaunch_workstream", label: "Relaunch worker in Herdr",
+    description: "Explicitly rebind a stopped, exact tmux workstream to Herdr. The controller refuses live or uncertain tmux workers and never migrates them automatically.",
+    parameters: Type.Object({ workstreamId: Type.String({ pattern: ID.source }) }),
+    async execute(_id, params, signal) {
+      consume("relaunch", params.workstreamId); const { projectId } = requiredEnvironment();
+      const text = await invoke(["relaunch-herdr", "--project-id", projectId, "--workstream-id", params.workstreamId], signal);
       return { content: [{ type: "text", text }], details: {} };
     },
   });

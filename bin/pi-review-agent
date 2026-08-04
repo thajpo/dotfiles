@@ -53,7 +53,8 @@ PY
 agent_dir=${PI_CODING_AGENT_DIR:-"$HOME/.pi/agent"}
 sandbox="$agent_dir/npm/node_modules/@kjrjay/pi-sandbox/index.ts"
 extension="$agent_dir/extensions/review-receipt/index.ts"
-[[ -r $sandbox && -r $extension ]] || { printf 'pi-review-agent: required extensions missing\n' >&2; exit 1; }
+web_access="$agent_dir/npm/node_modules/pi-web-access/index.ts"
+[[ -r $sandbox && -r $extension && -r $web_access ]] || { printf 'pi-review-agent: required extensions missing\n' >&2; exit 1; }
 export PI_REVIEW_PROJECT_ID="$project_id" PI_REVIEW_REQUEST_ID="$request_id" PI_REVIEW_SESSION_ID="$session_id"
 export PI_REVIEW_CANDIDATE_OID="$candidate_oid" PI_REVIEW_BASE_OID="$base_oid" PI_REVIEW_CAPABILITY="$capability" PI_REVIEW_CONTROL="$control"
 cd "$workspace"
@@ -78,5 +79,5 @@ lease_path="$lease_dir/$lease_key.lock"
 python3 -c 'import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600); os.fchmod(fd, 0o600); fcntl.flock(fd, fcntl.LOCK_SH); os.execvpe(sys.argv[2], sys.argv[2:], os.environ)' "$lease_path" "$real_pi" \
   --no-extensions --no-skills --no-context-files --no-prompt-templates \
   --model "openai-codex/gpt-5.6-luna" --thinking high \
-  -e "$sandbox" -e "$extension" --tools read,grep,find,ls,submit_review_receipt \
+  -e "$sandbox" -e "$extension" -e "$web_access" --tools read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,submit_review_receipt \
   --session-id "$session_id" --session-dir "$agent_dir/sessions/review/$project_id" --name "review-${request_id}"

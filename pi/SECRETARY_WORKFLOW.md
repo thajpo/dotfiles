@@ -54,10 +54,12 @@ worktree, persistence, and further-spawn capabilities.
 Its fixed tool allowlist is:
 
 ```text
-read, grep, find, ls, host_command, subagent,
+read, grep, find, ls, web_search, fetch_content, get_search_content, source_check,
+host_command, subagent,
 secretary_git, secretary_git_write, secretary_git_cleanup,
 secretary_record_idea, secretary_create_workstream,
-secretary_open_workstream, secretary_list_workstreams,
+secretary_open_workstream, secretary_relaunch_workstream,
+secretary_list_workstreams,
 secretary_list_attention, secretary_acknowledge_attention,
 secretary_create_reviewer, secretary_land_reviewed,
 secretary_create_integration, secretary_cleanup_workstream
@@ -67,22 +69,151 @@ It intentionally does not expose `bash`, `write`, or `edit`. Child secretary
 investigators receive an even smaller hardened list:
 
 ```text
-read, grep, find, ls, secretary_git, contact_supervisor, host_command
+read, grep, find, ls, web_search, fetch_content, get_search_content,
+source_check, secretary_git, contact_supervisor, intercom, host_command
 ```
 
 They receive no write/edit/shell/subagent tool, no ordinary extensions, and no
-Git worktree. The secretary's normal read tools are a tool boundary, not a
+Git worktree; web access is loaded only through the explicit read-only search
+extension. The secretary's normal read tools are a tool boundary, not a
 container security boundary: the secretary launcher does not load the
 container-sandbox extension. The host controller and explicit extension list
 are therefore part of the authority boundary.
 
+## Secretary presentation backends and Herdr surface
+
+The secretary/workstream system has two selectable presentation backends:
+
+- **tmux (default):** `pisec` and `pi-start secretary` keep the existing
+  `pisec` grid and launch full workstreams with `pidev`/tmux.
+- **Herdr (opt-in):** `pi-secretary --herdr` uses the dedicated Herdr session
+  `pi-secretary`. It creates one project Space per registered project and
+  launches new full workstreams as guarded Herdr panes in that Space.
+
+The active surface selects the backend; it is not a global replacement. A
+runtime record pins the backend, so opening a tmux workstream from Herdr (or
+vice versa) refuses rather than migrating or killing the existing worker.
+Switch surfaces only after stopping the current surface, and do not run both
+surfaces for one project. Existing tmux workers are never automatically
+migrated.
+
+The Herdr command starts the same guarded
+`bin/pi-secretary --internal-launch --project-id <id>` process used by `pisec`.
+It never starts a bare or unguarded `pi`. A Herdr workstream uses the checked-in
+`bin/pi-herdr-workstream` wrapper, which verifies the exact project,
+workstream, assigned branch/worktree, session ID, brief, and backend before
+calling the normal guarded `bin/pi` route. It does not call `pidev` or nest
+tmux inside Herdr. Runtime records retain the Herdr session, Space, tab,
+secretary pane, and worker pane IDs. Launch and cleanup re-query those exact
+IDs and fail closed on a missing, mismatched, unguarded, or ambiguous process.
+Attention events still use the existing workstream channel and controller.
+
+Herdr server restore is deliberately native-agent-safe:
+
+```toml
+[session]
+resume_agents_on_restore = false
+```
+
+Herdr's native Pi restore command is `pi --session ...`, which would bypass the
+secretary/worker wrappers and their fixed boundaries. After a Herdr server
+restart, `pi-secretary --herdr` restores idle shells and relaunches only
+through the guarded wrappers. Herdr workstream recovery is automatic only for
+records already pinned to Herdr; a tmux-pinned record is left untouched. The
+dedicated config is separate from the normal Herdr default session, and the
+command does not install the optional Herdr Pi integration automatically.
+
+Use `pisec` or `pi-start secretary` for the tmux surface. Before stopping a
+surface, finish or explicitly stop its secretary/worker processes through their
+normal controls; do not kill a live Pi worker and assume its state is
+recoverable. A surface stop never migrates a live worker, and a worker pinned to
+the old backend remains unavailable from the new surface until its explicit
+relaunch procedure is completed. To switch from Herdr to tmux:
+
+```bash
+herdr session stop pi-secretary
+pisec
+```
+
+To switch from tmux to Herdr, stop the tmux secretary surface first, then run
+`pi-secretary --herdr`. The per-project secretary lock is the final ownership
+check; a failed switch leaves the existing surface and worker untouched.
+
+To explicitly relaunch one existing tmux worker into Herdr (never as part of
+ordinary startup):
+
+1. In the tmux worker pane, let the worker finish or exit normally; do not kill
+   a live Pi process. Save/close any separate editor pane in that exact tmux
+   workstream window.
+2. Verify the exact tmux workstream window from the runtime record and close
+   that now-idle window. The relaunch controller refuses an existing window,
+   live process, uncertain socket, or process still using the assigned
+   worktree; it never guesses or kills through uncertainty.
+3. Stop the tmux secretary surface and release its project lock:
+   `tmux kill-session -t pisec` (or exit the exact `pisec` client without
+   disturbing unrelated tmux sessions), then run `pi-secretary --herdr`.
+4. In the Herdr secretary for that project, explicitly say
+   `relaunch <exact-workstream-id> into Herdr`. The exact-target authorization
+   calls `secretary_relaunch_workstream`; it preserves the existing workstream
+   and Pi session identity, creates a Herdr worker pane, and starts only the
+   guarded `pi-herdr-workstream` wrapper.
+
+If any verification fails, leave the tmux worker and runtime record unchanged
+and resolve the stale/live state first.
+
+### Herdr UX vocabulary and navigation
+
+- **Space/workspace** = the project/context container.
+- **Tab** = a layout within a Space.
+- **Pane** = one terminal.
+- **Agent** = the process running in a pane.
+
+The current one-secretary-per-project layout makes a current-Space **Agents**
+filter redundant: each Space initially has exactly one secretary. The useful
+model is for a project Space to contain its secretary plus one or more Herdr
+workstream agents; the Agents view then selects an exact process, not merely a
+project.
+
+Herdr's default prefix is **Ctrl-b**. Use `Ctrl-b w` for the Spaces/workspace
+picker, `Ctrl-b h/j/k/l` to move between panes, `Ctrl-b c` and
+`Ctrl-b n/p` for tabs, and `Ctrl-b b` to toggle the sidebar. `Ctrl-b q` detaches
+from Herdr; `Ctrl-b ?` opens key help. Press the prefix twice (`Ctrl-b
+Ctrl-b`) to send a literal prefix to the focused Pi pane. These are Herdr
+bindings, not Pi Backspace bindings.
+
+### Backspace diagnostic
+
+A single Backspace deleting two characters is the known outer-Kitty
+press/release compatibility bug, not a secretary binding. Kitty 0.31/0.32 can
+send a normal `CSI 127 u` press and a release that arrives as another raw
+`DEL`; the old outer terminal cannot distinguish the release, while newer
+Kitty releases fixed the protocol issue. The observed host is Kitty 0.32.2;
+upgrade the outer Kitty to **0.48.1 or newer** (current release preferred), then
+restart Kitty and the Herdr server. Check the path with:
+
+```bash
+kitty --version
+herdr --version
+HERDR_DEBUG_OSC_EVIDENCE=1 herdr --session pi-secretary api snapshot
+```
+
+The repository does not remap Pi's Backspace and does not edit Kitty
+configuration automatically. If the problem remains after the upgrade, save
+the diagnostic output and report the outer terminal plus the exact key path;
+changing Pi's binding would hide the transport problem rather than fix it.
+
 ## Secretary tools
 
-### Project inspection and notes
+### Project inspection, feedback, and notes
 
 - `read`, `grep`, `find`, `ls`: inspect project evidence.
+- Child workers and investigators report blocked capability requests, risks, and
+  suggestions through the parent supervisor intake. The parent decides whether
+  to answer, reject, or promote the request; no feedback message grants
+  authority by itself.
 - `secretary_record_idea`: write a bounded brief into the secretary state store
-  outside the repository. It requires explicit record/note authorization.
+  outside the repository. It requires explicit record/note authorization and is
+  the durable path for an accepted agent suggestion.
 - `secretary_list_workstreams`: list validated persistent full-agent records.
 - `secretary_list_attention`: list unacknowledged worker attention events.
 - `secretary_acknowledge_attention`: acknowledge one exact event after explicit
@@ -146,6 +277,9 @@ benchmark cleanup automatically.
   bounded brief, allocate a persistent workstream branch/worktree, and launch
   the full worker.
 - `secretary_open_workstream`: focus an existing exact workstream.
+- `secretary_relaunch_workstream`: an explicit, exact-target-only transition for
+  a stopped tmux worker into Herdr; it refuses live/uncertain tmux state and
+  never performs an automatic migration.
 - `secretary_create_reviewer`: create a detached read-only reviewer checkout
   for an exact pending candidate OID.
 - `secretary_land_reviewed`: after the secretary and user jointly decide that
@@ -168,7 +302,9 @@ handoff.
 The checked-in `worker` definition has:
 
 ```text
-read, write, edit, bash, grep, find, ls, contact_supervisor, host_command, subagent
+read, write, edit, bash, grep, find, ls, web_search, fetch_content,
+get_search_content, source_check, contact_supervisor, intercom, host_command,
+subagent
 ```
 
 `host_command` is request-only: a worker or investigator may propose an exact
@@ -185,7 +321,8 @@ The normal read-only roles (`scout`, `context-builder`, `delegate`, `oracle`,
 `planner`, `researcher`, and `reviewer`) have:
 
 ```text
-read, bash, grep, find, ls, contact_supervisor, host_command
+read, bash, grep, find, ls, web_search, fetch_content, get_search_content,
+source_check, contact_supervisor, intercom, host_command
 ```
 
 Their `acceptanceRole: read-only` is an acceptance/coordination contract, not a

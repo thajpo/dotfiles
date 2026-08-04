@@ -8,7 +8,8 @@ Pi workspace quick reference
 Start from no tmux sessions:
   pi-start                 Start tmux, ensure pi-personal, and attach to it.
   pi-start --mobile        Start full-width conversation windows.
-  pi-start secretary       Start/open the secretary grid and attach to it.
+  pi-start secretary       Start/open the tmux secretary grid and attach to it.
+  pi-secretary --herdr     Open the separate Herdr secretary surface.
   pi-start project [DIR]   Open a project workspace (DIR defaults to $PWD).
   pi-start host            Open pi-personal and select its explicit pi-host pane.
   pi-start all              Start pi-personal and the secretary grid.
@@ -54,6 +55,7 @@ Tmux sessions and switching:
   tmux attach -t NAME      Attach to a named session.
 
 Secretary projects:
+  pi-secretary --herdr      Open one Herdr Space per registered project; optional backend, does not replace pisec.
   pisec                     Open the default projects without restarting live panes.
   pisec --mobile            Put each active secretary conversation in its own full-width window.
   pisec activate ALIAS ... Replace the active project set.
@@ -61,6 +63,15 @@ Secretary projects:
   pisec list                Print the registered project records.
   pi-secretary-stats        Summarize secretary session/run time and token usage.
   /subagents-fleet          Explicitly inspect private child runs.
+
+Herdr navigation:
+  Ctrl-b w                  Open the Spaces/workspace picker.
+  Ctrl-b h/j/k/l            Move between panes; Ctrl-b c, n, p navigate tabs.
+  Ctrl-b b                  Toggle the sidebar; Ctrl-b q detaches.
+  Ctrl-b ?                  Show Herdr help; Ctrl-b Ctrl-b sends a literal prefix to Pi.
+  Space/workspace           Project/context container; tab is a layout; pane is a terminal; agent is its process.
+  Agents view               Selects an exact process; a one-secretary Space has no useful current-Space filter until workers are added.
+  kitty --version           Diagnose the known Kitty 0.31/0.32 Backspace press/release bug; upgrade Kitty >= 0.48.1.
 
 Recovery:
   pi-restart                Replace every tmux workspace with a fresh Pi grid.

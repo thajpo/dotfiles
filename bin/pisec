@@ -248,7 +248,9 @@ process_is_any_secretary() {
 }
 secretary_command() {
   local project_id=$1 command
-  printf -v command '%q --internal-launch --project-id %q' "$self_launch" "$project_id"
+  # The surface is selected by the active launcher, never by ambient tmux or
+  # Herdr environment inherited by the server.
+  printf -v command 'env PI_SECRETARY_BACKEND=tmux %q --internal-launch --project-id %q' "$self_launch" "$project_id"
   printf '%s' "$command"
 }
 pane_idle_shell() {

@@ -90,6 +90,48 @@ host_command({
 `pi-host` remains a separate explicit maintenance mode and does not use this
 request mechanism.
 
+## Agent feedback and intake
+
+A child agent must not silently broaden its authority or guess through a missing
+capability, context item, or product decision. For a blocking issue it can use
+`contact_supervisor` with `reason: "interview_request"` and submit the structured
+`agent-feedback.v1` form carried in the request. The parent receives the request
+in the current session and can answer it with
+`subagent_supervisor({ action: "reply", replyTo, message })`; the answer is a
+review decision, not an automatic grant of new tools or authority. A typical
+request is:
+
+```text
+contact_supervisor({
+  reason: "interview_request",
+  message: "I cannot complete this without a decision.",
+  interview: {
+    schema: "agent-feedback.v1",
+    kind: "capability-request",
+    title: "Need source inspection",
+    want: "Inspect the generated artifact outside the task workspace",
+    blocked_by: "No approved tool for that host path",
+    why: "The artifact is required to validate the result",
+    evidence: ["validation stopped at ..."],
+    options: [{"label": "Approve host read", "tradeoff": "exposes requested output"}],
+    recommendation: "Approve only the exact read command",
+    decision_needed: true
+  }
+})
+```
+
+For a non-blocking idea, risk, or improvement suggestion, the child sends a
+compact `AGENT_FEEDBACK` JSON message with `reason: "progress_update"`. It does
+not wait. The parent can accept it, reject it, ask for more evidence, or ask the
+secretary to record it as a durable idea through `secretary_record_idea`.
+
+The retained role definitions opt into Pi-subagents' user-scoped memory at
+`~/.pi/agent/agent-memory/pi-harness/MEMORY.md`. The first 200 lines are
+reference context for those roles. This is deliberately user-scoped rather than
+project state: repository instructions and project facts remain in `AGENTS.md`.
+Agents should propose durable memory additions through the intake and should
+not silently treat memory as authorization.
+
 ## Workspace modes
 
 `pi` reads the host-owned policy before Pi starts. It canonicalizes the current
@@ -174,8 +216,9 @@ One normal task has one route, workspace, branch, and container. Parent,
 scouts, worker, reviewers, and BTW share it. Child context style does not alter
 the execution plane. Children cannot publish or remove the task container. A
 worker may spawn headless asynchronous investigators, but that nested fanout is
-mechanically restricted to read-only agents with read/search/supervisor tools;
-it cannot create worktrees, write, edit, run shell commands, or spawn again.
+mechanically restricted to read-only agents with local read/search, web-search,
+source-verification, and supervisor tools; it cannot create worktrees, write,
+edit, run shell commands, or spawn again.
 
 `/goal <objective>` uses pi-goal to continue the same session after a settled
 turn until `goal_complete`, `goal_blocked`, pause, or a provider/runtime stop.
@@ -183,8 +226,10 @@ This harness configures no automatic response-count or no-progress turn limit. U
 provider-token bound is desired.
 Investigator count is selected from the task rather than a fixed fanout recipe;
 report-only parallelism does not create Git worktrees. Secretary investigators
-run asynchronously with only read/search and bounded read-only Git tools; they
-inherit neither shell/write tools nor ordinary extensions. Interactive
+run asynchronously with local read/search, web-search, source-verification, and
+bounded read-only Git tools; they inherit neither shell/write tools nor ordinary
+extensions, and load web access only through the explicit read-only search
+extension. Interactive
 sessions keep `subagent_wait` non-blocking: completion notifications and
 `subagent({ action: "status" })` remain available without holding the parent
 turn open. Secretary investigations impose no elapsed-time, assistant-turn,

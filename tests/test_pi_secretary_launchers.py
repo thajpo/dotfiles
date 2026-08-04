@@ -66,6 +66,7 @@ class SecretaryLauncherTests(unittest.TestCase):
                 agent_dir / "extensions/secretary-investigator-git/index.ts",
                 agent_dir / "extensions/fast-mode/index.ts",
                 agent_dir / "extensions/host-command/index.ts",
+                agent_dir / "npm/node_modules/pi-web-access/index.ts",
                 agent_dir / "skills/project-status/SKILL.md",
             ]:
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,10 +99,10 @@ pathlib.Path(os.environ['FAKE_PI_OUTPUT']).write_text(json.dumps({
             self.assertEqual(invocation["cwd"], str(repos[0]))
             args = invocation["args"]
             self.assertEqual(args[args.index("--tools") + 1],
-                             "read,grep,find,ls,host_command,subagent,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea,secretary_create_workstream,secretary_open_workstream,secretary_list_workstreams,secretary_list_attention,secretary_acknowledge_attention,secretary_create_reviewer,secretary_land_reviewed,secretary_create_integration,secretary_cleanup_workstream")
+                             "read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,host_command,subagent,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea,secretary_create_workstream,secretary_open_workstream,secretary_relaunch_workstream,secretary_list_workstreams,secretary_list_attention,secretary_acknowledge_attention,secretary_create_reviewer,secretary_land_reviewed,secretary_create_integration,secretary_cleanup_workstream")
             for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--session"]:
                 self.assertIn(flag, args)
-            self.assertEqual(args.count("-e"), 6)
+            self.assertEqual(args.count("-e"), 7)
             self.assertNotIn("--session-id", args)
             session_file = Path(args[args.index("--session") + 1])
             self.assertTrue(session_file.is_file())
@@ -109,6 +110,63 @@ pathlib.Path(os.environ['FAKE_PI_OUTPUT']).write_text(json.dumps({
             self.assertNotIn("bash", args[args.index("--tools") + 1])
             self.assertEqual(invocation["secretary"]["PI_SECRETARY_READ_ONLY"], "1")
             self.assertEqual(invocation["secretary"]["PI_SECRETARY_PROJECT_ID"], records[0]["projectId"])
+
+    def test_pi_secretary_herdr_creates_a_parallel_surface_without_tmux(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, _, records, env = setup_registry(root, 3)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            log = root / "herdr.jsonl"
+            herdr = fake_bin / "herdr"
+            herdr.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+with pathlib.Path(os.environ['FAKE_HERDR_LOG']).open('a') as stream:
+    stream.write(json.dumps({'args': args, 'config': os.environ.get('HERDR_CONFIG_PATH')}) + '\\n')
+command = args[2:] if len(args) >= 2 and args[:2] == ['--session', 'pi-secretary'] else args
+if command == ['workspace', 'list']:
+    print(json.dumps({'result': {'workspaces': []}}))
+elif command == ['server', 'reload-config']:
+    print(json.dumps({'result': {'type': 'config_reload'}}))
+elif command[:2] == ['workspace', 'create']:
+    label = command[command.index('--label') + 1]
+    number = label.rsplit('/', 1)[-1]
+    print(json.dumps({'result': {
+        'workspace': {'workspace_id': 'w-' + number, 'label': label},
+        'tab': {'tab_id': 'w-' + number + ':t1'},
+        'root_pane': {'pane_id': 'w-' + number + ':p1',
+                      'workspace_id': 'w-' + number,
+                      'tab_id': 'w-' + number + ':t1'},
+    }}))
+elif command[:2] in (['pane', 'rename'], ['pane', 'run']) or command[:2] == ['workspace', 'focus']:
+    print(json.dumps({'result': {'type': 'ok'}}))
+elif command == []:
+    pass
+else:
+    raise SystemExit('unexpected Herdr command: ' + repr(command))
+""")
+            herdr.chmod(0o755)
+            env.update({"PATH": f"{fake_bin}:/usr/local/bin:/usr/bin:/bin",
+                        "FAKE_HERDR_LOG": str(log)})
+            result = subprocess.run([str(ROOT / "bin/pi-secretary"), "--herdr"], cwd=home,
+                                    env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            creates = [call for call in calls if call["args"][2:4] == ["workspace", "create"]]
+            launches = [call for call in calls if call["args"][2:4] == ["pane", "run"]]
+            self.assertEqual(len(creates), 3)
+            self.assertEqual(len(launches), 3)
+            launch_ids = set()
+            for call in launches:
+                command = call["args"][-1]
+                self.assertIn("--internal-launch --project-id", command)
+                launch_ids.add(command.rsplit(" ", 1)[-1])
+            self.assertEqual(launch_ids, {record["projectId"] for record in records})
+            self.assertEqual(calls[-1]["args"], ["--session", "pi-secretary"])
+            config = root / "state/pi-secretary/herdr/config.toml"
+            self.assertIn("resume_agents_on_restore = false", config.read_text())
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
 
     def test_pisec_initial_grid_sends_one_quoted_command_per_project(self):
         with tempfile.TemporaryDirectory() as tmp:

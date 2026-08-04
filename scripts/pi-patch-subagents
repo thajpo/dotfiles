@@ -34,7 +34,7 @@ apply_verified_patch() {
   }
   ( cd "$package_dir" && patch --batch --forward -p1 < "$patch_file" )
   actual=$(hash_file "$source_file")
-  [[ "$actual" == "$expected_after" ]] || {
+  [[ "$actual" == "$expected_after" || ",${compatible_after}," == *",$actual,"* ]] || {
     printf '%s: patched source hash mismatch: %s\n' "$label" "$actual" >&2
     exit 1
   }
@@ -76,7 +76,7 @@ apply_verified_patch \
   8cfba3086dbb460c59c18ebbe7bd04f3020f457d3e7ed5c91dc53dbfa9c5aa08 \
   bce5d9ee261a86fba34b9e421be745a5fca8a91d6a755c3c44d790e3c3df9727 \
   "$patch_dir/pi-subagents-0.35.1-worker-read-only-fanout.patch" \
-  8c28be64f679220d9ee1cfc2d44f67230b4b2fa50b3cefd338f8d7c0fab609aa
+  8c28be64f679220d9ee1cfc2d44f67230b4b2fa50b3cefd338f8d7c0fab609aa,47691096b6a766251cc0892695f0b7348cbac0c34ecd4bc7503be66db7377e63
 
 apply_verified_patch \
   pi-subagents-host-command-fanout \
@@ -85,7 +85,17 @@ apply_verified_patch \
   0.35.1 \
   bce5d9ee261a86fba34b9e421be745a5fca8a91d6a755c3c44d790e3c3df9727 \
   8c28be64f679220d9ee1cfc2d44f67230b4b2fa50b3cefd338f8d7c0fab609aa \
-  "$patch_dir/pi-subagents-0.35.1-host-command-fanout.patch"
+  "$patch_dir/pi-subagents-0.35.1-host-command-fanout.patch" \
+  47691096b6a766251cc0892695f0b7348cbac0c34ecd4bc7503be66db7377e63
+
+apply_verified_patch \
+  pi-subagents-web-access-fanout \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/extension/fanout-child.ts" \
+  0.35.1 \
+  8c28be64f679220d9ee1cfc2d44f67230b4b2fa50b3cefd338f8d7c0fab609aa \
+  47691096b6a766251cc0892695f0b7348cbac0c34ecd4bc7503be66db7377e63 \
+  "$patch_dir/pi-subagents-0.35.1-web-access-fanout.patch"
 
 apply_verified_patch \
   pi-subagents-no-host-verify \
@@ -160,7 +170,7 @@ apply_verified_patch \
   fcc5244d55fb2853175b52f0befdb30debb57048b56c7f5fda5614f7450109f4 \
   3b2d74c65fb03d56a4cbaa31bc8496703888fd0c4ecc7107f277f5b583561c71 \
   "$patch_dir/pi-sandbox-0.2.0-task-routing.patch" \
-  3d98412317e5f888cf9100866d5bd439a3314ea002f5164b1267b6c6a21a6673,46ed50a8ad54e0f1c49d9b044da693027999314f9599553de63feb21b7ad3b6d,d08ede1e69fff581c96705e32ecbc6f0fd7e0ba52e6a2f5e65461bbf615a3df9,ab2c2bc53e4f08c0bea0350d788e4298936a820fbab1f0eded95075339c65111
+  73149dce5452eb243f0644a788988c714ad06e46a48efcc02498c452836a4217,2e168773fc5bc6140ebc2b83dd7e97a6984e01230fc64c995c489ba0110d2cc2,ac17d426b3f975cce31b2b0cf3c9b026c21b2cad38fac48ff99efcfbf1dca032,2cd7601750697ee4305442fd1fed562d271aaf9fbce8b50f7d6c9371a2351bbd,1015bc8dde8e6d24146ebec541eaba1889cbc18e3cda66d0960dcf939fe40614,66a70758598b89d414e1e9235ae595a18280fc5e5ad880f38b4385ff1359c6ab,68c10277c415901b2ad2880e2d074bf180125a4d9dd737b6df38e39a199dc66e,106f813dda5ab293091e902d1f4a5f9e74478bcfdd5f4da337d6105f3343b1a4,2640fc22839f8f6c2cad1392d50effd0f9bd96af9fab23b892a2bb35ecae81ea,22ed0ec65e7a1afa1ac0055a757bcfc71dc026df84b1623e4929d85d5451fc91,22ed0ec65e7a1afa1ac0055a757bcfc71dc026df84b1623e4929d85d5451fc91
 
 apply_verified_patch \
   pi-sandbox-user-workspace \
@@ -170,7 +180,7 @@ apply_verified_patch \
   3b2d74c65fb03d56a4cbaa31bc8496703888fd0c4ecc7107f277f5b583561c71 \
   3d98412317e5f888cf9100866d5bd439a3314ea002f5164b1267b6c6a21a6673 \
   "$patch_dir/pi-sandbox-0.2.0-user-workspace.patch" \
-  46ed50a8ad54e0f1c49d9b044da693027999314f9599553de63feb21b7ad3b6d,d08ede1e69fff581c96705e32ecbc6f0fd7e0ba52e6a2f5e65461bbf615a3df9,ab2c2bc53e4f08c0bea0350d788e4298936a820fbab1f0eded95075339c65111
+  2e168773fc5bc6140ebc2b83dd7e97a6984e01230fc64c995c489ba0110d2cc2,ac17d426b3f975cce31b2b0cf3c9b026c21b2cad38fac48ff99efcfbf1dca032,2cd7601750697ee4305442fd1fed562d271aaf9fbce8b50f7d6c9371a2351bbd,1015bc8dde8e6d24146ebec541eaba1889cbc18e3cda66d0960dcf939fe40614,66a70758598b89d414e1e9235ae595a18280fc5e5ad880f38b4385ff1359c6ab,68c10277c415901b2ad2880e2d074bf180125a4d9dd737b6df38e39a199dc66e,106f813dda5ab293091e902d1f4a5f9e74478bcfdd5f4da337d6105f3343b1a4,2640fc22839f8f6c2cad1392d50effd0f9bd96af9fab23b892a2bb35ecae81ea,a71ed6b9015f3719be0fbfc5a2e69c45080ab5fc5d9eee815bfee36b29c5b870
 
 apply_verified_patch \
   pi-sandbox-runtime-contract \
@@ -180,7 +190,7 @@ apply_verified_patch \
   3d98412317e5f888cf9100866d5bd439a3314ea002f5164b1267b6c6a21a6673 \
   46ed50a8ad54e0f1c49d9b044da693027999314f9599553de63feb21b7ad3b6d \
   "$patch_dir/pi-sandbox-0.2.0-runtime-contract.patch" \
-  d08ede1e69fff581c96705e32ecbc6f0fd7e0ba52e6a2f5e65461bbf615a3df9,ab2c2bc53e4f08c0bea0350d788e4298936a820fbab1f0eded95075339c65111
+  ac17d426b3f975cce31b2b0cf3c9b026c21b2cad38fac48ff99efcfbf1dca032,2cd7601750697ee4305442fd1fed562d271aaf9fbce8b50f7d6c9371a2351bbd,1015bc8dde8e6d24146ebec541eaba1889cbc18e3cda66d0960dcf939fe40614,66a70758598b89d414e1e9235ae595a18280fc5e5ad880f38b4385ff1359c6ab,68c10277c415901b2ad2880e2d074bf180125a4d9dd737b6df38e39a199dc66e,106f813dda5ab293091e902d1f4a5f9e74478bcfdd5f4da337d6105f3343b1a4,2640fc22839f8f6c2cad1392d50effd0f9bd96af9fab23b892a2bb35ecae81ea,4ba506d0a11cb8fed9e9f4da86598d036a414888c00683ae9b669cc541d1b57f
 
 apply_verified_patch \
   pi-sandbox-control-plane-resources \
@@ -190,7 +200,7 @@ apply_verified_patch \
   46ed50a8ad54e0f1c49d9b044da693027999314f9599553de63feb21b7ad3b6d \
   d08ede1e69fff581c96705e32ecbc6f0fd7e0ba52e6a2f5e65461bbf615a3df9 \
   "$patch_dir/pi-sandbox-0.2.0-control-plane-resources.patch" \
-  ab2c2bc53e4f08c0bea0350d788e4298936a820fbab1f0eded95075339c65111
+  2cd7601750697ee4305442fd1fed562d271aaf9fbce8b50f7d6c9371a2351bbd,1015bc8dde8e6d24146ebec541eaba1889cbc18e3cda66d0960dcf939fe40614,66a70758598b89d414e1e9235ae595a18280fc5e5ad880f38b4385ff1359c6ab,68c10277c415901b2ad2880e2d074bf180125a4d9dd737b6df38e39a199dc66e,106f813dda5ab293091e902d1f4a5f9e74478bcfdd5f4da337d6105f3343b1a4,2640fc22839f8f6c2cad1392d50effd0f9bd96af9fab23b892a2bb35ecae81ea,f826ad7a18d70d4d89c576a86f4d0b29dd172a8c24e578da222061a25bbdf978
 
 apply_verified_patch \
   pi-subagents-model-policy \
@@ -296,4 +306,4 @@ apply_verified_patch \
   d08ede1e69fff581c96705e32ecbc6f0fd7e0ba52e6a2f5e65461bbf615a3df9 \
   ab2c2bc53e4f08c0bea0350d788e4298936a820fbab1f0eded95075339c65111 \
   "$patch_dir/pi-sandbox-0.2.0-child-lifecycle.patch" \
-  ab2c2bc53e4f08c0bea0350d788e4298936a820fbab1f0eded95075339c65111
+  2640fc22839f8f6c2cad1392d50effd0f9bd96af9fab23b892a2bb35ecae81ea,106f813dda5ab293091e902d1f4a5f9e74478bcfdd5f4da337d6105f3343b1a4,68c10277c415901b2ad2880e2d074bf180125a4d9dd737b6df38e39a199dc66e,66a70758598b89d414e1e9235ae595a18280fc5e5ad880f38b4385ff1359c6ab,1015bc8dde8e6d24146ebec541eaba1889cbc18e3cda66d0960dcf939fe40614,2cd7601750697ee4305442fd1fed562d271aaf9fbce8b50f7d6c9371a2351bbd,89fc0bf4a5a2b3a9b0a2a118a5e95c8e2a3d86520e0e351ec2df0b068a93e07f,5220a7359a6b8d97ac1f50955e80f24d1b4cfa142d3fe7b942ca2375802a0fda
