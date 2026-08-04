@@ -337,6 +337,9 @@ if [ -n "$MACHINE_PROFILE" ]; then
     install -m 600 "$MACHINE_PROFILE" "$STAGING_DIR/control/machine.env"
 fi
 for tree in extensions agents prompts themes; do cp -a "$SCRIPT_DIR/pi/$tree" "$STAGING_DIR/control/$tree"; done
+# npm and copied extension trees can inherit group-writable modes from the
+# staging filesystem; never activate a writable installed runtime tree.
+chmod -R go-w "$STAGING_DIR"
 python3 - "$STAGING_DIR/control/agents" "$PI_CONFIG_DIR" <<'PY'
 from pathlib import Path
 import sys

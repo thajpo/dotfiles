@@ -160,7 +160,7 @@
  	ImageName?: string;
  	Mounts?: ContainerInspectMount[];
  	Labels?: Record<string, string>;
-@@ -276,6 +320,100 @@
+@@ -276,6 +320,104 @@
  	return Array.from(new Set(values.filter(Boolean)));
  }
  
@@ -244,7 +244,11 @@
 +		throw new Error("Pi task route owner identity is unavailable or stale");
 +	}
 +	if (route.uid !== process.getuid?.() || route.gid !== process.getgid?.()) throw new Error("Pi task route UID/GID mismatch");
-+	if (Date.now() / 1000 - Number(route.createdAt ?? 0) > 7 * 24 * 60 * 60) throw new Error("Pi task route is stale");
++	const createdAt = route.createdAt;
++	const now = Date.now() / 1000;
++	if (typeof createdAt !== "number" || !Number.isFinite(createdAt) || createdAt < 0 || createdAt > now || now - createdAt > 7 * 24 * 60 * 60) {
++		throw new Error("Pi task route has an invalid or stale creation time");
++	}
 +	for (const key of ["repository", "worktree", "gitCommonDir", "gitDir", "worktreeRoot", "hostContext", "gitConfig"] as const) {
 +		if (!path.isAbsolute(route[key]!)) throw new Error(`Pi task route ${key} must be absolute`);
 +	}

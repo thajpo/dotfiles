@@ -1877,8 +1877,13 @@ def git_cleanup(project_id: str, operation: str, plan: dict[str, Any],
             current = _inspect_cleanup_recovery(project_id, repo, plan, object_format, policy_root, recovery)
         if not hmac.compare_digest(current["planHash"], plan_hash):
             raise SecretaryError("cleanup plan changed before apply")
-        return {"projectId": project_id, "operation": "apply",
-                **_apply_cleanup(repo, current, recovery_path, recovery)}
+        worktree_paths = sorted({str(Path(item["path"]).resolve(strict=False))
+                                 for item in current["plan"]["worktrees"]})
+        with contextlib.ExitStack() as leases:
+            for worktree_path in worktree_paths:
+                leases.enter_context(_worktree_exclusive_lease(repo, Path(worktree_path)))
+            return {"projectId": project_id, "operation": "apply",
+                    **_apply_cleanup(repo, current, recovery_path, recovery)}
 
 
 @contextlib.contextmanager
