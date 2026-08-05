@@ -61,7 +61,8 @@ class SecretaryControlTests(unittest.TestCase):
         self.home.mkdir()
         self.source = repo(root, "source")
         write_policy(self.home, [str(root)], worktree_root=str(root / "worktrees"))
-        self.env = {"HOME": str(self.home), "XDG_STATE_HOME": str(root / "state")}
+        self.env = {"HOME": str(self.home), "XDG_STATE_HOME": str(root / "state"),
+                     "PI_CODING_AGENT_DIR": str(self.home / ".pi" / "agent")}
         self.patch = mock.patch.dict(os.environ, self.env, clear=False)
         self.patch.start()
         self.initial = secretary.init_project(self.source)
@@ -426,7 +427,7 @@ class SecretaryControlTests(unittest.TestCase):
         registered = secretary.register_project(self.source, "promotion-project")
         output = Path(self.tmp.name) / "pidev-env.json"
         fake = Path(self.tmp.name) / "fake-pidev"
-        fake.write_text("#!/usr/bin/env python3\nimport json,os,pathlib\npathlib.Path(%r).write_text(json.dumps({k:os.environ.get(k) for k in ['PI_PIDEV_SESSION_ID','PI_PIDEV_WORKSTREAM_ID','PI_PIDEV_BRIEF_PATH']}))\n" % str(output))
+        fake.write_text("#!/usr/bin/env python3\nimport json,os,pathlib\npathlib.Path(%r).write_text(json.dumps({k:os.environ.get(k) for k in ['PI_PIDEV_SESSION_ID','PI_PIDEV_WORKSTREAM_ID','PI_PIDEV_BRIEF_PATH','PI_ROOT_PROFILE']}))\n" % str(output))
         fake.chmod(0o700)
         with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
              mock.patch.object(secretary, "_wait_for_managed_process", return_value=True), \
@@ -439,6 +440,7 @@ class SecretaryControlTests(unittest.TestCase):
         self.assertEqual(launched["PI_PIDEV_SESSION_ID"], promoted["piSessionId"])
         self.assertEqual(launched["PI_PIDEV_WORKSTREAM_ID"], promoted["workstreamId"])
         self.assertTrue(Path(launched["PI_PIDEV_BRIEF_PATH"]).is_file())
+        self.assertEqual(launched["PI_ROOT_PROFILE"], "worker")
         opened = secretary.open_workstream(self.source, self.capability, promoted["workstreamId"])
         self.assertEqual(opened["piSessionId"], promoted["piSessionId"])
         with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
@@ -485,6 +487,49 @@ class SecretaryControlTests(unittest.TestCase):
         self.assertEqual(secretary.list_events(registered["projectId"]), [])
         self.assertEqual(len(secretary.list_events(registered["projectId"], include_acknowledged=True)), 1)
 
+    def test_progress_attention_event_is_bounded_and_project_scoped(self):
+        registered = secretary.register_project(self.source, "progress-project")
+        brief = self._brief("Progress", "bounded progress")
+        workstream = self._workstream(brief["briefId"], workstream_id="progress-work")
+        route_cap = "progress-route"
+        route = Path(self.tmp.name) / "progress-route.json"
+        route.write_text(json.dumps({"uid": os.getuid(), "capabilityHash": __import__("hashlib").sha256(route_cap.encode()).hexdigest(),
+                                     "readOnly": False, "worktree": workstream["workspace"]}))
+        route.chmod(0o600)
+        with mock.patch.dict(os.environ, {"PI_TASK_ROUTE_FILE": str(route), "PI_TASK_ROUTE_CAPABILITY": route_cap}, clear=False):
+            event = secretary.append_event(registered["projectId"], workstream["workstreamId"],
+                                           "progress", "Reached the validation seam", '{"AGENT_FEEDBACK":{"kind":"suggestion"}}')
+        self.assertEqual(event["kind"], "progress")
+        self.assertEqual(event["source"], "agent")
+        self.assertNotEqual(event["details"], '{"AGENT_FEEDBACK":{"kind":"suggestion"}}')
+        event_details = json.loads(event["details"])
+        self.assertEqual(event_details["feedbackId"], event["eventId"])
+        self.assertEqual(event_details["form"]["kind"], "suggestion")
+        self.assertEqual(secretary.list_events(registered["projectId"])[0]["eventId"], event["eventId"])
+        feedback_path = self.home / ".pi" / "agent" / "feedback" / "records" / f"{event['eventId']}.json"
+        feedback = json.loads(feedback_path.read_text())
+        self.assertEqual(feedback["source"]["projectId"], registered["projectId"])
+        self.assertEqual(feedback["source"]["workstreamId"], workstream["workstreamId"])
+        self.assertFalse((self.source / "feedback").exists())
+
+    def test_feedback_store_rejects_a_project_root_path(self):
+        registered = secretary.register_project(self.source, "feedback-boundary")
+        brief = self._brief("Feedback boundary", "reject repository storage")
+        workstream = self._workstream(brief["briefId"], workstream_id="feedback-boundary-work")
+        route_cap = "feedback-boundary-route"
+        route = Path(self.tmp.name) / "feedback-boundary-route.json"
+        route.write_text(json.dumps({"uid": os.getuid(), "capabilityHash": __import__("hashlib").sha256(route_cap.encode()).hexdigest(),
+                                     "readOnly": False, "worktree": workstream["workspace"]}))
+        route.chmod(0o600)
+        inside_agent_dir = self.source / "feedback-agent"
+        with mock.patch.dict(os.environ, {"PI_TASK_ROUTE_FILE": str(route),
+                                          "PI_TASK_ROUTE_CAPABILITY": route_cap,
+                                          "PI_CODING_AGENT_DIR": str(inside_agent_dir)}, clear=False):
+            with self.assertRaisesRegex(secretary.SecretaryError, "must not be inside"):
+                secretary.append_event(registered["projectId"], workstream["workstreamId"],
+                                       "progress", "Rejected storage", "AGENT_FEEDBACK {\"kind\":\"risk\"}")
+        self.assertFalse(inside_agent_dir.exists())
+
     def test_process_exit_is_host_fact_not_completion(self):
         registered = secretary.register_project(self.source, "process-exit")
         brief = self._brief()
@@ -515,6 +560,7 @@ class SecretaryControlTests(unittest.TestCase):
         fake = Path(self.tmp.name) / "review-pidev"
         fake.write_text("#!/bin/sh\nexit 19\n"); fake.chmod(0o700)
         with mock.patch.object(secretary, "_pidev_path", return_value=fake), \
+             mock.patch.object(secretary, "_reviewer_process_live", return_value=False), \
              mock.patch.dict(os.environ, {"PI_SECRETARY_CAPABILITY": self.capability}, clear=False):
             with self.assertRaisesRegex(secretary.SecretaryError, "review launch failed"):
                 secretary.create_reviewer(registered["projectId"], event["eventId"])
@@ -911,6 +957,29 @@ class SecretaryControlTests(unittest.TestCase):
         self.assertEqual(len(match), 1)
         self.assertIn("currentOid", match[0])
         self.assertNotEqual(match[0]["currentOid"], ws["baseOid"])
+
+    def test_list_tolerates_safely_removed_worktree_but_open_stays_strict(self):
+        brief = self._brief("Removed worktree", "inventory remains available")
+        ws = self._workstream(brief["briefId"], "Removed", workstream_id="removed-worktree")
+        workspace = Path(ws["workspace"])
+        git(self.source, "worktree", "remove", str(workspace))
+        git(self.source, "branch", "-D", ws["branch"])
+
+        listing = secretary.list_workstreams(self.source, self.capability)
+        removed = next(item for item in listing if item["workstreamId"] == ws["workstreamId"])
+        self.assertIsNone(removed["currentOid"])
+        self.assertFalse(workspace.exists())
+        with self.assertRaisesRegex(secretary.SecretaryError, "workspace is unavailable"):
+            secretary.open_workstream(self.source, self.capability, ws["workstreamId"])
+
+    def test_list_rejects_missing_worktree_with_stale_git_registration(self):
+        brief = self._brief("Registered missing worktree", "fail closed")
+        ws = self._workstream(brief["briefId"], "Registered", workstream_id="registered-missing")
+        workspace = Path(ws["workspace"])
+        shutil.rmtree(workspace)
+
+        with self.assertRaisesRegex(secretary.SecretaryError, "still has a Git registration"):
+            secretary.list_workstreams(self.source, self.capability)
 
     def test_unrelated_repo_at_same_path_rejected(self):
         # Create a repo with a separate git-dir at a different path so the

@@ -123,8 +123,10 @@ def _ensure_config(state_root: Path, env: dict[str, str]) -> Path:
     return config
 
 
-def _load_registry(control: Path, env: dict[str, str]) -> list[dict[str, str]]:
-    result = _run([sys.executable, str(control), "registry-list"], env=env,
+def _load_registry(control: Path, env: dict[str, str], operation: str = "active-list") -> list[dict[str, str]]:
+    if operation not in {"active-list", "registry-list"}:
+        fail("invalid secretary registry operation")
+    result = _run([sys.executable, str(control), operation], env=env,
                   label="secretary registry lookup")
     try:
         records = json.loads(result.stdout)
@@ -305,6 +307,23 @@ def _is_secretary_launcher(process: dict[str, Any], launcher: Path, project_id: 
     return id_index + 1 < len(tokens) and tokens[id_index + 1] == project_id and "--internal-launch" in tokens
 
 
+def _pane_processes(herdr: str, pane_id: str, *, env: dict[str, str]) -> list[dict[str, Any]]:
+    # Native shell-only restore can publish a pane just before Herdr observes
+    # its foreground shell. Retry only that transient empty snapshot; malformed
+    # data remains an immediate fail-closed error.
+    for attempt in range(40):
+        result = _herdr_json(herdr, ["pane", "process-info", "--pane", pane_id], env=env,
+                             label=f"inspect Herdr pane {pane_id}")
+        process_info = result.get("process_info")
+        processes = process_info.get("foreground_processes") if isinstance(process_info, dict) else None
+        if not isinstance(processes, list) or not all(isinstance(item, dict) for item in processes):
+            fail(f"Herdr pane {pane_id} returned invalid process information")
+        if processes or attempt == 39:
+            return processes
+        time.sleep(0.05)
+    return []
+
+
 def _existing_pane_state(herdr: str, pane: dict[str, Any], project: dict[str, str],
                          launcher: Path, *, workspace_id: str, tab_id: str,
                          env: dict[str, str]) -> str:
@@ -326,14 +345,7 @@ def _existing_pane_state(herdr: str, pane: dict[str, Any], project: dict[str, st
     if agent not in (None, "") and agent != "pi":
         fail(f"Herdr secretary pane {pane_id} contains unexpected agent {agent!r}")
 
-    result = _herdr_json(herdr, ["pane", "process-info", "--pane", pane_id], env=env,
-                         label=f"inspect Herdr pane {pane_id}")
-    process_info = result.get("process_info")
-    if not isinstance(process_info, dict):
-        fail(f"Herdr pane {pane_id} returned invalid process information")
-    processes = process_info.get("foreground_processes")
-    if not isinstance(processes, list):
-        fail(f"Herdr pane {pane_id} omitted foreground process information")
+    processes = _pane_processes(herdr, pane_id, env=env)
     if any(isinstance(item, dict) and _is_secretary_launcher(item, launcher, project["projectId"])
            for item in processes):
         return "live"
@@ -344,6 +356,45 @@ def _existing_pane_state(herdr: str, pane: dict[str, Any], project: dict[str, st
     if processes and all(isinstance(item, dict) and _is_shell_process(item) for item in processes):
         return "shell"
     fail(f"Herdr secretary pane {pane_id} is not an idle shell or verified secretary")
+
+
+def _close_inactive_workspaces(herdr: str, workspaces: list[dict[str, Any]],
+                               registered: list[dict[str, str]], active: list[dict[str, str]],
+                               *, env: dict[str, str]) -> list[dict[str, Any]]:
+    """Remove only proven-idle workspaces excluded from the active selection.
+
+    A live process is never terminated here. ``pi-restart`` first stops the
+    complete named Herdr session, so its native shell-only restore makes stale
+    or repurposed secretary panes safe to remove. An in-place selection change
+    instead fails closed and asks for that restart boundary.
+    """
+    registered_labels = {_workspace_label(item["alias"]) for item in registered}
+    active_labels = {_workspace_label(item["alias"]) for item in active}
+    retained: list[dict[str, Any]] = []
+    for workspace in workspaces:
+        label = _require_string(workspace.get("label"), "workspace label")
+        if not label.startswith(WORKSPACE_PREFIX):
+            retained.append(workspace)
+            continue
+        if label not in registered_labels:
+            fail(f"Herdr contains an unregistered secretary workspace: {label}")
+        if label in active_labels:
+            retained.append(workspace)
+            continue
+        workspace_id = _require_string(workspace.get("workspace_id"), "workspace id")
+        pane_result = _herdr_json(herdr, ["pane", "list", "--workspace", workspace_id], env=env,
+                                  label=f"inspect inactive Herdr workspace {label}")
+        panes = _panes(pane_result)
+        if not panes:
+            fail(f"inactive Herdr workspace {label} has no pane")
+        for pane in panes:
+            pane_id = _require_string(pane.get("pane_id"), "pane id")
+            processes = _pane_processes(herdr, pane_id, env=env)
+            if not processes or not all(_is_shell_process(item) for item in processes):
+                fail(f"inactive Herdr workspace {label} still has a live process; run pi-restart")
+        _herdr_ok(herdr, ["workspace", "close", workspace_id], env=env,
+                  label=f"close inactive Herdr workspace {label}")
+    return retained
 
 
 def _ensure_project(herdr: str, project: dict[str, str], workspaces: list[dict[str, Any]],
@@ -527,6 +578,7 @@ def main() -> int:
     parser.add_argument("--launcher", required=True)
     parser.add_argument("--worker-launcher", required=True)
     parser.add_argument("--herdr-bin", required=True)
+    parser.add_argument("--no-attach", action="store_true")
     args = parser.parse_args()
 
     control = Path(args.control).resolve(strict=True)
@@ -543,7 +595,8 @@ def main() -> int:
         fail("Herdr executable is not executable")
 
     base_env = os.environ.copy()
-    records = _load_registry(control, base_env)
+    records = _load_registry(control, base_env, "active-list")
+    registered_records = _load_registry(control, base_env, "registry-list")
     state_base = Path(base_env.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))).expanduser()
     state_root = state_base / "pi-secretary"
     _ensure_directory(state_root, "secretary state directory")
@@ -560,11 +613,10 @@ def main() -> int:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         workspaces_result = _ensure_server(str(herdr_path), env=env, log_path=log_path)
         workspaces = _workspace_records(workspaces_result)
+        workspaces = _close_inactive_workspaces(
+            str(herdr_path), workspaces, registered_records, records, env=env,
+        )
         expected_labels = {_workspace_label(item["alias"]) for item in records}
-        for item in workspaces:
-            label = item.get("label")
-            if isinstance(label, str) and label.startswith(WORKSPACE_PREFIX) and label not in expected_labels:
-                fail(f"Herdr contains an unregistered secretary workspace: {label}")
         workspace_ids: list[str] = []
         for project in records:
             workspace_id, _created = _ensure_project(
@@ -579,6 +631,8 @@ def main() -> int:
             _herdr_ok(str(herdr_path), ["workspace", "focus", workspace_ids[0]], env=env,
                       label="focus first Herdr secretary workspace")
 
+    if args.no_attach:
+        return 0
     os.execve(str(herdr_path), [str(herdr_path), "--session", SESSION], env)
     return 0
 

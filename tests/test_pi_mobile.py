@@ -102,7 +102,7 @@ cmd = args[0]
 if cmd == 'has-session': raise SystemExit(1)
 if cmd == 'new-session': print('@1'); raise SystemExit(0)
 if cmd == 'new-window': print('@' + str(2 + int(sum(1 for line in pathlib.Path(os.environ['FAKE_TMUX_LOG']).read_text().splitlines() if 'new-window' in line)))); raise SystemExit(0)
-if cmd == 'list-panes': print('%1\\t0\\tshell\\tsh\\t'); raise SystemExit(0)
+if cmd == 'list-panes': print('%1\\t0\\tshell\\tsh\\t0\\t'); raise SystemExit(0)
 if cmd == 'split-window': raise SystemExit(9)
 raise SystemExit(0)
 """
@@ -128,8 +128,9 @@ raise SystemExit(0)
             self.assertEqual(len([call for call in calls if call[0] == "new-window"]), 3)
             self.assertFalse(any(call[0] == "split-window" for call in calls))
             self.assertFalse(any(call[0] == "select-layout" for call in calls))
-            sends = [call for call in calls if call[0] == "send-keys"]
-            self.assertEqual(len(sends), len(records))
+            launches = [call for call in calls if call[0] == "respawn-pane"]
+            self.assertEqual(len(launches), len(records))
+            self.assertFalse(any(call[0] == "send-keys" for call in calls))
 
     def test_pidev_mobile_starts_a_single_full_width_pi_pane(self):
         from tests.test_pi_launchers import make_git_repo, make_tmux_fixture

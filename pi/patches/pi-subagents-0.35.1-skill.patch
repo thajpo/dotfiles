@@ -564,7 +564,7 @@
 -  clarify: true
 -})
 -```
-+Children use `contact_supervisor` (preferred, when available) or `intercom` (fallback) to ask the parent for decisions. Parents reply with `subagent_supervisor({ action: "reply", message: "..." })`.
++Children use the always-available `contact_supervisor` tool as the required parent-feedback channel; `intercom` is only a lower-level fallback for bridge/runtime failures. Parents reply with `subagent_supervisor({ action: "reply", message: "..." })`.
  
 -Tool calls launch directly by default. Set `clarify: true` on single, parallel, or chain runs when you want the clarify UI. Clarify edits affect only the next run; use management actions, settings, or markdown files for persistent changes.
 -For programmatic background launches, use `async: true`. `clarify: true` keeps the run foreground for the clarify UI.

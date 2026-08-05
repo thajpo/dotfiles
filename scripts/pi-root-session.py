@@ -454,6 +454,15 @@ def record_for(records: list[dict[str, Any]], conversation_id: str) -> dict[str,
     return next((record for record in records if record["conversationId"] == conversation_id), None)
 
 
+def managed_profile_for_id(conversation_id: str) -> str | None:
+    """Return the launcher-owned profile implied by a legacy stable ID."""
+    if conversation_id.startswith("personal-"):
+        return "personal"
+    if conversation_id.startswith("sec-") or conversation_id.startswith("secretary-"):
+        return "secretary"
+    return None
+
+
 def context_for(cwd: Path, repository_arg: str | None) -> tuple[Path | None, Path]:
     try:
         supplied = Path(os.path.expanduser(repository_arg)).resolve(strict=True) if repository_arg else cwd.resolve(strict=True)
@@ -473,7 +482,25 @@ def ensure_record(agent_dir: Path, conversation_id: str, profile: str, cwd: Path
         existing = record_for(records, conversation_id)
         if existing is not None:
             if existing["profile"] != profile:
-                raise RootSessionError(f"conversation id already belongs to profile {existing['profile']}")
+                # Early durable-registry generations could register a managed
+                # personal/secretary session as generic `root` before the
+                # launcher profile reached the lifecycle extension. Repair
+                # only that one-way legacy case, with both the reserved stable
+                # ID prefix and exact repository identity as proof. All other
+                # profile changes remain forbidden.
+                implied_profile = managed_profile_for_id(conversation_id)
+                if existing["profile"] != "root" or profile != implied_profile:
+                    raise RootSessionError(f"conversation id already belongs to profile {existing['profile']}")
+                try:
+                    stored_repository = Path(existing["repository"]).resolve(strict=True) if existing.get("repository") else None
+                    requested_path = Path(os.path.expanduser(repository_arg)).resolve(strict=True) if repository_arg else cwd.resolve(strict=True)
+                    requested_repository = canonical_repository(requested_path)
+                except OSError as error:
+                    raise RootSessionError("root registry repository is missing") from error
+                if (stored_repository is None or requested_repository is None or
+                        repository_identity(stored_repository)[0] != repository_identity(requested_repository)[0]):
+                    raise RootSessionError("legacy managed profile repair requires the exact registered repository")
+                existing["profile"] = profile
             try:
                 repository = Path(existing["repository"]).resolve(strict=True) if existing.get("repository") else None
             except OSError as error:
@@ -768,7 +795,9 @@ def register_existing(agent_dir: Path, session_file_arg: str, profile: str, work
         if existing is not None:
             if existing["sessionFile"] != str(session_file):
                 raise RootSessionError("root conversation id is already registered to another session file")
-            record.update({"profile": profile, "worktree": str(worktree), "repository": str(repository) if repository else None,
+            if existing["profile"] != profile:
+                raise RootSessionError(f"root conversation already belongs to profile {existing['profile']}")
+            record.update({"worktree": str(worktree), "repository": str(repository) if repository else None,
                            "repositoryId": repository_id or None, "objectFormat": object_format or None,
                            "branch": branch or None, "status": "active", "updatedAt": now_iso()})
         if existing is None:

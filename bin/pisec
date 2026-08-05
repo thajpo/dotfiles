@@ -20,10 +20,9 @@ dotfiles_dir=$(realpath "$self_dir/..")
 control="$dotfiles_dir/scripts/pi-secretary-control.py"
 if [[ -f "$HOME/.local/share/pi/control/pi-secretary-control.py" ]]; then control="$HOME/.local/share/pi/control/pi-secretary-control.py"; fi
 
-declare -a default_aliases=(vla-lens csv-agent SleepyDreamyV3)
 usage() {
   printf '%s\n' 'usage: pisec [--mobile|-mobile] [register --alias ALIAS [REPOSITORY] | list | launch-info PROJECT_ID | open | launch]'
-  printf '%s\n' '       pisec                 (open the default three projects)'
+  printf '%s\n' '       pisec                 (open the persisted active projects)'
   printf '%s\n' '       pisec launch          (repair the grid when panes are idle)'
   printf '%s\n' '       pisec activate ALIAS [ALIAS ...]'
   printf '%s\n' '       pisec swap ACTIVE_ALIAS INACTIVE_ALIAS'
@@ -31,14 +30,17 @@ usage() {
 }
 
 registry_json() { python3 "$control" registry-list; }
-registry_rows() {
+active_registry_json() { python3 "$control" active-list; }
+encoded_registry_rows() {
   python3 -c '
 import base64, json, sys
 for item in json.load(sys.stdin):
     values = [item[k] for k in ("projectId", "alias", "primaryRepository", "secretarySessionId")]
     print("\t".join(base64.urlsafe_b64encode(v.encode()).decode() for v in values))
-' <<<"$(registry_json)"
+'
 }
+registry_rows() { encoded_registry_rows <<<"$(registry_json)"; }
+active_registry_rows() { encoded_registry_rows <<<"$(active_registry_json)"; }
 decode() { python3 - "$1" <<'PY'
 import base64, sys
 print(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)).decode(), end="")
@@ -96,7 +98,6 @@ case "$action" in
     ;;
   default)
     [[ $# -eq 0 ]] || { usage >&2; exit 2; }
-    requested_aliases=("${default_aliases[@]}")
     ;;
   open|launch)
     [[ $# -eq 1 ]] || { usage >&2; exit 2; }
@@ -127,6 +128,84 @@ while IFS=$'\t' read -r id64 alias64 repo64 session64; do
 done <<< "$rows"
 project_count=${#ids[@]}
 (( project_count > 0 )) || { printf 'pisec: no registered projects\n' >&2; exit 1; }
+
+# The active selection is durable and backend-neutral. Validate that the
+# controller returned an exact ordered subset of the already validated
+# registry before inspecting or mutating either presentation surface.
+active_rows=$(active_registry_rows) || { printf 'pisec: active project lookup failed closed\n' >&2; exit 1; }
+declare -a active_indices=() active_flags=()
+for _id in "${ids[@]}"; do active_flags+=(0); done
+while IFS=$'\t' read -r id64 alias64 repo64 session64; do
+  [[ -n "$id64" ]] || continue
+  id=$(decode "$id64"); alias=$(decode "$alias64"); repository=$(decode "$repo64"); session_id=$(decode "$session64")
+  found=-1
+  for j in "${!ids[@]}"; do
+    if [[ "${ids[$j]}" == "$id" ]]; then found=$j; break; fi
+  done
+  (( found >= 0 )) || { printf 'pisec: active selection contains an unknown project\n' >&2; exit 1; }
+  [[ "${aliases[$found]}" == "$alias" && "${repositories[$found]}" == "$repository" &&
+     "${session_ids[$found]}" == "$session_id" && ${active_flags[$found]} == 0 ]] || {
+    printf 'pisec: malformed active project selection\n' >&2; exit 1;
+  }
+  active_flags[$found]=1
+  active_indices+=("$found")
+done <<< "$active_rows"
+(( ${#active_indices[@]} > 0 )) || { printf 'pisec: no active projects selected\n' >&2; exit 1; }
+
+# Active selection is shared by tmux and Herdr. When Herdr currently owns the
+# conversations, persist the requested set and use the full restart boundary;
+# that safely turns all old panes into shells before inactive Spaces are closed.
+herdr_secretary_running() {
+  local herdr_bin payload
+  herdr_bin=$(command -v herdr 2>/dev/null) || return 1
+  payload=$("$herdr_bin" session list --json 2>/dev/null) || return 2
+  python3 -c '
+import json, sys
+try:
+    sessions = json.load(sys.stdin)["sessions"]
+    if not isinstance(sessions, list): raise ValueError
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(2)
+raise SystemExit(0 if any(isinstance(item, dict) and item.get("name") == "pi-secretary" and item.get("running") is True for item in sessions) else 1)
+' <<<"$payload"
+}
+if [[ "$action" == activate || "$action" == use || "$action" == swap ]]; then
+  herdr_active=0
+  if herdr_secretary_running; then herdr_active=1; else
+    rc=$?
+    (( rc == 1 )) || { printf 'pisec: cannot inspect the Herdr secretary surface\n' >&2; exit 1; }
+  fi
+  if (( herdr_active )); then
+    declare -a selected_aliases=()
+    if [[ "$action" == swap ]]; then
+      old_index=-1; new_index=-1
+      for j in "${!aliases[@]}"; do
+        [[ "${aliases[$j]}" == "$swap_old" ]] && old_index=$j
+        [[ "${aliases[$j]}" == "$swap_new" ]] && new_index=$j
+      done
+      (( old_index >= 0 )) || { printf 'pisec: unknown project alias: %s\n' "$swap_old" >&2; exit 1; }
+      (( new_index >= 0 )) || { printf 'pisec: unknown project alias: %s\n' "$swap_new" >&2; exit 1; }
+      (( old_index != new_index && active_flags[$old_index] == 1 && active_flags[$new_index] == 0 )) || {
+        printf 'pisec: swap requires one active and one inactive project\n' >&2; exit 1;
+      }
+      for j in "${active_indices[@]}"; do
+        if [[ "$j" == "$old_index" ]]; then selected_aliases+=("$swap_new"); else selected_aliases+=("${aliases[$j]}"); fi
+      done
+    else
+      selected_aliases=("${requested_aliases[@]}")
+    fi
+    declare -a active_set_args=()
+    for alias in "${selected_aliases[@]}"; do active_set_args+=(--alias "$alias"); done
+    python3 "$control" active-set "${active_set_args[@]}" >/dev/null || {
+      printf 'pisec: cannot persist active project selection\n' >&2; exit 1;
+    }
+    restart="$HOME/.local/bin/pi-restart"
+    [[ -x "$restart" ]] || restart="$self_dir/pi-restart"
+    [[ -x "$restart" ]] || { printf 'pisec: pi-restart is missing\n' >&2; exit 1; }
+    printf 'pisec: restarting the active Herdr surface to apply the new project set\n' >&2
+    if (( mobile_layout )); then exec "$restart" -mobile -herdr; else exec "$restart" -herdr; fi
+  fi
+fi
 
 if ! command -v tmux >/dev/null 2>&1; then printf 'pisec: tmux is required\n' >&2; exit 127; fi
 state_root=${XDG_STATE_HOME:-$HOME/.local/state}/pi-secretary
@@ -163,7 +242,7 @@ self_launch="$self_dir/pi-secretary"
 # in desktop mode, or one full-width secretary conversation in mobile mode.
 tmux_has() { tmux has-session -t "=$session" >/dev/null 2>&1; }
 window_rows() { tmux list-windows -t "=$session" -F $'#{window_id}\t#{window_name}' 2>/dev/null; }
-pane_rows() { tmux list-panes -t "$1" -F $'#{pane_id}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_title}' 2>/dev/null; }
+pane_rows() { tmux list-panes -t "$1" -F $'#{pane_id}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_dead}\t#{pane_title}' 2>/dev/null; }
 declare -a window_ids=() window_names=()
 if tmux_has; then
   session_exists=1
@@ -175,10 +254,10 @@ if tmux_has; then
   done <<< "$windows"
   (( ${#window_ids[@]} > 0 )) || fail 'pisec session has no project windows'
 else
+  # Resolve and preflight the target projects before creating a session. In
+  # particular, an active Herdr surface must not leave behind a blank pisec
+  # shell merely because the same durable secretary lock is already held.
   session_exists=0
-  window_id=$(tmux new-session -d -P -F '#{window_id}' -s "$session" -n projects-1 -c "$HOME" 'exec sh') || fail 'cannot create pisec session'
-  [[ "$window_id" =~ ^@ ]] || fail 'tmux returned an invalid projects window id'
-  window_ids+=("$window_id"); window_names+=(projects-1)
 fi
 
 # Exact launcher/process proof. A shell wrapper is accepted only when its next
@@ -260,6 +339,29 @@ pane_idle_shell() {
   [[ "$args" == *bash* || "$args" == *sh* || "$args" == *sleep* ]] || return 1
   if children=$(pgrep -P "$pid" 2>/dev/null); then [[ -z "$children" ]] && return 0; return 1; else rc=$?; [[ $rc -eq 1 ]] && return 0; return 2; fi
 }
+secretary_lock_held() {
+  local project_id=$1 project_dir directory_lock lock_path probe_fd rc
+  project_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/sessions/secretary/$project_id"
+  directory_lock="$project_dir/.active.lock.d"
+  lock_path="$project_dir/.active.lock"
+  [[ ! -L "$directory_lock" && ! -L "$lock_path" ]] || return 2
+  [[ ! -e "$directory_lock" ]] || { [[ -d "$directory_lock" ]] && return 0; return 2; }
+  [[ -e "$lock_path" ]] || return 1
+  [[ -f "$lock_path" ]] || return 2
+  # On hosts without flock, pi-secretary uses the directory lock handled above.
+  command -v flock >/dev/null 2>&1 || return 1
+  exec {probe_fd}<>"$lock_path" || return 2
+  if flock -n "$probe_fd"; then
+    flock -u "$probe_fd" || { eval "exec ${probe_fd}>&-"; return 2; }
+    eval "exec ${probe_fd}>&-"
+    return 1
+  else
+    rc=$?
+    eval "exec ${probe_fd}>&-"
+    [[ $rc -eq 1 ]] && return 0
+    return 2
+  fi
+}
 
 # Validate every existing pane before rebuilding. Live process identity is
 # authoritative; idle shells are allowed as placeholders during a restore.
@@ -270,11 +372,15 @@ for _id in "${ids[@]}"; do mapped+=(0); done
 for window_id in "${window_ids[@]}"; do
   panes=$(pane_rows "$window_id") || fail 'cannot query projects panes'
   window_pane_count=0
-  while IFS=$'\t' read -r pane_id pane_index pane_pid pane_command pane_title; do
+  while IFS=$'\t' read -r pane_id pane_index pane_pid pane_command pane_dead pane_title; do
     [[ -n "$pane_id" ]] || continue
+    [[ "$pane_dead" == 0 || "$pane_dead" == 1 ]] || fail 'tmux returned invalid secretary pane state'
     window_pane_count=$((window_pane_count + 1))
     pane_ids+=("$pane_id"); pane_pids+=("$pane_pid"); pane_commands+=("$pane_command")
     pane_titles+=("$pane_title"); pane_window_ids+=("$window_id")
+    # A retained dead pane has no live process identity to inspect. Explicit
+    # launch may safely replace it, unlike a live shell with an unknown child.
+    [[ "$pane_dead" == 0 ]] || continue
     matched=-1
     for j in "${!ids[@]}"; do
       if process_is_secretary "$pane_pid" "${ids[$j]}" "${session_ids[$j]}"; then
@@ -325,33 +431,40 @@ elif [[ "$action" == swap ]]; then
   old_index=$(alias_index "$swap_old") || fail "unknown project alias: $swap_old"
   new_index=$(alias_index "$swap_new") || fail "unknown project alias: $swap_new"
   (( old_index != new_index )) || fail 'swap requires two different project aliases'
-  old_live=0; new_live=0
-  for j in "${live_indices[@]}"; do
-    [[ "$j" == "$old_index" ]] && old_live=1
-    [[ "$j" == "$new_index" ]] && new_live=1
+  (( active_flags[$old_index] == 1 )) || fail "project is not active: $swap_old"
+  (( active_flags[$new_index] == 0 )) || fail "project is already active: $swap_new"
+  for j in "${active_indices[@]}"; do
     if [[ "$j" == "$old_index" ]]; then target_indices+=("$new_index"); target_flags[$new_index]=1
     else target_indices+=("$j"); target_flags[$j]=1
     fi
   done
-  (( old_live == 1 )) || fail "project is not active: $swap_old"
-  (( new_live == 0 )) || fail "project is already active: $swap_new"
 else
-  if (( ${#live_indices[@]} > 0 )); then
-    for j in "${live_indices[@]}"; do target_indices+=("$j"); target_flags[$j]=1; done
-  else
-    for wanted in "${default_aliases[@]}"; do
-      found=$(alias_index "$wanted") || continue
-      (( target_flags[$found] == 0 )) || continue
-      target_flags[$found]=1; target_indices+=("$found")
-    done
-    for j in "${!ids[@]}"; do
-      (( target_flags[$j] == 0 )) || continue
-      target_flags[$j]=1; target_indices+=("$j")
-    done
-  fi
+  for j in "${active_indices[@]}"; do target_indices+=("$j"); target_flags[$j]=1; done
 fi
 target_count=${#target_indices[@]}
 (( target_count > 0 )) || fail 'no active projects selected'
+
+# The stable secretary session is single-owner across presentation backends.
+# Check every process that would need to be launched before mutating the grid,
+# so Herdr ownership produces a useful error instead of three commands that
+# exit silently back into interactive placeholder shells.
+for j in "${target_indices[@]}"; do
+  (( mapped[$j] == 0 )) || continue
+  if secretary_lock_held "${ids[$j]}"; then
+    fail "project ${aliases[$j]} is already owned by another secretary surface; attach there or stop it first (Herdr: herdr session stop pi-secretary)"
+  else
+    rc=$?
+    (( rc == 1 )) || fail "cannot inspect the active secretary lock for project ${aliases[$j]}"
+  fi
+done
+
+# A cold start creates its temporary seed only after the cross-surface lock
+# preflight. The normal transactional rebuild below replaces this seed.
+if (( session_exists == 0 )); then
+  window_id=$(tmux new-session -d -P -F '#{window_id}' -s "$session" -n projects-1 -c "$HOME" 'exec sh') || fail 'cannot create pisec session'
+  [[ "$window_id" =~ ^@ ]] || fail 'tmux returned an invalid projects window id'
+  window_ids+=("$window_id"); window_names+=(projects-1)
+fi
 
 switch_to_grid() {
   local target=$1
@@ -445,9 +558,21 @@ for ((w=1; w<=window_count; w++)); do
   tmux rename-window -t "${rebuilt_windows[$((w - 1))]}" "projects-$w" || fail 'cannot name pisec window'
 done
 for k in "${!pending_panes[@]}"; do
-  command=$(secretary_command "${ids[${pending_projects[$k]}]}")
-  tmux send-keys -t "${pending_panes[$k]}" "$command" C-m || fail 'cannot start secretary pane'
+  project_index=${pending_projects[$k]}
+  pane_target=${pending_panes[$k]}
+  command=$(secretary_command "${ids[$project_index]}")
+  # Start the wrapper as the pane command, not as synthetic terminal input.
+  # If startup fails, remain-on-exit keeps the diagnostic visible in a dead
+  # pane and user keystrokes cannot become unrelated shell commands.
+  tmux set-option -p -t "$pane_target" remain-on-exit on || fail 'cannot configure secretary pane failure visibility'
+  tmux respawn-pane -k -t "$pane_target" -c "${repositories[$project_index]}" "$command" || fail 'cannot start secretary pane'
 done
+
+if [[ "$action" == activate || "$action" == use || "$action" == swap ]]; then
+  declare -a active_set_args=()
+  for j in "${target_indices[@]}"; do active_set_args+=(--alias "${aliases[$j]}"); done
+  python3 "$control" active-set "${active_set_args[@]}" >/dev/null || fail 'cannot persist active project selection'
+fi
 
 if [[ "$action" == default || "$action" == open || "$action" == "" ]]; then
   switch_to_grid "${rebuilt_windows[0]}"

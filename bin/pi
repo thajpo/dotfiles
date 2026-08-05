@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+case "${1:-}" in
+  help|--help-custom|-help-custom|help-custom)
+    shift
+    exec "$self_dir/pi-help-custom" "$@"
+    ;;
+esac
+
 if (( EUID == 0 )); then
   printf 'pi: ordinary coding mode must not run as root\n' >&2
   exit 1
 fi
 
-self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 self_path=$(realpath "$self_dir/$(basename -- "${BASH_SOURCE[0]}")")
-if [[ ${1:-} == --help-custom || ${1:-} == -help-custom || ${1:-} == help-custom ]]; then
-  [[ $# -eq 1 ]] || { printf 'pi: custom help does not accept additional arguments\n' >&2; exit 2; }
-  exec "$self_dir/pi-help-custom"
-fi
 dotfiles_dir=$(realpath "$self_dir/..")
 helper="$dotfiles_dir/scripts/pi-workspace.py"
 if [[ ! -f "$helper" ]]; then

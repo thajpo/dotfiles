@@ -1,16 +1,12 @@
 {
   "palettePreset": "tokyo-night",
-  "density": "cozy",
-  "separator": "bar",
+  "density": "compact",
+  "separator": "dot",
   "segments": [
-    "provider",
     "model",
     "thinking",
-    "cwd",
-    "branch",
-    "context",
-    "cost",
-    "time"
+    "tools",
+    "context"
   ],
   "segmentText": {
     "brand": { "prefix": "pi ", "suffix": "" },

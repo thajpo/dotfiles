@@ -2,8 +2,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -342,7 +344,7 @@ print(os.environ["FAKE_PI"])
             self.assertEqual(args[-2:], ["--", "--sandbox-target=current"])
             self.assertIn("--session", args)
 
-    def test_pi_host_banner_fresh_session_and_disabled_resources(self):
+    def test_pi_host_banner_and_disabled_resources(self):
         with tempfile.TemporaryDirectory() as tmp:
             home, _, output, env = setup_home(Path(tmp))
             result = subprocess.run([str(ROOT / "bin/pi-host"), "maintenance"], cwd=home, env=env, text=True, capture_output=True)
@@ -355,6 +357,84 @@ print(os.environ["FAKE_PI"])
             session_dir = Path(args[args.index("--session-dir") + 1])
             self.assertTrue(session_dir.is_dir())
             self.assertEqual(invocation["env"], {})
+
+    def test_pi_host_resumes_a_stable_session_for_each_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, repo, output, env = setup_home(Path(tmp))
+            first = subprocess.run(
+                [str(ROOT / "bin/pi-host"), "maintenance"], cwd=repo, env=env,
+                text=True, capture_output=True,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            first_args = json.loads(output.read_text())["args"]
+            first_dir = Path(first_args[first_args.index("--session-dir") + 1])
+            first_id = first_args[first_args.index("--session-id") + 1]
+
+            second = subprocess.run(
+                [str(ROOT / "bin/pi-host"), "follow-up"], cwd=repo, env=env,
+                text=True, capture_output=True,
+            )
+            self.assertEqual(second.returncode, 0, second.stderr)
+            second_args = json.loads(output.read_text())["args"]
+            self.assertEqual(Path(second_args[second_args.index("--session-dir") + 1]), first_dir)
+            self.assertEqual(second_args[second_args.index("--session-id") + 1], first_id)
+
+            browse = subprocess.run(
+                [str(ROOT / "bin/pi-host"), "--resume"], cwd=repo, env=env,
+                text=True, capture_output=True,
+            )
+            self.assertEqual(browse.returncode, 0, browse.stderr)
+            browse_args = json.loads(output.read_text())["args"]
+            self.assertIn("--resume", browse_args)
+            self.assertNotIn("--session-id", browse_args)
+            self.assertEqual(Path(browse_args[browse_args.index("--session-dir") + 1]), first_dir)
+
+            other = subprocess.run(
+                [str(ROOT / "bin/pi-host")], cwd=home, env=env,
+                text=True, capture_output=True,
+            )
+            self.assertEqual(other.returncode, 0, other.stderr)
+            other_args = json.loads(output.read_text())["args"]
+            self.assertNotEqual(
+                Path(other_args[other_args.index("--session-dir") + 1]), first_dir,
+            )
+            self.assertNotEqual(other_args[other_args.index("--session-id") + 1], first_id)
+
+    def test_pi_host_refuses_a_concurrent_writer_for_the_same_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, repo, _, env = setup_home(root)
+            ready = root / "host-ready"
+            fake_pi = home / ".local/share/pi/core/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+            fake_pi.write_text("""#!/usr/bin/env python3
+import os, pathlib, time
+pathlib.Path(os.environ['FAKE_PI_READY']).write_text('ready\\n')
+time.sleep(30)
+""")
+            fake_pi.chmod(0o755)
+            env["FAKE_PI_READY"] = str(ready)
+            first = subprocess.Popen(
+                [str(ROOT / "bin/pi-host")], cwd=repo, env=env,
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    if first.poll() is not None:
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(ready.exists(), first.stderr.read() if first.poll() is not None else "")
+                second = subprocess.run(
+                    [str(ROOT / "bin/pi-host")], cwd=repo, env=env,
+                    text=True, capture_output=True, timeout=5,
+                )
+                self.assertEqual(second.returncode, 1)
+                self.assertIn("already owns this host session directory", second.stderr)
+            finally:
+                if first.poll() is None:
+                    os.killpg(first.pid, signal.SIGTERM)
+                first.communicate(timeout=5)
 
     def test_pi_host_accepts_only_stable_host_maintenance_session_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:

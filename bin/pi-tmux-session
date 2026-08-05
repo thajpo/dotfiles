@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Stable Pi entry point for tmux and tmux-resurrect. The launcher ID is only a
-# lookup key; bin/pi resolves it to the exact durable root JSONL and worktree.
+# Stable Pi entry point for managed personal panes (tmux or Herdr) and
+# tmux-resurrect. The launcher ID is only a lookup key; bin/pi resolves it to
+# the exact durable root JSONL and worktree.
 set -euo pipefail
 
 self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)

@@ -21,6 +21,7 @@ class HarnessStaticTests(unittest.TestCase):
             "openai-codex/gpt-5.6-luna",
         ])
         overrides = settings["subagents"]["agentOverrides"]
+        self.assertEqual(set(overrides), {path.stem for path in (ROOT / "pi/agents").glob("*.md")})
         self.assertEqual(overrides["scout"]["model"], "openai-codex/gpt-5.6-luna")
         self.assertEqual(overrides["scout"]["thinking"], "max")
         self.assertEqual(overrides["worker"]["model"], "openai-codex/gpt-5.6-luna")
@@ -60,6 +61,11 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertEqual(config["parallel"]["maxTasks"], 0)
         self.assertEqual(config["maxSubagentSpawnsPerSession"], 0)
         self.assertEqual(config["maxSubagentDepth"], 2)
+        self.assertEqual(config["intercomBridge"]["mode"], "always")
+        bridge = (ROOT / "pi/npm/node_modules/pi-subagents/src/intercom/intercom-bridge.ts").read_text()
+        native_channel = (ROOT / "pi/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts").read_text()
+        self.assertIn('const bridgeTools = ["intercom", "contact_supervisor"]', bridge)
+        self.assertIn('name: "contact_supervisor"', native_channel)
         self.assertIn("npm:@narumitw/pi-goal@0.43.0", settings["packages"])
         self.assertIn("npm:pi-image-tools@1.4.0", settings["packages"])
         self.assertEqual(json.loads((ROOT / "pi/keybindings.json").read_text())["app.clipboard.pasteImage"], [])
@@ -93,6 +99,8 @@ class HarnessStaticTests(unittest.TestCase):
         for agent_path in (ROOT / "pi/agents").glob("*.md"):
             text = agent_path.read_text()
             frontmatter = text.split("---", 2)[1]
+            tools = re.search(r"^tools: (.+)$", frontmatter, re.MULTILINE).group(1).split(", ")
+            self.assertIn("contact_supervisor", tools, agent_path.name)
             self.assertIn("host_command", text, agent_path.name)
             self.assertIn("memory:\n  scope: user\n  path: pi-harness", frontmatter, agent_path.name)
             self.assertIn("agent-feedback.v1", text, agent_path.name)
@@ -107,6 +115,13 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("can reply with a structured", acceptance)
         self.assertIn("pi-subagents-0.35.1-host-command-fanout.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
         self.assertIn("pi-subagents-0.35.1-web-access-fanout.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+        self.assertIn("pi-subagents-0.35.1-feedback-persistence.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+        self.assertIn("pi-subagents-0.35.1-worktree-approval.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+        self.assertIn("pi-subagents-0.35.1-feedback-workflow-skill.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+        feedback_patch = (ROOT / "pi/patches/pi-subagents-0.35.1-feedback-persistence.patch").read_text()
+        self.assertIn('path.join(agentDir, "feedback", "records")', feedback_patch)
+        self.assertIn("PI_AGENT_FEEDBACK_RAW", feedback_patch)
+        self.assertIn("pi-subagents-0.35.1-feedback-tool-all-variants.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
 
     def test_observability_inspector_is_read_only_and_activated(self):
         extension = (ROOT / "pi/extensions/observability/index.ts").read_text()
@@ -131,6 +146,8 @@ class HarnessStaticTests(unittest.TestCase):
     def test_secretary_investigators_are_mechanically_read_only(self):
         wrapper = (ROOT / "pi/extensions/secretary-subagents/index.ts").read_text()
         self.assertIn('const SAFE_ACTIONS = new Set<SafeAction>(["list", "doctor", "status", "interrupt", "stop", "resume", "steer"]);', wrapper)
+        self.assertIn('const READ_ONLY_ACTIONS = new Set<SafeAction>(["list", "doctor", "status"]);', wrapper)
+        self.assertIn('!READ_ONLY_ACTIONS.has(action) && !authorizedActions.has(action)', wrapper)
         self.assertIn('params.action.toLowerCase()', wrapper)
         self.assertIn('requires explicit current-turn user intent', wrapper)
         self.assertIn('actionTargetIsAuthorized', wrapper)
@@ -140,6 +157,8 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('selected = candidates.find', lifecycle)
         self.assertIn('discoverAgents(cwd, scope).agents.filter(isReadOnlyAgent)', wrapper)
         self.assertIn('const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "secretary_git", "contact_supervisor", "intercom", "host_command"]', wrapper)
+        self.assertIn('const tools = [...INVESTIGATOR_TOOLS];', wrapper)
+        self.assertNotIn('agent.tools?.includes("contact_supervisor")', wrapper)
         self.assertIn('subagentOnlyExtensions: [gitExtension, autoContinueExtension, hostCommandExtension, webAccessExtension]', wrapper)
         self.assertIn('extensions: []', wrapper)
         self.assertIn('mcpDirectTools: []', wrapper)
@@ -341,8 +360,15 @@ class HarnessStaticTests(unittest.TestCase):
             "child cannot rebind",
             "history must descend from the recorded host OID",
             "Sandbox child lease metadata is incomplete",
+            "Checkpointing owns its own parent transition",
+            "A child can start after the checkpoint",
         ]:
             self.assertIn(evidence, child_lifecycle_patch)
+        checkpoint_first = child_lifecycle_patch.index("Checkpointing owns its own parent transition")
+        shutdown_transition = child_lifecycle_patch.index(
+            'beginChildLifecycleTransition("shut down or remove the sandbox container")'
+        )
+        self.assertLess(checkpoint_first, shutdown_transition)
         for evidence in [
             "ensureNoSandboxParentTransition",
             "PI_SUBAGENT_CHILD",
@@ -443,7 +469,7 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('local source=$1 target=$2 rollback_dir backup=""', installer)
         self.assertIn('rollback_dir=${3:-$(dirname "$target")}', installer)
         self.assertIn("pi-sandbox-gc", installer)
-        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,host_command,subagent,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea", "--session", "--name"]:
+        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,host_command,subagent,subagent_supervisor,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea", "--session", "--name"]:
             self.assertIn(flag, launcher)
         self.assertNotIn("subagent_wait", launcher)
         self.assertEqual(launcher.count("-e \"$"), 7)
@@ -460,6 +486,8 @@ class HarnessStaticTests(unittest.TestCase):
             self.assertNotIn(forbidden, launcher)
         self.assertEqual(extension.count("pi.registerTool"), 14)
         self.assertIn("Current user turn did not authorize", extension)
+        self.assertIn("ctx.ui.confirm", extension)
+        self.assertIn("switch-client", extension)
         self.assertIn("Natural-language requests to log", extension)
         self.assertIn("log|note|capture|document", extension)
         self.assertIn("fast-forward-only landing", extension)
@@ -469,6 +497,8 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('name: "subagent"', secretary_subagents)
         self.assertIn("Number.MAX_SAFE_INTEGER", secretary_subagents)
         self.assertIn("requestsWorktree", secretary_subagents)
+        self.assertIn("createNativeSupervisorChannel", secretary_subagents)
+        self.assertIn("supervisorChannel.start", secretary_subagents)
         self.assertIn("isReadOnlyAgent", secretary_subagents)
         self.assertIn("no elapsed-time, assistant-turn, or tool-call budgets", secretary_subagents)
         self.assertIn("secretary-stats.jsonl", (ROOT / "pi/README.md").read_text())
@@ -478,8 +508,11 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("getBranch", brief_extension)
         self.assertIn("pi.appendEntry", brief_extension)
         self.assertIn("pi.sendUserMessage", brief_extension)
+        self.assertIn("headful implementation worker", brief_extension)
+        self.assertIn('kind: \\"progress\\"', brief_extension)
         channel_extension = (ROOT / "pi/extensions/workstream-channel/index.ts").read_text()
         self.assertIn('name: "notify_secretary"', channel_extension)
+        self.assertIn('Type.Literal("progress")', channel_extension)
         self.assertNotIn("sendUserMessage", channel_extension)
         self.assertNotIn("registerCommand", channel_extension)
         reviewer = (ROOT / "bin/pi-review-agent").read_text()
@@ -510,6 +543,10 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertTrue((ROOT / "bin/pi-start").stat().st_mode & 0o111)
         self.assertTrue((ROOT / "bin/pi-help-custom").stat().st_mode & 0o111)
         self.assertIn("for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session", installer)
+        self.assertIn("pi-personal-herdr", installer)
+        self.assertIn("pi-personal-herdr.py", installer)
+        self.assertTrue((ROOT / "bin/pi-personal-herdr").stat().st_mode & 0o111)
+        self.assertTrue((ROOT / "scripts/pi-personal-herdr.py").stat().st_mode & 0o111)
         self.assertIn("--session-id", pidev)
         self.assertIn("exact durable root JSONL", (ROOT / "bin/pi-tmux-session").read_text())
         self.assertIn("tmux new-session", pidev)
@@ -525,7 +562,13 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertTrue((ROOT / "bin/pi-restart").stat().st_mode & 0o111)
         self.assertIn("pi-restart", installer)
         self.assertIn("tmux kill-server", restart)
-        self.assertIn('exec "$pi_start" all', restart)
+        self.assertIn('personal_herdr_active=0', restart)
+        self.assertIn('secretary_herdr_active=0', restart)
+        self.assertIn('exec "$pi_start" "${start_args[@]}"', restart)
+        self.assertIn('herdr_session_running', restart)
+        self.assertIn('stop_herdr_session pi-personal', restart)
+        self.assertIn('stop_herdr_session pi-secretary', restart)
+        self.assertIn('pi-restart-handoff', restart)
         self.assertIn("client_tty", restart)
         self.assertIn("PI_RESTARTING=1", restart)
         self.assertIn("set-environment -gu PI_RESTARTING", (ROOT / "bin/pi-start").read_text())
@@ -534,7 +577,8 @@ class HarnessStaticTests(unittest.TestCase):
     def test_custom_help_covers_common_pi_commands(self):
         help_text = (ROOT / "bin/pi-help-custom").read_text()
         for command in [
-            "pi --help-custom", "pi-start help", "pi-restart", "pi-start all", "pi-root-session migrate",
+            "Remember these three", "pi help all", "pi --help", "pi --help-custom", "pi-start help",
+            "pi-restart", "pi-start all", "pi-root-session migrate", "pi-sandbox-gc",
             "/goal <objective>", "/goal status|pause|resume", "/goal --tokens 100k",
             "/fast on|off|status", "/subagents-doctor",
         ]:
@@ -696,6 +740,23 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
         self.assertIn("acceptanceFailedChecks", failure_events)
         self.assertIn('process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim() === "worker"', fanout)
         self.assertIn('WORKER_READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "contact_supervisor", "intercom", "host_command"]', fanout)
+        self.assertIn('tools: WORKER_READ_ONLY_TOOLS,', fanout)
+        self.assertNotIn('agent.tools?.includes("contact_supervisor")', fanout)
+        feedback_channel = (ROOT / "pi/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts").read_text()
+        self.assertIn('path.join(agentDir, "feedback", "records")', feedback_channel)
+        self.assertIn('action: "list" | "send" | "ask" | "reply" | "pending" | "status" | "review"', feedback_channel)
+        subagent_extension = (ROOT / "pi/npm/node_modules/pi-subagents/src/extension/index.ts").read_text()
+        self.assertIn("approveWorktreeRequest", subagent_extension)
+        self.assertIn("project open in the current Pi session", subagent_extension)
+        for patch_name in [
+            "pi-subagents-0.35.1-worker-read-only-fanout.patch",
+            "pi-subagents-0.35.1-host-command-fanout.patch",
+            "pi-subagents-0.35.1-web-access-fanout.patch",
+            "pi-subagents-0.35.1-feedback-tool-all-variants.patch",
+        ]:
+            patch_text = (ROOT / "pi/patches" / patch_name).read_text()
+            self.assertIn("tools: WORKER_READ_ONLY_TOOLS,", patch_text, patch_name)
+            self.assertNotIn('agent.tools?.includes("contact_supervisor")', patch_text, patch_name)
         self.assertIn('async: true', fanout)
         self.assertIn('acceptance: WORKER_READ_ONLY_ACCEPTANCE', fanout)
         for path in agent_dir.glob("*.md"):
@@ -735,7 +796,7 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
         self.assertNotIn("Fable mode is the default", added)
         patch_installer = (ROOT / "scripts/pi-patch-subagents").read_text()
         self.assertIn("pi-subagents-0.35.1-skill.patch", patch_installer)
-        self.assertIn("39a97d5b66806fbb85fe73aac2cd96608ee70c4adf69dc17d39a6cf3fdcc32bd", patch_installer)
+        self.assertIn("89416c9f454be303d4a744d8bccc76ad88d1574a0076d82b9b937479457bd665", patch_installer)
         installer = (ROOT / "install.sh").read_text()
         self.assertIn("for tree in extensions agents prompts themes", installer)
         self.assertIn('activate_path "$STAGING_DIR/control/$tree" "$PI_CONFIG_DIR/$tree"', installer)

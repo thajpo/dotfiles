@@ -16,6 +16,16 @@ function alreadySeeded(ctx: ExtensionContext, workstreamId: string): boolean {
 }
 
 export default function workstreamBrief(pi: ExtensionAPI): void {
+  pi.on("before_agent_start", (event) => {
+    const workstreamId = process.env.PI_WORKSTREAM_ID ?? "";
+    const projectId = process.env.PI_WORKSTREAM_PROJECT_ID ?? "";
+    const briefPath = process.env.PI_WORKSTREAM_BRIEF_PATH ?? "";
+    if (!ID.test(workstreamId) || !PROJECT_ID.test(projectId) || !briefPath.startsWith("/")) return;
+    return {
+      systemPrompt: event.systemPrompt + "\n\nYou are the headful implementation worker for the host-assigned workstream " + workstreamId + ". The user is speaking directly to you; implement the approved brief in this assigned worktree and do not wait for the secretary to relay ordinary user conversation. The project secretary remains a supervisory peer. Send concise milestone updates with notify_secretary({ kind: \"progress\", ... }), and use needs-user or review-requested when the secretary must act. Include bounded AGENT_FEEDBACK JSON in progress details for useful risks or improvement suggestions, but never silently promote feedback into memory or project ideas. Preserve the assigned repository boundary and do not commit, push, or modify another worktree unless the user and project workflow explicitly authorize it.\n",
+    };
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     const workstreamId = process.env.PI_WORKSTREAM_ID ?? "";
     const projectId = process.env.PI_WORKSTREAM_PROJECT_ID ?? "";

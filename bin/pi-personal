@@ -74,6 +74,30 @@ esac
 
 command -v tmux >/dev/null 2>&1 || { printf 'pi-personal: tmux is required\n' >&2; exit 127; }
 
+# The stable personal session IDs are single-owner across presentation
+# backends. Never let tmux race a running pi-personal Herdr surface.
+herdr_personal_running() {
+  local herdr_bin payload
+  herdr_bin=$(command -v herdr 2>/dev/null) || return 1
+  payload=$("$herdr_bin" session list --json 2>/dev/null) || return 2
+  python3 -c '
+import json, sys
+try:
+    sessions = json.load(sys.stdin)["sessions"]
+    if not isinstance(sessions, list): raise ValueError
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(2)
+raise SystemExit(0 if any(isinstance(item, dict) and item.get("name") == "pi-personal" and item.get("running") is True for item in sessions) else 1)
+' <<<"$payload"
+}
+if herdr_personal_running; then
+  printf 'pi-personal: Herdr pi-personal is running; use pi-restart to switch safely\n' >&2
+  exit 1
+else
+  rc=$?
+  (( rc == 1 )) || { printf 'pi-personal: cannot inspect the Herdr personal surface\n' >&2; exit 1; }
+fi
+
 # tmux.conf also ensures this workspace asynchronously. Serialize that boot
 # path with an explicit pi-start invocation so two launchers cannot repair the
 # same panes concurrently.
@@ -335,7 +359,7 @@ if tmux has-session -t "=$session" 2>/dev/null; then
         configure_pane "$pane_id" "$role"
       fi
     else
-      target_window=${window_ids_by_index[$((index / 2))]}
+      target_window=${window_ids_by_index[$(window_index_for_role "$index")]}
       mapfile -t target_panes < <(pane_rows "$target_window")
       (( ${#target_panes[@]} == 1 )) || {
         printf 'pi-personal: cannot add %s without rebuilding the layout\n' "$role" >&2

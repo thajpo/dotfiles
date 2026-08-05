@@ -77,6 +77,9 @@ REGISTRY_FIELDS = {
     "schemaVersion", "projectId", "alias", "primaryRepository", "secretarySessionId",
     "registeredAt",
 }
+ACTIVE_PROJECT_FIELDS = {"schemaVersion", "projectIds", "updatedAt"}
+DEFAULT_ACTIVE_ALIASES = ("vla-lens", "csv-agent", "SleepyDreamyV3")
+MAX_ACTIVE_PROJECTS = 16
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$")
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -1975,11 +1978,82 @@ def register_project(repository: str | Path, alias: str) -> dict[str, Any]:
             ("projectId", "alias", "primaryRepository", "secretarySessionId", "registeredAt")}
 
 
+def _public_registry_record(record: dict[str, Any]) -> dict[str, Any]:
+    return {key: record[key] for key in
+            ("projectId", "alias", "primaryRepository", "secretarySessionId", "registeredAt")}
+
+
 def registry_list() -> list[dict[str, Any]]:
     root = _state_root()
-    return [{key: record[key] for key in
-             ("projectId", "alias", "primaryRepository", "secretarySessionId", "registeredAt")}
-            for record in _registry_records(root)]
+    return [_public_registry_record(record) for record in _registry_records(root)]
+
+
+def _active_projects_path(root: Path) -> Path:
+    return root / "active-projects.json"
+
+
+def _default_active_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_alias = {record["alias"]: record for record in records}
+    selected = [by_alias[alias] for alias in DEFAULT_ACTIVE_ALIASES if alias in by_alias]
+    selected_ids = {record["projectId"] for record in selected}
+    for record in records:
+        if len(selected) >= 3:
+            break
+        if record["projectId"] not in selected_ids:
+            selected.append(record)
+            selected_ids.add(record["projectId"])
+    # New/test registries without the established aliases get a bounded,
+    # deterministic initial surface rather than every project ever registered.
+    return selected
+
+
+def _active_registry_records(root: Path, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    path = _active_projects_path(root)
+    if not path.exists() and not path.is_symlink():
+        return _default_active_records(records)
+    value = _read_json(path, ACTIVE_PROJECT_FIELDS, required=ACTIVE_PROJECT_FIELDS)
+    if value.get("schemaVersion") != 1:
+        raise SecretaryError("unsupported active project selection")
+    _timestamp(value.get("updatedAt"), "active project update timestamp")
+    project_ids = value.get("projectIds")
+    if (not isinstance(project_ids, list) or not project_ids or
+            len(project_ids) > MAX_ACTIVE_PROJECTS or
+            any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item)
+                for item in project_ids) or len(set(project_ids)) != len(project_ids)):
+        raise SecretaryError("malformed active project selection")
+    by_id = {record["projectId"]: record for record in records}
+    if any(project_id not in by_id for project_id in project_ids):
+        raise SecretaryError("active project selection references an unregistered project")
+    return [by_id[project_id] for project_id in project_ids]
+
+
+def active_registry_list() -> list[dict[str, Any]]:
+    root = _state_root()
+    with _registry_lock(root):
+        records = _registry_records(root)
+        return [_public_registry_record(record)
+                for record in _active_registry_records(root, records)]
+
+
+def set_active_projects(aliases: list[str]) -> list[dict[str, Any]]:
+    if (not aliases or len(aliases) > MAX_ACTIVE_PROJECTS or
+            any(not isinstance(alias, str) or not ALIAS_RE.fullmatch(alias) for alias in aliases) or
+            len(set(aliases)) != len(aliases)):
+        raise SecretaryError("invalid active project aliases")
+    root = _state_root()
+    with _registry_lock(root):
+        records = _registry_records(root)
+        by_alias = {record["alias"]: record for record in records}
+        missing = [alias for alias in aliases if alias not in by_alias]
+        if missing:
+            raise SecretaryError(f"unknown project alias: {missing[0]}")
+        selected = [by_alias[alias] for alias in aliases]
+        value = {"schemaVersion": 1,
+                 "projectIds": [record["projectId"] for record in selected],
+                 "updatedAt": _utc_now()}
+        _atomic(_active_projects_path(root),
+                json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+        return [_public_registry_record(record) for record in selected]
 
 
 def launch_info(project_id: str, *, internal: bool = False) -> dict[str, Any]:
@@ -2032,7 +2106,91 @@ def _validate_oid(oid: str, object_format: str) -> str:
 
 # --- Briefs ---
 
-EVENT_KINDS = {"needs-user", "review-requested", "referral", "process-exit"}
+EVENT_KINDS = {"progress", "needs-user", "review-requested", "referral", "process-exit"}
+FEEDBACK_MAX_TEXT = 4096
+
+
+def _feedback_store_root() -> Path:
+    configured = os.environ.get("PI_CODING_AGENT_DIR", "").strip()
+    base = Path(configured) if configured and Path(configured).is_absolute() else Path.home() / ".pi" / "agent"
+    return base / "feedback" / "records"
+
+
+def _feedback_form(details: str) -> dict[str, Any] | None:
+    if not re.search(r"AGENT_FEEDBACK", details, flags=re.IGNORECASE):
+        return None
+    marker = re.search(r"AGENT_FEEDBACK\s*:?\s*(.*)", details, flags=re.IGNORECASE | re.DOTALL)
+    candidates = [details.strip()]
+    if marker:
+        candidates.append(marker.group(1).strip())
+    value: Any = None
+    candidate = candidates[-1]
+    for raw_candidate in candidates:
+        current = raw_candidate
+        fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", current, flags=re.IGNORECASE | re.DOTALL)
+        if fenced:
+            current = fenced.group(1).strip()
+        try:
+            parsed = json.loads(current)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("AGENT_FEEDBACK"), dict):
+            parsed = parsed["AGENT_FEEDBACK"]
+        if isinstance(parsed, dict):
+            value = parsed
+            candidate = current
+            break
+    if not isinstance(value, dict):
+        return {"schema": "AGENT_FEEDBACK", "summary": candidate[:FEEDBACK_MAX_TEXT]}
+    form: dict[str, Any] = {"schema": str(value.get("schema") or "AGENT_FEEDBACK")[:128]}
+    for key in ("kind", "title", "want", "blocked_by", "why", "recommendation"):
+        item = value.get(key)
+        if isinstance(item, str) and item.strip(): form[key] = item.strip()[:FEEDBACK_MAX_TEXT]
+    if isinstance(value.get("evidence"), list):
+        form["evidence"] = [item.strip()[:1000] for item in value["evidence"] if isinstance(item, str) and item.strip()][:32]
+    if isinstance(value.get("options"), list):
+        form["options"] = [item for item in value["options"][:16] if isinstance(item, dict)]
+    if isinstance(value.get("decision_needed"), bool): form["decision_needed"] = value["decision_needed"]
+    return form
+
+
+def _feedback_event_details(event_id: str, form: dict[str, Any]) -> str:
+    normalized = {"feedbackId": event_id, "schemaVersion": 1, "form": form}
+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode()) <= 4096:
+        return encoded
+    return json.dumps({"feedbackId": event_id, "schemaVersion": 1}, separators=(",", ":"))
+
+
+def _persist_feedback_event(project_id: str, workstream_id: str, event_id: str,
+                            details: str, created_at: str, repo: Path) -> None:
+    form = _feedback_form(details)
+    if form is None:
+        return
+    root = _feedback_store_root()
+    repo_path = repo.resolve(strict=False)
+    root_path = root.resolve(strict=False)
+    if within(repo_path, root_path) or within(root_path, repo_path):
+        raise SecretaryError("feedback store must not be inside the project repository")
+    record_dir = _ensure_dir(root)
+    source_session = os.environ.get("PI_ROOT_SESSION_FILE") or os.environ.get("PI_PIDEV_SESSION_ID")
+    record: dict[str, Any] = {
+        "schemaVersion": 1,
+        "feedbackId": event_id,
+        "createdAt": created_at,
+        "updatedAt": created_at,
+        "source": {"role": "workstream-worker", "projectId": project_id,
+                   "workstreamId": workstream_id,
+                   **({"sessionId": Path(source_session).name[:128]} if source_session else {})},
+        "reason": "progress_update",
+        "form": form,
+        "contentDigest": hashlib.sha256(details.encode("utf-8")).hexdigest(),
+        "lifecycle": "delivered",
+        "outcome": "unreviewed",
+    }
+    if os.environ.get("PI_AGENT_FEEDBACK_RAW") == "1":
+        record["raw"] = {"details": details[:16 * 1024]}
+    _atomic(record_dir / f"{event_id}.json", json.dumps(record, sort_keys=True, separators=(",", ":")))
 
 
 def _event_path(project: Path, event_id: str) -> Path:
@@ -2240,6 +2398,11 @@ def append_event(project_id: str, workstream_id: str, kind: str, summary: str,
         if kind == "review-requested":
             request = _create_review_request(project_id, workstream_id, current_record)
             value["details"] = json.dumps({"reviewRequestId": request["requestId"]}, separators=(",", ":"))
+        if source == "agent":
+            feedback_form = _feedback_form(value["details"])
+            if feedback_form is not None:
+                _persist_feedback_event(project_id, workstream_id, event_id, value["details"], value["createdAt"], repo)
+                value["details"] = _feedback_event_details(event_id, feedback_form)
         _atomic(_event_path(project, event_id), json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
     return value
 
@@ -3170,7 +3333,10 @@ def _validate_workstream_record(path: Path, project: Path, repo: Path,
     if not workspace_raw.is_absolute():
         raise SecretaryError("workstream workspace must be absolute")
     _no_symlink_path(workspace_raw)
-    ws_path = workspace_raw.resolve(strict=not allow_missing_workspace)
+    try:
+        ws_path = workspace_raw.resolve(strict=not allow_missing_workspace)
+    except (OSError, RuntimeError) as error:
+        raise SecretaryError("workstream workspace is unavailable") from error
     # Re-validate policy
     _, trusted_live, policy_root = _load_policy_and_classify(repo)
     if not trusted_live:
@@ -3232,8 +3398,14 @@ def list_workstreams(repository: str | Path, capability: str) -> list[dict[str, 
     for entry in sorted(directory.iterdir()):
         if entry.suffix != ".json":
             raise SecretaryError("unexpected workstream record")
+        # Inventory must remain available after a completed or interrupted
+        # cleanup removes an owned worktree. The tolerant validator still
+        # requires an in-policy path, no remaining Git registration, an
+        # available base commit, and valid branch ancestry when a branch
+        # remains. Strict open/launch paths continue to require the worktree.
         validated = _validate_workstream_record(entry, project, repo, record["objectFormat"],
-                                                 record["gitCommonDir"])
+                                                 record["gitCommonDir"],
+                                                 allow_missing_workspace=True)
         runtime = _workstream_runtime(project, repo, validated)
         result.append({"projectId": project.name, **validated, **runtime})
     return result
@@ -4473,7 +4645,8 @@ def launch_workstream(project_id: str, workstream_id: str) -> dict[str, Any]:
                             "PI_PIDEV_WORKSTREAM_ID": workstream_id,
                             "PI_PIDEV_PROJECT_ID": project_id,
                             "PI_PIDEV_BRIEF_PATH": str(brief_path),
-                            "PI_PIDEV_CONTROL": str(Path(__file__).resolve())})
+                            "PI_PIDEV_CONTROL": str(Path(__file__).resolve()),
+                            "PI_ROOT_PROFILE": "worker"})
         try:
             result = subprocess.run([str(_pidev_path())], cwd=record["workspace"], env=environment,
                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
@@ -4622,6 +4795,8 @@ def _cli() -> int:
     p = sub.add_parser("register"); p.add_argument("--alias", required=True)
     p.add_argument("--repository", default=argparse.SUPPRESS)
     sub.add_parser("registry-list")
+    sub.add_parser("active-list")
+    p = sub.add_parser("active-set"); p.add_argument("--alias", action="append", required=True)
     p = sub.add_parser("launch-info"); p.add_argument("--project-id", required=True)
     p.add_argument("--internal-launch", action="store_true")
     sub.add_parser("status")
@@ -4679,6 +4854,10 @@ def _cli() -> int:
             result = register_project(args.repository, args.alias)
         elif args.command == "registry-list":
             result = registry_list()
+        elif args.command == "active-list":
+            result = active_registry_list()
+        elif args.command == "active-set":
+            result = set_active_projects(args.alias)
         elif args.command == "launch-info":
             result = launch_info(args.project_id, internal=args.internal_launch)
         elif args.command == "status":

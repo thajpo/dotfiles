@@ -13,7 +13,7 @@
  function workerReadOnlyFanout(): boolean {
  	return process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim() === "worker";
 @@ -47,7 +48,7 @@
- 		tools: WORKER_READ_ONLY_TOOLS.filter((tool) => tool !== "contact_supervisor" || agent.tools?.includes(tool)),
+ 		tools: WORKER_READ_ONLY_TOOLS,
  		mcpDirectTools: [],
  		extensions: [],
 -		subagentOnlyExtensions: [HOST_COMMAND_EXTENSION],

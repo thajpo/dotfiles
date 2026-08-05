@@ -20,9 +20,11 @@ import {
 } from "../../npm/node_modules/pi-subagents/src/shared/types.ts";
 import { actionAuthorization, actionTargetIsAuthorized, type ActionAuthorization } from "./lifecycle.ts";
 import { addSecretaryUsage, emptySecretaryUsage, recordSecretarySessionStats, recordSecretarySubagentStats, secretaryUsage } from "./stats.ts";
+import { createNativeSupervisorChannel } from "../../npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts";
 
 type SafeAction = "list" | "doctor" | "status" | "interrupt" | "stop" | "resume" | "steer";
 const SAFE_ACTIONS = new Set<SafeAction>(["list", "doctor", "status", "interrupt", "stop", "resume", "steer"]);
+const READ_ONLY_ACTIONS = new Set<SafeAction>(["list", "doctor", "status"]);
 const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "secretary_git", "contact_supervisor", "intercom", "host_command"];
 function getSubagentSessionRoot(parentSessionFile: string | null): string {
   const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
@@ -67,7 +69,11 @@ function isReadOnlyAgent(agent: { acceptanceRole?: string; tools?: string[] }): 
 }
 
 function hardenAgent<T extends { tools?: string[] }>(agent: T, gitExtension: string, autoContinueExtension: string, hostCommandExtension: string, webAccessExtension: string): T {
-  const tools = INVESTIGATOR_TOOLS.filter((tool) => tool !== "contact_supervisor" || agent.tools?.includes(tool));
+  // Every eligible investigator gets the native parent-feedback channel even
+  // when a custom agent omitted it from its frontmatter. The runtime registers
+  // the tool for child sessions; keeping it in this strict allowlist makes the
+  // capability explicit without granting any mutation tools.
+  const tools = [...INVESTIGATOR_TOOLS];
   return {
     ...agent,
     tools,
@@ -191,6 +197,7 @@ export default function secretarySubagents(pi: ExtensionAPI): void {
     },
   };
   const state = createState();
+  const supervisorChannel = createNativeSupervisorChannel(pi, state);
   let sessionStartedAt: number | undefined;
   let sessionStatsId: string | null = null;
   let sessionTurns = 0;
@@ -232,6 +239,7 @@ export default function secretarySubagents(pi: ExtensionAPI): void {
   const cleanupRuntime = () => {
     if (runtimeDisposed) return;
     runtimeDisposed = true;
+    supervisorChannel.dispose();
     disposeNotify();
     resultWatcher.stopResultWatcher();
     for (const unsubscribe of eventUnsubscribes) unsubscribe();
@@ -276,7 +284,7 @@ export default function secretarySubagents(pi: ExtensionAPI): void {
       "Children share the secretary's mechanically read-only project view; worktrees, writers, and mutating management actions are unavailable.",
       "Investigations run asynchronously by default and completion results are delivered back to this secretary session.",
       "Secretary investigations have no elapsed-time, assistant-turn, or tool-call budgets; let the investigator finish naturally and use completion notifications.",
-      "Explicit user requests may use status, interrupt, stop, resume, or steer for a selected run; ordinary task text cannot invoke management actions.",
+      "List, doctor, and status are always read-only; interrupt, stop, resume, and steer require an explicit current-turn user request for a selected run.",
       "Use the agents' existing report formats and synthesize their returned findings for the user.",
     ].join("\n"),
     parameters: SubagentParams,
@@ -289,8 +297,8 @@ export default function secretarySubagents(pi: ExtensionAPI): void {
         if (!SAFE_ACTIONS.has(action)) {
           return Promise.resolve(rejected(`Secretary subagents do not allow action='${params.action}'.`));
         }
-        const authorization = authorizedActions.get(action);
-        if (!authorization) {
+        const authorization = authorizedActions.get(action) ?? { ids: [], agents: [] };
+        if (!READ_ONLY_ACTIONS.has(action) && !authorizedActions.has(action)) {
           return Promise.resolve(rejected(`Secretary subagent action '${action}' requires explicit current-turn user intent.`));
         }
         if (!actionTargetIsAuthorized(action, params, authorization, state)) {
@@ -362,6 +370,7 @@ export default function secretarySubagents(pi: ExtensionAPI): void {
   });
   pi.on("session_start", (_event, ctx) => {
     state.baseCwd = ctx.cwd;
+    supervisorChannel.start();
     state.lastUiContext = ctx;
     state.currentSessionId = ctx.sessionManager.getSessionId() ?? null;
     sessionStartedAt = Date.now();

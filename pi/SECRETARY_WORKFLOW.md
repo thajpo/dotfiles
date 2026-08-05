@@ -26,8 +26,10 @@ workstreams.
 
 The secretary can see the project's registered workstreams through
 `secretary_list_workstreams` and their attention events through
-`secretary_list_attention`. This is not a promise that it sees every arbitrary
-process or every unregistered branch; unregistered Git state is inspected with
+`secretary_list_attention`. Workstream creation and focus use an interactive
+Pi approval prompt bound to the currently registered project; natural-language
+string matching is not used for those operations. This is not a promise that it
+sees every arbitrary process or every unregistered branch; unregistered Git state is inspected with
 `secretary_git`.
 
 ### 3. A full worker
@@ -55,7 +57,7 @@ Its fixed tool allowlist is:
 
 ```text
 read, grep, find, ls, web_search, fetch_content, get_search_content, source_check,
-host_command, subagent,
+host_command, subagent, subagent_supervisor,
 secretary_git, secretary_git_write, secretary_git_cleanup,
 secretary_record_idea, secretary_create_workstream,
 secretary_open_workstream, secretary_relaunch_workstream,
@@ -82,20 +84,33 @@ are therefore part of the authority boundary.
 
 ## Secretary presentation backends and Herdr surface
 
-The secretary/workstream system has two selectable presentation backends:
+Personal and secretary use one explicit per-invocation backend/layout matrix:
 
-- **tmux (default):** `pisec` and `pi-start secretary` keep the existing
-  `pisec` grid and launch full workstreams with `pidev`/tmux.
-- **Herdr (opt-in):** `pi-secretary --herdr` uses the dedicated Herdr session
-  `pi-secretary`. It creates one project Space per registered project and
-  launches new full workstreams as guarded Herdr panes in that Space.
+```text
+pi-start all                   desktop + tmux (default)
+pi-start all -mobile           mobile  + tmux
+pi-start all -herdr            desktop + Herdr
+pi-start all -mobile -herdr    mobile  + Herdr
+```
 
-The active surface selects the backend; it is not a global replacement. A
-runtime record pins the backend, so opening a tmux workstream from Herdr (or
-vice versa) refuses rather than migrating or killing the existing worker.
-Switch surfaces only after stopping the current surface, and do not run both
-surfaces for one project. Existing tmux workers are never automatically
-migrated.
+`all` always starts both surfaces. Flags are not persisted. If a proven managed
+grid already occupies another matrix cell, `pi-start all` performs the guarded
+rebuild automatically; `pi-restart` accepts the same flags and forces a clean
+rebuild. In tmux, `pi-personal` and `pisec` own the surfaces. In Herdr, two named sessions are started:
+`pi-personal` for the four durable personal roles and `pi-secretary` with one
+project Space per active project. Desktop personal pairs roles in two Spaces;
+mobile personal gives each role its own Space.
+
+The active secretary project set remains backend-neutral and persistent; change
+it with `pisec activate`/`swap`. A workstream runtime record pins its backend,
+so switching presentation refuses rather than migrating or killing an existing
+worker. Single-surface `pi-start` commands are non-destructive and refuse a
+conflicting live owner. The explicit whole-grid command, `pi-start all`, safely
+hands a proven backend/layout mismatch to `pi-restart`; unknown state still
+fails closed. `pi-restart` stops both managed Herdr sessions and tmux before
+rebuilding the requested matrix. This refreshes explicit extensions and
+prevents stale or repurposed panes from surviving. `pisec activate`/`swap` hands off to a Herdr
+restart when Herdr currently owns the secretary conversations.
 
 The Herdr command starts the same guarded
 `bin/pi-secretary --internal-launch --project-id <id>` process used by `pisec`.
@@ -116,28 +131,30 @@ resume_agents_on_restore = false
 ```
 
 Herdr's native Pi restore command is `pi --session ...`, which would bypass the
-secretary/worker wrappers and their fixed boundaries. After a Herdr server
-restart, `pi-secretary --herdr` restores idle shells and relaunches only
-through the guarded wrappers. Herdr workstream recovery is automatic only for
-records already pinned to Herdr; a tmux-pinned record is left untouched. The
-dedicated config is separate from the normal Herdr default session, and the
-command does not install the optional Herdr Pi integration automatically.
+managed wrappers and their fixed boundaries. After a server restart,
+`pi-personal-herdr` and `pi-secretary --herdr` restore idle shells and relaunch
+only through exact managed launchers. Herdr workstream recovery is automatic
+only for records already pinned to Herdr; a tmux-pinned record is left
+untouched. Both named sessions use dedicated configs separate from the normal
+Herdr default session, and neither installs the optional Herdr Pi integration.
 
 Use `pisec` or `pi-start secretary` for the tmux surface. Before stopping a
 surface, finish or explicitly stop its secretary/worker processes through their
 normal controls; do not kill a live Pi worker and assume its state is
 recoverable. A surface stop never migrates a live worker, and a worker pinned to
 the old backend remains unavailable from the new surface until its explicit
-relaunch procedure is completed. To switch from Herdr to tmux:
+relaunch procedure is completed. Switch backend or layout through the full restart boundary:
 
 ```bash
-herdr session stop pi-secretary
-pisec
+pi-restart                  # desktop tmux
+pi-restart -mobile          # mobile tmux
+pi-restart -herdr           # desktop Herdr
+pi-restart -mobile -herdr   # mobile Herdr
 ```
 
-To switch from tmux to Herdr, stop the tmux secretary surface first, then run
-`pi-secretary --herdr`. The per-project secretary lock is the final ownership
-check; a failed switch leaves the existing surface and worker untouched.
+The per-project secretary lock is the final ownership check. Existing workers
+remain pinned to their recorded backend; selecting a matrix never implicitly
+migrates them.
 
 To explicitly relaunch one existing tmux worker into Herdr (never as part of
 ordinary startup):
@@ -214,8 +231,10 @@ changing Pi's binding would hide the transport problem rather than fix it.
 - `secretary_record_idea`: write a bounded brief into the secretary state store
   outside the repository. It requires explicit record/note authorization and is
   the durable path for an accepted agent suggestion.
+- `subagent_supervisor`: answer child feedback requests and mark persisted
+  progress feedback accepted, rejected, or deferred.
 - `secretary_list_workstreams`: list validated persistent full-agent records.
-- `secretary_list_attention`: list unacknowledged worker attention events.
+- `secretary_list_attention`: list unacknowledged worker progress and attention events.
 - `secretary_acknowledge_attention`: acknowledge one exact event after explicit
   user instruction.
 
@@ -273,10 +292,12 @@ benchmark cleanup automatically.
 
 ### Workstream lifecycle
 
-- `secretary_create_workstream`: after explicit user authorization, create a
-  bounded brief, allocate a persistent workstream branch/worktree, and launch
-  the full worker.
-- `secretary_open_workstream`: focus an existing exact workstream.
+- `secretary_create_workstream`: after an interactive user approval prompt
+  bound to the current project, create a bounded brief, allocate a persistent
+  workstream branch/worktree, launch the full worker, and focus its tmux session
+  when the secretary has an active tmux client.
+- `secretary_open_workstream`: after an interactive approval prompt, focus an
+  existing exact workstream.
 - `secretary_relaunch_workstream`: an explicit, exact-target-only transition for
   a stopped tmux worker into Herdr; it refuses live/uncertain tmux state and
   never performs an automatic migration.
@@ -342,12 +363,14 @@ The dedicated review launcher has only read/search tools plus
 2. The secretary reads project files and bounded Git state. If useful, it
    starts one or more asynchronous read-only investigators. Results return to
    the secretary for synthesis; investigators do not create worktrees.
-3. The user authorizes a bounded implementation workstream. The secretary
-   records the brief, creates the managed branch/worktree, and starts the full
-   worker in its own Pi development window.
-4. The worker edits and tests in its assigned sandbox/worktree/branch, then
-   reports completion, attention, or a review request. The secretary observes
-   the durable workstream record and attention events.
+3. The secretary asks for an interactive approval. After approval it records
+   the brief, creates the managed branch/worktree, starts the full worker in its
+   own Pi development window, and focuses that worker for the user when possible.
+4. The worker receives a headful implementation-worker prompt, edits and tests
+   in its assigned sandbox/worktree/branch, and sends bounded progress,
+   needs-user, or review-requested events. The secretary observes the durable
+   workstream record and attention events without gaining write access to the
+   worker worktree.
 5. For review, the secretary creates an exact-OID detached reviewer. The
    reviewer inspects without editing and submits one receipt. A later commit
    makes that receipt stale.

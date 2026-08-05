@@ -611,66 +611,54 @@
  		const result = await this.checkpointGitRef(ctx);
  		if (result.committed || result.imported) ctx?.ui.notify(result.message, "info");
  	}
-@@ -2795,26 +3219,47 @@
- 			this.dockerPortMappings = [];
+@@ -2796,13 +3220,31 @@
  			return;
  		}
+ 		const containerToCleanup = this.containerName;
++		let preserveContainer = this.pendingRebase !== undefined;
++		// Checkpointing owns its own parent transition. Do it before acquiring the
++		// shutdown transition: nesting the two leaves /new and /resume blocked by
++		// an in-process transition that can never legitimately be reclaimed.
++		// Do not auto-checkpoint unless the sandbox was actually started.
++		if (this.started && this.containerName && this.getMode() === "isolated" && !preserveContainer) {
++			try {
++				await this.autoCheckpointSandboxChanges(ctx);
++			} catch (error) {
++				preserveContainer = true;
++				ctx?.ui.notify(`Sandbox retained after checkpoint failure: ${error instanceof Error ? error.message : String(error)}`, "warning");
++			}
++		}
++		if (preserveContainer) return;
++
 +		let transition: { release(): void } | undefined;
 +		try {
++			// A child can start after the checkpoint. Acquiring a fresh transition
++			// closes that race or fails closed while preserving the container.
 +			transition = this.beginChildLifecycleTransition("shut down or remove the sandbox container");
 +		} catch (error) {
 +			ctx?.ui.notify(error instanceof Error ? error.message : String(error), "warning");
 +			return;
 +		}
- 		const containerToCleanup = this.containerName;
-+		let preserveContainer = this.pendingRebase !== undefined;
  		try {
- 			// Do not auto-checkpoint unless the sandbox was actually started.
- 			// checkpointGitRef() calls ensure(), and on a resume/session
- 			// switch that would create a throwaway container for the session being
- 			// left, producing two containers for one visible resume.
+-			// Do not auto-checkpoint unless the sandbox was actually started.
+-			// checkpointGitRef() calls ensure(), and on a resume/session
+-			// switch that would create a throwaway container for the session being
+-			// left, producing two containers for one visible resume.
 -			if (this.started && this.containerName && this.getMode() === "isolated") await this.autoCheckpointSandboxChanges(ctx);
-+			if (this.started && this.containerName && this.getMode() === "isolated" && !preserveContainer) {
-+				try {
-+					await this.autoCheckpointSandboxChanges(ctx);
-+				} catch (error) {
-+					preserveContainer = true;
-+					ctx?.ui.notify(`Sandbox retained after checkpoint failure: ${error instanceof Error ? error.message : String(error)}`, "warning");
-+				}
-+			}
- 		} finally {
--			if (containerToCleanup) {
--				if (this.config.lifecycle === "remove") {
--					await this.removeOwnedTaskContainers();
--				} else if (explicitStop || this.config.lifecycle === "stopped") {
--					await this.runtimeExec(["stop", containerToCleanup]).catch(() => undefined);
-+			try {
-+				if (!preserveContainer && containerToCleanup) {
-+					if (this.config.lifecycle === "remove") {
-+						await this.removeOwnedTaskContainers();
-+					} else if (explicitStop || this.config.lifecycle === "stopped") {
-+						await this.runtimeExec(["stop", containerToCleanup]).catch(() => undefined);
-+					}
-+				}
-+				if (!preserveContainer) {
-+					ctx?.ui.setStatus("sandbox", undefined);
-+					this.containerName = undefined;
-+					this.started = false;
-+					this.dockerPortMappings = [];
-+					this.depsInstalled = false;
- 				}
-+			} finally {
-+				transition?.release();
- 			}
--			ctx?.ui.setStatus("sandbox", undefined);
--			this.containerName = undefined;
--			this.started = false;
--			this.dockerPortMappings = [];
--			this.depsInstalled = false;
+-		} finally {
+ 			if (containerToCleanup) {
+ 				if (this.config.lifecycle === "remove") {
+ 					await this.removeOwnedTaskContainers();
+@@ -2815,6 +3257,8 @@
+ 			this.started = false;
+ 			this.dockerPortMappings = [];
+ 			this.depsInstalled = false;
++		} finally {
++			transition?.release();
  		}
  	}
  }
-@@ -2838,6 +3283,7 @@
+@@ -2838,6 +3282,7 @@
  	isEnabled() { return this.engine.isEnabled(); }
  	getConfig() { return this.engine.getConfig(); }
  	getRuntimeInfo() { return this.engine.getRuntimeInfo(); }
@@ -678,7 +666,7 @@
  	getMode() { return this.engine.getMode(); }
  	getRoute() { return this.engine.getRoute(); }
  	getGitRefState() { return this.engine.getGitRefState(); }
-@@ -3647,6 +4093,7 @@
+@@ -3647,6 +4092,7 @@
  					const target = parseTarget(config.target, "target");
  					const gitRefState = sandbox.workspace.getGitRefState();
  					const targetLock = sandbox.workspace.getTargetLockStatus();
@@ -686,7 +674,7 @@
  					const dockerPorts = formatDockerPortMappings(sandbox.lifecycle.getDockerPortMappings());
  					ctx.ui.notify(
  						[
-@@ -3672,6 +4119,12 @@
+@@ -3672,6 +4118,12 @@
  							`Container lifecycle: ${config.lifecycle}`,
  								`Package cache volume: ${PACKAGE_CACHE_VOLUME} scoped by task or dependency environment -> ${PACKAGE_CACHE_ROOT}`,
  							`Rebase pending: ${sandbox.workspace.hasPendingRebase()}`,

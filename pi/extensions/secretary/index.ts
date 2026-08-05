@@ -1,8 +1,8 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import fs from "node:fs";
 import path from "node:path";
-import { gitCleanupApplyWasAuthorized, gitWriteWasAuthorized, promotionWasAuthorized, type GitAuthorization, type GitCleanupAuthorization } from "./authorization.ts";
+import { gitCleanupApplyWasAuthorized, gitWriteWasAuthorized, type GitAuthorization, type GitCleanupAuthorization } from "./authorization.ts";
 
 const PROJECT_ID = /^[0-9a-f]{64}$/;
 const ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/;
@@ -33,7 +33,7 @@ const CLEANUP_PLAN = Type.Object({
   }), { maxItems: 256 })),
 });
 
-type Authorization = "record" | "promote" | "open" | "relaunch" | "ack" | "review" | "land" | "integrate" | "cleanup" | GitAuthorization | GitCleanupAuthorization;
+type Authorization = "record" | "relaunch" | "ack" | "review" | "land" | "integrate" | "cleanup" | GitAuthorization | GitCleanupAuthorization;
 let authorized = new Set<Authorization>();
 let authorizedTargets = new Map<Authorization, string>();
 let authorizedCleanupTarget: string | null = null;
@@ -89,16 +89,12 @@ function updateAuthorization(text: string, source: string): void {
   if (recordWasAuthorized(value)) authorized.add("record");
   for (const action of gitWriteWasAuthorized(value)) authorized.add(action);
   if (gitCleanupApplyWasAuthorized(value)) authorized.add("git-cleanup");
-  if (promotionWasAuthorized(value)) authorized.add("promote");
   const targetIds = [...new Set(value.match(/\b(?:ws|rr)-[a-z0-9][a-z0-9-]{0,59}\b|\bevt-[a-z0-9][a-z0-9-]{0,58}\b/g) ?? [])];
   const targetFor = (prefix: "ws" | "rr" | "evt"): string | null => {
     const matches = targetIds.filter((id) => id.startsWith(`${prefix}-`));
     return matches.length === 1 ? matches[0] : null;
   };
   const openTarget = targetFor("ws");
-  if (openTarget !== null && /\b(open|resume|focus|switch to)\b/.test(value)) {
-    authorized.add("open"); authorizedTargets.set("open", openTarget);
-  }
   const relaunchDenied = /\b(?:don't|do not|never|not|without|avoid|refus(?:e|es|ed|ing)|won't|will not|can't|cannot|shouldn't|should not)\b[\s\S]{0,80}\b(?:relaunch|migrat|switch)\w*\b/.test(value);
   const relaunchDiscussion = value.includes("?") ||
     /\b(?:can|could|should|would|may)\s+(?:we|you|i|it)\b[\s\S]{0,100}\b(?:relaunch|restart|switch|move)\w*\b/.test(value) ||
@@ -138,7 +134,7 @@ function updateAuthorization(text: string, source: string): void {
   if (/^\s*(yes|yep|do it|go ahead|please do|sounds good)[.!\s]*$/i.test(text)) {
     // Landing/integration are acceptance decisions, not generic secretary
     // actions. The user and secretary must name that decision explicitly.
-    authorized.add("record"); authorized.add("promote");
+    authorized.add("record");
   }
 }
 
@@ -160,6 +156,52 @@ function consumeCleanup(workstreamId: string): void {
   authorizedCleanupTarget = null;
 }
 
+function boundedApprovalText(value: string, maxBytes: number): string {
+  const text = value.trim();
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+  return `${text.slice(0, Math.max(0, maxBytes - 1))}…`;
+}
+
+async function approveWorkstream(ctx: ExtensionContext, operation: "create" | "open", details: string): Promise<void> {
+  if (!ctx.hasUI) throw new Error("Workstream approval requires an interactive secretary session.");
+  const { alias, projectId } = requiredEnvironment();
+  const body = [
+    `Project: ${alias} (${projectId.slice(0, 12)})`,
+    `Repository: ${ctx.cwd}`,
+    `Operation: ${operation === "create" ? "create and launch a headful implementation workstream" : "open and focus an existing workstream"}`,
+    "",
+    boundedApprovalText(details, 6000),
+    "",
+    "This approval applies only to this registered project and this request.",
+  ].join("\n");
+  let approved = false;
+  try {
+    approved = await ctx.ui.confirm(operation === "create" ? "Approve workstream creation?" : "Open workstream?", body);
+  } catch (error) {
+    throw new Error(`Workstream approval prompt failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!approved) throw new Error("The user rejected the workstream request.");
+}
+
+async function focusTmuxWorkstream(pi: ExtensionAPI, text: string, signal: AbortSignal): Promise<string> {
+  let record: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return text;
+    record = parsed as Record<string, unknown>;
+  } catch {
+    return text;
+  }
+  if (record.backend === "herdr" || typeof record.tmuxSession !== "string" || !record.tmuxSession) return text;
+  if (!process.env.TMUX) return `${text}\n\nWorker started in tmux session ${record.tmuxSession}; no active tmux client was available to focus it.`;
+  const result = await pi.exec("tmux", ["switch-client", "-t", `=${record.tmuxSession}`], { signal, timeout: 10_000 });
+  if (result.code !== 0) {
+    const detail = (result.stderr || result.stdout || "tmux focus failed").trim().slice(0, 300);
+    return `${text}\n\nWorker started, but Pi could not focus its tmux session: ${detail}`;
+  }
+  return `${text}\n\nFocused worker session ${record.tmuxSession}.`;
+}
+
 export default function secretary(pi: ExtensionAPI): void {
   // Installed globally but active only under the fixed secretary launcher.
   if (process.env.PI_SECRETARY_READ_ONLY !== "1") return;
@@ -178,11 +220,11 @@ export default function secretary(pi: ExtensionAPI): void {
     const { alias, projectId } = requiredEnvironment();
     return {
       systemPrompt: event.systemPrompt + `\n\nYou are the persistent secretary for project ${alias} (project ID ${projectId}).\n` +
-        "Switchboard boundary: inspect project evidence, record bounded ideas, and create/open peer full agents only after the current natural-language user turn explicitly authorizes it. Natural-language requests to log, note, capture, document, save, record, or park guidance count as record authorization; do not require the user to repeat a particular keyword. " +
+        "Switchboard boundary: inspect project evidence, record bounded ideas, and create/open peer full agents only after the dedicated interactive workstream approval prompt is accepted. Natural-language requests to log, note, capture, document, save, record, or park guidance count as record authorization; workstream creation and focus never rely on string matching. " +
         "You may use the subagent tool for read-only investigation when parallel or specialized inspection would improve the answer. Choose the number and shape of investigators according to the work rather than following a fixed fanout recipe; use their existing report formats and synthesize the results. Investigation never needs a Git worktree. " +
         "You are not a coding agent and cannot modify repository files, run shell commands, or perform arbitrary Git operations. A promoted full agent owns implementation, its task_packet, and direct technical discussion. After the current user turn explicitly authorizes commit, push, or commit-and-push, use only secretary_git_write with an explicit message and relative path list for commits; push is limited to origin and the current branch. For Git cleanup, first use secretary_git for inspection, then use secretary_git_cleanup with exact expected OIDs, owned paths, and a dry-run plan; only apply after the current user turn explicitly authorizes applying that cleanup plan. Cleanup never accepts arbitrary Git arguments, remote operations, force deletion, or product-source paths. Never fabricate a user turn or relay general agent chat. Use secretary_git for bounded read-only Git inspection; never claim Git is unavailable when that tool can answer.\n\n" +
         "## Project-status skill\n" + projectStatusSkill() +
-        "\n\nUse only the read allowlist and secretary semantic tools. User affirmation such as 'yes' is sufficient for creating a new workstream or recording ordinary guidance; actions against an existing workstream, review event, or review request require that exact target ID in the current user turn. Landing or integration also requires the secretary and user to explicitly decide acceptance, and Git writes/cleanup require their own explicit current-turn authorization. Never inherit a generic affirmation for a targeted or destructive action. Never inherit a generic affirmation for landing or integration.",
+        "\n\nUse only the read allowlist and secretary semantic tools. Workstream creation and focus require the dedicated interactive approval prompt; actions against an existing review event or review request require that exact target ID in the current user turn. Landing or integration also requires the secretary and user to explicitly decide acceptance, and Git writes/cleanup require their own explicit current-turn authorization. Never inherit a generic affirmation for a targeted or destructive action. Never inherit a generic affirmation for landing or integration.",
     };
   });
 
@@ -278,22 +320,26 @@ export default function secretary(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "secretary_create_workstream", label: "Create full agent",
-    description: "Create and focus a separate persistent full agent after explicit user instruction or affirmation.",
+    description: "Create and focus a separate persistent full agent after an interactive approval prompt bound to the current registered project.",
     parameters: Type.Object({ title: Type.String({ maxLength: 200 }), brief: Type.String({ maxLength: 16384 }), role: ROLE }),
-    async execute(_id, params, signal) {
-      consume("promote"); const { projectId } = requiredEnvironment();
+    async execute(_id, params, signal, _update, ctx) {
+      await approveWorkstream(ctx, "create", `Title: ${params.title}\nRole: ${params.role}\n\nBrief:\n${params.brief}`);
+      const { projectId } = requiredEnvironment();
       const text = await invoke(["promote", "--project-id", projectId, "--title", params.title, "--brief", params.brief, "--role", params.role], signal);
-      return { content: [{ type: "text", text }], details: {} };
+      const focused = await focusTmuxWorkstream(pi, text, signal);
+      return { content: [{ type: "text", text: focused }], details: {} };
     },
   });
   pi.registerTool({
     name: "secretary_open_workstream", label: "Open full agent",
-    description: "Open/focus an existing full agent after explicit user instruction.",
+    description: "Open/focus an existing full agent after an explicit user approval prompt.",
     parameters: Type.Object({ workstreamId: Type.String({ pattern: ID.source }) }),
-    async execute(_id, params, signal) {
-      consume("open", params.workstreamId); const { projectId } = requiredEnvironment();
+    async execute(_id, params, signal, _update, ctx) {
+      await approveWorkstream(ctx, "open", `Workstream: ${params.workstreamId}`);
+      const { projectId } = requiredEnvironment();
       const text = await invoke(["focus-workstream", "--project-id", projectId, "--workstream-id", params.workstreamId], signal);
-      return { content: [{ type: "text", text }], details: {} };
+      const focused = await focusTmuxWorkstream(pi, text, signal);
+      return { content: [{ type: "text", text: focused }], details: {} };
     },
   });
   pi.registerTool({
@@ -348,7 +394,7 @@ export default function secretary(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "secretary_list_attention", label: "List attention",
-    description: "List unacknowledged bounded workstream attention and host process-exit events.",
+    description: "List unacknowledged bounded worker progress, attention, and host process-exit events.",
     parameters: Type.Object({}),
     async execute(_id, _params, signal) {
       const { projectId } = requiredEnvironment();

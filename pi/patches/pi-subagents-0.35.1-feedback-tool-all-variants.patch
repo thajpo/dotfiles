@@ -1,0 +1,11 @@
+--- a/src/extension/fanout-child.ts
++++ b/src/extension/fanout-child.ts
+@@ -45,7 +45,7 @@
+ function hardenWorkerReadOnlyAgent<T extends { tools?: string[] }>(agent: T): T {
+ 	return {
+ 		...agent,
+-		tools: WORKER_READ_ONLY_TOOLS.filter((tool) => tool !== "contact_supervisor" || agent.tools?.includes(tool)),
++		tools: WORKER_READ_ONLY_TOOLS,
+ 		mcpDirectTools: [],
+ 		extensions: [],
+ 		subagentOnlyExtensions: [HOST_COMMAND_EXTENSION, WEB_ACCESS_EXTENSION],

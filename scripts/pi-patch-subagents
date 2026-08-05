@@ -66,7 +66,18 @@ apply_verified_patch \
   0.35.1 \
   af1755857c0a4f30eabfd95ecfff11cd83cb95e13a39fe43d8fe5f68567f757e \
   b713a3eafd90ca0e0808669b70ee11bacd119ba2c94ec12b956a1a8bdbe3b318 \
-  "$patch_dir/pi-subagents-0.35.1-hidden-success-extension.patch"
+  "$patch_dir/pi-subagents-0.35.1-hidden-success-extension.patch" \
+  1ee49ded4230bc5d2b9a17202aa5bec0a7dd6d7d0a4d16a6ad5d9d3f7cf30166,405ff3b352e5091c4c8dd0b7f313e4cd6def6bcfedf70e6e38c515b85d6b4c79
+
+apply_verified_patch \
+  pi-subagents-worktree-approval \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/extension/index.ts" \
+  0.35.1 \
+  b713a3eafd90ca0e0808669b70ee11bacd119ba2c94ec12b956a1a8bdbe3b318 \
+  405ff3b352e5091c4c8dd0b7f313e4cd6def6bcfedf70e6e38c515b85d6b4c79 \
+  "$patch_dir/pi-subagents-0.35.1-worktree-approval.patch" \
+  1ee49ded4230bc5d2b9a17202aa5bec0a7dd6d7d0a4d16a6ad5d9d3f7cf30166
 
 apply_verified_patch \
   pi-subagents-worker-read-only-fanout \
@@ -74,28 +85,47 @@ apply_verified_patch \
   "$agent_dir/npm/node_modules/pi-subagents/src/extension/fanout-child.ts" \
   0.35.1 \
   8cfba3086dbb460c59c18ebbe7bd04f3020f457d3e7ed5c91dc53dbfa9c5aa08 \
-  bce5d9ee261a86fba34b9e421be745a5fca8a91d6a755c3c44d790e3c3df9727 \
+  1a5a29f3b02857088995ea97969ebfbfb119c95cc69e9f265867a7a838e4e2e0 \
   "$patch_dir/pi-subagents-0.35.1-worker-read-only-fanout.patch" \
-  8c28be64f679220d9ee1cfc2d44f67230b4b2fa50b3cefd338f8d7c0fab609aa,47691096b6a766251cc0892695f0b7348cbac0c34ecd4bc7503be66db7377e63
+  47691096b6a766251cc0892695f0b7348cbac0c34ecd4bc7503be66db7377e63,a9d6d2338ad89bfb4a4d18ecaf081e50cc73cd7e62984bcf86ae28a22623a8b7,c464c0f7411c496e5cfea86ebc52cd7f772932f1b367e3d3b67043e0601b8fe7
 
 apply_verified_patch \
   pi-subagents-host-command-fanout \
   "$agent_dir/npm/node_modules/pi-subagents" \
   "$agent_dir/npm/node_modules/pi-subagents/src/extension/fanout-child.ts" \
   0.35.1 \
-  bce5d9ee261a86fba34b9e421be745a5fca8a91d6a755c3c44d790e3c3df9727 \
-  8c28be64f679220d9ee1cfc2d44f67230b4b2fa50b3cefd338f8d7c0fab609aa \
+  1a5a29f3b02857088995ea97969ebfbfb119c95cc69e9f265867a7a838e4e2e0 \
+  a9d6d2338ad89bfb4a4d18ecaf081e50cc73cd7e62984bcf86ae28a22623a8b7 \
   "$patch_dir/pi-subagents-0.35.1-host-command-fanout.patch" \
-  47691096b6a766251cc0892695f0b7348cbac0c34ecd4bc7503be66db7377e63
+  47691096b6a766251cc0892695f0b7348cbac0c34ecd4bc7503be66db7377e63,c464c0f7411c496e5cfea86ebc52cd7f772932f1b367e3d3b67043e0601b8fe7
 
 apply_verified_patch \
   pi-subagents-web-access-fanout \
   "$agent_dir/npm/node_modules/pi-subagents" \
   "$agent_dir/npm/node_modules/pi-subagents/src/extension/fanout-child.ts" \
   0.35.1 \
-  8c28be64f679220d9ee1cfc2d44f67230b4b2fa50b3cefd338f8d7c0fab609aa \
+  a9d6d2338ad89bfb4a4d18ecaf081e50cc73cd7e62984bcf86ae28a22623a8b7 \
+  c464c0f7411c496e5cfea86ebc52cd7f772932f1b367e3d3b67043e0601b8fe7 \
+  "$patch_dir/pi-subagents-0.35.1-web-access-fanout.patch" \
+  47691096b6a766251cc0892695f0b7348cbac0c34ecd4bc7503be66db7377e63
+
+apply_verified_patch \
+  pi-subagents-feedback-tool-all-variants \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/extension/fanout-child.ts" \
+  0.35.1 \
   47691096b6a766251cc0892695f0b7348cbac0c34ecd4bc7503be66db7377e63 \
-  "$patch_dir/pi-subagents-0.35.1-web-access-fanout.patch"
+  c464c0f7411c496e5cfea86ebc52cd7f772932f1b367e3d3b67043e0601b8fe7 \
+  "$patch_dir/pi-subagents-0.35.1-feedback-tool-all-variants.patch"
+
+apply_verified_patch \
+  pi-subagents-feedback-persistence \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts" \
+  0.35.1 \
+  6cbdf1057f5c8589f7090dde9bb294a66ae8235c093c553974106f60a87023bc \
+  cf726b8f94568c8016ce96dbcf2c8e0214abe53b375668d55ff07d3a94880096 \
+  "$patch_dir/pi-subagents-0.35.1-feedback-persistence.patch"
 
 apply_verified_patch \
   pi-subagents-no-host-verify \
@@ -150,8 +180,18 @@ apply_verified_patch \
   "$agent_dir/npm/node_modules/pi-subagents/skills/pi-subagents/SKILL.md" \
   0.35.1 \
   188a6d85ed2c1102d3351e3138a0a11a9864f00d6e36a7ae1371377d3e57333d \
-  39a97d5b66806fbb85fe73aac2cd96608ee70c4adf69dc17d39a6cf3fdcc32bd \
-  "$patch_dir/pi-subagents-0.35.1-skill.patch"
+  89416c9f454be303d4a744d8bccc76ad88d1574a0076d82b9b937479457bd665 \
+  "$patch_dir/pi-subagents-0.35.1-skill.patch" \
+  163025ce9d08a81b473a2cf74585dd7d8e169dafa6d1e4514df682ac788f3d73
+
+apply_verified_patch \
+  pi-subagents-feedback-workflow-skill \
+  "$agent_dir/npm/node_modules/pi-subagents" \
+  "$agent_dir/npm/node_modules/pi-subagents/skills/pi-subagents/SKILL.md" \
+  0.35.1 \
+  89416c9f454be303d4a744d8bccc76ad88d1574a0076d82b9b937479457bd665 \
+  163025ce9d08a81b473a2cf74585dd7d8e169dafa6d1e4514df682ac788f3d73 \
+  "$patch_dir/pi-subagents-0.35.1-feedback-workflow-skill.patch"
 
 apply_verified_patch \
   pi-btw \
@@ -304,6 +344,6 @@ apply_verified_patch \
   "$agent_dir/npm/node_modules/@kjrjay/pi-sandbox/index.ts" \
   0.2.0 \
   d08ede1e69fff581c96705e32ecbc6f0fd7e0ba52e6a2f5e65461bbf615a3df9 \
-  ab2c2bc53e4f08c0bea0350d788e4298936a820fbab1f0eded95075339c65111 \
+  cea7712195bf98bcd18f8b498d3442efb11cdf40cd45629cb016df2c90020794 \
   "$patch_dir/pi-sandbox-0.2.0-child-lifecycle.patch" \
   2640fc22839f8f6c2cad1392d50effd0f9bd96af9fab23b892a2bb35ecae81ea,106f813dda5ab293091e902d1f4a5f9e74478bcfdd5f4da337d6105f3343b1a4,68c10277c415901b2ad2880e2d074bf180125a4d9dd737b6df38e39a199dc66e,66a70758598b89d414e1e9235ae595a18280fc5e5ad880f38b4385ff1359c6ab,1015bc8dde8e6d24146ebec541eaba1889cbc18e3cda66d0960dcf939fe40614,2cd7601750697ee4305442fd1fed562d271aaf9fbce8b50f7d6c9371a2351bbd,89fc0bf4a5a2b3a9b0a2a118a5e95c8e2a3d86520e0e351ec2df0b068a93e07f,5220a7359a6b8d97ac1f50955e80f24d1b4cfa142d3fe7b942ca2375802a0fda

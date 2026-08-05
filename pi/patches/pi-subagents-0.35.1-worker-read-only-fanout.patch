@@ -28,7 +28,7 @@
 +function hardenWorkerReadOnlyAgent<T extends { tools?: string[] }>(agent: T): T {
 +	return {
 +		...agent,
-+		tools: WORKER_READ_ONLY_TOOLS.filter((tool) => tool !== "contact_supervisor" || agent.tools?.includes(tool)),
++		tools: WORKER_READ_ONLY_TOOLS,
 +		mcpDirectTools: [],
 +		extensions: [],
 +		subagentOnlyExtensions: [],

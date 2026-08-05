@@ -12,6 +12,12 @@ SPEC = importlib.util.spec_from_file_location("pi_secretary_control_herdr", ROOT
 secretary = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
 SPEC.loader.exec_module(secretary)
+HERDR_SPEC = importlib.util.spec_from_file_location(
+    "pi_secretary_herdr_orchestrator", ROOT / "scripts/pi-secretary-herdr.py",
+)
+herdr_orchestrator = importlib.util.module_from_spec(HERDR_SPEC)
+assert HERDR_SPEC.loader
+HERDR_SPEC.loader.exec_module(herdr_orchestrator)
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -91,6 +97,20 @@ class HerdrBackendTests(unittest.TestCase):
         path_patch = mock.patch.object(secretary, "_herdr_path", return_value=self.fake_herdr)
         worker_patch = mock.patch.object(secretary, "_herdr_worker_path", return_value=ROOT / "bin/pi-herdr-workstream")
         return state, surface_patch, json_patch, ok_patch, path_patch, worker_patch
+
+    def test_shell_restore_retries_an_initial_empty_process_snapshot(self):
+        empty = {"process_info": {"foreground_processes": []}}
+        shell = {"process_info": {"foreground_processes": [{
+            "argv": ["/bin/bash"], "cmdline": "/bin/bash", "name": "bash",
+        }]}}
+        with mock.patch.object(herdr_orchestrator, "_herdr_json", side_effect=[empty, shell]) as inspect, \
+             mock.patch.object(herdr_orchestrator.time, "sleep") as sleep:
+            processes = herdr_orchestrator._pane_processes(
+                "/fake/herdr", "w1:p1", env={},
+            )
+        self.assertEqual(processes, shell["process_info"]["foreground_processes"])
+        self.assertEqual(inspect.call_count, 2)
+        sleep.assert_called_once_with(0.05)
 
     def test_new_herdr_workstream_uses_pane_run_not_pidev_or_tmux(self):
         workstream = self.make_workstream()

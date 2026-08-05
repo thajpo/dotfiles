@@ -1,0 +1,20 @@
+--- a/skills/pi-subagents/SKILL.md
++++ b/skills/pi-subagents/SKILL.md
+@@ -134,6 +134,8 @@
+ 
+ Children use the always-available `contact_supervisor` tool as the required parent-feedback channel; `intercom` is only a lower-level fallback for bridge/runtime failures. Parents reply with `subagent_supervisor({ action: "reply", message: "..." })`.
+ 
++Every `agent-feedback.v1` interview and `AGENT_FEEDBACK` progress update is persisted in Pi-owned user storage under `~/.pi/agent/feedback/records/` (or the configured Pi agent directory), with bounded normalized content and provenance. Raw prompt content is opt-in via `PI_AGENT_FEEDBACK_RAW=1`. Parents can disposition non-blocking records with `subagent_supervisor({ action: "review", feedbackId, outcome: "accepted|rejected|deferred" })`; this does not automatically promote memory or ideas.
++
+ Use `contact_supervisor` with `reason: "need_decision"` when blocked. Use `reason: "progress_update"` for non-blocking checkpoints. Children must not decide unapproved scope, product, or architecture changes; they escalate.
+ 
+ ## Worktree isolation
+@@ -148,7 +150,7 @@
+ })
+ ```
+ 
+-Use worktrees for intentionally independent writers. Default is one writer per active worktree.
++Use worktrees for intentionally independent writers. The parent shows an interactive approval prompt before creating them; approval is bound to the project open in the current Pi session and the exact request. Default is one writer per active worktree.
+ 
+ ## Important constraints
+ 

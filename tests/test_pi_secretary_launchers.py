@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -52,6 +53,34 @@ def setup_registry(root: Path, count: int = 2):
 
 
 class SecretaryLauncherTests(unittest.TestCase):
+    def test_active_project_selection_is_bounded_ordered_and_persistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, _, records, env = setup_registry(root, 5)
+            initial = subprocess.run(
+                [str(CONTROL), "active-list"], env=env, text=True,
+                capture_output=True, check=True,
+            )
+            initial_records = json.loads(initial.stdout)
+            self.assertEqual(len(initial_records), 3)
+            self.assertTrue({item["projectId"] for item in initial_records}.issubset(
+                {item["projectId"] for item in records},
+            ))
+
+            selected_aliases = ["project-4", "project-1", "project-3"]
+            selected = subprocess.run(
+                [str(CONTROL), "active-set", *sum((["--alias", alias] for alias in selected_aliases), [])],
+                env=env, text=True, capture_output=True, check=True,
+            )
+            self.assertEqual([item["alias"] for item in json.loads(selected.stdout)], selected_aliases)
+            reread = subprocess.run(
+                [str(CONTROL), "active-list"], env=env, text=True,
+                capture_output=True, check=True,
+            )
+            self.assertEqual([item["alias"] for item in json.loads(reread.stdout)], selected_aliases)
+            state = root / "state/pi-secretary/active-projects.json"
+            self.assertEqual(state.stat().st_mode & 0o777, 0o600)
+
     def test_pi_secretary_constructs_fixed_read_only_pi_invocation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -99,7 +128,7 @@ pathlib.Path(os.environ['FAKE_PI_OUTPUT']).write_text(json.dumps({
             self.assertEqual(invocation["cwd"], str(repos[0]))
             args = invocation["args"]
             self.assertEqual(args[args.index("--tools") + 1],
-                             "read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,host_command,subagent,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea,secretary_create_workstream,secretary_open_workstream,secretary_relaunch_workstream,secretary_list_workstreams,secretary_list_attention,secretary_acknowledge_attention,secretary_create_reviewer,secretary_land_reviewed,secretary_create_integration,secretary_cleanup_workstream")
+                             "read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,host_command,subagent,subagent_supervisor,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea,secretary_create_workstream,secretary_open_workstream,secretary_relaunch_workstream,secretary_list_workstreams,secretary_list_attention,secretary_acknowledge_attention,secretary_create_reviewer,secretary_land_reviewed,secretary_create_integration,secretary_cleanup_workstream")
             for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--session"]:
                 self.assertIn(flag, args)
             self.assertEqual(args.count("-e"), 7)
@@ -168,7 +197,41 @@ else:
             self.assertIn("resume_agents_on_restore = false", config.read_text())
             self.assertEqual(config.stat().st_mode & 0o777, 0o600)
 
-    def test_pisec_initial_grid_sends_one_quoted_command_per_project(self):
+    def test_pisec_active_selection_restarts_the_current_herdr_surface(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, _, _, env = setup_registry(root, 3)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            herdr = fake_bin / "herdr"
+            herdr.write_text("""#!/bin/sh
+[ "$*" = "session list --json" ] || exit 2
+printf '%s\n' '{"sessions":[{"name":"pi-secretary","running":true}]}'
+""")
+            herdr.chmod(0o755)
+            restart_log = root / "restart.log"
+            home_bin = home / ".local/bin"
+            home_bin.mkdir(parents=True)
+            restart = home_bin / "pi-restart"
+            restart.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$FAKE_RESTART_LOG\"\n")
+            restart.chmod(0o755)
+            env.update({"PATH": f"{fake_bin}:/usr/local/bin:/usr/bin:/bin",
+                        "FAKE_RESTART_LOG": str(restart_log)})
+            result = subprocess.run(
+                [str(ROOT / "bin/pisec"), "activate", "project-2", "project-0"],
+                cwd=home, env=env, text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("restarting the active Herdr surface", result.stderr)
+            self.assertEqual(restart_log.read_text(), "-herdr\n")
+            active = subprocess.run(
+                [str(CONTROL), "active-list"], env=env, text=True,
+                capture_output=True, check=True,
+            )
+            self.assertEqual([item["alias"] for item in json.loads(active.stdout)],
+                             ["project-2", "project-0"])
+
+    def test_pisec_initial_grid_starts_one_direct_command_per_project(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             home, _, records, env = setup_registry(root, 3)
@@ -186,7 +249,7 @@ if cmd=='new-session': print('@1'); raise SystemExit(0)
 if cmd=='new-window': print('@2'); raise SystemExit(0)
 if cmd=='kill-window': raise SystemExit(0)
 if cmd=='rename-window': raise SystemExit(0)
-if cmd=='list-panes': print('%1\\t0\\tshell-1\\tsh\\t'); raise SystemExit(0)
+if cmd=='list-panes': print('%1\\t0\\tshell-1\\tsh\\t0\\t'); raise SystemExit(0)
 if cmd=='split-window': print('%2'); raise SystemExit(0)
 raise SystemExit(0)
 """)
@@ -210,19 +273,51 @@ raise SystemExit(0)
             release_lock.wait(timeout=2)
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
-            sends = [call for call in calls if call[0] == "send-keys"]
-            self.assertEqual(len(sends), 3)
-            for call in sends:
-                self.assertEqual(len(call), 5)
-                self.assertEqual(call[-1], "C-m")
-                self.assertIn(" --internal-launch --project-id ", call[3])
+            launches = [call for call in calls if call[0] == "respawn-pane"]
+            self.assertEqual(len(launches), 3)
+            for call in launches:
+                self.assertEqual(call[1:3], ["-k", "-t"])
+                self.assertIn(" --internal-launch --project-id ", call[-1])
             self.assertEqual({record["projectId"] for record in records},
-                             {call[3].rsplit(" ", 1)[-1] for call in sends})
+                             {call[-1].rsplit(" ", 1)[-1] for call in launches})
+            self.assertEqual(len([call for call in calls if call[0] == "send-keys"]), 0)
             self.assertEqual(len([call for call in calls if call[0] == "split-window"]), 1)
             first_layout = next(i for i, call in enumerate(calls) if call[0] == "select-layout")
             first_split = next(i for i, call in enumerate(calls) if call[0] == "split-window")
             self.assertLess(first_layout, first_split)
             self.assertIn(["select-layout", "-t", "@2", "even-horizontal"], calls)
+
+    def test_pisec_refuses_cross_surface_lock_before_creating_blank_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, _, records, env = setup_registry(root, 1)
+            fake_bin = root / "bin"; fake_bin.mkdir()
+            log = root / "tmux.jsonl"
+            tmux = fake_bin / "tmux"
+            tmux.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys
+with pathlib.Path(os.environ['FAKE_TMUX_LOG']).open('a') as stream:
+    stream.write(json.dumps(sys.argv[1:]) + '\\n')
+if sys.argv[1] == 'has-session': raise SystemExit(1)
+raise SystemExit('unexpected tmux mutation: ' + repr(sys.argv[1:]))
+""")
+            tmux.chmod(0o755)
+            project_dir = home / ".pi/agent/sessions/secretary" / records[0]["projectId"]
+            project_dir.mkdir(parents=True)
+            lock_stream = (project_dir / ".active.lock").open("w")
+            try:
+                fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                env.update({"PATH": f"{fake_bin}:/usr/local/bin:/usr/bin:/bin",
+                            "FAKE_TMUX_LOG": str(log)})
+                result = subprocess.run([str(ROOT / "bin/pisec"), "launch"], cwd=home,
+                                        env=env, text=True, capture_output=True)
+            finally:
+                fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+                lock_stream.close()
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("already owned by another secretary surface", result.stderr)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(calls, [["has-session", "-t", "=pisec"]])
 
     def test_pisec_open_preserves_live_processes_without_restarting_them(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -255,8 +350,8 @@ if args[0]=='split-window': print('%3'); raise SystemExit(0)
 if args[0]=='kill-window': raise SystemExit(0)
 if args[0]=='rename-window': raise SystemExit(0)
 if args[0]=='list-panes':
- print('%1\\t0\\troot-0\\tsh\\tchanged-title')
- print('%2\\t1\\troot-1\\tsh\\tother-title')
+ print('%1\\t0\\troot-0\\tsh\\t0\\tchanged-title')
+ print('%2\\t1\\troot-1\\tsh\\t0\\tother-title')
  raise SystemExit(0)
 raise SystemExit(0)
 """)

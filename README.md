@@ -16,8 +16,11 @@ Review and apply the root-session migration before restarting an existing Pi
 workspace. `pi-image-tools@1.4.0` owns `Ctrl+V` and persists native image
 attachments without sharing host `/tmp` with task containers.
 
-`pi-restart` applies the new generation, boots tmux, and starts the personal
-workspace and secretary grid. If it is not on `PATH` yet, run
+`pi-restart` applies the new generation and always starts both personal and
+secretary. Desktop tmux is the default for every invocation; add `-mobile`,
+`-herdr`, or both to select mobile tmux, desktop Herdr, or mobile Herdr. Herdr
+uses separate named `pi-personal` and `pi-secretary` sessions. Flags are not
+persisted. If the launcher is not on `PATH` yet, run
 `~/.local/bin/pi-restart` instead.
 
 Machine-specific non-secret settings live in `machines/`. On Apple Silicon
@@ -221,8 +224,8 @@ threshold is `-55 dBFS`. Override calibration with
 - Pi keeps the prompt editor and footer pinned while mouse-wheel scrolling through conversation history, so drafts remain editable while reading earlier responses
 - Deterministic trusted-live/isolated repository policy and hardened Docker task containers
 - One shared execution plane for parent, subagents, and pi-btw
-- Explicit unsandboxed `pi-host` maintenance launcher
-- `pi-start` boots tmux from a cold start; `pi-restart` replaces every tmux workspace and reruns `pi-start all`; `pi --help-custom` (also `pi -help-custom`) documents workspace startup, recovery, and session switching
+- Explicit unsandboxed `pi-host` maintenance launcher; it resumes one stable host conversation per invocation directory, enforces one writer for that session directory, stays in that directory, and does not create a Git worktree
+- `pi-start all` always starts personal plus secretary with a simple per-invocation matrix: no flags = desktop tmux, `-mobile` = mobile tmux, `-herdr` = desktop Herdr, and `-mobile -herdr` = mobile Herdr; if a proven managed grid is in another matrix cell, `pi-start all` performs the same guarded rebuild automatically, while `pi-restart` with the same flags forces a clean rebuild; flags are not persisted; `pi help` is the short memorable guide, `pi help all` is the full workspace/recovery reference, and `pi --help` remains the upstream CLI reference
 - `pidev` is the managed Pi development launcher; it records the canonical project directory and uses a stable session store so tmux-resurrect can reopen the same conversation even after a temporary worktree disappears
 - In Pi, `Ctrl-g` enters conversation browse mode: use `j/k`, `Ctrl-u/d`, `gg/G`, `v`, and `y`; press `i`, `q`, or `Esc` to return to the pinned prompt
 - `/fast` enables OpenAI's priority service tier for the current session; use `/fast off` to disable it
@@ -231,8 +234,8 @@ threshold is `-55 dBFS`. Override calibration with
   response-count, elapsed-time, or no-progress cutoff is imposed
 - `/observe` or `Ctrl+I` opens a read-only Task/Fleet/Messages Inspector for explicit task packets, child instructions, context summaries, status, results, and failures
 - Interactive subagent runs return control instead of blocking on `subagent_wait`; completion notifications and status/control actions remain available
-- `pisec` opens the default three secretary projects (`vla-lens`, `csv-agent`, `SleepyDreamyV3`) without restarting live panes; `pisec launch` is the explicit idle-pane repair path; secretaries may fan out to any useful number of existing read-only investigator agents without creating Git worktrees, while implementation still requires an explicit full workstream; with an odd active count `pisec` gives the first project its own window and puts the remaining projects into two side-by-side panes; use `pisec activate ALIAS ...` or `pisec swap OLD_ALIAS NEW_ALIAS` to change the active set; add `--mobile` for one full-width conversation per window
-- `pi-secretary --herdr` opens the optional Herdr secretary surface, with one project Space per registered project; new full workstreams use guarded Herdr panes while normal `pisec`/`pi-start secretary` remain tmux-default; it preserves the tmux surface and never auto-migrates existing workers
+- `pisec` opens the persisted active secretary set (initially `vla-lens`, `csv-agent`, and `SleepyDreamyV3`) without restarting live panes; `pisec launch` is the explicit idle-pane repair path; secretaries may fan out to any useful number of existing read-only investigator agents without creating Git worktrees, while implementation still requires an explicit full workstream; with an odd active count `pisec` gives the first project its own window and puts the remaining projects into two side-by-side panes; use `pisec activate ALIAS ...` or `pisec swap OLD_ALIAS NEW_ALIAS` to change the backend-neutral active set; add `--mobile` for one full-width conversation per window
+- `-herdr` starts two named Herdr surfaces: `pi-personal` for the four durable personal conversations and `pi-secretary` with one project Space per active project; desktop personal pairs roles in two Spaces, while mobile personal gives each role its own Space; workstreams remain guarded and backend-pinned, and are never auto-migrated
 - `pi-personal` maintains a separate session with at most two side-by-side panes per window for `mlre-transition`, the financial workbook (`investing/investment-os`), dotfiles, and an explicit `pi-host` session; additional roles get additional windows, and `Ctrl-a p` switches to it; `pi-personal --mobile` gives each role its own full-width window
 - Installs to `~/.pi/agent` without tracking credentials, sessions, or runtime state
 

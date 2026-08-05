@@ -122,8 +122,25 @@ contact_supervisor({
 
 For a non-blocking idea, risk, or improvement suggestion, the child sends a
 compact `AGENT_FEEDBACK` JSON message with `reason: "progress_update"`. It does
-not wait. The parent can accept it, reject it, ask for more evidence, or ask the
-secretary to record it as a durable idea through `secretary_record_idea`.
+not wait. The native supervisor channel automatically persists the bounded
+normalized form under `~/.pi/agent/feedback/records/` (or the configured
+Pi agent directory), outside the project root. Workstream attention events retain only a
+feedback ID and normalized bounded form; raw feedback is not copied into the
+project event by default. The parent can mark it accepted, rejected, or deferred
+with `subagent_supervisor({ action: "review", ... })`, or ask for more evidence.
+This persistence is not automatic memory or project-idea promotion;
+`secretary_record_idea` remains explicit.
+
+Every checked-in agent variant explicitly lists `contact_supervisor`. Runtime
+intercom bridging and the worker/secretary read-only hardening paths also
+re-add that feedback tool for custom variants that omitted it, while preserving
+all other least-privilege tool restrictions. The persistent secretary is the
+parent/supervisor session; it receives child feedback through its subagent
+channel rather than contacting itself.
+
+Blocking interview forms are persisted with their provenance, lifecycle,
+content digest, and parent response; raw prompt/interview content is omitted by
+default and is only retained when `PI_AGENT_FEEDBACK_RAW=1` is explicitly set.
 
 The retained role definitions opt into Pi-subagents' user-scoped memory at
 `~/.pi/agent/agent-memory/pi-harness/MEMORY.md`. The first 200 lines are
@@ -175,9 +192,11 @@ to `pi-sandbox/<session-hash>`; the active host checkout stays unchanged.
 
 ### Host maintenance
 
-`pi-host` is deliberately unsandboxed, normal-user, fresh-session maintenance.
-It prints a warning and disables context files, extension discovery, skills, and
-prompt templates, so autonomous subagents are not loaded. It may explicitly
+`pi-host` is deliberately unsandboxed, normal-user maintenance with one stable
+conversation per invocation directory. It runs in the invocation's current
+directory and never creates or enters a Git worktree. It prints a warning and
+disables context files, extension discovery, skills, and prompt templates, so
+autonomous subagents are not loaded. It may explicitly
 load only the inert `auto-continue` lifecycle extension so a host task resumes
 after compaction; no tools or subagent providers are enabled by that extension.
 It may run commands that use interactive `sudo`, but the harness never stores

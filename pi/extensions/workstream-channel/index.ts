@@ -34,9 +34,9 @@ function controlPath(): string {
 export default function workstreamChannel(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "notify_secretary", label: "Notify project secretary",
-    description: "Post one bounded needs-user, review-requested, or referral event. This is not general agent chat and does not create a user turn.",
+    description: "Post one bounded progress, needs-user, review-requested, or referral event. This is not general agent chat and does not create a user turn.",
     parameters: Type.Object({
-      kind: Type.Union([Type.Literal("needs-user"), Type.Literal("review-requested"), Type.Literal("referral")]),
+      kind: Type.Union([Type.Literal("progress"), Type.Literal("needs-user"), Type.Literal("review-requested"), Type.Literal("referral")]),
       summary: Type.String({ maxLength: 500 }), details: Type.Optional(Type.String({ maxLength: 4096 })),
     }),
     async execute(_id, params, signal, _update, ctx) {

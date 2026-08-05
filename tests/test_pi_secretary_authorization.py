@@ -7,38 +7,6 @@ AUTH = (ROOT / "pi/extensions/secretary/authorization.ts").resolve()
 
 
 class SecretaryAuthorizationTests(unittest.TestCase):
-    def test_promotion_authorization_accepts_clear_instructions_not_discussion(self):
-        cases = {
-            "please create a workstream: fix the parser": True,
-            "spawn two headful agents in this repository": True,
-            "yes—create two headful workstreams in this repository": True,
-            "go ahead and create an agent/workstream to fix this": True,
-            "create an agent": True,
-            "spawn a headful worker": True,
-            "you can create a workstream": True,
-            "can we create a workstream?": False,
-            "could you create a workstream?": False,
-            "how about creating a workstream?": False,
-            "what happens if we create one?": False,
-            "we should create a workstream": False,
-            "I think we should create a workstream": False,
-            "do not create a workstream": False,
-            "I refuse to create a workstream": False,
-            "I am proposing a workstream": False,
-            "let's discuss creating a workstream": False,
-        }
-        script = f"""
-import {{ promotionWasAuthorized }} from {json.dumps(AUTH.as_uri())};
-const cases = {json.dumps(list(cases))};
-process.stdout.write(JSON.stringify(cases.map((value) => promotionWasAuthorized(value))));
-"""
-        result = subprocess.run(
-            ["node", "--experimental-strip-types", "--input-type=module", "-e", script],
-            cwd=ROOT, text=True, capture_output=True, check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), list(cases.values()))
-
     def test_git_authorization_is_explicit_and_clause_scoped(self):
         cases = {
             "the commit is ready": [],

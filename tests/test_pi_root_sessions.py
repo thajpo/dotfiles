@@ -68,6 +68,55 @@ class RootSessionTests(unittest.TestCase):
             self.assertEqual({record["conversationId"] for record in records}, {"root-one", "root-two"})
             self.assertTrue(all(Path(record["sessionFile"]).parent.name == "root" for record in records))
 
+    def test_legacy_managed_id_repairs_root_profile_only_for_exact_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); home = root / "home"; home.mkdir(); worktrees = root / "worktrees"; worktrees.mkdir()
+            repo = make_repo(root)
+            first = json.loads(self.run_helper(
+                home, worktrees, "ensure", "--conversation-id", "personal-dotfiles",
+                "--profile", "root", "--cwd", str(repo),
+            ).stdout)
+            repaired = json.loads(self.run_helper(
+                home, worktrees, "ensure", "--conversation-id", "personal-dotfiles",
+                "--profile", "personal", "--cwd", str(repo),
+            ).stdout)
+            self.assertEqual(first["sessionFile"], repaired["sessionFile"])
+            self.assertEqual(repaired["profile"], "personal")
+
+            other = root / "other"; other.mkdir()
+            git(other, "init", "-b", "main")
+            git(other, "config", "user.name", "Root Test")
+            git(other, "config", "user.email", "root@example.invalid")
+            (other / "tracked").write_text("other\n")
+            git(other, "add", "tracked"); git(other, "commit", "-m", "initial")
+            self.run_helper(
+                home, worktrees, "ensure", "--conversation-id", "personal-wrong",
+                "--profile", "root", "--cwd", str(repo),
+            )
+            mismatch = self.run_helper(
+                home, worktrees, "ensure", "--conversation-id", "personal-wrong",
+                "--profile", "personal", "--cwd", str(other), check=False,
+            )
+            self.assertEqual(mismatch.returncode, 2)
+            self.assertIn("exact registered repository", mismatch.stderr)
+
+    def test_session_event_cannot_reprofile_an_existing_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); home = root / "home"; home.mkdir(); worktrees = root / "worktrees"; worktrees.mkdir()
+            repo = make_repo(root)
+            record = json.loads(self.run_helper(
+                home, worktrees, "ensure", "--conversation-id", "personal-one",
+                "--profile", "personal", "--cwd", str(repo),
+            ).stdout)
+            result = self.run_helper(
+                home, worktrees, "register-existing", "--session-file", record["sessionFile"],
+                "--profile", "root", "--worktree", record["worktree"], check=False,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("already belongs to profile personal", result.stderr)
+            records = json.loads((home / ".pi/agent/root-registry.json").read_text())["records"]
+            self.assertEqual(records[0]["profile"], "personal")
+
     def test_migration_selects_newest_duplicate_and_archives_other_without_deleting_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

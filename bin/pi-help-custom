@@ -1,88 +1,149 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cat <<'HELP'
-Pi workspace quick reference
-============================
+mode=${1:-quick}
+case "$mode" in
+  quick|-h|--help) [[ $# -le 1 ]] || { printf 'usage: pi help [all]\n' >&2; exit 2; } ;;
+  all|--all) [[ $# -eq 1 ]] || { printf 'usage: pi help [all]\n' >&2; exit 2; } ;;
+  *) printf 'usage: pi help [all]\n' >&2; exit 2 ;;
+esac
 
-Start from no tmux sessions:
-  pi-start                 Start tmux, ensure pi-personal, and attach to it.
-  pi-start --mobile        Start full-width conversation windows.
-  pi-start secretary       Start/open the tmux secretary grid and attach to it.
-  pi-secretary --herdr     Open the separate Herdr secretary surface.
-  pi-start project [DIR]   Open a project workspace (DIR defaults to $PWD).
-  pi-start host            Open pi-personal and select its explicit pi-host pane.
-  pi-start all              Start pi-personal and the secretary grid.
-  pi-restart                Kill all tmux sessions, then run pi-start all.
-  pi-restart --mobile       Rebuild each Pi conversation as its own full-width window.
+show_quick() {
+  cat <<'HELP'
+Pi commands
+===========
 
-Help and restart:
-  pi --help-custom           Show this guide from any shell.
-  pi-start help              Show this guide through the managed launcher.
-  pi-restart                 Kill all tmux sessions and boot pi-start all.
+Remember these three:
+  pi                         Work on the repository in the current directory.
+  pi-start all               Start personal + secretary: desktop tmux (default).
+  pi-restart                 Rebuild personal + secretary as desktop tmux.
 
-Run Pi directly:
-  cd REPOSITORY && pi       Normal policy-controlled durable root session.
-  pi-host                   Explicit unsandboxed host-maintenance session.
-  pi-root-session migrate --dry-run
-                            Inspect legacy root-session migration.
-  pi-root-session migrate  Copy selected histories into stable roots.
-  pi-root-session cleanup --repository PATH
-                            Review stale worktrees before explicit cleanup.
+The complete start matrix (flags are per invocation, not persisted):
+  pi-start all                         desktop + tmux
+  pi-start all -mobile                 mobile  + tmux
+  pi-start all -herdr                  desktop + Herdr
+  pi-start all -mobile -herdr          mobile  + Herdr
 
-In Pi:
-  /goal <objective>          Continue the same goal until completion or a bound.
+`all` always starts both personal and secretary. `--mobile` and `--herdr` are
+accepted aliases. If the managed grid is already in another matrix cell,
+`pi-start all` rebuilds it safely. `pi-restart` forces a clean rebuild.
+
+Choose one destination instead:
+  pi-start                   Personal only, desktop tmux.
+  pi-start secretary         Secretary only, desktop tmux.
+  pi-start project [DIR]     Project workspace with Neovim + Pi.
+  pi-start host              Explicit unsandboxed host-maintenance conversation.
+
+More help:
+  pi help all                Full launcher, recovery, and navigation reference.
+  pi --help                  Upstream Pi CLI options.
+  pidev --help               Project workspace options.
+HELP
+}
+
+show_all() {
+  show_quick
+  cat <<'HELP'
+
+Full workspace reference
+========================
+
+Backend and layout:
+  - Desktop and tmux are defaults on every invocation.
+  - `-mobile` changes layout for that invocation only.
+  - `-herdr` puts both managed surfaces in Herdr for that invocation only.
+  - `pi-start all` safely rebuilds a proven managed grid when its backend or
+    layout differs; single-surface starts never replace another live owner.
+  - `pi-restart` forces a clean rebuild using the requested matrix cell.
+  - Conversation identities survive either backend and layout.
+
+What the layouts contain:
+  tmux desktop               Personal and secretary use paired side-by-side panes.
+  tmux mobile                Each conversation gets its own tmux window.
+  Herdr desktop              Named sessions `pi-personal` and `pi-secretary`;
+                             personal roles are paired in two Spaces.
+  Herdr mobile               The same two named sessions; each personal role gets
+                             its own Space. Secretary keeps one Space per active project.
+
+Herdr clients:
+  In a graphical terminal, `pi-start all -herdr` keeps personal in the current
+  window and opens secretary in a second terminal window. Over SSH/headless,
+  both named sessions still start; this terminal attaches personal and prints:
+    herdr session attach pi-secretary
+
+Start and switch examples:
+  pi-start all -mobile       Start or switch both surfaces to mobile tmux.
+  pi-start all -herdr        Start or switch both surfaces to desktop Herdr.
+  pi-restart -herdr          Force a clean rebuild as desktop Herdr.
+  pi-restart -mobile -herdr  Switch cleanly to mobile Herdr.
+  pi-restart -mobile         Switch cleanly to mobile tmux.
+  pi-restart --no-attach     Rebuild without opening a client.
+
+Other launchers:
+  cd REPOSITORY && pi        Start/resume a policy-controlled root conversation.
+  cd REPOSITORY && pidev     Neovim on the left and Pi on the right.
+  cd REPOSITORY && pidev -mobile
+                             Pi only in a full-width project window.
+  pi-host                    Resume the single-writer unsandboxed host session for $PWD.
+
+Switch and navigate:
+  Ctrl-a p                   Switch to pi-personal in tmux.
+  Ctrl-a g                   Switch to pisec in tmux.
+  Ctrl-a \                    Toggle the previous tmux session.
+  tmux ls                    List tmux sessions.
+  tmux attach -t NAME        Attach to a named tmux session.
+  Ctrl-b w                   Herdr Spaces/workspace picker.
+  Ctrl-b h/j/k/l             Move between Herdr panes.
+  Ctrl-b c / n / p           Create, next, or previous Herdr tab.
+  Ctrl-b b / q / ?           Sidebar, detach, or Herdr help.
+
+Useful commands inside Pi:
+  /goal <objective>          Work continuously toward an objective.
   /goal status|pause|resume  Inspect or control the active goal.
   /goal clear                Remove the active goal.
-  /goal --tokens 100k ...    Add a provider-token budget to a goal.
-  Enter while busy           Steer the current run (after the current tool batch).
-  Alt-Enter while busy       Queue a follow-up after the run settles.
-  /fast on|off|status        Toggle OpenAI priority service tier.
-  /subagents-doctor          Inspect subagent discovery and runtime routing.
-  Ctrl-g                     Browse conversation history without losing the prompt.
-
-Project tmux workspaces:
-  cd REPOSITORY && pidev    Neovim on the left, Pi on the right.
-  cd REPOSITORY && pidev --mobile
-                            Pi gets a full-width window; no Neovim split is created.
-  pidev --help              Show the managed project-launcher help.
-
-Tmux sessions and switching:
-  Ctrl-a p                  Switch to pi-personal.
-  Ctrl-a g                  Switch to pisec (if it is running).
-  Ctrl-a \                  Toggle the previous tmux session.
-  tmux ls                   List sessions.
-  tmux attach -t NAME      Attach to a named session.
+  /goal --tokens 100k ...    Give a goal an explicit provider-token budget.
+  /fast on|off|status        Toggle OpenAI priority service.
+  /subagents-fleet           Inspect private child runs.
+  /subagents-doctor          Diagnose subagent discovery and routing.
+  /observe or Ctrl-I         Inspect task, fleet, messages, and failures.
+  Ctrl-g                     Browse conversation history.
+  Enter / Alt-Enter          Steer now / queue a follow-up while Pi is busy.
 
 Secretary projects:
-  pi-secretary --herdr      Open one Herdr Space per registered project; optional backend, does not replace pisec.
-  pisec                     Open the default projects without restarting live panes.
-  pisec --mobile            Put each active secretary conversation in its own full-width window.
-  pisec activate ALIAS ... Replace the active project set.
-  pisec swap OLD NEW       Replace one active project without changing order.
-  pisec list                Print the registered project records.
-  pi-secretary-stats        Summarize secretary session/run time and token usage.
-  /subagents-fleet          Explicitly inspect private child runs.
+  pisec                      Open the active set directly in desktop tmux.
+  pisec -mobile              Open it directly in mobile tmux.
+  pisec activate ALIAS ...   Persist/replace the backend-neutral active set.
+                             If Herdr owns it, Herdr restarts safely.
+  pisec swap OLD NEW         Replace one active project without changing order.
+  pisec list                 List all registered secretary projects.
+  pisec launch               Repair idle tmux secretary panes without attaching.
+  pi-secretary --herdr       Directly open/repair the active set in Herdr.
+  pi-secretary-stats         Summarize secretary time and token usage.
 
-Herdr navigation:
-  Ctrl-b w                  Open the Spaces/workspace picker.
-  Ctrl-b h/j/k/l            Move between panes; Ctrl-b c, n, p navigate tabs.
-  Ctrl-b b                  Toggle the sidebar; Ctrl-b q detaches.
-  Ctrl-b ?                  Show Herdr help; Ctrl-b Ctrl-b sends a literal prefix to Pi.
-  Space/workspace           Project/context container; tab is a layout; pane is a terminal; agent is its process.
-  Agents view               Selects an exact process; a one-secretary Space has no useful current-Space filter until workers are added.
-  kitty --version           Diagnose the known Kitty 0.31/0.32 Backspace press/release bug; upgrade Kitty >= 0.48.1.
+Recovery and maintenance:
+  pi-restart                 Rebuild personal + secretary as desktop tmux.
+  pi-personal --ensure       Repair missing desktop tmux personal panes.
+  pi-personal -mobile --ensure
+                             Repair mobile tmux personal windows.
+  pi-root-session migrate --dry-run
+                             Inspect legacy root-session migration.
+  pi-root-session migrate    Apply the reviewed root-session migration.
+  pi-root-session cleanup --repository PATH
+                             Review stale managed worktrees before cleanup.
+  pi-sandbox-gc              Inspect stale Pi-owned containers and caches.
+  pi-sandbox-gc --apply      Apply only the printed Pi-owned cleanup plan.
 
-Recovery:
-  pi-restart                Replace every tmux workspace with a fresh Pi grid.
-  pi-start personal         Recreate missing personal panes and attach there.
-  pi-start --mobile all     Boot personal and secretary in full-width mobile windows.
-  pi-personal --ensure      Repair personal two-pane windows without switching clients.
-  pi-personal --mobile --ensure
-                            Repair personal full-width windows without switching clients.
-  pisec launch              Repair/rebuild the secretary grid when panes are idle.
+Safety boundary:
+  root, personal, secretary  Conversation roles and authority profiles.
+  tmux, Herdr                Terminal backends, not authority profiles.
+  Only one backend may own a durable managed conversation at a time.
+  Ordinary `pi` owns repository trust and sandbox selection. Use `pi-host`
+  only when unsandboxed host-user access is intentional.
 
-The ordinary pi launcher owns workspace selection and sandbox policy. Do not
-pass sandbox/trust flags to it; use pi-host only when unsandboxed host access is
-intentional.
+Compatibility aliases:
+  pi --help-custom           Same as `pi help`.
+  pi-start help              Same quick guide.
 HELP
+}
+
+if [[ "$mode" == all || "$mode" == --all ]]; then show_all; else show_quick; fi
