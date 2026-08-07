@@ -100,6 +100,33 @@ class RootSessionTests(unittest.TestCase):
             self.assertEqual(mismatch.returncode, 2)
             self.assertIn("exact registered repository", mismatch.stderr)
 
+    def test_non_git_root_cannot_gain_repository_authority_on_reregistration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); home = root / "home"; home.mkdir(); worktrees = root / "worktrees"; worktrees.mkdir()
+            plain = root / "plain"; plain.mkdir()
+            record = json.loads(self.run_helper(home, worktrees, "ensure", "--conversation-id", "plain-root", "--profile", "root", "--cwd", str(plain)).stdout)
+            self.assertIsNone(record["repository"])
+            git(plain, "init", "-b", "main"); git(plain, "config", "user.name", "Root Test"); git(plain, "config", "user.email", "root@example.invalid")
+            (plain / "tracked").write_text("now git\n"); git(plain, "add", "tracked"); git(plain, "commit", "-m", "initial")
+            result = self.run_helper(home, worktrees, "register-existing", "--session-file", record["sessionFile"], "--profile", "root", "--worktree", str(plain), check=False)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("different exact repository/worktree", result.stderr)
+            stored = json.loads((home / ".pi/agent/root-registry.json").read_text())["records"][0]
+            self.assertIsNone(stored["repository"])
+
+    def test_session_event_cannot_rebind_an_existing_root_from_header_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); home = root / "home"; home.mkdir(); worktrees = root / "worktrees"; worktrees.mkdir()
+            repo = make_repo(root)
+            record = json.loads(self.run_helper(home, worktrees, "ensure", "--conversation-id", "bound-root", "--profile", "personal", "--cwd", str(repo)).stdout)
+            other = root / "other"; other.mkdir(); git(other, "init", "-b", "main"); git(other, "config", "user.name", "Root Test"); git(other, "config", "user.email", "root@example.invalid")
+            (other / "tracked").write_text("other\n"); git(other, "add", "tracked"); git(other, "commit", "-m", "initial")
+            result = self.run_helper(home, worktrees, "register-existing", "--session-file", record["sessionFile"], "--profile", "personal", "--worktree", str(other), check=False)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("different exact repository/worktree", result.stderr)
+            records = json.loads((home / ".pi/agent/root-registry.json").read_text())["records"]
+            self.assertEqual(records[0]["worktree"], record["worktree"])
+
     def test_session_event_cannot_reprofile_an_existing_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); home = root / "home"; home.mkdir(); worktrees = root / "worktrees"; worktrees.mkdir()

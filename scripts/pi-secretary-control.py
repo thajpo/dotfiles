@@ -26,7 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 # Reuse workspace policy/classify so precedence stays exactly aligned.
 _WORKSPACE_SPEC = importlib.util.spec_from_file_location(
@@ -4782,6 +4782,22 @@ def promote_workstream(project_id: str, title: str, brief_text: str, role: str,
     return record
 
 
+def controller_facade(request: Mapping[str, Any], *, state_root: os.PathLike[str] | str) -> dict[str, Any]:
+    """Delegate controller-mode secretary lifecycle requests without fallback."""
+    from scripts.pi_control.activation import read_latch
+    from scripts.pi_control.client import ControllerClient, protocol_request
+    if not isinstance(request, dict) or set(request) != {"protocolVersion", "operation", "request"}:
+        raise SecretaryError("controller protocol envelope is malformed")
+    body = request["request"]
+    if not isinstance(body, dict):
+        raise SecretaryError("controller protocol request body is malformed")
+    project_id = body.get("projectId")
+    latch = read_latch(Path(state_root) / "activation.v1.json")
+    if latch.payload.get("mode") != "controller" or latch.payload.get("projectId") != project_id:
+        raise SecretaryError("controller activation is unavailable; legacy fallback is forbidden")
+    return protocol_request(ControllerClient(state_root), request)
+
+
 # --- CLI ---
 
 def _cli() -> int:
@@ -4800,6 +4816,7 @@ def _cli() -> int:
     p = sub.add_parser("launch-info"); p.add_argument("--project-id", required=True)
     p.add_argument("--internal-launch", action="store_true")
     sub.add_parser("status")
+    p = sub.add_parser("controller-protocol"); p.add_argument("--request-json", required=True); p.add_argument("--state-root", required=True)
     p = sub.add_parser("git-read"); p.add_argument("--project-id", required=True)
     p.add_argument("--operation", required=True); p.add_argument("git_args", nargs=argparse.REMAINDER)
     p = sub.add_parser("git-write"); p.add_argument("--project-id", required=True)
@@ -4862,6 +4879,11 @@ def _cli() -> int:
             result = launch_info(args.project_id, internal=args.internal_launch)
         elif args.command == "status":
             result = status(args.repository, args.capability)
+        elif args.command == "controller-protocol":
+            path = Path(args.request_json)
+            if path.stat().st_size > MAX_JSON: raise SecretaryError("controller request is too large")
+            request = json.loads(path.read_text(encoding="utf-8"))
+            result = controller_facade(request, state_root=args.state_root)
         elif args.command == "git-read":
             result = git_read(args.project_id, args.operation, args.git_args)
         elif args.command == "git-write":

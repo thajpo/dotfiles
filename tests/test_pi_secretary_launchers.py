@@ -94,6 +94,8 @@ class SecretaryLauncherTests(unittest.TestCase):
                 agent_dir / "extensions/secretary-subagents/index.ts",
                 agent_dir / "extensions/secretary-investigator-git/index.ts",
                 agent_dir / "extensions/fast-mode/index.ts",
+                agent_dir / "extensions/observability/index.ts",
+                agent_dir / "extensions/harness-feedback/index.ts",
                 agent_dir / "extensions/host-command/index.ts",
                 agent_dir / "npm/node_modules/pi-web-access/index.ts",
                 agent_dir / "skills/project-status/SKILL.md",
@@ -128,10 +130,11 @@ pathlib.Path(os.environ['FAKE_PI_OUTPUT']).write_text(json.dumps({
             self.assertEqual(invocation["cwd"], str(repos[0]))
             args = invocation["args"]
             self.assertEqual(args[args.index("--tools") + 1],
-                             "read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,host_command,subagent,subagent_supervisor,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea,secretary_create_workstream,secretary_open_workstream,secretary_relaunch_workstream,secretary_list_workstreams,secretary_list_attention,secretary_acknowledge_attention,secretary_create_reviewer,secretary_land_reviewed,secretary_create_integration,secretary_cleanup_workstream")
+                             "read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,host_command,harness_feedback,subagent,subagent_supervisor,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea,secretary_create_workstream,secretary_open_workstream,secretary_relaunch_workstream,secretary_list_workstreams,secretary_list_attention,secretary_acknowledge_attention,secretary_create_reviewer,secretary_land_reviewed,secretary_create_integration,secretary_cleanup_workstream")
             for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--session"]:
                 self.assertIn(flag, args)
-            self.assertEqual(args.count("-e"), 7)
+            self.assertEqual(args.count("-e"), 9)
+            self.assertIn(str(agent_dir / "extensions/observability/index.ts"), args)
             self.assertNotIn("--session-id", args)
             session_file = Path(args[args.index("--session") + 1])
             self.assertTrue(session_file.is_file())

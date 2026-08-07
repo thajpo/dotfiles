@@ -34,7 +34,8 @@ platform. The task container owns only its writable upper layer and cache
 volume. A project or worktree dependency change creates a new key; it never
 mutates an image already used by another task. Workspace/path dependencies and
 projects without the lock pair use a task-local environment at
-`/opt/pi/task-env`, still inside Linux Docker and never the host `.venv`.
+`/tmp/pi-home/task-env`, inside the container's private UID/GID-owned tmpfs and
+never the host `.venv`.
 
 Active `SKILL.md` directories are mounted read-only at their original absolute
 paths so the model can load them without exposing the host home directory.
@@ -92,6 +93,11 @@ request mechanism.
 
 ## Agent feedback and intake
 
+Every subagent also receives the direct `harness_feedback` tool for one bounded
+non-blocking harness-improvement observation; it writes to the central Pi feed
+shared by all projects. Use the parent channel below for blocked decisions or
+when the parent must see the update immediately.
+
 A child agent must not silently broaden its authority or guess through a missing
 capability, context item, or product decision. For a blocking issue it can use
 `contact_supervisor` with `reason: "interview_request"` and submit the structured
@@ -120,23 +126,28 @@ contact_supervisor({
 })
 ```
 
-For a non-blocking idea, risk, or improvement suggestion, the child sends a
-compact `AGENT_FEEDBACK` JSON message with `reason: "progress_update"`. It does
-not wait. The native supervisor channel automatically persists the bounded
-normalized form under `~/.pi/agent/feedback/records/` (or the configured
-Pi agent directory), outside the project root. Workstream attention events retain only a
-feedback ID and normalized bounded form; raw feedback is not copied into the
-project event by default. The parent can mark it accepted, rejected, or deferred
-with `subagent_supervisor({ action: "review", ... })`, or ask for more evidence.
+For a non-blocking idea, risk, or improvement suggestion—including harness
+self-improvement feedback—the child should actively consider sending a compact
+`AGENT_FEEDBACK` JSON message with `reason: "progress_update"`. It does not
+wait. The native supervisor channel automatically persists the bounded
+normalized form in the central Pi store at `~/.pi/agent/feedback/records/`
+(or the configured Pi agent directory), across all projects and outside every
+project root. Workstream attention events retain only a feedback ID and
+normalized bounded form; raw feedback is not copied into the project event by
+default. Review the central feed with `pi-harness-feedback`, or filter it to a
+repository with `pi-harness-feedback --repository PATH`. The parent can mark
+it accepted, rejected, or deferred with
+`subagent_supervisor({ action: "review", ... })`, or ask for more evidence.
 This persistence is not automatic memory or project-idea promotion;
 `secretary_record_idea` remains explicit.
 
-Every checked-in agent variant explicitly lists `contact_supervisor`. Runtime
-intercom bridging and the worker/secretary read-only hardening paths also
-re-add that feedback tool for custom variants that omitted it, while preserving
-all other least-privilege tool restrictions. The persistent secretary is the
-parent/supervisor session; it receives child feedback through its subagent
-channel rather than contacting itself.
+Every checked-in agent variant explicitly lists `contact_supervisor` and
+`harness_feedback`. Runtime intercom bridging and the worker/secretary
+read-only hardening paths also re-add those feedback tools for custom variants
+that omitted them, while preserving all other least-privilege tool
+restrictions. The persistent secretary is the parent/supervisor session; it
+receives child feedback through its subagent channel rather than contacting
+itself.
 
 Blocking interview forms are persisted with their provenance, lifecycle,
 content digest, and parent response; raw prompt/interview content is omitted by

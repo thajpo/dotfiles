@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "../pi/npm/node_modules/jiti/lib/jiti.mjs";
+import { createExtensionJiti } from "./extension-jiti.mjs";
 
-const jiti = createJiti(import.meta.url);
+const jiti = createExtensionJiti(import.meta.url);
 const { default: fastMode } = await jiti.import("../pi/extensions/fast-mode/index.ts");
 
 function setup(provider = "openai-codex") {
   const commands = new Map();
   const events = new Map();
   const notices = [];
+  const entries = [];
   const pi = {
     registerCommand(name, command) {
       commands.set(name, command);
@@ -16,32 +17,46 @@ function setup(provider = "openai-codex") {
     on(name, handler) {
       events.set(name, handler);
     },
+    appendEntry(customType, data) {
+      entries.push({ type: "custom", customType, data });
+    },
   };
   const ctx = {
     model: { provider },
+    hasUI: true,
+    sessionManager: { getBranch() { return entries; } },
     ui: { notify(message, level) { notices.push({ message, level }); } },
   };
   fastMode(pi);
-  return { commands, events, notices, ctx };
+  events.get("session_start")({}, ctx);
+  return { commands, events, notices, entries, ctx };
 }
 
 test("/fast adds priority service tier only to direct OpenAI requests", async () => {
-  const { commands, events, notices, ctx } = setup();
+  const { commands, events, notices, entries, ctx } = setup();
   const command = commands.get("fast");
   const beforeRequest = events.get("before_provider_request");
   assert.ok(command);
   assert.ok(beforeRequest);
 
-  assert.equal(await beforeRequest({ payload: { model: "gpt-5.6-luna" } }, ctx), undefined);
-  await command.handler("on", ctx);
-  assert.match(notices.at(-1).message, /Fast mode: ON/);
   assert.deepEqual(
     await beforeRequest({ payload: { model: "gpt-5.6-luna" } }, ctx),
     { model: "gpt-5.6-luna", service_tier: "priority" },
   );
-
   await command.handler("off", ctx);
+  assert.equal(entries.at(-1).customType, "fast-mode-state");
+  assert.equal(entries.at(-1).data.enabled, false);
   assert.equal(await beforeRequest({ payload: { model: "gpt-5.6-luna" } }, ctx), undefined);
+
+  await command.handler("on", ctx);
+  assert.equal(entries.at(-1).data.enabled, true);
+  entries.pop();
+  events.get("session_tree")({}, ctx);
+  assert.equal(await beforeRequest({ payload: {} }, ctx), undefined);
+
+  entries.length = 0;
+  events.get("session_start")({}, ctx);
+  assert.deepEqual(await beforeRequest({ payload: {} }, ctx), { service_tier: "priority" });
 });
 
 test("/fast refuses non-OpenAI models", async () => {

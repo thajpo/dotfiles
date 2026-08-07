@@ -601,6 +601,31 @@ Where warranted, produce:
 - repository instruction;
 - or an explicit conclusion that no durable change is needed.
 
+## Harness feedback across all projects
+
+Every subagent is encouraged to inspect the harness while doing meaningful
+work and submit a bounded self-improvement observation when one is useful.
+This includes workers, reviewers, scouts, researchers, planners, delegates,
+secretary investigators, and headful workstream workers. Look for missing
+capabilities, unsafe or surprising defaults, repeated friction, weak
+observability or recovery, testing gaps, and changes that would make the next
+incorrect implementation fail sooner.
+
+Prefer the direct `harness_feedback` tool for one non-blocking bounded
+`kind: "harness-improvement"` observation. Use the parent-scoped
+`contact_supervisor` channel with `reason: "progress_update"` as well when the
+parent should see the update immediately; headful workstream workers put the
+same bounded object in `notify_secretary` progress details. Do not send routine
+completion status, secrets, or speculative noise. If there is no useful
+observation, send nothing. Feedback is a proposal and never grants authority
+or silently changes memory, product scope, or repository policy.
+
+All projects feed the same Pi-owned log at `~/.pi/agent/feedback/records/`.
+The dotfiles review command is `pi-harness-feedback` (use
+`--repository PATH` to filter), and the parent or secretary decides whether a
+record is accepted, rejected, deferred, or promoted into a durable harness
+change.
+
 ## Completion
 
 Before reporting completion:

@@ -44,7 +44,7 @@ class HarnessStaticTests(unittest.TestCase):
         worker_frontmatter = worker.split("---", 2)[1]
         self.assertIn("model: openai-codex/gpt-5.6-luna", worker_frontmatter)
         self.assertIn("acceptanceRole: writer", worker_frontmatter)
-        self.assertIn("tools: read, write, edit, bash, grep, find, ls, web_search, fetch_content, get_search_content, source_check, contact_supervisor, intercom, host_command, subagent", worker_frontmatter)
+        self.assertIn("tools: read, write, edit, bash, grep, find, ls, web_search, fetch_content, get_search_content, source_check, contact_supervisor, intercom, host_command, harness_feedback, subagent", worker_frontmatter)
         config = json.loads((ROOT / "pi/extensions/subagent/config.json").read_text())
         self.assertTrue(config["asyncByDefault"])
         self.assertFalse(config["asyncWidget"])
@@ -101,6 +101,8 @@ class HarnessStaticTests(unittest.TestCase):
             frontmatter = text.split("---", 2)[1]
             tools = re.search(r"^tools: (.+)$", frontmatter, re.MULTILINE).group(1).split(", ")
             self.assertIn("contact_supervisor", tools, agent_path.name)
+            self.assertIn("harness_feedback", tools, agent_path.name)
+            self.assertIn("extensions/harness-feedback/index.ts", frontmatter, agent_path.name)
             self.assertIn("host_command", text, agent_path.name)
             self.assertIn("memory:\n  scope: user\n  path: pi-harness", frontmatter, agent_path.name)
             self.assertIn("agent-feedback.v1", text, agent_path.name)
@@ -109,6 +111,17 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("Agent feedback and intake", harness_readme)
         self.assertIn("~/.pi/agent/agent-memory/pi-harness/MEMORY.md", harness_readme)
         self.assertIn("secretary_record_idea", harness_readme)
+        self.assertIn("all projects", harness_readme)
+        harness_feedback = (ROOT / "pi/HARNESS_FEEDBACK.md").read_text()
+        feedback_extension = (ROOT / "pi/extensions/harness-feedback/index.ts").read_text()
+        self.assertIn('name: "harness_feedback"', feedback_extension)
+        self.assertIn("writePrivateJson", feedback_extension)
+        self.assertIn("PI_HARNESS_PROJECT_ID", feedback_extension)
+        self.assertIn("harness-improvement", harness_feedback)
+        self.assertIn("pi-harness-feedback", harness_feedback)
+        agents_policy = (ROOT / "agent/AGENTS.md").read_text()
+        self.assertIn("Harness feedback across all projects", agents_policy)
+        self.assertIn("Pi-owned log", agents_policy)
         acceptance = (ROOT / "pi/WORKFLOW_ACCEPTANCE.md").read_text()
         self.assertIn("agent-feedback.v1", acceptance)
         self.assertIn("AGENT_FEEDBACK", acceptance)
@@ -116,8 +129,19 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("pi-subagents-0.35.1-host-command-fanout.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
         self.assertIn("pi-subagents-0.35.1-web-access-fanout.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
         self.assertIn("pi-subagents-0.35.1-feedback-persistence.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+        self.assertIn("pi-subagents-0.35.1-feedback-persistence-upgrade.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+        self.assertIn("pi-subagents-0.35.1-feedback-byte-bounds.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+        self.assertIn("truncateUtf8", (ROOT / "pi/patches/pi-subagents-0.35.1-feedback-byte-bounds.patch").read_text())
+        self.assertIn("pi-subagents-0.35.1-harness-feedback-fanout.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+        self.assertIn("pi-subagents-0.35.1-fast-mode-fanout.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
         self.assertIn("pi-subagents-0.35.1-worktree-approval.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
         self.assertIn("pi-subagents-0.35.1-feedback-workflow-skill.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+        self.assertTrue((ROOT / "bin/pi-harness-feedback").stat().st_mode & 0o111)
+        self.assertTrue((ROOT / "scripts/pi-harness-feedback.py").stat().st_mode & 0o111)
+        self.assertIn("pi-harness-feedback.py", (ROOT / "install.sh").read_text())
+        feedback_launcher = (ROOT / "bin/pi-harness-feedback").read_text()
+        self.assertIn("../share/pi/control/pi-harness-feedback.py", feedback_launcher)
+        self.assertIn("pi-harness-feedback", (ROOT / "bin/pi-help-custom").read_text())
         feedback_patch = (ROOT / "pi/patches/pi-subagents-0.35.1-feedback-persistence.patch").read_text()
         self.assertIn('path.join(agentDir, "feedback", "records")', feedback_patch)
         self.assertIn("PI_AGENT_FEEDBACK_RAW", feedback_patch)
@@ -129,6 +153,10 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('pi.registerCommand(OBSERVE_COMMAND', extension)
         self.assertIn('Key.ctrl("i")', extension)
         self.assertIn('overlay: true', extension)
+        self.assertIn('ctx.mode !== "tui"', extension)
+        self.assertIn('readNestedRegistry', extension)
+        self.assertIn('wrapDisplayLines', extension)
+        self.assertNotIn('listAsyncRuns', extension)
         self.assertIn('SUBAGENT_ASYNC_STARTED_EVENT', extension)
         self.assertIn('SUBAGENT_FOREGROUND_STARTED_EVENT', extension)
         self.assertIn('SUBAGENT_FOREGROUND_COMPLETE_EVENT', extension)
@@ -137,6 +165,7 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('validatePacket', core)
         self.assertIn('redacted', core)
         self.assertIn('MAX_MESSAGES', core)
+        self.assertIn('expandCompletionRecords', core)
         foreground_patch = "\n".join([
             (ROOT / "pi/patches/pi-subagents-0.35.1-observability-foreground-start-types.patch").read_text(),
             (ROOT / "pi/patches/pi-subagents-0.35.1-observability-foreground-start-executor.patch").read_text(),
@@ -154,12 +183,13 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('must target the run selected by the current user turn', wrapper)
         lifecycle = (ROOT / "pi/extensions/secretary-subagents/lifecycle.ts").read_text()
         self.assertIn('const TARGETED_ACTIONS', lifecycle)
-        self.assertIn('selected = candidates.find', lifecycle)
+        self.assertIn('const selected = resolveTarget', lifecycle)
         self.assertIn('discoverAgents(cwd, scope).agents.filter(isReadOnlyAgent)', wrapper)
-        self.assertIn('const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "secretary_git", "contact_supervisor", "intercom", "host_command"]', wrapper)
+        self.assertIn('const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "secretary_git", "contact_supervisor", "intercom", "host_command", "harness_feedback"]', wrapper)
         self.assertIn('const tools = [...INVESTIGATOR_TOOLS];', wrapper)
         self.assertNotIn('agent.tools?.includes("contact_supervisor")', wrapper)
-        self.assertIn('subagentOnlyExtensions: [gitExtension, autoContinueExtension, hostCommandExtension, webAccessExtension]', wrapper)
+        self.assertIn('subagentOnlyExtensions: [gitExtension, autoContinueExtension, fastModeExtension, hostCommandExtension, webAccessExtension, feedbackExtension]', wrapper)
+        self.assertIn('fast-mode extension is unavailable', wrapper)
         self.assertIn('extensions: []', wrapper)
         self.assertIn('mcpDirectTools: []', wrapper)
         self.assertIn('memory: undefined', wrapper)
@@ -262,6 +292,8 @@ class HarnessStaticTests(unittest.TestCase):
         sandbox = (ROOT / "pi/patches/pi-sandbox-0.2.0-runtime-contract.patch").read_text()
         self.assertIn('PI_TRUSTED_PROJECT_ROOTS="${HOME}/projects"', profile)
         self.assertIn("manifest-only build context", runtime)
+        self.assertIn("immutable_local_base_reference", runtime)
+        self.assertIn('["docker", "tag", base_id, reference]', runtime)
         self.assertIn("uv==${UV_VERSION}", dockerfile)
         self.assertIn("executionTarget", sandbox)
         self.assertIn("skill-resource", sandbox)
@@ -277,7 +309,9 @@ class HarnessStaticTests(unittest.TestCase):
         control_plane_patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-control-plane-resources.patch").read_text()
         ownership_patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-user-workspace.patch").read_text()
         child_lifecycle_patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-child-lifecycle.patch").read_text()
+        transition_recovery_patch = (ROOT / "pi/patches/pi-sandbox-0.2.0-transition-recovery.patch").read_text()
         child_lease_patch = (ROOT / "pi/patches/pi-subagents-0.35.1-sandbox-child-lease.patch").read_text()
+        child_lease_permissions_patch = (ROOT / "pi/patches/pi-subagents-0.35.1-sandbox-child-lease-permissions.patch").read_text()
         child_runner_patch = (ROOT / "pi/patches/pi-subagents-0.35.1-sandbox-child-lease-runner.patch").read_text()
         child_foreground_patch = (ROOT / "pi/patches/pi-subagents-0.35.1-sandbox-child-lease-foreground.patch").read_text()
         for evidence in [
@@ -369,6 +403,23 @@ class HarnessStaticTests(unittest.TestCase):
             'beginChildLifecycleTransition("shut down or remove the sandbox container")'
         )
         self.assertLess(checkpoint_first, shutdown_transition)
+        recovery_added = "\n".join(
+            line[1:]
+            for line in transition_recovery_patch.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        )
+        for evidence in [
+            "readSandboxParentTransition",
+            'JSON.parse(readFileSync(transitionPath, "utf8"))',
+            "this.parentTransition = undefined",
+            "oldSandboxTip,",
+            "transitionHeld",
+            "if (!containerToCleanup)",
+            '"/tmp/pi-home/task-env"',
+        ]:
+            self.assertIn(evidence, recovery_added)
+        self.assertNotIn("parseSandboxParentTransition(readFileSync", recovery_added)
+        self.assertIn("rootInfo = fs.lstatSync(rootDir)", child_lease_permissions_patch)
         for evidence in [
             "ensureNoSandboxParentTransition",
             "PI_SUBAGENT_CHILD",
@@ -398,12 +449,34 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("pi-subagents-0.35.1-observability-foreground-start-types.patch", installer)
         self.assertIn("pi-subagents-0.35.1-observability-foreground-start-executor.patch", installer)
         self.assertIn("pi-subagents-0.35.1-sandbox-child-lease.patch", installer)
+        self.assertIn("pi-subagents-0.35.1-sandbox-child-lease-permissions.patch", installer)
         self.assertIn("pi-subagents-0.35.1-sandbox-child-lease-runner.patch", installer)
         self.assertIn("pi-subagents-0.35.1-sandbox-child-lease-foreground.patch", installer)
         self.assertIn("pi-sandbox-0.2.0-child-lifecycle.patch", installer)
         self.assertIn("pi-sandbox-0.2.0-user-workspace.patch", installer)
         self.assertIn("pi-sandbox-0.2.0-runtime-contract.patch", installer)
         self.assertIn("pi-sandbox-0.2.0-control-plane-resources.patch", installer)
+        self.assertIn("pi-sandbox-0.2.0-fast-mode-review.patch", installer)
+        self.assertIn("pi-sandbox-0.2.0-transition-recovery.patch", installer)
+        child_lifecycle_install = installer.split("  pi-sandbox-child-lifecycle \\\n", 1)[1].split("\n\napply_verified_patch", 1)[0]
+        self.assertIn(
+            "d08ede1e69fff581c96705e32ecbc6f0fd7e0ba52e6a2f5e65461bbf615a3df9,ac17d426b3f975cce31b2b0cf3c9b026c21b2cad38fac48ff99efcfbf1dca032",
+            child_lifecycle_install,
+        )
+        compatible_hashes = child_lifecycle_install.split(
+            '"$patch_dir/pi-sandbox-0.2.0-child-lifecycle.patch" \\\n', 1
+        )[1]
+        self.assertNotIn("ac17d426b3f975cce31b2b0cf3c9b026c21b2cad38fac48ff99efcfbf1dca032", compatible_hashes)
+        recovery_install = installer.split("  pi-sandbox-transition-recovery \\\n", 1)[1].split("\n\napply_verified_patch", 1)[0]
+        self.assertIn(
+            "230bc0197e93429069aa8acff39b94447bfe0eb149be5a24f13ac7ad93077355,826b43df0ef974858d6c3dd2738fe94712947c6821bc38cdbd1993bfcdac7e27",
+            recovery_install,
+        )
+        recovery_compatible = recovery_install.split(
+            '"$patch_dir/pi-sandbox-0.2.0-transition-recovery.patch" \\\n', 1
+        )[1]
+        self.assertNotIn("230bc0197e93429069aa8acff39b94447bfe0eb149be5a24f13ac7ad93077355", recovery_compatible)
+        self.assertNotIn("826b43df0ef974858d6c3dd2738fe94712947c6821bc38cdbd1993bfcdac7e27", recovery_compatible)
         install_script = (ROOT / "install.sh").read_text()
         self.assertIn("pi-runtime.py", install_script)
         self.assertIn("pi-sandbox-gc.py", install_script)
@@ -411,6 +484,11 @@ class HarnessStaticTests(unittest.TestCase):
         integration = (ROOT / "tests/pi-docker-isolated-ownership.sh").read_text()
         self.assertIn("--cap-add CHOWN", integration)
         self.assertIn("repeated tool-call execution", integration)
+        docker_integration = (ROOT / "tests/pi-docker-integration.sh").read_text()
+        self.assertIn("/tmp/pi-home/task-env", docker_integration)
+        self.assertIn(".write-probe", docker_integration)
+        candidate_tests = (ROOT / "tests/run-candidate-tests.sh").read_text()
+        self.assertIn("pi-sandbox-source-regressions.mjs", candidate_tests)
         runtime_integration = (ROOT / "tests/pi-docker-runtime-cache.sh").read_text()
         self.assertIn("environmentKey", runtime_integration)
         self.assertIn("native-host-sentinel", runtime_integration)
@@ -464,16 +542,18 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn("pi-secretary-control.py", installer)
         self.assertIn("pi-root-session.py", installer)
         self.assertIn("pi-secretary-stats.py", installer)
+        self.assertIn("pi-harness-feedback.py", installer)
         self.assertIn('skill_rollback_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pi/rollback/skills"', installer)
         self.assertIn('activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status" "$skill_rollback_dir"', installer)
         self.assertIn('local source=$1 target=$2 rollback_dir backup=""', installer)
         self.assertIn('rollback_dir=${3:-$(dirname "$target")}', installer)
         self.assertIn("pi-sandbox-gc", installer)
-        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,host_command,subagent,subagent_supervisor,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea", "--session", "--name"]:
+        for flag in ["--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--tools", "read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,host_command,harness_feedback,subagent,subagent_supervisor,secretary_git,secretary_git_write,secretary_git_cleanup,secretary_record_idea", "--session", "--name"]:
             self.assertIn(flag, launcher)
         self.assertNotIn("subagent_wait", launcher)
-        self.assertEqual(launcher.count("-e \"$"), 7)
+        self.assertEqual(launcher.count("-e \"$"), 9)
         self.assertIn('fast_mode_extension="$agent_dir/extensions/fast-mode/index.ts"', launcher)
+        self.assertIn('observability_extension="$agent_dir/extensions/observability/index.ts"', launcher)
         self.assertIn('root_session_extension="$agent_dir/extensions/root-session/index.ts"', launcher)
         self.assertIn('auto_continue_extension="$agent_dir/extensions/auto-continue/index.ts"', launcher)
         self.assertIn('host_command_extension="$agent_dir/extensions/host-command/index.ts"', launcher)
@@ -516,7 +596,7 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertNotIn("sendUserMessage", channel_extension)
         self.assertNotIn("registerCommand", channel_extension)
         reviewer = (ROOT / "bin/pi-review-agent").read_text()
-        self.assertIn("--tools read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,submit_review_receipt", reviewer)
+        self.assertIn("--tools read,grep,find,ls,web_search,fetch_content,get_search_content,source_check,submit_review_receipt,harness_feedback", reviewer)
         self.assertNotIn("host_command", reviewer)
         self.assertIn("--no-extensions", reviewer)
         self.assertIn('--model "openai-codex/gpt-5.6-luna" --thinking high', reviewer)
@@ -600,6 +680,37 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('service_tier: "priority"', extension)
         self.assertIn('OPENAI_PROVIDERS', extension)
         self.assertIn('Usage: /fast [on|off|status]', extension)
+        self.assertIn('let enabled = true;', extension)
+        self.assertIn('STATE_ENTRY = "fast-mode-state"', extension)
+        self.assertIn('pi.appendEntry(STATE_ENTRY', extension)
+        self.assertIn('pi.on("session_start"', extension)
+        self.assertIn('pi.on("session_tree"', extension)
+        self.assertNotIn('setStatus("fast-mode"', extension)
+        host = (ROOT / "bin/pi-host").read_text()
+        self.assertIn('fast_mode_extension="$dotfiles_dir/pi/extensions/fast-mode/index.ts"', host)
+        self.assertIn('host_extension_args=(-e "$fast_mode_extension")', host)
+        reviewer = (ROOT / "bin/pi-review-agent").read_text()
+        self.assertIn('fast_mode_extension="$dotfiles_dir/pi/extensions/fast-mode/index.ts"', reviewer)
+        self.assertIn('-e "$fast_mode_extension"', reviewer)
+        sandbox_review = (ROOT / "pi/patches/pi-sandbox-0.2.0-fast-mode-review.patch").read_text()
+        for evidence in [
+            "DefaultResourceLoader",
+            'path.join(agentDir, "extensions", "fast-mode", "index.ts")',
+            "Sandbox review fast-mode extension is unavailable",
+            "noExtensions: true",
+            "additionalExtensionPaths: [fastModeExtension]",
+            "noSkills: true",
+            "noPromptTemplates: true",
+            "noThemes: true",
+            "noContextFiles: true",
+            "await loader.reload()",
+            "resourceLoader: await reviewResourceLoader(ctx.cwd, systemPrompt)",
+        ]:
+            self.assertIn(evidence, sandbox_review)
+        self.assertIn(
+            "pi-sandbox-0.2.0-fast-mode-review.patch",
+            (ROOT / "scripts/pi-patch-subagents").read_text(),
+        )
 
     def test_tmux_resurrect_and_continuum_ordering_is_conservative(self):
         config = (ROOT / "tmux.conf").read_text()
@@ -663,6 +774,18 @@ class HarnessStaticTests(unittest.TestCase):
     def test_btw_and_subagents_task_routes_are_pinned(self):
         btw = (ROOT / "pi/patches/pi-btw-0.4.1-task-routing.patch").read_text()
         self.assertIn("PI_TASK_ROUTE_CAPABILITY", btw)
+        btw_fast_mode = (ROOT / "pi/patches/pi-btw-0.4.1-fast-mode.patch").read_text()
+        self.assertIn("DefaultResourceLoader", btw_fast_mode)
+        self.assertIn("noExtensions: true", btw_fast_mode)
+        self.assertIn("additionalExtensionPaths: [fastModeExtension]", btw_fast_mode)
+        self.assertIn("fast-mode extension is unavailable", btw_fast_mode)
+        self.assertIn("pi-btw-0.4.1-fast-mode.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+        btw_feedback = (ROOT / "pi/patches/pi-btw-0.4.1-harness-feedback.patch").read_text()
+        self.assertIn("harnessFeedbackExtension", btw_feedback)
+        self.assertIn("pi-btw-0.4.1-harness-feedback.patch", (ROOT / "scripts/pi-patch-subagents").read_text())
+        btw_source = (ROOT / "pi/npm/node_modules/pi-btw/extensions/btw.ts").read_text()
+        self.assertIn("harness-feedback", btw_source)
+        self.assertIn('"harness_feedback"', btw_source)
         worktrees = (ROOT / "pi/patches/pi-subagents-0.35.1-task-worktrees.patch").read_text()
         self.assertIn("must commit all changes before comparison", worktrees)
         self.assertIn("durable comparison", worktrees)
@@ -716,7 +839,7 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
 
     def test_global_agents_hash_and_removed_legacy_orchestrators(self):
         agents = (ROOT / "agent/AGENTS.md").read_bytes()
-        self.assertEqual(hashlib.sha256(agents).hexdigest(), "5f1209abcdc5f44c571bb7fd18c63be99565f986bea7fbb30a7bd4f45408d8e7")
+        self.assertEqual(hashlib.sha256(agents).hexdigest(), "2b9f91ea04cb5ca3bfddc38d6141707dfea001f54da6bf5c46c90a491e21957b")
         policy = agents.decode()
         for heading in ["### FAST", "### RIP", "### BUILD", "### MAJOR", "### OFF", "### LIGHT", "### DEEP"]:
             self.assertIn(heading, policy)
@@ -739,8 +862,13 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
         self.assertIn("function acceptanceEventFields", failure_events)
         self.assertIn("acceptanceFailedChecks", failure_events)
         self.assertIn('process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim() === "worker"', fanout)
-        self.assertIn('WORKER_READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "contact_supervisor", "intercom", "host_command"]', fanout)
+        self.assertIn('WORKER_READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "contact_supervisor", "intercom", "host_command", "harness_feedback"]', fanout)
         self.assertIn('tools: WORKER_READ_ONLY_TOOLS,', fanout)
+        self.assertIn('HARNESS_FEEDBACK_EXTENSION', fanout)
+        self.assertIn('FAST_MODE_EXTENSION', fanout)
+        self.assertIn('subagentOnlyExtensions: [HOST_COMMAND_EXTENSION, FAST_MODE_EXTENSION, WEB_ACCESS_EXTENSION, HARNESS_FEEDBACK_EXTENSION]', fanout)
+        fast_mode_fanout_patch = (ROOT / "pi/patches/pi-subagents-0.35.1-fast-mode-fanout.patch").read_text()
+        self.assertIn('FAST_MODE_EXTENSION', fast_mode_fanout_patch)
         self.assertNotIn('agent.tools?.includes("contact_supervisor")', fanout)
         feedback_channel = (ROOT / "pi/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts").read_text()
         self.assertIn('path.join(agentDir, "feedback", "records")', feedback_channel)
@@ -753,6 +881,7 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
             "pi-subagents-0.35.1-host-command-fanout.patch",
             "pi-subagents-0.35.1-web-access-fanout.patch",
             "pi-subagents-0.35.1-feedback-tool-all-variants.patch",
+            "pi-subagents-0.35.1-harness-feedback-fanout.patch",
         ]:
             patch_text = (ROOT / "pi/patches" / patch_name).read_text()
             self.assertIn("tools: WORKER_READ_ONLY_TOOLS,", patch_text, patch_name)
@@ -767,6 +896,7 @@ try { policy.buildModelCandidates("deepseek/deepseek-v4-flash:high", undefined, 
             self.assertIn("inheritSkills: false", frontmatter, path.name)
             self.assertIn("subagentOnlyExtensions: __PI_AGENT_DIR__/extensions/workflow-state/index.ts", frontmatter, path.name)
             self.assertIn("__PI_AGENT_DIR__/extensions/auto-continue/index.ts", frontmatter, path.name)
+            self.assertIn("__PI_AGENT_DIR__/extensions/fast-mode/index.ts", frontmatter, path.name)
             self.assertIn("__PI_AGENT_DIR__/npm/node_modules/pi-web-access/index.ts", frontmatter, path.name)
             tools = re.search(r"^tools: (.+)$", frontmatter, re.MULTILINE).group(1).split(", ")
             for web_tool in ("web_search", "fetch_content", "get_search_content", "source_check"):

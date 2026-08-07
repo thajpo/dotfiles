@@ -5,6 +5,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,22 @@ class PiRuntimeContractTests(unittest.TestCase):
     def test_path_and_workspace_dependencies_fail_closed_to_task_local(self):
         self.assertTrue(runtime.has_workspace_or_path_dependency("[tool.uv.workspace]\nmembers = ['pkg']"))
         self.assertTrue(runtime.has_workspace_or_path_dependency("foo = { path = '../shared' }"))
+
+    def test_immutable_base_reference_uses_and_verifies_an_id_derived_local_tag(self):
+        base_id = "sha256:" + "a" * 64
+        expected = "pi-runtime-base:" + "a" * 64
+        with mock.patch.object(runtime, "run", return_value="") as run, \
+             mock.patch.object(runtime, "inspect_image", return_value={"Id": base_id}) as inspect_image:
+            self.assertEqual(runtime.immutable_local_base_reference(base_id), expected)
+        run.assert_called_once_with(["docker", "tag", base_id, expected])
+        inspect_image.assert_called_once_with(expected)
+
+        with self.assertRaisesRegex(runtime.RuntimeErrorContract, "canonical sha256"):
+            runtime.immutable_local_base_reference("sha256:not-an-id")
+        with mock.patch.object(runtime, "run", return_value=""), \
+             mock.patch.object(runtime, "inspect_image", return_value={"Id": "sha256:" + "b" * 64}):
+            with self.assertRaisesRegex(runtime.RuntimeErrorContract, "does not resolve"):
+                runtime.immutable_local_base_reference(base_id)
 
     def test_prepare_without_uv_lock_does_not_touch_worktree(self):
         with tempfile.TemporaryDirectory() as temporary:

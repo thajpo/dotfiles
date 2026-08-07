@@ -41,13 +41,20 @@ done
 real_pi=$($helper resolve-pi --self "$self_path" --cwd "$PWD")
 export PI_PINNED_PI_EXECUTABLE="$real_pi"
 
+# Repository identity must come from -C, never caller-supplied Git routing
+# variables that can silently redirect rev-parse to another checkout.
+clean_git() {
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
+    -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES git "$@"
+}
+
 # Hold a shared worktree lease for the entire Pi process. Secretary cleanup
 # takes the matching exclusive lease before its final liveness check and Git
 # removal, so a managed launch cannot acquire the cwd in that interval.
 exec_pinned_pi() {
   local workspace common state_root lease_dir lease_key lease_path
   workspace=$(pwd -P)
-  common=$(git -C "$workspace" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  common=$(clean_git -C "$workspace" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   if [[ -z "$common" ]]; then
     exec "$@"
   fi
@@ -226,4 +233,24 @@ if [[ "$PI_TASK_POLICY_VALID" != "True" && "$PI_TASK_POLICY_VALID" != "true" ]];
   printf 'Pi repository policy was unavailable or invalid; fail-closed isolated mode selected.\n' >&2
 fi
 cd "$PI_TASK_WORKTREE"
+# Carry the common Git identity into every child so feedback from ordinary
+# project roots is attributed to the same central Pi feed as secretary and
+# workstream launches. Never inherit caller-supplied attribution if discovery
+# fails: cross-project feedback filters rely on this identity.
+unset PI_HARNESS_PROJECT_ID PI_HARNESS_REPOSITORY
+feedback_repository=$(pwd -P)
+feedback_common=$(clean_git -C "$feedback_repository" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+if [[ -n "$feedback_common" ]]; then
+  feedback_common=$(realpath "$feedback_common")
+  if command -v sha256sum >/dev/null 2>&1; then
+    PI_HARNESS_PROJECT_ID=$(printf '%s' "$feedback_common" | sha256sum | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    PI_HARNESS_PROJECT_ID=$(printf '%s' "$feedback_common" | shasum -a 256 | awk '{print $1}')
+  else
+    printf 'pi: no SHA-256 utility found for harness feedback attribution\n' >&2
+    exit 1
+  fi
+  export PI_HARNESS_PROJECT_ID
+fi
+export PI_HARNESS_REPOSITORY="$feedback_repository"
 exec_pinned_pi "$real_pi" "${root_args[@]}"

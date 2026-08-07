@@ -108,11 +108,15 @@ status, and result/error messages. Confirm it does not display hidden reasoning.
 Have a child issue an `agent-feedback.v1` `interview_request` for a missing
 capability and confirm the parent receives it, can reply with a structured
 review decision, and does not silently grant new authority. Confirm the bounded
-record appears under `~/.pi/agent/feedback/records/` (or the configured Pi agent
-directory), never in the project root, and that the reply outcome updates it.
+record appears under the central `~/.pi/agent/feedback/records/` (or the
+configured Pi agent directory) feed shared by all projects, never in the
+project root, and that the reply outcome updates it.
 Have another child send a non-blocking `AGENT_FEEDBACK` progress update and
 confirm it is visible without requiring a reply, persists with provenance, and
-can later be marked accepted, rejected, or deferred.
+can later be marked accepted, rejected, or deferred. Have a reviewer or other
+child invoke `harness_feedback` directly and confirm it writes to the same
+central all-project feed; run `pi-harness-feedback` and verify the record is
+visible without copying raw prompt content into a project root.
 
 ## Context audit setup
 

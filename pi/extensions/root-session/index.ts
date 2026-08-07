@@ -40,13 +40,21 @@ export default function rootSessionExtension(pi: ExtensionAPI): void {
 }
 
 function sessionCwd(sessionFile: string): string | undefined {
+  let fd: number | undefined;
   try {
-    const first = fs.readFileSync(sessionFile, "utf8").split("\\n").find((line) => line.trim());
+    fd = fs.openSync(sessionFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const buffer = Buffer.alloc(64 * 1024 + 1);
+    const count = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    if (count > 64 * 1024) return undefined;
+    const first = buffer.subarray(0, count).toString("utf8").split("\n").find((line) => line.trim());
     if (!first) return undefined;
-    const value = JSON.parse(first).cwd;
+    const parsed: unknown = JSON.parse(first);
+    const value = parsed && typeof parsed === "object" ? (parsed as { cwd?: unknown }).cwd : undefined;
     return typeof value === "string" && path.isAbsolute(value) && fs.statSync(value).isDirectory() ? value : undefined;
   } catch {
     return undefined;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
 }
 

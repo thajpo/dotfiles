@@ -46,10 +46,13 @@ def setup_home(root: Path):
     fake.write_text("""#!/usr/bin/env python3
 import json, os, pathlib, sys
 out = pathlib.Path(os.environ['FAKE_PI_OUTPUT'])
-out.write_text(json.dumps({'args': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k:v for k,v in os.environ.items() if k.startswith('PI_TASK_') or k == 'PI_SUBAGENTS_WORKTREE_DIR'}}))
+out.write_text(json.dumps({'args': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k:v for k,v in os.environ.items() if k.startswith('PI_TASK_') or k.startswith('PI_HARNESS_') or k == 'PI_SUBAGENTS_WORKTREE_DIR'}}))
 """)
     fake.chmod(0o755)
     (package.parent.parent / ".bin/pi").symlink_to(fake)
+    fast_mode = home / ".pi/agent/extensions/fast-mode/index.ts"
+    fast_mode.parent.mkdir(parents=True, exist_ok=True)
+    fast_mode.write_text("placeholder\\n")
     output = root / "fake-output.json"
     env = os.environ.copy()
     env.update({
@@ -258,6 +261,12 @@ class LauncherTests(unittest.TestCase):
             malicious = repo / "pi"
             malicious.write_text("#!/bin/sh\necho hijacked >&2; exit 99\n")
             malicious.chmod(0o755)
+            env["PI_HARNESS_PROJECT_ID"] = "f" * 64
+            env["PI_HARNESS_REPOSITORY"] = "/caller/spoofed"
+            redirected = Path(tmp) / "redirected"
+            redirected.mkdir()
+            git(redirected, "init")
+            env["GIT_DIR"] = str(redirected / ".git")
             result = subprocess.run([str(ROOT / "bin/pi"), "hello"], cwd=repo, env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             invocation = json.loads(output.read_text())
@@ -269,6 +278,9 @@ class LauncherTests(unittest.TestCase):
             self.assertTrue(Path(args[args.index("--session") + 1]).is_file())
             self.assertEqual(invocation["env"]["PI_TASK_MODE"], "trusted-live")
             self.assertTrue(Path(invocation["env"]["PI_TASK_ROUTE_FILE"]).is_file())
+            expected_project_id = hashlib.sha256(str((repo / ".git").resolve()).encode()).hexdigest()
+            self.assertEqual(invocation["env"]["PI_HARNESS_PROJECT_ID"], expected_project_id)
+            self.assertEqual(invocation["env"]["PI_HARNESS_REPOSITORY"], str(repo.resolve()))
             self.assertNotIn("hijacked", result.stderr)
 
     def test_installed_launchers_use_control_plane_helper_when_repo_path_is_absent(self):
@@ -281,6 +293,9 @@ class LauncherTests(unittest.TestCase):
             installed.mkdir(parents=True)
             control.mkdir(parents=True)
             core.mkdir(parents=True)
+            fast_mode = home / ".pi/agent/extensions/fast-mode/index.ts"
+            fast_mode.parent.mkdir(parents=True)
+            fast_mode.write_text("placeholder\\n")
             output = root / "pi-output.json"
             fake_pi = core / "pi"
             fake_pi.write_text("""#!/usr/bin/env python3
@@ -354,6 +369,8 @@ print(os.environ["FAKE_PI"])
             args = invocation["args"]
             for flag in ["--no-context-files", "--no-extensions", "--no-skills", "--no-prompt-templates", "--session-dir", "--name"]:
                 self.assertIn(flag, args)
+            extension_paths = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "-e"]
+            self.assertTrue(any(path.endswith("/fast-mode/index.ts") for path in extension_paths))
             session_dir = Path(args[args.index("--session-dir") + 1])
             self.assertTrue(session_dir.is_dir())
             self.assertEqual(invocation["env"], {})

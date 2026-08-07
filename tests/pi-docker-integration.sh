@@ -77,12 +77,13 @@ docker create --name "$container" \
   -e BUN_INSTALL_CACHE_DIR=/var/cache/pi-packages/bun \
   -e PIP_CACHE_DIR=/var/cache/pi-packages/pip \
   -e UV_CACHE_DIR=/var/cache/pi-packages/uv \
-  -e VIRTUAL_ENV=/opt/pi/task-env \
-  -e UV_PROJECT_ENVIRONMENT=/opt/pi/task-env \
-  -e PATH=/opt/pi/task-env/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  -e VIRTUAL_ENV=/tmp/pi-home/task-env \
+  -e UV_PROJECT_ENVIRONMENT=/tmp/pi-home/task-env \
+  -e PATH=/tmp/pi-home/task-env/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   pi-tool-sandbox:node22-bookworm-20260728 sleep infinity >/dev/null
 docker start "$container" >/dev/null
 
+docker exec "$container" sh -c 'mkdir -p "$UV_PROJECT_ENVIRONMENT" && test -w "$UV_PROJECT_ENVIRONMENT" && : > "$UV_PROJECT_ENVIRONMENT/.write-probe"'
 printf 'host\n' > "$worktree/host-visible.txt"
 docker exec -w "$worktree" "$container" test -f host-visible.txt
 docker exec -w "$worktree" "$container" sh -c 'printf "container\n" > container-visible.txt'
@@ -151,9 +152,9 @@ expected_env = {
     "BUN_INSTALL_CACHE_DIR": "/var/cache/pi-packages/bun",
     "PIP_CACHE_DIR": "/var/cache/pi-packages/pip",
     "UV_CACHE_DIR": "/var/cache/pi-packages/uv",
-    "VIRTUAL_ENV": "/opt/pi/task-env",
-    "UV_PROJECT_ENVIRONMENT": "/opt/pi/task-env",
-    "PATH": "/opt/pi/task-env/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "VIRTUAL_ENV": "/tmp/pi-home/task-env",
+    "UV_PROJECT_ENVIRONMENT": "/tmp/pi-home/task-env",
+    "PATH": "/tmp/pi-home/task-env/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 }
 environment_entries = [entry.split("=", 1) for entry in config["Env"]]
 environment = dict(environment_entries)
@@ -161,4 +162,4 @@ assert len(environment_entries) == len(environment)
 assert all(environment.get(key) == value for key, value in expected_env.items())
 assert host.get("PortBindings") in ({}, None)
 PY
-printf 'PASS trusted-live Docker mount, ownership, no-port default, and boundary integration\n'
+printf 'PASS trusted-live Docker mount, task-local env ownership, no-port default, and boundary integration\n'

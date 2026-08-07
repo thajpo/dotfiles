@@ -1,0 +1,58 @@
+--- a/index.ts
++++ b/index.ts
+@@ -44,7 +44,7 @@
+ 	type BashOperations,
+ 	createAgentSession,
+ 	createBashToolDefinition,
+-	createExtensionRuntime,
++	DefaultResourceLoader,
+ 	defineTool,
+ 	createEditToolDefinition,
+ 	createFindToolDefinition,
+@@ -3515,19 +3515,24 @@
+ 		})();
+ 	});
+ 
+-	function reviewResourceLoader(systemPrompt: string): ResourceLoader {
+-		const runtime = createExtensionRuntime();
+-		return {
+-			getExtensions: () => ({ extensions: [], errors: [], runtime }),
+-			getSkills: () => ({ skills: [], diagnostics: [] }),
+-			getPrompts: () => ({ prompts: [], diagnostics: [] }),
+-			getThemes: () => ({ themes: [], diagnostics: [] }),
+-			getAgentsFiles: () => ({ agentsFiles: [] }),
+-			getSystemPrompt: () => systemPrompt,
+-			getAppendSystemPrompt: () => [],
+-			extendResources: () => {},
+-			reload: async () => {},
+-		};
++	async function reviewResourceLoader(cwd: string, systemPrompt: string): Promise<ResourceLoader> {
++		const agentDir = getAgentDir();
++		const fastModeExtension = path.join(agentDir, "extensions", "fast-mode", "index.ts");
++		if (!existsSync(fastModeExtension)) throw new Error("Sandbox review fast-mode extension is unavailable");
++		const loader = new DefaultResourceLoader({
++			cwd,
++			agentDir,
++			noExtensions: true,
++			additionalExtensionPaths: [fastModeExtension],
++			noSkills: true,
++			noPromptTemplates: true,
++			noThemes: true,
++			noContextFiles: true,
++			systemPrompt,
++			appendSystemPrompt: [],
++		});
++		await loader.reload();
++		return loader;
+ 	}
+ 
+ 	function finalAssistantText(messages: readonly AgentMessage[]): string {
+@@ -3746,7 +3751,7 @@
+ 			model,
+ 			thinkingLevel,
+ 			modelRegistry: ctx.modelRegistry,
+-			resourceLoader: reviewResourceLoader(systemPrompt),
++			resourceLoader: await reviewResourceLoader(ctx.cwd, systemPrompt),
+ 			tools: ["read", "find", "ls", "review_log", "review_read", "review_commit", "review_diff"],
+ 			customTools,
+ 			sessionManager: SessionManager.inMemory(ctx.cwd),

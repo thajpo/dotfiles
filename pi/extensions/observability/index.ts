@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -11,7 +12,6 @@ import {
 } from "@earendil-works/pi-tui";
 import {
   ASYNC_DIR,
-  RESULTS_DIR,
   SUBAGENT_ASYNC_COMPLETE_EVENT,
   SUBAGENT_ASYNC_STARTED_EVENT,
   SUBAGENT_CONTROL_EVENT,
@@ -20,14 +20,20 @@ import {
   SUBAGENT_RESULT_INTERCOM_EVENT,
   SUBAGENT_STEERING_NOTICE_EVENT,
 } from "../../npm/node_modules/pi-subagents/src/shared/types.ts";
-import { listAsyncRuns } from "../../npm/node_modules/pi-subagents/src/runs/background/async-status.ts";
+import {
+  buildNestedRouteIndex,
+  readNestedRegistry,
+  type NestedRoute,
+} from "../../npm/node_modules/pi-subagents/src/runs/shared/nested-events.ts";
 import { workflowArtifactsDirForSession } from "../workflow-state/core.mjs";
 import {
   boundedText,
   cycleAgentIndex,
   explicitSessionMessage,
+  expandCompletionRecords,
   extractActivePacket,
   formatTaskPacket,
+  MAX_AGENTS,
   projectInspectorState,
   reduceInspectorKey,
   statusGlyph,
@@ -44,7 +50,16 @@ const MAX_RUNS = 64;
 const OBSERVE_COMMAND = "observe";
 
 type Theme = ExtensionContext["ui"]["theme"];
-type InspectorSnapshot = ReturnType<typeof projectInspectorState>;
+type ControlSnapshot = {
+  available: boolean;
+  reason?: string;
+  project?: Record<string, unknown>;
+  workingCopies?: unknown[];
+  changes?: unknown[];
+  attention?: unknown[];
+  facts?: Record<string, unknown>;
+};
+type InspectorSnapshot = ReturnType<typeof projectInspectorState> & { control: ControlSnapshot };
 type RuntimeAgent = {
   key: string;
   source: string;
@@ -76,6 +91,20 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function finiteTimestamp(...values: unknown[]): number {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= 8.64e15) return value;
+  }
+  return 0;
+}
+
+function runIsActive(status: Record<string, unknown>): boolean {
+  const active = new Set(["queued", "pending", "running"]);
+  if (typeof status.state === "string" && active.has(status.state)) return true;
+  return Array.isArray(status.steps) && status.steps.some((step) =>
+    isObject(step) && typeof step.status === "string" && active.has(step.status));
+}
+
 function pathWithin(root: string, candidate: string): boolean {
   const base = path.resolve(root);
   const target = path.resolve(candidate);
@@ -84,6 +113,29 @@ function pathWithin(root: string, candidate: string): boolean {
 
 function currentUid(): number | undefined {
   return typeof process.getuid === "function" ? process.getuid() : undefined;
+}
+
+function readControllerControl(): ControlSnapshot {
+  const projectId = process.env.PI_CONTROL_PROJECT_ID;
+  if (!projectId) return { available: false, reason: "controller project binding is unavailable" };
+  const cli = process.env.PI_CONTROL_CLI ?? path.join(process.env.HOME ?? "", ".local", "bin", "pi-control");
+  if (!cli || !fs.existsSync(cli)) return { available: false, reason: "installed controller CLI is unavailable" };
+  const args = process.env.PI_CONTROL_STATE_ROOT ? ["--state-root", process.env.PI_CONTROL_STATE_ROOT] : [];
+  args.push("status", projectId, "--no-refresh", "--json");
+  try {
+    const parsed: unknown = JSON.parse(execFileSync(cli, args, { encoding: "utf8", timeout: 500, maxBuffer: 128 * 1024 }));
+    if (!isObject(parsed)) return { available: false, reason: "controller returned an unsupported status shape" };
+    return {
+      available: true,
+      project: isObject(parsed.project) ? parsed.project : undefined,
+      workingCopies: Array.isArray(parsed.workingCopies) ? parsed.workingCopies : [],
+      changes: Array.isArray(parsed.changes) ? parsed.changes : [],
+      attention: Array.isArray(parsed.attention) ? parsed.attention : [],
+      facts: isObject(parsed.facts) ? parsed.facts : undefined,
+    };
+  } catch (error) {
+    return { available: false, reason: `controller status unavailable: ${error instanceof Error ? error.message.slice(0, 180) : "unknown error"}` };
+  }
 }
 
 function ownedRegularFile(filePath: string): boolean {
@@ -324,16 +376,17 @@ function readContextManifest(sessionFile: string | undefined, roots: string[], r
     agent,
     runId,
     index,
-    ts: typeof manifest.created_at === "number" ? manifest.created_at : Date.now(),
+    ts: typeof manifest.captured_at === "number" ? manifest.captured_at : Date.now(),
     text: parts.join(" · "),
   }];
 }
 
-function readRunData(status: Record<string, unknown>, runDir: string, ctx: ExtensionContext, warnings: string[]): { run: Record<string, unknown>; messages: RuntimeMessage[] } {
+function readRunData(status: Record<string, unknown>, runDir: string, ctx: ExtensionContext, maxSteps: number): { run: Record<string, unknown>; messages: RuntimeMessage[]; inspectedSteps: number; truncatedSteps: boolean } {
   const artifactRoots = trustedArtifactRoots(status, runDir, ctx);
   const sessionRoots = trustedSessionRoots(status, runDir);
   const runId = typeof status.runId === "string" ? status.runId : path.basename(runDir);
-  const rawSteps = Array.isArray(status.steps) ? status.steps : [];
+  const allRawSteps = Array.isArray(status.steps) ? status.steps : [];
+  const rawSteps = allRawSteps.slice(0, Math.max(0, maxSteps));
   const steps: Record<string, unknown>[] = [];
   const messages: RuntimeMessage[] = [];
   const artifactRoot = safeArtifactRoot(status.artifactsDir, artifactRoots);
@@ -343,8 +396,8 @@ function readRunData(status: Record<string, unknown>, runDir: string, ctx: Exten
     if (!isObject(raw)) continue;
     const step = { ...raw };
     const agent = typeof step.agent === "string" ? step.agent : "unknown";
-    const input = artifactRoot ? parseTaskArtifact(readContainedText(artifactPath(artifactRoot, runId, agent, index, rawSteps.length, "input.md"), MAX_ARTIFACT_BYTES, artifactRoots)) : undefined;
-    const output = artifactRoot ? boundedText(readTail(artifactPath(artifactRoot, runId, agent, index, rawSteps.length, "output.md"), MAX_OUTPUT_BYTES, artifactRoots) ?? "") : "";
+    const input = artifactRoot ? parseTaskArtifact(readContainedText(artifactPath(artifactRoot, runId, agent, index, allRawSteps.length, "input.md"), MAX_ARTIFACT_BYTES, artifactRoots)) : undefined;
+    const output = artifactRoot ? boundedText(readTail(artifactPath(artifactRoot, runId, agent, index, allRawSteps.length, "output.md"), MAX_OUTPUT_BYTES, artifactRoots) ?? "") : "";
     if (input) {
       step.task = input;
       messages.push({ id: `instruction:async:${runId}:${index}`, kind: "instruction", source: "async", agent, runId, index, ts: typeof step.startedAt === "number" ? step.startedAt : Date.now(), text: input });
@@ -367,8 +420,10 @@ function readRunData(status: Record<string, unknown>, runDir: string, ctx: Exten
     messages.push({ id: `failure:async:${runId}`, kind: "failure", source: "status", runId, ts: typeof status.lastUpdate === "number" ? status.lastUpdate : Date.now(), text: status.error });
   }
   const run = { ...status, id: runId, steps };
-  return { run, messages };
+  return { run, messages, inspectedSteps: steps.length, truncatedSteps: allRawSteps.length > rawSteps.length };
 }
+
+type ScanBudget = { remainingSteps: number; truncatedSteps: boolean };
 
 function readNestedRunData(
   value: unknown,
@@ -376,6 +431,7 @@ function readNestedRunData(
   warnings: string[],
   messages: RuntimeMessage[],
   seen: Set<string>,
+  budget: ScanBudget,
 ): void {
   if (!isObject(value)) return;
   const run = value;
@@ -390,13 +446,15 @@ function readNestedRunData(
     } else {
       const status = readJsonObject(statusPath, MAX_STATUS_BYTES, [tempRoot]);
       if (status) {
-        const inspected = readRunData(status, asyncDir, ctx, warnings);
+        const inspected = readRunData(status, asyncDir, ctx, budget.remainingSteps);
+        budget.remainingSteps = Math.max(0, budget.remainingSteps - inspected.inspectedSteps);
+        budget.truncatedSteps ||= inspected.truncatedSteps;
         messages.push(...inspected.messages);
       }
     }
   }
   if (Array.isArray(run.children)) {
-    for (const child of run.children) readNestedRunData(child, ctx, warnings, messages, seen);
+    for (const child of run.children) readNestedRunData(child, ctx, warnings, messages, seen, budget);
   }
 }
 
@@ -406,30 +464,16 @@ function scanRuns(ctx: ExtensionContext): { runs: Record<string, unknown>[]; mes
   const warnings: string[] = [];
   const sessionId = ctx.sessionManager.getSessionId();
   let entries: fs.Dirent[];
-  let summaries: Record<string, unknown>[] = [];
-  try {
-    summaries = listAsyncRuns(ASYNC_DIR, {
-      ...(sessionId ? { sessionId } : {}),
-      resultsDir: RESULTS_DIR,
-      limit: MAX_RUNS,
-    }) as unknown as Record<string, unknown>[];
-  } catch (error) {
-    warnings.push(`Nested fleet projection unavailable: ${boundedText(error instanceof Error ? error.message : String(error), 500)}`);
-  }
-  const summaryById = new Map<string, Record<string, unknown>>();
-  for (const summary of summaries) {
-    if (typeof summary.id === "string") summaryById.set(summary.id, summary);
-  }
   try {
     entries = fs.readdirSync(ASYNC_DIR, { withFileTypes: true });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") warnings.push(`Fleet scan unavailable: ${boundedText(error instanceof Error ? error.message : String(error), 500)}`);
     return { runs, messages, warnings };
   }
-  const runEntries = entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink()).slice(0, MAX_RUNS);
-  if (entries.length > runEntries.length) warnings.push(`Fleet scan limited to ${MAX_RUNS} run directories.`);
-  const nestedSeen = new Set<string>();
-  for (const entry of runEntries) {
+
+  const candidates: Array<{ name: string; runDir: string; status: Record<string, unknown>; active: boolean; updatedAt: number }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
     const runDir = path.join(ASYNC_DIR, entry.name);
     const statusPath = path.join(runDir, "status.json");
     if (!canonicalContained(statusPath, [ASYNC_DIR])) {
@@ -442,26 +486,48 @@ function scanRuns(ctx: ExtensionContext): { runs: Record<string, unknown>[]; mes
       continue;
     }
     if (sessionId && status.sessionId !== sessionId) continue;
-    const inspected = readRunData(status, runDir, ctx, warnings);
-    const runId = typeof status.runId === "string" ? status.runId : entry.name;
-    const summary = summaryById.get(runId);
-    if (summary) {
-      const summarySteps = Array.isArray(summary.steps) ? summary.steps : [];
-      const rawSteps = Array.isArray(inspected.run.steps) ? inspected.run.steps : [];
-      const steps = summarySteps.map((step, index) => ({
-        ...(isObject(step) ? step : {}),
-        ...(isObject(rawSteps[index]) ? rawSteps[index] : {}),
-      }));
-      runs.push({ ...summary, ...inspected.run, id: runId, steps, nestedChildren: summary.nestedChildren ?? inspected.run.nestedChildren });
-      if (Array.isArray(summary.nestedChildren)) {
-        for (const child of summary.nestedChildren) readNestedRunData(child, ctx, warnings, messages, nestedSeen);
+    candidates.push({
+      name: entry.name,
+      runDir,
+      status,
+      active: runIsActive(status),
+      updatedAt: finiteTimestamp(status.lastUpdate, status.endedAt, status.startedAt),
+    });
+  }
+  // A long-running child must not disappear merely because many newer runs
+  // completed. Keep live work first, then use recency within each lifecycle
+  // class; the overall cap still bounds synchronous TUI scanning.
+  candidates.sort((left, right) => Number(right.active) - Number(left.active) || right.updatedAt - left.updatedAt || left.name.localeCompare(right.name));
+  if (candidates.length > MAX_RUNS) warnings.push(`Fleet scan limited to ${MAX_RUNS} runs; active runs are prioritized before recent terminal runs.`);
+
+  let nestedRoutes = new Map<string, NestedRoute>();
+  try {
+    nestedRoutes = buildNestedRouteIndex();
+  } catch (error) {
+    warnings.push(`Nested fleet projection unavailable: ${boundedText(error instanceof Error ? error.message : String(error), 500)}`);
+  }
+  const nestedSeen = new Set<string>();
+  const budget: ScanBudget = { remainingSteps: MAX_AGENTS, truncatedSteps: false };
+  for (const candidate of candidates.slice(0, MAX_RUNS)) {
+    const inspected = readRunData(candidate.status, candidate.runDir, ctx, budget.remainingSteps);
+    budget.remainingSteps = Math.max(0, budget.remainingSteps - inspected.inspectedSteps);
+    budget.truncatedSteps ||= inspected.truncatedSteps;
+    const runId = typeof candidate.status.runId === "string" ? candidate.status.runId : candidate.name;
+    const route = nestedRoutes.get(runId);
+    let nestedChildren: unknown[] = [];
+    if (route) {
+      try {
+        nestedChildren = readNestedRegistry(route).children;
+      } catch (error) {
+        warnings.push(`Nested status unavailable for ${boundedText(runId, 120)}: ${boundedText(error instanceof Error ? error.message : String(error), 500)}`);
       }
-    } else {
-      runs.push(inspected.run);
     }
+    const run = nestedChildren.length > 0 ? { ...inspected.run, nestedChildren } : inspected.run;
+    runs.push(run);
+    for (const child of nestedChildren) readNestedRunData(child, ctx, warnings, messages, nestedSeen, budget);
     messages.push(...inspected.messages);
   }
-  runs.sort((left, right) => Number(right.lastUpdate ?? right.startedAt ?? 0) - Number(left.lastUpdate ?? left.startedAt ?? 0));
+  if (budget.truncatedSteps) warnings.push(`Fleet detail reads limited to ${MAX_AGENTS} agent steps per refresh.`);
   return { runs, messages, warnings };
 }
 
@@ -522,7 +588,14 @@ class InspectorRuntime {
 
   private addAgent(agent: RuntimeAgent): void {
     const previous = this.agents.get(agent.key);
-    this.agents.set(agent.key, { ...previous, ...agent, updatedAt: Date.now() });
+    this.agents.set(agent.key, {
+      ...previous,
+      ...agent,
+      // Completion events often omit the original start timestamp. Preserve
+      // the first observation so elapsed time does not reset to zero at exit.
+      startedAt: previous?.startedAt ?? agent.startedAt,
+      updatedAt: Date.now(),
+    });
   }
 
   onStarted(value: unknown): void {
@@ -556,17 +629,20 @@ class InspectorRuntime {
   }
 
   onComplete(value: unknown): void {
-    const runId = isObject(value) && (typeof value.id === "string" ? value.id : typeof value.runId === "string" ? value.runId : undefined);
-    if (!eventSessionMatches(value, this.sessionId, this.knownRunIds, runId) || !isObject(value)) return;
-    if (runId) this.knownRunIds.add(runId);
-    const index = typeof value.index === "number" ? value.index : typeof value.taskIndex === "number" ? value.taskIndex : undefined;
-    const agent = typeof value.agent === "string" ? value.agent : "agent";
-    const success = value.success === true || value.state === "complete" || value.state === "completed";
-    const status = success ? "complete" : value.state === "paused" ? "paused" : "failed";
-    const record = runtimeAgentFrom({ ...value, runId, agent, status }, index, value.source === "foreground" ? "foreground" : "async");
-    this.addAgent(record);
-    const summary = typeof value.summary === "string" ? value.summary : typeof value.message === "string" ? value.message : "No result summary available.";
-    this.addMessage({ id: `runtime-result:${record.key}:${record.updatedAt}`, kind: success ? "result" : "failure", source: record.source, agent, runId, index, ts: record.updatedAt, text: summary });
+    for (const completion of expandCompletionRecords(value)) {
+      const runId = typeof completion.runId === "string" ? completion.runId : typeof completion.id === "string" ? completion.id : undefined;
+      if (!eventSessionMatches(completion, this.sessionId, this.knownRunIds, runId)) continue;
+      if (runId) this.knownRunIds.add(runId);
+      const index = typeof completion.index === "number" ? completion.index : typeof completion.taskIndex === "number" ? completion.taskIndex : undefined;
+      const agent = typeof completion.agent === "string" ? completion.agent : "agent";
+      const success = completion.success === true || (completion.success !== false && (completion.state === "complete" || completion.state === "completed"));
+      const status = success ? "complete" : completion.state === "paused" ? "paused" : completion.state === "stopped" || completion.state === "detached" ? completion.state : "failed";
+      const record = runtimeAgentFrom({ ...completion, runId, agent, status }, index, completion.source === "foreground" ? "foreground" : "async");
+      this.addAgent(record);
+      const summary = typeof completion.summary === "string" ? completion.summary : typeof completion.message === "string" ? completion.message : "No result summary available.";
+      const messageKind = success ? "result" : status === "failed" ? "failure" : "warning";
+      this.addMessage({ id: `runtime-result:${record.key}:${record.updatedAt}`, kind: messageKind, source: record.source, agent, runId, index, ts: record.updatedAt, text: summary });
+    }
   }
 
   onControl(value: unknown): void {
@@ -611,14 +687,17 @@ class InspectorRuntime {
     for (const run of scanned.runs) {
       if (typeof run.id === "string") this.knownRunIds.add(run.id);
     }
-    return projectInspectorState({
-      packet,
-      runs: scanned.runs,
-      runtimeAgents: [...this.agents.values()],
-      messages: [...scanned.messages, ...this.messages.values()],
-      warnings: scanned.warnings,
-      now: Date.now(),
-    });
+    return {
+      ...projectInspectorState({
+        packet,
+        runs: scanned.runs,
+        runtimeAgents: [...this.agents.values()],
+        messages: [...scanned.messages, ...this.messages.values()],
+        warnings: scanned.warnings,
+        now: Date.now(),
+      }),
+      control: readControllerControl(),
+    };
   }
 }
 
@@ -630,6 +709,10 @@ function fit(text: string, width: number): string {
 function tabLabel(tab: string, active: boolean, theme: Theme): string {
   const label = `[${tab}]`;
   return active ? theme.fg("accent", theme.bold(label)) : theme.fg("dim", label);
+}
+
+function wrapDisplayLines(lines: string[], width: number): string[] {
+  return lines.flatMap((line) => line.split("\n").flatMap((part) => part ? wrapTextWithAnsi(part, Math.max(1, width)) : [""]));
 }
 
 function detailLabel(label: string, value: unknown): string | undefined {
@@ -649,7 +732,7 @@ class InspectorComponent implements Component {
   private snapshot: InspectorSnapshot;
   private selected = 0;
   private selectedKey: string | undefined;
-  private tab: "task" | "fleet" | "messages" = "fleet";
+  private tab: "task" | "fleet" | "messages" | "control" = "fleet";
   private allMessages = false;
   private transcript = false;
   private bodyScroll = 0;
@@ -710,7 +793,7 @@ class InspectorComponent implements Component {
     if (action.type === "next-agent") return this.move(1);
     if (action.type === "previous-agent") return this.move(-1);
     if (action.type === "tab") {
-      this.tab = action.tab as "task" | "fleet" | "messages";
+      this.tab = action.tab as "task" | "fleet" | "messages" | "control";
       this.bodyScroll = 0;
       this.tui.requestRender();
       return;
@@ -750,13 +833,13 @@ class InspectorComponent implements Component {
     return this.snapshot.agents[this.selected];
   }
 
-  private taskLines(): string[] {
+  private taskLines(width: number): string[] {
     const lines = formatTaskPacket(this.snapshot.packet);
     if (this.snapshot.warnings.length) {
       lines.push("", this.theme.fg("warning", "Warnings:"));
       lines.push(...this.snapshot.warnings.map((warning) => `  • ${warning}`));
     }
-    return lines;
+    return wrapDisplayLines(lines, width);
   }
 
   private fleetLines(width: number): string[] {
@@ -787,7 +870,31 @@ class InspectorComponent implements Component {
       const activity = agent.currentTool ? ` · ${agent.currentTool}` : agent.activityState ? ` · ${agent.activityState}` : "";
       roster.push(`${marker} ${statusGlyph(agent.status)} ${source}${agent.agent}${run} · ${agent.status} · ${elapsedLabel(agent.startedAt, agent.updatedAt, agent.status)}${activity}`);
     });
-    return [...detail, ...(detail.length ? [""] : []), ...roster].map((line) => truncateToWidth(line, width, ""));
+    return [
+      ...wrapDisplayLines(detail, width),
+      ...(detail.length ? [""] : []),
+      ...roster.map((line) => truncateToWidth(line, width, "")),
+    ];
+  }
+
+  private controlLines(width: number): string[] {
+    const control = this.snapshot.control;
+    if (!control.available) return ["Controller status unavailable.", "", control.reason ?? "No controller status was returned.", "Set PI_CONTROL_PROJECT_ID to bind this read-only view."];
+    const project = control.project ?? {};
+    const attention = control.attention?.length ?? 0;
+    const lines = [
+      this.theme.fg("accent", "Controller · read-only"),
+      detailLabel("Project", project.project_id ?? project.projectId),
+      detailLabel("Desired", project.desired_state),
+      detailLabel("Observed", project.observed_state),
+      detailLabel("Resource version", project.resource_version),
+      `Working copies: ${control.workingCopies?.length ?? 0}`,
+      `Changes: ${control.changes?.length ?? 0}`,
+      attention ? this.theme.fg("warning", `Attention: ${attention}`) : "Attention: none",
+      detailLabel("Observation", control.facts?.source),
+      detailLabel("Freshness", control.facts?.refreshed),
+    ].filter((line): line is string => Boolean(line));
+    return wrapDisplayLines(lines, width);
   }
 
   private messagesLines(width: number): string[] {
@@ -814,8 +921,9 @@ class InspectorComponent implements Component {
   }
 
   private bodyLines(width: number): string[] {
-    if (this.tab === "task") return this.taskLines();
+    if (this.tab === "task") return this.taskLines(width);
     if (this.tab === "messages") return this.messagesLines(width);
+    if (this.tab === "control") return this.controlLines(width);
     return this.fleetLines(width);
   }
 
@@ -833,8 +941,8 @@ class InspectorComponent implements Component {
     }
     this.bodyScroll = Math.max(0, Math.min(this.bodyScroll, maxScroll));
     const visible = body.slice(this.bodyScroll, this.bodyScroll + bodyHeight);
-    const tabs = `${tabLabel("Task", this.tab === "task", this.theme)}  ${tabLabel("Fleet", this.tab === "fleet", this.theme)}  ${tabLabel("Messages", this.tab === "messages", this.theme)}`;
-    const footer = "1/2/3 tabs · j/k or Tab agents · PgUp/PgDn scroll · a all · v transcript · Esc close";
+    const tabs = `${tabLabel("Task", this.tab === "task", this.theme)}  ${tabLabel("Fleet", this.tab === "fleet", this.theme)}  ${tabLabel("Messages", this.tab === "messages", this.theme)}  ${tabLabel("Control", this.tab === "control", this.theme)}`;
+    const footer = "1/2/3/4 tabs · j/k or Tab agents · PgUp/PgDn scroll · a all · v transcript · Esc close";
     const lines = [
       this.theme.fg("border", `╭${"─".repeat(innerWidth)}╮`),
       this.theme.fg("border", "│") + fit(` ${this.theme.bold("Pi Inspector")} ${this.theme.fg("dim", "· read-only")}`, innerWidth) + this.theme.fg("border", "│"),
@@ -865,8 +973,8 @@ export default function observabilityExtension(pi: ExtensionAPI): void {
 
   const show = async (ctx: ExtensionContext): Promise<void> => {
     runtime.setSession(ctx.sessionManager.getSessionId() ?? null);
-    if (!ctx.hasUI) {
-      ctx.ui.notify("Inspector requires an interactive Pi UI; use /observe from an interactive session.", "warning");
+    if (ctx.mode !== "tui") {
+      ctx.ui.notify("Inspector requires an interactive Pi TUI; use /observe from an interactive session.", "warning");
       return;
     }
     if (open) {

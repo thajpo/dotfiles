@@ -37,7 +37,7 @@
  }
  
  interface ContactSupervisorParams {
-@@ -63,10 +70,36 @@
+@@ -63,10 +70,37 @@
  }
  
  interface IntercomParams {
@@ -64,6 +64,7 @@
 +		childTarget?: string;
 +		projectId?: string;
 +		workstreamId?: string;
++		repository?: string;
 +	};
 +	reason: SupervisorReason;
 +	form: Record<string, unknown>;
@@ -75,7 +76,7 @@
  }
  
  const ContactSupervisorParamsSchema = Type.Object({
-@@ -76,16 +109,184 @@
+@@ -76,16 +110,186 @@
  }, { additionalProperties: false });
  
  const IntercomParamsSchema = Type.Object({
@@ -179,12 +180,14 @@
 +	try { fs.chmodSync(root, 0o700); } catch { /* best effort */ }
 +}
 +
-+function feedbackProjectFields(): { projectId?: string; workstreamId?: string } {
-+	const projectId = process.env.PI_SECRETARY_PROJECT_ID?.trim() || process.env.PI_WORKSTREAM_PROJECT_ID?.trim();
++function feedbackProjectFields(): { projectId?: string; workstreamId?: string; repository?: string } {
++	const projectId = process.env.PI_HARNESS_PROJECT_ID?.trim() || process.env.PI_SECRETARY_PROJECT_ID?.trim() || process.env.PI_WORKSTREAM_PROJECT_ID?.trim();
 +	const workstreamId = process.env.PI_WORKSTREAM_ID?.trim();
++	const repository = process.env.PI_HARNESS_REPOSITORY?.trim();
 +	return {
 +		...(projectId && /^[0-9a-f]{64}$/.test(projectId) ? { projectId } : {}),
 +		...(workstreamId && /^[a-z0-9][a-z0-9-]{0,62}$/.test(workstreamId) ? { workstreamId } : {}),
++		...(repository && repository.startsWith("/") ? { repository: repository.slice(0, 512) } : {}),
 +	};
 +}
 +
@@ -261,7 +264,7 @@
  export function resolveSupervisorChannelDir(runId: string, agent: string, childIndex: number): string {
  	return path.join(SUPERVISOR_CHANNEL_ROOT, `${safeSegment(runId)}-${safeSegment(agent)}-${childIndex}`);
  }
-@@ -252,6 +453,7 @@
+@@ -252,6 +456,7 @@
  	};
  	const serialized = JSON.stringify(request, null, "\t");
  	if (Buffer.byteLength(serialized, "utf-8") > MAX_MESSAGE_BYTES) throw new Error("Supervisor request is too large.");
@@ -269,7 +272,7 @@
  	writeAtomicJson(requestPath(metadata.channelDir, requestId), request);
  
  	if (!expectsReply) {
-@@ -263,7 +465,7 @@
+@@ -263,7 +468,7 @@
  
  	try {
  		const reply = await waitForReply(metadata.channelDir, requestId, replyDeadline, signal);
@@ -278,7 +281,7 @@
  		if (params.reason === "interview_request") {
  			const structured = parseStructuredReply(reply.message);
  			if (structured.error) details.structuredReplyParseError = structured.error;
-@@ -487,6 +689,12 @@
+@@ -487,6 +692,12 @@
  }
  
  function cleanupRequestLifecycle(request: PendingSupervisorRequest, lifecycle: SupervisorRequestLifecycle): void {
@@ -291,7 +294,7 @@
  	if (lifecycle === "resolved" || lifecycle === "expired" || lifecycle === "inactive") removeRequestFile(request.requestFile);
  }
  
-@@ -509,17 +717,29 @@
+@@ -509,17 +720,29 @@
  	const lines = [request.message];
  	if (request.expectsReply) {
  		lines.push("", `Reply with: ${NATIVE_SUPERVISOR_TOOL_NAME}({ action: "reply", replyTo: "${request.id}", message: "..." })`);
@@ -322,7 +325,7 @@
  	};
  	writeAtomicJson(replyPath(request.channelDir, request.id), reply);
  	removeRequestFile(request.requestFile);
-@@ -563,8 +783,8 @@
+@@ -563,8 +786,8 @@
  		name,
  		label: name === "intercom" ? "Intercom" : "Subagent Supervisor",
  		description: name === "intercom"
@@ -333,7 +336,7 @@
  		parameters: IntercomParamsSchema,
  		async execute(_id, params) {
  			refreshPendingRequests(pending, state, state.lastUiContext ?? undefined);
-@@ -578,9 +798,14 @@
+@@ -578,9 +801,14 @@
  			}
  			if (input.action === "reply") {
  				const request = resolvePendingRequest(pending, input);
@@ -350,7 +353,7 @@
  			}
  			if (input.action === "send" || input.action === "ask") {
  				throw new Error("Native pi-subagents intercom currently handles supervisor replies. Child agents initiate asks with contact_supervisor.");
-@@ -629,6 +854,7 @@
+@@ -629,6 +857,7 @@
  				continue;
  			}
  			seenFiles.add(file);

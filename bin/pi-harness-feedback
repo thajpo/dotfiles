@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+feedback_script="$self_dir/pi-harness-feedback.py"
+if [[ ! -r "$feedback_script" ]]; then feedback_script="$self_dir/../share/pi/control/pi-harness-feedback.py"; fi
+if [[ ! -r "$feedback_script" ]]; then feedback_script="$self_dir/../scripts/pi-harness-feedback.py"; fi
+[[ -r "$feedback_script" ]] || { printf 'pi-harness-feedback: helper script is not installed\n' >&2; exit 1; }
+exec python3 "$feedback_script" "$@"

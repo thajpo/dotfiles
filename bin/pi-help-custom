@@ -102,7 +102,7 @@ Useful commands inside Pi:
   /goal status|pause|resume  Inspect or control the active goal.
   /goal clear                Remove the active goal.
   /goal --tokens 100k ...    Give a goal an explicit provider-token budget.
-  /fast on|off|status        Toggle OpenAI priority service.
+  /fast on|off|status        OpenAI priority service is on by default; toggle it here.
   /subagents-fleet           Inspect private child runs.
   /subagents-doctor          Diagnose subagent discovery and routing.
   /observe or Ctrl-I         Inspect task, fleet, messages, and failures.
@@ -119,6 +119,9 @@ Secretary projects:
   pisec launch               Repair idle tmux secretary panes without attaching.
   pi-secretary --herdr       Directly open/repair the active set in Herdr.
   pi-secretary-stats         Summarize secretary time and token usage.
+  pi-harness-feedback        Review the central normalized feedback feed.
+  pi-harness-feedback --repository PATH
+                             Filter harness feedback to one project.
 
 Recovery and maintenance:
   pi-restart                 Rebuild personal + secretary as desktop tmux.
@@ -132,6 +135,8 @@ Recovery and maintenance:
                              Review stale managed worktrees before cleanup.
   pi-sandbox-gc              Inspect stale Pi-owned containers and caches.
   pi-sandbox-gc --apply      Apply only the printed Pi-owned cleanup plan.
+  pi-harness-feedback --format markdown --include-reviewed
+                             Show reviewed and pending self-improvement feedback.
 
 Safety boundary:
   root, personal, secretary  Conversation roles and authority profiles.

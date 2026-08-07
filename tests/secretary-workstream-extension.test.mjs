@@ -1,8 +1,8 @@
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createJiti } from "../pi/npm/node_modules/jiti/lib/jiti.mjs";
+import { createExtensionJiti } from "./extension-jiti.mjs";
 
-const jiti = createJiti(import.meta.url);
+const jiti = createExtensionJiti(import.meta.url);
 const { default: secretaryExtension } = await jiti.import(
   "../pi/extensions/secretary/index.ts",
 );

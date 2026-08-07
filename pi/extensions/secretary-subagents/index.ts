@@ -18,14 +18,14 @@ import {
   ASYNC_DIR, RESULTS_DIR, SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_ASYNC_STARTED_EVENT,
   type Details, type SubagentState,
 } from "../../npm/node_modules/pi-subagents/src/shared/types.ts";
-import { actionAuthorization, actionTargetIsAuthorized, type ActionAuthorization } from "./lifecycle.ts";
+import { actionAuthorization, actionTargetIsAuthorized, actionWasAuthorized, type ActionAuthorization } from "./lifecycle.ts";
 import { addSecretaryUsage, emptySecretaryUsage, recordSecretarySessionStats, recordSecretarySubagentStats, secretaryUsage } from "./stats.ts";
 import { createNativeSupervisorChannel } from "../../npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts";
 
 type SafeAction = "list" | "doctor" | "status" | "interrupt" | "stop" | "resume" | "steer";
 const SAFE_ACTIONS = new Set<SafeAction>(["list", "doctor", "status", "interrupt", "stop", "resume", "steer"]);
 const READ_ONLY_ACTIONS = new Set<SafeAction>(["list", "doctor", "status"]);
-const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "secretary_git", "contact_supervisor", "intercom", "host_command"];
+const INVESTIGATOR_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "secretary_git", "contact_supervisor", "intercom", "host_command", "harness_feedback"];
 function getSubagentSessionRoot(parentSessionFile: string | null): string {
   const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
   if (parentSessionFile) {
@@ -68,7 +68,7 @@ function isReadOnlyAgent(agent: { acceptanceRole?: string; tools?: string[] }): 
   return !agent.tools.some((tool) => tool === "edit" || tool === "write" || tool === "subagent");
 }
 
-function hardenAgent<T extends { tools?: string[] }>(agent: T, gitExtension: string, autoContinueExtension: string, hostCommandExtension: string, webAccessExtension: string): T {
+function hardenAgent<T extends { tools?: string[] }>(agent: T, gitExtension: string, autoContinueExtension: string, fastModeExtension: string, hostCommandExtension: string, webAccessExtension: string, feedbackExtension: string): T {
   // Every eligible investigator gets the native parent-feedback channel even
   // when a custom agent omitted it from its frontmatter. The runtime registers
   // the tool for child sessions; keeping it in this strict allowlist makes the
@@ -79,7 +79,7 @@ function hardenAgent<T extends { tools?: string[] }>(agent: T, gitExtension: str
     tools,
     mcpDirectTools: [],
     extensions: [],
-    subagentOnlyExtensions: [gitExtension, autoContinueExtension, hostCommandExtension, webAccessExtension],
+    subagentOnlyExtensions: [gitExtension, autoContinueExtension, fastModeExtension, hostCommandExtension, webAccessExtension, feedbackExtension],
     inheritProjectContext: false,
     inheritSkills: false,
     output: undefined,
@@ -125,37 +125,6 @@ function rejected(message: string): { content: Array<{ type: "text"; text: strin
   };
 }
 
-function actionWasDenied(value: string, action: SafeAction): boolean {
-  const words = action === "list"
-    ? "list|show|enumerate"
-    : action === "doctor"
-      ? "doctor|diagnos(?:e|is)|health"
-      : action === "status"
-        ? "status|progress|state"
-        : action === "interrupt"
-          ? "interrupt|pause"
-          : action === "stop"
-            ? "stop|cancel|terminate"
-            : action === "resume"
-              ? "resume|continue"
-              : "steer|redirect|guide";
-  return new RegExp(`(?:^|[.!?,;]\\s*)[^.!?,;]{0,50}\\b(?:don't|do not|never|not|without|avoid|can't|cannot|shouldn't|should not)\\b[^.!?,;]{0,50}\\b(?:${words})\\b`).test(value) ||
-    new RegExp(`(?:^|[.!?,;]\\s*)[^.!?,;]{0,50}\\b(?:${words})\\b[^.!?,;]{0,40}\\b(?:not needed|unnecessary|not required)\\b`).test(value);
-}
-
-function actionWasAuthorized(value: string, action: SafeAction): boolean {
-  if (actionWasDenied(value, action)) return false;
-  if (action === "list") return /\b(?:list|show|enumerate)\b[\s\S]{0,80}\b(?:investigator|agent|subagent)s?\b|\b(?:investigator|agent|subagent)s?\b[\s\S]{0,80}\b(?:available|list)\b/.test(value);
-  if (action === "doctor") return /\b(?:doctor|diagnos(?:e|is)|health check)\b/.test(value);
-  if (action === "status") return /^\s*(?:status|progress|state)\b/i.test(value) ||
-    /\b(?:show|check|get|report|tell me|what is|give me)\b[\s\S]{0,40}\b(?:status|progress|state)\b|\b(?:status|progress|state)\b\s+(?:of|for|on)\b/.test(value);
-  const target = "run|investigator|agent|subagent|job|task|investigation|scout|research|child|it|them|that";
-  if (action === "interrupt") return /^\s*(?:interrupt|pause)\b/.test(value) || new RegExp(`\\b(?:interrupt|pause)\\b[\\s\\S]{0,50}\\b(?:${target})\\b`).test(value);
-  if (action === "stop") return /^\s*(?:stop|cancel|terminate)\b/.test(value) || new RegExp(`\\b(?:stop|cancel|terminate)\\b[\\s\\S]{0,50}\\b(?:${target})\\b`).test(value);
-  if (action === "resume") return /^\s*(?:resume|continue)\\b/.test(value) || new RegExp(`\\b(?:resume|continue)\\b[\\s\\S]{0,50}\\b(?:${target})\\b`).test(value);
-  return /^\s*(?:steer|redirect|guide)\\b/.test(value) || new RegExp(`\\b(?:steer|redirect|guide)\\b[\\s\\S]{0,50}\\b(?:${target})\\b`).test(value);
-}
-
 export default function secretarySubagents(pi: ExtensionAPI): void {
   // This file lives in the global extension tree for transactional installation,
   // but activates only in the explicitly constrained secretary launcher.
@@ -164,11 +133,15 @@ export default function secretarySubagents(pi: ExtensionAPI): void {
   const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
   const gitExtension = path.join(agentDir, "extensions", "secretary-investigator-git", "index.ts");
   const autoContinueExtension = path.join(agentDir, "extensions", "auto-continue", "index.ts");
+  const fastModeExtension = path.join(agentDir, "extensions", "fast-mode", "index.ts");
   const hostCommandExtension = path.join(agentDir, "extensions", "host-command", "index.ts");
+  const feedbackExtension = path.join(agentDir, "extensions", "harness-feedback", "index.ts");
   const webAccessExtension = path.join(agentDir, "npm", "node_modules", "pi-web-access", "index.ts");
   if (!fs.existsSync(gitExtension)) throw new Error("secretary investigator Git extension is unavailable");
   if (!fs.existsSync(autoContinueExtension)) throw new Error("auto-continue extension is unavailable");
+  if (!fs.existsSync(fastModeExtension)) throw new Error("fast-mode extension is unavailable");
   if (!fs.existsSync(hostCommandExtension)) throw new Error("host-command extension is unavailable");
+  if (!fs.existsSync(feedbackExtension)) throw new Error("harness-feedback extension is unavailable");
   if (!fs.existsSync(webAccessExtension)) throw new Error("pi-web-access extension is unavailable");
   // Investigator count is intentionally policy-free. Runtime concurrency is a
   // scheduler, not a workflow prescription, and remains caller-selectable.
@@ -212,9 +185,8 @@ export default function secretarySubagents(pi: ExtensionAPI): void {
     authorizedActions = new Map();
     if (event.source !== "extension") {
       const value = event.text.toLowerCase();
-      const authorization = actionAuthorization(value);
       for (const action of SAFE_ACTIONS) {
-        if (actionWasAuthorized(value, action)) authorizedActions.set(action, authorization);
+        if (actionWasAuthorized(value, action)) authorizedActions.set(action, actionAuthorization(value, action));
       }
     }
     return { action: "continue" };
@@ -269,7 +241,7 @@ export default function secretarySubagents(pi: ExtensionAPI): void {
       const discovered = discoverAgents(cwd, scope);
       return {
         ...discovered,
-        agents: discovered.agents.filter(isReadOnlyAgent).map((agent) => hardenAgent(agent, gitExtension, autoContinueExtension, hostCommandExtension, webAccessExtension)),
+        agents: discovered.agents.filter(isReadOnlyAgent).map((agent) => hardenAgent(agent, gitExtension, autoContinueExtension, fastModeExtension, hostCommandExtension, webAccessExtension, feedbackExtension)),
       };
     },
     allowMutatingManagementActions: false,
@@ -304,7 +276,10 @@ export default function secretarySubagents(pi: ExtensionAPI): void {
         if (!actionTargetIsAuthorized(action, params, authorization, state)) {
           return Promise.resolve(rejected(`Secretary subagent action '${action}' must target the run selected by the current user turn.`));
         }
-        authorizedActions.delete(action);
+        // Preserve explicitly multi-target authority for the rest of this user
+        // turn so "stop run A and run B" does not fail after the first call.
+        // Single/generic authority remains one-shot.
+        if (authorization.ids.length <= 1) authorizedActions.delete(action);
         if (action === "list") {
           const scope = params.agentScope === "user" || params.agentScope === "project" ? params.agentScope : "both";
           return Promise.resolve(listInvestigators(ctx.cwd, scope));

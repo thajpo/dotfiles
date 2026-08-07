@@ -5,6 +5,7 @@ import {
   cycleAgentIndex,
   extractActivePacket,
   explicitSessionMessage,
+  expandCompletionRecords,
   formatTaskPacket,
   normalizeMessages,
   projectInspectorState,
@@ -43,10 +44,15 @@ describe("observability core", () => {
   });
 
   it("bounds and redacts explicit display text", () => {
-    const text = boundedText("Bearer abcdefghijklmnop secret=super-secret-value sk-test_123456789 npm_12345678901234567890");    assert.doesNotMatch(text, /abcdefghijklmnop/);
+    const text = boundedText("Bearer abcdefghijklmnop secret=super-secret-value sk-test_123456789 npm_12345678901234567890");
+    assert.doesNotMatch(text, /abcdefghijklmnop/);
     assert.doesNotMatch(text, /super-secret-value/);
     assert.doesNotMatch(text, /sk-test_123456789/);
     assert.doesNotMatch(text, /npm_12345678901234567890/);
+    assert.equal(boundedText("Bearer abcdefghijklmnop"), "[redacted]");
+    assert.equal(boundedText("prefix sk_abcdefghijklmnop suffix"), "prefix [redacted] suffix");
+    assert.equal(boundedText("secret=abcdefgh"), "secret=[redacted]");
+    assert.equal(boundedText("safe\u001b]52;c;Y2xpcGJvYXJk\u0007 text\u202Espoof"), "safe]52;c;Y2xpcGJvYXJk textspoof");
     assert.ok(boundedText("x".repeat(100), 20).length <= 20);
   });
 
@@ -55,6 +61,53 @@ describe("observability core", () => {
     assert.ok(lines.some((line) => line.includes("Mode: build")));
     assert.ok(lines.some((line) => line.includes("Acceptance:")));
     assert.ok(lines.every((line) => !line.includes("super-secret-value")));
+
+    const ripLines = formatTaskPacket({
+      task_id: "rip-1",
+      mode: "rip",
+      learning: "light",
+      question: "Why is the task slow?",
+      environment: "Local fixture",
+      useful_evidence: ["trace.json"],
+      stop_condition: "One cause is reproduced",
+      current_hypotheses: ["Repeated scans"],
+      experiment_results: ["Capped scans are faster"],
+      remaining_uncertainty: ["Production scale"],
+    });
+    assert.ok(ripLines.includes("Environment: Local fixture"));
+    assert.ok(ripLines.includes("Current hypotheses:"));
+    assert.ok(ripLines.includes("  • Repeated scans"));
+    assert.ok(ripLines.includes("Experiment results:"));
+    assert.ok(ripLines.includes("Remaining uncertainty:"));
+
+    const majorLines = formatTaskPacket({
+      task_id: "major-1",
+      mode: "major",
+      learning: "light",
+      original_request: "Audit the harness",
+      program: {
+        desired_end_state: "Clean inheritance",
+        work_areas: ["Inspector", "child resources"],
+        dependency_order: ["map", "fix", "verify"],
+        completed_slices: ["Mapped sessions"],
+        current_slice: "Inspector correctness",
+        future_slices: ["Final review"],
+      },
+      decisions: [],
+      open_decisions: [],
+      evidence: { summaries: ["Runtime tests pass"], artifact_paths: ["tests/observability.test.mjs"] },
+      candidates: [{ candidate_id: "bounded", hypothesis: "Bound the scanner", decisive_evidence: ["Profile"] }],
+    });
+    assert.ok(majorLines.includes("Original request: Audit the harness"));
+    assert.ok(majorLines.includes("  Work areas:"));
+    assert.ok(majorLines.includes("    • Inspector"));
+    assert.ok(majorLines.includes("    • map"));
+    assert.ok(majorLines.includes("  Completed slices:"));
+    assert.ok(majorLines.includes("  Future slices:"));
+    assert.ok(majorLines.includes("  Summaries:"));
+    assert.ok(majorLines.includes("  Candidate 1:"));
+    assert.ok(majorLines.includes("    ID: bounded"));
+    assert.ok(majorLines.every((line) => !line.includes('["Inspector"')));
   });
 
   it("projects every run step and nested child into a selectable fleet", () => {
@@ -108,6 +161,30 @@ describe("observability core", () => {
     assert.ok(state.messages.some((message) => message.kind === "failure" && message.agent === "reviewer"));
   });
 
+  it("expands grouped async completions without losing child identity", () => {
+    const records = expandCompletionRecords({
+      id: "run-1",
+      sessionId: "session-1",
+      source: "async",
+      results: [
+        { agent: "scout", index: 0, status: "completed", summary: "mapped" },
+        { agent: "reviewer", index: 1, status: "failed", summary: "rejected" },
+      ],
+    });
+    assert.deepEqual(records.map((record) => ({
+      runId: record.runId,
+      sessionId: record.sessionId,
+      agent: record.agent,
+      index: record.index,
+      state: record.state,
+    })), [
+      { runId: "run-1", sessionId: "session-1", agent: "scout", index: 0, state: "completed" },
+      { runId: "run-1", sessionId: "session-1", agent: "reviewer", index: 1, state: "failed" },
+    ]);
+    assert.deepEqual(expandCompletionRecords({ runId: "single", agent: "worker", state: "complete" }).map((record) => record.agent), ["worker"]);
+    assert.deepEqual(expandCompletionRecords(null), []);
+  });
+
   it("filters session records to explicit non-reasoning content", () => {
     assert.equal(explicitSessionMessage({ message: { role: "system", content: "secret system prompt" } }), null);
     assert.deepEqual(explicitSessionMessage({ message: { role: "assistant", content: [{ type: "thinking", text: "private reasoning" }, { type: "text", text: "public result" }] } }), { role: "assistant", text: "public result" });
@@ -133,5 +210,7 @@ describe("observability core", () => {
     assert.equal(statusGlyph("failed"), "✗");
     assert.equal(statusGlyph("unknown"), "?");
     assert.equal(normalizeMessages([{ id: "1", kind: "instruction", text: "brief" }, { id: "1", kind: "result", text: "duplicate" }]).length, 1);
+    const malformedTime = normalizeMessages([{ id: "time", text: "bounded timestamp", ts: 1e300 }])[0].ts;
+    assert.doesNotThrow(() => new Date(malformedTime).toISOString());
   });
 });

@@ -195,7 +195,12 @@ def save_registry(path: Path, records: Iterable[dict[str, Any]]) -> None:
 
 def git(cwd: Path, *args: str, check: bool = True) -> str:
     environment = os.environ.copy()
-    environment.update({"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "PAGER": "cat"})
+    # -C/cwd must define repository identity. Inherited GIT_DIR/GIT_WORK_TREE
+    # can otherwise redirect durable root creation into an unrelated checkout.
+    for key in list(environment):
+        if key.startswith("GIT_"):
+            environment.pop(key)
+    environment.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "PAGER": "cat"})
     result = subprocess.run(["git", *args], cwd=str(cwd), env=environment, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if check and result.returncode:
@@ -419,7 +424,12 @@ def session_header(path: Path) -> dict[str, Any] | None:
     _lstat(path, directory=False)
     try:
         with path.open(encoding="utf-8") as stream:
-            for line in stream:
+            for _ in range(8):
+                line = stream.readline(64 * 1024 + 1)
+                if not line:
+                    return None
+                if len(line.encode("utf-8")) > 64 * 1024:
+                    return None
                 if not line.strip():
                     continue
                 value = json.loads(line)
@@ -797,9 +807,11 @@ def register_existing(agent_dir: Path, session_file_arg: str, profile: str, work
                 raise RootSessionError("root conversation id is already registered to another session file")
             if existing["profile"] != profile:
                 raise RootSessionError(f"root conversation already belongs to profile {existing['profile']}")
-            record.update({"worktree": str(worktree), "repository": str(repository) if repository else None,
-                           "repositoryId": repository_id or None, "objectFormat": object_format or None,
-                           "branch": branch or None, "status": "active", "updatedAt": now_iso()})
+            if existing.get("worktree") != str(worktree) or existing.get("repository") != (str(repository) if repository else None):
+                raise RootSessionError("root conversation is already bound to a different exact repository/worktree")
+            # The registry/controller binding is authoritative on re-registration;
+            # session-header cwd is only evidence and may not rebind it.
+            record.update({"status": "active", "updatedAt": now_iso()})
         if existing is None:
             records.append(record)
         save_registry(registry_path, records)

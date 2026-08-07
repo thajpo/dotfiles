@@ -1,0 +1,83 @@
+--- a/extensions/btw.ts
++++ b/extensions/btw.ts
+@@ -1,3 +1,7 @@
++import { existsSync } from "node:fs";
++import * as os from "node:os";
++import * as path from "node:path";
++
+ import {
+   buildSessionContext,
+   createAgentSession,
+@@ -5,7 +9,7 @@
+   createEditToolDefinition,
+   createReadToolDefinition,
+   createWriteToolDefinition,
+-  createExtensionRuntime,
++  DefaultResourceLoader,
+   SessionManager,
+   type AgentSession,
+   type AgentSessionEvent,
+@@ -174,24 +178,30 @@
+     .trim();
+ }
+ 
+-function createBtwResourceLoader(
++async function createBtwResourceLoader(
+   ctx: ExtensionCommandContext,
+   appendSystemPrompt: string[] = [BTW_SYSTEM_PROMPT],
+-): ResourceLoader {
+-  const extensionsResult = { extensions: [], errors: [], runtime: createExtensionRuntime() };
++): Promise<ResourceLoader> {
++  const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
++  const fastModeExtension = path.join(agentDir, "extensions", "fast-mode", "index.ts");
++  if (!existsSync(fastModeExtension)) {
++    throw new Error("BTW fast-mode extension is unavailable");
++  }
+   const systemPrompt = stripDynamicSystemPromptFooter(ctx.getSystemPrompt());
+-
+-  return {
+-    getExtensions: () => extensionsResult,
+-    getSkills: () => ({ skills: [], diagnostics: [] }),
+-    getPrompts: () => ({ prompts: [], diagnostics: [] }),
+-    getThemes: () => ({ themes: [], diagnostics: [] }),
+-    getAgentsFiles: () => ({ agentsFiles: [] }),
+-    getSystemPrompt: () => systemPrompt,
+-    getAppendSystemPrompt: () => appendSystemPrompt,
+-    extendResources: () => {},
+-    reload: async () => {},
+-  };
++  const loader = new DefaultResourceLoader({
++    cwd: ctx.cwd,
++    agentDir,
++    noExtensions: true,
++    additionalExtensionPaths: [fastModeExtension],
++    noSkills: true,
++    noPromptTemplates: true,
++    noThemes: true,
++    noContextFiles: true,
++    systemPrompt,
++    appendSystemPrompt,
++  });
++  await loader.reload();
++  return loader;
+ }
+ 
+ function createSandboxProxyTool(pi: ExtensionAPI, tool: ToolDefinition<any, any>): ToolDefinition<any, any> {
+@@ -1644,7 +1654,7 @@
+         createSandboxProxyTool(pi, createEditToolDefinition(ctx.cwd)),
+         createSandboxProxyTool(pi, createBashToolDefinition(ctx.cwd)),
+       ],
+-      resourceLoader: createBtwResourceLoader(ctx),
++      resourceLoader: await createBtwResourceLoader(ctx),
+     });
+ 
+     const { messages: seedMessages, sideThreadStartIndex } = buildBtwSeedState(ctx, pendingThread, mode, settings.model);
+@@ -2199,7 +2209,7 @@
+       modelRegistry: ctx.modelRegistry as AgentSession["modelRegistry"],
+       thinkingLevel: "off",
+       tools: [],
+-      resourceLoader: createBtwResourceLoader(ctx, [BTW_SUMMARIZE_SYSTEM_PROMPT]),
++      resourceLoader: await createBtwResourceLoader(ctx, [BTW_SUMMARIZE_SYSTEM_PROMPT]),
+     });
+ 
+     try {

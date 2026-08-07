@@ -1,0 +1,40 @@
+--- a/extensions/btw.ts
++++ b/extensions/btw.ts
+@@ -53,6 +53,7 @@
+   "If no main session messages are provided, treat this as a fully contextless tangent thread and rely only on the user's words plus your general instructions.",
+   "Focus on answering the user's side questions, helping them think through ideas, or planning next steps.",
+   "Do not act as if you need to continue unfinished work from the main session unless the user explicitly asks you to prepare something for injection back to it.",
++  "If you notice useful harness friction or an improvement opportunity, submit one bounded harness_feedback observation to the central Pi feed.",
+ ].join(" ");
+ 
+ const BTW_SUMMARIZE_SYSTEM_PROMPT =
+@@ -184,15 +185,19 @@
+ ): Promise<ResourceLoader> {
+   const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
+   const fastModeExtension = path.join(agentDir, "extensions", "fast-mode", "index.ts");
++  const harnessFeedbackExtension = path.join(agentDir, "extensions", "harness-feedback", "index.ts");
+   if (!existsSync(fastModeExtension)) {
+     throw new Error("BTW fast-mode extension is unavailable");
+   }
++  if (!existsSync(harnessFeedbackExtension)) {
++    throw new Error("BTW harness-feedback extension is unavailable");
++  }
+   const systemPrompt = stripDynamicSystemPromptFooter(ctx.getSystemPrompt());
+   const loader = new DefaultResourceLoader({
+     cwd: ctx.cwd,
+     agentDir,
+     noExtensions: true,
+-    additionalExtensionPaths: [fastModeExtension],
++    additionalExtensionPaths: [fastModeExtension, harnessFeedbackExtension],
+     noSkills: true,
+     noPromptTemplates: true,
+     noThemes: true,
+@@ -1647,7 +1652,7 @@
+       modelRegistry: ctx.modelRegistry as AgentSession["modelRegistry"],
+       thinkingLevel: settings.thinkingLevel,
+       // BTW tools are explicit proxies to the parent sandbox. There is no host fallback.
+-      tools: ["read", "bash", "edit", "write"],
++      tools: ["read", "bash", "edit", "write", "harness_feedback"],
+       customTools: [
+         createSandboxProxyTool(pi, createReadToolDefinition(ctx.cwd)),
+         createSandboxProxyTool(pi, createWriteToolDefinition(ctx.cwd)),

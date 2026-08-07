@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createJiti } from "../pi/npm/node_modules/jiti/lib/jiti.mjs";
+import { createExtensionJiti } from "./extension-jiti.mjs";
 
-const jiti = createJiti(import.meta.url);
+const jiti = createExtensionJiti(import.meta.url);
 const { default: workflowStateExtension } = await jiti.import(
   "../pi/extensions/workflow-state/index.ts",
 );

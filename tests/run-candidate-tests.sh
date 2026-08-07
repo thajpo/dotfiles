@@ -5,15 +5,28 @@ root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 temporary=$(mktemp -d)
 cleanup() { rm -rf "$temporary"; }
 trap cleanup EXIT
-mkdir -p "$temporary/npm"
+mkdir -p "$temporary/npm" "$temporary/packages"
+# Local first-party package dependencies resolve relative to the staged npm
+# prefix, so preserve the reviewed package provenance tree in the disposable
+# candidate root without touching installed node_modules.
+ln -s "$root/pi/packages/pi-sandbox-control" "$temporary/packages/pi-sandbox-control"
+ln -s "$root/pi/packages/pi-subagents-control" "$temporary/packages/pi-subagents-control"
 cp "$root/pi/npm/package.json" "$root/pi/npm/package-lock.json" "$temporary/npm/"
 # Always verify patches against a clean lockfile install. Reusing the checkout's
 # node_modules can silently test an obsolete, previously patched generation.
 npm ci --prefix "$temporary/npm" --legacy-peer-deps --no-audit --no-fund >/dev/null
 PI_CODING_AGENT_DIR="$temporary" "$root/scripts/pi-patch-subagents" >/dev/null
+# The full patch chain must also accept its own final hashes on repeat runs.
+PI_CODING_AGENT_DIR="$temporary" "$root/scripts/pi-patch-subagents" >/dev/null
 PI_TEST_PACKAGE_ROOT="$temporary/npm" \
   "$temporary/npm/node_modules/.bin/jiti" "$root/tests/pi-candidate-worktrees.mjs"
 PI_TEST_PACKAGE_ROOT="$temporary/npm" \
   "$temporary/npm/node_modules/.bin/jiti" "$root/tests/pi-child-lease.mjs"
+if [[ -f "$temporary/npm/node_modules/@kjrjay/pi-sandbox/index.ts" ]]; then
+  PI_TEST_PACKAGE_ROOT="$temporary/npm" \
+    node "$root/tests/pi-sandbox-source-regressions.mjs"
+else
+  printf '%s\n' 'SKIP legacy pi-sandbox source regressions: first-party package is authoritative'
+fi
 PI_TEST_PACKAGE_ROOT="$temporary/npm" \
   "$temporary/npm/node_modules/.bin/jiti" "$root/tests/pi-session-lease.mjs"

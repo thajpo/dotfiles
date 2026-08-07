@@ -1,0 +1,24 @@
+--- a/src/extension/fanout-child.ts
++++ b/src/extension/fanout-child.ts
+@@ -28,10 +28,11 @@
+ 	return p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
+ }
+ 
+-const WORKER_READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "contact_supervisor", "intercom", "host_command"];
++const WORKER_READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "contact_supervisor", "intercom", "host_command", "harness_feedback"];
+ const WORKER_READ_ONLY_ACCEPTANCE = { level: "none" as const, reason: "worker read-only fanout" };
+ const HOST_COMMAND_EXTENSION = path.join(getAgentDir(), "extensions", "host-command", "index.ts");
+ const WEB_ACCESS_EXTENSION = path.join(getAgentDir(), "npm", "node_modules", "pi-web-access", "index.ts");
++const HARNESS_FEEDBACK_EXTENSION = path.join(getAgentDir(), "extensions", "harness-feedback", "index.ts");
+ 
+ function workerReadOnlyFanout(): boolean {
+ 	return process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim() === "worker";
+@@ -48,7 +49,7 @@
+ 		tools: WORKER_READ_ONLY_TOOLS,
+ 		mcpDirectTools: [],
+ 		extensions: [],
+-		subagentOnlyExtensions: [HOST_COMMAND_EXTENSION, WEB_ACCESS_EXTENSION],
++		subagentOnlyExtensions: [HOST_COMMAND_EXTENSION, WEB_ACCESS_EXTENSION, HARNESS_FEEDBACK_EXTENSION],
+ 		inheritProjectContext: false,
+ 		inheritSkills: false,
+ 		output: undefined,

@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -80,6 +81,21 @@ def base_id_and_platform(item: dict[str, Any]) -> tuple[str, str]:
     return image_id, f"{os_name}/{architecture}"
 
 
+def immutable_local_base_reference(base_id: str) -> str:
+    match = re.fullmatch(r"sha256:([0-9a-f]{64})", base_id)
+    if not match:
+        raise RuntimeErrorContract("base image id is not a canonical sha256 digest")
+    reference = f"pi-runtime-base:{match.group(1)}"
+    # BuildKit does not accept a bare image ID in FROM; it interprets
+    # `sha256:<id>` as a registry repository. Pin a deterministic local tag to
+    # the inspected ID, then verify the tag before using it. Derived-image
+    # layer verification below still rejects any concurrent retargeting.
+    run(["docker", "tag", base_id, reference])
+    if str(inspect_image(reference).get("Id", "")) != base_id:
+        raise RuntimeErrorContract("local immutable base reference does not resolve to the inspected image id")
+    return reference
+
+
 def manifest_digest(paths: list[Path], base_id: str, platform_name: str) -> str:
     digest = hashlib.sha256()
     digest.update(CONTRACT_VERSION.encode())
@@ -111,7 +127,7 @@ def image_has_contract(image: str, key: str, base_id: str, base_layers: list[str
     )
 
 
-def build_image(worktree: Path, paths: list[Path], base_image: str, base_id: str,
+def build_image(worktree: Path, paths: list[Path], base_id: str,
                 base_layers: list[str], platform_name: str, key: str) -> str:
     final_image = f"pi-runtime-uv:{key[:32]}"
     if image_has_contract(final_image, key, base_id, base_layers):
@@ -126,14 +142,15 @@ def build_image(worktree: Path, paths: list[Path], base_image: str, base_id: str
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         if image_has_contract(final_image, key, base_id, base_layers):
             return final_image
+        base_reference = immutable_local_base_reference(base_id)
         with tempfile.TemporaryDirectory(prefix="pi-runtime-build-") as temporary:
             context = Path(temporary)
             for source in paths:
                 shutil.copyfile(source, context / source.name)
             copy_lines = "\n".join(f"COPY {path.name} /opt/pi/runtime-project/{path.name}" for path in paths)
-            # Build from the inspected immutable image ID, never the mutable
-            # tag that was used to discover it.
-            dockerfile = f"""FROM {base_id}
+            # Build from a verified local tag whose name is derived from the
+            # inspected immutable image ID, never the mutable discovery tag.
+            dockerfile = f"""FROM {base_reference}
 WORKDIR /opt/pi/runtime-project
 {copy_lines}
 RUN mkdir -p /opt/pi/env \\
@@ -197,7 +214,7 @@ def prepare(route_path: Path) -> dict[str, Any]:
     if not isinstance(base_layers, list) or not base_layers or not all(isinstance(layer, str) and layer for layer in base_layers):
         raise RuntimeErrorContract("base image metadata is missing immutable filesystem layers")
     key = manifest_digest(paths, base_id, platform_name)
-    image = build_image(worktree, paths, base_image, base_id, base_layers, platform_name, key)
+    image = build_image(worktree, paths, base_id, base_layers, platform_name, key)
     return {
         "provider": "uv",
         "mode": "derived-image",

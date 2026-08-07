@@ -155,9 +155,73 @@ fi
 
 mkdir -p "$PI_CONFIG_DIR"
 STAGING_DIR=$(mktemp -d "$PI_CONFIG_DIR/.install.XXXXXX")
-mkdir -p "$STAGING_DIR/npm" "$STAGING_DIR/control"
+mkdir -p "$STAGING_DIR/npm" "$STAGING_DIR/packages" "$STAGING_DIR/control"
+# npm's file:../packages dependencies intentionally remain relative links. Copy
+# the reviewed first-party trees into the disposable root before npm ci, then
+# activate that sibling root beside $PI_CONFIG_DIR/npm so those links survive.
+for package in pi-sandbox-control pi-subagents-control; do
+    source_package="$SCRIPT_DIR/pi/packages/$package"
+    [ -d "$source_package" ] && [ ! -L "$source_package" ] || {
+        echo "First-party npm package is missing or unsafe: $source_package" >&2
+        exit 1
+    }
+    cp -a -- "$source_package" "$STAGING_DIR/packages/"
+done
+python3 - "$STAGING_DIR" "$STAGING_DIR/packages/pi-sandbox-control" "$STAGING_DIR/packages/pi-subagents-control" <<'PY'
+from pathlib import Path
+import os
+import stat
+import sys
+
+root = Path(sys.argv[1]).resolve(strict=True)
+for raw in sys.argv[2:]:
+    package = Path(raw)
+    if package.is_symlink() or not package.is_dir():
+        raise SystemExit(f"staged first-party package is not a regular directory: {package}")
+    try:
+        package.resolve(strict=True).relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"staged first-party package escapes staging root: {package}") from exc
+    for entry in (package, *package.rglob("*")):
+        try:
+            entry.absolute().relative_to(root)
+            info = entry.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                entry.resolve(strict=True).relative_to(root)
+            elif not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                raise SystemExit(f"special file in staged first-party package: {entry}")
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"unsafe staged first-party package entry: {entry}") from exc
+PY
 cp "$SCRIPT_DIR/pi/npm/package.json" "$SCRIPT_DIR/pi/npm/package-lock.json" "$STAGING_DIR/npm/"
 npm ci --prefix "$STAGING_DIR/npm" --legacy-peer-deps --no-audit --no-fund
+# npm may materialize a local dependency as a relative symlink. It must remain
+# present, resolvable, and rooted in the reviewed package tree before staging
+# can continue.
+python3 - "$STAGING_DIR" "$STAGING_DIR/npm/node_modules/pi-sandbox-control" "$STAGING_DIR/npm/node_modules/pi-subagents" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]).resolve(strict=True)
+allowed = {
+    (root / "packages" / "pi-sandbox-control").resolve(strict=True),
+    (root / "packages" / "pi-subagents-control").resolve(strict=True),
+}
+for raw in sys.argv[2:]:
+    dependency = Path(raw)
+    if not dependency.exists() and not dependency.is_symlink():
+        raise SystemExit(f"npm local dependency is missing after clean install: {dependency}")
+    try:
+        resolved = dependency.resolve(strict=True)
+    except OSError as exc:
+        raise SystemExit(f"npm local dependency is broken: {dependency}") from exc
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise SystemExit(f"npm local dependency escapes staging root: {dependency} -> {resolved}") from exc
+    if resolved not in allowed and not any(resolved.is_relative_to(item) for item in allowed):
+        raise SystemExit(f"npm local dependency has unexpected provenance: {dependency} -> {resolved}")
+PY
 # Pi extensions declare the SDK as peer dependencies; expose the exact SDK
 # packages owned by the dedicated core to the isolated extension tree. Without
 # this, jiti resolves an extension from ~/.pi/agent/npm but cannot see the
@@ -337,6 +401,11 @@ if [ -n "$MACHINE_PROFILE" ]; then
     install -m 600 "$MACHINE_PROFILE" "$STAGING_DIR/control/machine.env"
 fi
 for tree in extensions agents prompts themes; do cp -a "$SCRIPT_DIR/pi/$tree" "$STAGING_DIR/control/$tree"; done
+# Install the controller as a self-contained Python package under the stable
+# activated helper root. The bin launcher selects this artifact when installed
+# and only uses scripts.pi_control for an explicit repository checkout.
+cp -a "$SCRIPT_DIR/scripts/pi_control" "$STAGING_DIR/control/pi_control"
+install -m 755 "$SCRIPT_DIR/bin/pi-control" "$STAGING_DIR/control/pi-control"
 # npm and copied extension trees can inherit group-writable modes from the
 # staging filesystem; never activate a writable installed runtime tree.
 chmod -R go-w "$STAGING_DIR"
@@ -349,17 +418,18 @@ agent_dir = sys.argv[2]
 for path in agents_dir.glob("*.md"):
     path.write_text(path.read_text(encoding="utf-8").replace("__PI_AGENT_DIR__", agent_dir), encoding="utf-8")
 PY
-ln -s "$SCRIPT_DIR/agent/AGENTS.md" "$STAGING_DIR/control/AGENTS.md"
+install -m 600 "$SCRIPT_DIR/agent/AGENTS.md" "$STAGING_DIR/control/AGENTS.md"
 install -m 755 "$SCRIPT_DIR/scripts/pi-workspace.py" "$STAGING_DIR/control/pi-workspace.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-runtime.py" "$STAGING_DIR/control/pi-runtime.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-sandbox-gc.py" "$STAGING_DIR/control/pi-sandbox-gc.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-control.py" "$STAGING_DIR/control/pi-secretary-control.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-root-session.py" "$STAGING_DIR/control/pi-root-session.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-stats.py" "$STAGING_DIR/control/pi-secretary-stats.py"
+install -m 755 "$SCRIPT_DIR/scripts/pi-harness-feedback.py" "$STAGING_DIR/control/pi-harness-feedback.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-herdr.py" "$STAGING_DIR/control/pi-secretary-herdr.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-personal-herdr.py" "$STAGING_DIR/control/pi-personal-herdr.py"
 cp -a "$SCRIPT_DIR/skills/project-status" "$STAGING_DIR/control/project-status-skill"
-for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-personal-herdr pi-secretary pi-secretary-herdr pi-herdr-workstream pi-root-session pi-secretary-stats pi-review-agent pi-sandbox-gc pi-restart; do
+for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-personal-herdr pi-secretary pi-secretary-herdr pi-herdr-workstream pi-root-session pi-secretary-stats pi-harness-feedback pi-review-agent pi-sandbox-gc pi-restart; do
     install -m 755 "$SCRIPT_DIR/bin/$launcher" "$STAGING_DIR/control/$launcher"
 done
 python3 - "$STAGING_DIR/control/pi" "$STAGING_DIR/control/pi-host" <<'PY'
@@ -377,6 +447,50 @@ for name in sys.argv[1:]:
     path.write_text(text)
     path.chmod(0o755)
 PY
+# Record the complete disposable generation only after every staged launcher
+# and path rewrite is final. The manifest digest is the staged build identity;
+# it intentionally excludes the random staging path and is never accepted as
+# proof of live activation by itself.
+STAGED_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$DOCKER_STAGING_IMAGE")
+PI_STAGE_REPOSITORY="$SCRIPT_DIR" PI_STAGE_IMAGE_ID="$STAGED_IMAGE_ID" python3 - "$STAGING_DIR" "$STAGING_DIR/control/build-manifest.json" <<'PY'
+import os
+import sys
+from pathlib import Path
+from scripts.pi_control.staged_build import create_build_manifest, load_build_manifest, write_build_manifest
+
+staging_root = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+manifest = create_build_manifest(
+    staging_root,
+    repository=os.environ["PI_STAGE_REPOSITORY"],
+    manifest_path=destination,
+    require_repository_metadata=True,
+    metadata={
+        "piVersion": Path(os.environ["PI_STAGE_REPOSITORY"]).joinpath("pi/PI_VERSION").read_text(encoding="utf-8").strip(),
+        "imageId": os.environ["PI_STAGE_IMAGE_ID"],
+        "installer": "install.sh",
+    },
+)
+# Verify the complete staged file/symlink set before writing the envelope, then
+# load the serialized envelope and verify again with only the envelope itself
+# excluded. This rejects omissions, extras, traversal, and special files.
+manifest.verify_files(staging_root)
+saved = write_build_manifest(manifest, destination)
+loaded = load_build_manifest(destination)
+loaded.verify_files(staging_root, exclude_paths=[destination])
+print(saved.build_id)
+PY
+if [ -n "${PI_EXPECTED_BUILD_MANIFEST:-}" ]; then
+    python3 - "$STAGING_DIR/control/build-manifest.json" "$PI_EXPECTED_BUILD_MANIFEST" <<'PY'
+import sys
+from scripts.pi_control.staged_build import load_build_manifest
+
+actual = load_build_manifest(sys.argv[1])
+expected = load_build_manifest(sys.argv[2])
+if actual.digest != expected.digest or actual.build_id != expected.build_id or actual.payload != expected.payload:
+    raise SystemExit("staged build manifest does not match PI_EXPECTED_BUILD_MANIFEST")
+PY
+fi
 
 INSTALL_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ).$$
 OLD_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$FINAL_IMAGE" 2>/dev/null || true)
@@ -418,6 +532,8 @@ honor_pending_signal
 [ -z "$CORE_STAGING" ] || { activate_path "$CORE_STAGING" "$PI_CORE_DIR"; CORE_STAGING=""; }
 activate_path "$POLICY_STAGING" "$POLICY_PATH"
 POLICY_STAGING=""
+activate_path "$STAGING_DIR/control/build-manifest.json" "$PI_CONFIG_DIR/control-build-manifest.json"
+activate_path "$STAGING_DIR/packages" "$PI_CONFIG_DIR/packages"
 activate_path "$STAGING_DIR/npm" "$PI_CONFIG_DIR/npm"
 for config in settings.json keybindings.json pi-goal.json pi-chrome-devtools.json pi-plan-mode.json pi-statusline.json pr-review.json AGENTS.md; do
     activate_path "$STAGING_DIR/control/$config" "$PI_CONFIG_DIR/$config"
@@ -429,6 +545,8 @@ activate_path "$STAGING_DIR/control/pi-sandbox-gc.py" "$HOME/.local/share/pi/con
 activate_path "$STAGING_DIR/control/pi-secretary-control.py" "$HOME/.local/share/pi/control/pi-secretary-control.py"
 activate_path "$STAGING_DIR/control/pi-root-session.py" "$HOME/.local/share/pi/control/pi-root-session.py"
 activate_path "$STAGING_DIR/control/pi-secretary-stats.py" "$HOME/.local/share/pi/control/pi-secretary-stats.py"
+activate_path "$STAGING_DIR/control/pi-harness-feedback.py" "$HOME/.local/share/pi/control/pi-harness-feedback.py"
+activate_path "$STAGING_DIR/control/pi_control" "$HOME/.local/share/pi/control/pi_control"
 activate_path "$STAGING_DIR/control/pi-secretary-herdr.py" "$HOME/.local/share/pi/control/pi-secretary-herdr.py"
 activate_path "$STAGING_DIR/control/pi-personal-herdr.py" "$HOME/.local/share/pi/control/pi-personal-herdr.py"
 if [ -n "$MACHINE_PROFILE" ]; then
@@ -438,9 +556,124 @@ if [ -n "$MACHINE_PROFILE" ]; then
 fi
 skill_rollback_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pi/rollback/skills"
 activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status" "$skill_rollback_dir"
-for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-personal-herdr pi-secretary pi-secretary-herdr pi-herdr-workstream pi-root-session pi-secretary-stats pi-review-agent pi-sandbox-gc pi-restart; do
+for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-personal-herdr pi-secretary pi-secretary-herdr pi-herdr-workstream pi-root-session pi-secretary-stats pi-harness-feedback pi-review-agent pi-sandbox-gc pi-restart; do
     activate_path "$STAGING_DIR/control/$launcher" "$HOME/.local/bin/$launcher"
 done
+activate_path "$STAGING_DIR/control/pi-control" "$HOME/.local/bin/pi-control"
+
+# Validate the activated generation before the commit point. The projection is
+# made from the actual active files (hard links where possible), so manifest
+# verification covers every split activation target rather than only IDs.
+python3 - "$PI_CONFIG_DIR/control-build-manifest.json" "$PI_CONFIG_DIR" "$HOME" "$MACHINE_CONFIG_PATH" "$STAGING_DIR" <<'PY'
+from pathlib import Path
+import os
+import shutil
+import stat
+import sys
+import tempfile
+
+from scripts.pi_control.staged_build import load_build_manifest
+
+manifest_path, pi_config, home, machine_config, staging = map(Path, sys.argv[1:])
+manifest = load_build_manifest(manifest_path)
+pi_config = pi_config.resolve(strict=True)
+home = home.resolve(strict=True)
+staging = staging.resolve(strict=True)
+control_root = home / ".local" / "share" / "pi" / "control"
+local_bin = home / ".local" / "bin"
+policy_path = home / ".config" / "pi" / "repository-policy.json"
+machine_config = Path(machine_config)
+
+package_root = pi_config / "packages"
+if package_root.is_symlink() or not package_root.is_dir() or control_root.is_symlink() or not control_root.is_dir():
+    raise SystemExit("activated package or controller root is missing or symlinked")
+allowed_packages = {
+    (package_root / "pi-sandbox-control").resolve(strict=True),
+    (package_root / "pi-subagents-control").resolve(strict=True),
+}
+for package in sorted(allowed_packages):
+    if package.is_symlink() or not package.is_dir():
+        raise SystemExit(f"activated first-party package is not a regular directory: {package}")
+    try:
+        package.relative_to(package_root.resolve(strict=True))
+    except ValueError as exc:
+        raise SystemExit(f"activated first-party package escapes its root: {package}") from exc
+    for entry in (package, *package.rglob("*")):
+        info = entry.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            try:
+                entry.resolve(strict=True).relative_to(package_root.resolve(strict=True))
+            except (OSError, ValueError) as exc:
+                raise SystemExit(f"activated first-party package has an unsafe symlink: {entry}") from exc
+        elif not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+            raise SystemExit(f"special file in activated first-party package: {entry}")
+
+for name, expected in {
+    "pi-sandbox-control": package_root / "pi-sandbox-control",
+    "pi-subagents": package_root / "pi-subagents-control",
+}.items():
+    dependency = pi_config / "npm" / "node_modules" / name
+    try:
+        resolved = dependency.resolve(strict=True)
+        resolved.relative_to(expected.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"activated npm dependency has invalid provenance: {dependency}") from exc
+
+configs = {"settings.json", "keybindings.json", "pi-goal.json", "pi-chrome-devtools.json", "pi-plan-mode.json", "pi-statusline.json", "pr-review.json", "AGENTS.md"}
+helpers = {"pi-workspace.py", "pi-runtime.py", "pi-sandbox-gc.py", "pi-secretary-control.py", "pi-root-session.py", "pi-secretary-stats.py", "pi-harness-feedback.py", "pi-secretary-herdr.py", "pi-personal-herdr.py"}
+launchers = {"pi", "pi-start", "pi-help-custom", "pi-host", "pidev", "pi-tmux-session", "pisec", "pi-personal", "pi-personal-herdr", "pi-secretary", "pi-secretary-herdr", "pi-herdr-workstream", "pi-root-session", "pi-secretary-stats", "pi-harness-feedback", "pi-review-agent", "pi-sandbox-gc", "pi-restart", "pi-control"}
+
+def active_path(relative: str) -> Path:
+    if relative.startswith("npm/"):
+        return pi_config / relative
+    if relative.startswith("packages/"):
+        return pi_config / relative
+    if not relative.startswith("control/"):
+        raise SystemExit(f"manifest path is outside known activation surfaces: {relative}")
+    suffix = relative.removeprefix("control/")
+    if suffix == "repository-policy.json":
+        return policy_path
+    if suffix == "machine.env":
+        return machine_config
+    if suffix in configs:
+        return pi_config / suffix
+    if suffix.startswith(("extensions/", "agents/", "prompts/", "themes/")):
+        return pi_config / suffix
+    if suffix == "project-status-skill" or suffix.startswith("project-status-skill/"):
+        return pi_config / "skills" / "project-status" / suffix.removeprefix("project-status-skill/")
+    if suffix == "pi_control" or suffix.startswith("pi_control/") or suffix in helpers:
+        return control_root / suffix
+    if suffix in launchers:
+        return local_bin / suffix
+    raise SystemExit(f"manifest path has no activation target: {relative}")
+
+projection = Path(tempfile.mkdtemp(prefix=".post-verify.", dir=staging))
+try:
+    for entry in manifest.payload["files"]:
+        relative = entry["path"]
+        target = active_path(relative)
+        if not target.exists() and not target.is_symlink():
+            raise SystemExit(f"activated manifest path is missing: {target}")
+        projected = projection / relative
+        projected.parent.mkdir(parents=True, exist_ok=True)
+        if entry["kind"] == "file":
+            if target.is_symlink() or not target.is_file():
+                raise SystemExit(f"activated manifest file is not regular: {target}")
+            try:
+                os.link(target, projected)
+            except OSError:
+                shutil.copyfile(target, projected)
+                os.chmod(projected, stat.S_IMODE(target.stat().st_mode))
+        elif entry["kind"] == "symlink":
+            if not target.is_symlink():
+                raise SystemExit(f"activated manifest symlink is not a symlink: {target}")
+            os.symlink(os.readlink(target), projected)
+        else:
+            raise SystemExit(f"unexpected manifest entry kind: {entry['kind']}")
+    manifest.verify_files(projection)
+finally:
+    shutil.rmtree(projection, ignore_errors=True)
+PY
 
 # All active paths now form a complete generation. Switch back to immediate
 # signal handling before the commit point so no pending signal is discarded.

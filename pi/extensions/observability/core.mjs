@@ -19,11 +19,11 @@ export const MAX_AGENTS = 128;
 export const MAX_MESSAGES = 800;
 
 const SECRET_PATTERNS = [
-  /\b(?:sk|rk|pk|ghp|gho|ghs|github_pat|glpat|npm|xoxb|xoxp)_[A-Za-z0-9_-]{8,}\b/g,
-  /\b(?:sk|rk|pk|ghp|gho|ghs|github_pat|glpat|xoxb|xoxp)-[A-Za-z0-9_-]{8,}\b/g,
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi,
-  /-----BEGIN [^-]+ PRIVATE KEY-----[\s\S]*?-----END [^-]+ PRIVATE KEY-----/g,
-  /(\b(?:password|passwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)/gi,
+  { pattern: /\b(?:sk|rk|pk|ghp|gho|ghs|github_pat|glpat|npm|xoxb|xoxp)_[A-Za-z0-9_-]{8,}\b/g, preservePrefix: false },
+  { pattern: /\b(?:sk|rk|pk|ghp|gho|ghs|github_pat|glpat|xoxb|xoxp)-[A-Za-z0-9_-]{8,}\b/g, preservePrefix: false },
+  { pattern: /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, preservePrefix: false },
+  { pattern: /-----BEGIN [^-]+ PRIVATE KEY-----[\s\S]*?-----END [^-]+ PRIVATE KEY-----/g, preservePrefix: false },
+  { pattern: /(\b(?:password|passwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)/gi, preservePrefix: true },
 ];
 
 /** @param {unknown} value @param {number} [max] */
@@ -34,10 +34,15 @@ export function boundedText(value, max = MAX_TEXT_CHARS) {
   else {
     try { text = JSON.stringify(value); } catch { text = String(value); }
   }
-  text = String(text).replaceAll("\u0000", "");
-  for (const pattern of SECRET_PATTERNS) {
+  // Child output and persisted status are untrusted display data. Preserve
+  // ordinary whitespace, but remove terminal control/bidi sequences before a
+  // TUI renderer can interpret them.
+  text = String(text)
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/g, "");
+  for (const { pattern, preservePrefix } of SECRET_PATTERNS) {
     pattern.lastIndex = 0;
-    text = text.replace(pattern, (_match, prefix) => `${prefix ?? ""}[redacted]`);
+    text = text.replace(pattern, (_match, prefix) => `${preservePrefix && typeof prefix === "string" ? prefix : ""}[redacted]`);
   }
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1))}…`;
@@ -90,59 +95,89 @@ export function formatTaskPacket(packet) {
   if (!packet || typeof packet !== "object") return ["No active task packet.", "", "Use task_packet to set one for this session."];
   const value = /** @type {Record<string, unknown>} */ (packet);
   const lines = [];
-  const scalar = [
+  /** @param {string} label @param {unknown} item @param {string} [indent] */
+  const pushText = (label, item, indent = "") => {
+    if (typeof item !== "string" || item === "") return;
+    lines.push(`${indent}${label}: ${boundedText(item)}`);
+  };
+  /** @param {string} label @param {unknown} item @param {string} [indent] */
+  const pushList = (label, item, indent = "") => {
+    if (!Array.isArray(item) || item.length === 0) return;
+    lines.push(`${indent}${label}:`);
+    for (const entry of item.slice(0, MAX_PACKET_ITEMS)) lines.push(`${indent}  • ${boundedText(entry)}`);
+  };
+
+  for (const [label, item] of [
     ["Task ID", value.task_id],
     ["Mode", value.mode],
     ["Learning", value.learning],
+    ["Original request", value.original_request],
     ["Goal", value.goal],
-    ["Intended behavior", value.intended_behavior],
-    ["Unchanged behavior", value.unchanged_behavior],
-    ["Affected surfaces", value.affected_surfaces],
-    ["Boundaries", value.boundaries],
     ["Current interpretation", value.current_interpretation],
     ["Current slice", value.current_slice],
     ["Question", value.question],
+    ["Environment", value.environment],
     ["Stop condition", value.stop_condition],
-    ["Desired end state", value.desired_end_state],
-    ["Unresolved decisions", value.open_decisions],
-  ];
-  for (const [label, item] of scalar) {
-    if (item === undefined || item === null || item === "") continue;
-    if (Array.isArray(item)) {
-      lines.push(`${label}:`);
-      for (const entry of item.slice(0, MAX_PACKET_ITEMS)) lines.push(`  • ${boundedText(entry)}`);
-    } else {
-      lines.push(`${label}: ${boundedText(item)}`);
-    }
-  }
-  const listFields = [
+    ["Intended behavior", value.intended_behavior],
+    ["Unchanged behavior", value.unchanged_behavior],
+  ]) pushText(label, item);
+
+  for (const [label, item] of [
     ["Constraints", value.constraints],
-    ["Acceptance", value.acceptance],
+    ["Affected surfaces", value.affected_surfaces],
     ["Decisions", value.decisions],
+    ["Boundaries", value.boundaries],
+    ["Acceptance", value.acceptance],
+    ["Open decisions", value.open_decisions],
     ["Useful evidence", value.useful_evidence],
-    ["Work areas", value.work_areas],
-    ["Invariants", value.invariants],
-    ["Results", value.results],
-    ["Evidence", value.evidence],
-  ];
-  for (const [label, item] of listFields) {
-    if (!Array.isArray(item) || item.length === 0) continue;
-    lines.push(`${label}:`);
-    for (const entry of item.slice(0, MAX_PACKET_ITEMS)) lines.push(`  • ${boundedText(entry)}`);
+    ["Current hypotheses", value.current_hypotheses],
+    ["Experiment results", value.experiment_results],
+    ["Remaining uncertainty", value.remaining_uncertainty],
+  ]) pushList(label, item);
+
+  if (value.evidence && typeof value.evidence === "object" && !Array.isArray(value.evidence)) {
+    const evidence = /** @type {Record<string, unknown>} */ (value.evidence);
+    lines.push("Evidence:");
+    pushList("Summaries", evidence.summaries, "  ");
+    pushList("Artifact paths", evidence.artifact_paths, "  ");
   }
+
   if (value.program && typeof value.program === "object" && !Array.isArray(value.program)) {
     const program = /** @type {Record<string, unknown>} */ (value.program);
     lines.push("Program:");
-    for (const [label, field] of [
-      ["Desired end state", program.desired_end_state],
-      ["Work areas", program.work_areas],
-      ["Dependency order", program.dependency_order],
-      ["Current slice", program.current_slice],
-    ]) {
-      if (field === undefined || field === null || field === "") continue;
-      lines.push(`  ${label}: ${boundedText(field)}`);
-    }
+    pushText("Desired end state", program.desired_end_state, "  ");
+    pushList("Work areas", program.work_areas, "  ");
+    pushList("Dependency order", program.dependency_order, "  ");
+    pushList("Completed slices", program.completed_slices, "  ");
+    pushText("Current slice", program.current_slice, "  ");
+    pushList("Future slices", program.future_slices, "  ");
   }
+
+  if (Array.isArray(value.candidates) && value.candidates.length > 0) {
+    lines.push("Candidates:");
+    value.candidates.slice(0, MAX_PACKET_ITEMS).forEach((candidate, index) => {
+      if (typeof candidate === "string") {
+        lines.push(`  • ${boundedText(candidate)}`);
+        return;
+      }
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return;
+      const item = /** @type {Record<string, unknown>} */ (candidate);
+      lines.push(`  Candidate ${index + 1}:`);
+      for (const [label, field] of [
+        ["ID", item.candidate_id],
+        ["Hypothesis", item.hypothesis],
+        ["Base commit", item.base_commit],
+        ["Result", item.result],
+        ["Decisive evidence", item.decisive_evidence],
+        ["Useful pieces", item.useful_pieces],
+        ["Superseding candidate", item.superseding_candidate],
+      ]) {
+        if (Array.isArray(field)) pushList(label, field, "    ");
+        else pushText(label, field, "    ");
+      }
+    });
+  }
+
   return lines.length ? lines : ["Active task packet has no displayable fields."];
 }
 
@@ -160,7 +195,9 @@ function messageKind(value) {
 
 /** @param {unknown} value */
 function finiteTime(value, fallback) {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  // ECMAScript Date rejects values outside this range. Clamping here keeps a
+  // malformed child timestamp from crashing Inspector rendering.
+  return typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= 8.64e15 ? value : fallback;
 }
 
 /**
@@ -200,6 +237,33 @@ export function explicitSessionMessage(value) {
   }
   const text = boundedText(parts.join("\n").trim());
   return text ? { role, text } : null;
+}
+
+/**
+ * Expand grouped completion events into one record per child while preserving
+ * the parent run/session identity. Foreground completion events already arrive
+ * as one child and therefore pass through unchanged.
+ * @param {unknown} value
+ * @returns {Array<Record<string, unknown>>}
+ */
+export function expandCompletionRecords(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const parent = /** @type {Record<string, unknown>} */ (value);
+  if (!Array.isArray(parent.results) || parent.results.length === 0) return [parent];
+  const runId = typeof parent.runId === "string" ? parent.runId : typeof parent.id === "string" ? parent.id : undefined;
+  return parent.results.flatMap((candidate, position) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+    const child = /** @type {Record<string, unknown>} */ (candidate);
+    const childState = typeof child.state === "string" ? child.state : typeof child.status === "string" ? child.status : undefined;
+    return [{
+      ...parent,
+      ...child,
+      ...(runId ? { runId } : {}),
+      index: typeof child.index === "number" ? child.index : position,
+      ...(childState ? { state: childState } : {}),
+      results: undefined,
+    }];
+  });
 }
 
 /** @param {unknown} message @param {number} fallback */
@@ -399,11 +463,16 @@ function projectAgents(runs, runtimeAgents, instructions) {
       });
     }
   }
-  agents.sort((left, right) => {
+  const uniqueAgents = [...agents.reduce((byKey, agent) => {
+    const previous = byKey.get(agent.key);
+    byKey.set(agent.key, previous ? { ...previous, ...agent } : agent);
+    return byKey;
+  }, new Map()).values()];
+  uniqueAgents.sort((left, right) => {
     const active = (status) => status === "running" || status === "queued" || status === "pending";
     return Number(active(right.status)) - Number(active(left.status)) || right.updatedAt - left.updatedAt || left.key.localeCompare(right.key);
   });
-  return agents.slice(0, MAX_AGENTS);
+  return uniqueAgents.slice(0, MAX_AGENTS);
 }
 
 /**
@@ -461,6 +530,7 @@ export function reduceInspectorKey(value) {
   if (key === "1" || key.toLowerCase() === "t") return { type: "tab", tab: "task" };
   if (key === "2" || key.toLowerCase() === "f") return { type: "tab", tab: "fleet" };
   if (key === "3" || key.toLowerCase() === "m") return { type: "tab", tab: "messages" };
+  if (key === "4" || key.toLowerCase() === "c") return { type: "tab", tab: "control" };
   if (key.toLowerCase() === "a") return { type: "all-messages" };
   if (key.toLowerCase() === "v") return { type: "transcript" };
   if (key.toLowerCase() === "r") return { type: "refresh" };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -21,6 +21,25 @@ function routeFixture() {
   mkdirSync(path.join(root, "subagent-sandbox-leases", routeKey), { recursive: true, mode: 0o700 });
   return { root, route, routeKey };
 }
+
+test("child lease repairs a private root before validating its mode", { skip: typeof acquireSandboxChildLease !== "function" }, () => {
+  const { root, route, routeKey } = routeFixture();
+  const leaseRoot = path.join(root, "subagent-sandbox-leases", routeKey);
+  chmodSync(leaseRoot, 0o755);
+  const previous = process.env.PI_TASK_ROUTE_FILE;
+  process.env.PI_TASK_ROUTE_FILE = route;
+  let handle;
+  try {
+    handle = acquireSandboxChildLease({ runId: "mode-repair", sessionId: "test-session", source: "async" });
+    assert.ok(handle);
+    assert.equal(statSync(leaseRoot).mode & 0o777, 0o700);
+  } finally {
+    handle?.release();
+    if (previous === undefined) delete process.env.PI_TASK_ROUTE_FILE;
+    else process.env.PI_TASK_ROUTE_FILE = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("child lease rejects malformed live parent transition without reclaiming it", { skip: typeof acquireSandboxChildLease !== "function" }, () => {
   const { root, route, routeKey } = routeFixture();

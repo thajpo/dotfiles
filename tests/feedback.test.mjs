@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createJiti } from "../pi/npm/node_modules/jiti/lib/jiti.mjs";
+import { createExtensionJiti } from "./extension-jiti.mjs";
 
-const jiti = createJiti(import.meta.url);
+const jiti = createExtensionJiti(import.meta.url);
 const supervisor = await jiti.import(
   "../pi/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts",
 );
@@ -13,6 +13,8 @@ const supervisor = await jiti.import(
 const ENV_NAMES = [
   "PI_CODING_AGENT_DIR",
   "PI_AGENT_FEEDBACK_RAW",
+  "PI_HARNESS_PROJECT_ID",
+  "PI_HARNESS_REPOSITORY",
   "PI_SECRETARY_PROJECT_ID",
   "PI_WORKSTREAM_PROJECT_ID",
   "PI_WORKSTREAM_ID",
@@ -101,7 +103,13 @@ describe("native supervisor feedback persistence", () => {
     assert.ok(contact);
     await contact.execute("call", {
       reason: "progress_update",
-      message: 'AGENT_FEEDBACK {"AGENT_FEEDBACK":{"schema":"agent-feedback.v1","kind":"risk","title":"Fixture risk","evidence":["bounded evidence"]}}',
+      message: `AGENT_FEEDBACK ${JSON.stringify({ AGENT_FEEDBACK: {
+        schema: "agent-feedback.v1",
+        kind: "risk",
+        title: "Fixture \u001b]52;c;Y2xpcGJvYXJk\u0007 risk",
+        evidence: ["bounded evidence"],
+        recommendation: "😀".repeat(5000),
+      } })}`,
     }, new AbortController().signal);
 
     const files = fs.readdirSync(recordsRoot(agentDir));
@@ -112,6 +120,8 @@ describe("native supervisor feedback persistence", () => {
     assert.equal(initial.reason, "progress_update");
     assert.equal(initial.form.schema, "agent-feedback.v1");
     assert.equal(initial.form.kind, "risk");
+    assert.doesNotMatch(initial.form.title, /[\u001b\u0007]/);
+    assert.ok(Buffer.byteLength(initial.form.recommendation, "utf8") <= 4096);
     assert.equal(initial.source.agent, "scout");
     assert.equal(initial.source.runId, runId);
     assert.equal(initial.source.projectId, "a".repeat(64));
