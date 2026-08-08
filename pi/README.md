@@ -1,5 +1,14 @@
 # Pi configuration
 
+## Active system
+
+The current implementation target is the fresh Pi system described in
+[`PI_GREENFIELD_IMPLEMENTATION_PLAN.md`](../PI_GREENFIELD_IMPLEMENTATION_PLAN.md).
+It uses `~/.local/share/pi-system/`, `~/.local/state/pi-system/`, and
+`~/.local/share/pi-system-work/`; it does not adopt historical controller
+state. The old harness remains available until staged acceptance and rollback
+proof pass.
+
 This directory contains the reproducible, non-secret Pi harness:
 
 - Pi `0.83.0` and exact npm package pins;

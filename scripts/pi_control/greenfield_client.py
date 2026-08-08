@@ -20,6 +20,8 @@ from .launch import attest_run, ensure_installed_build, prepare_run, stop_run
 from .messages import acknowledge_message, list_messages, mark_delivered, post_message, reply_message
 from .models import canonical_json, new_id, utc_now, validate_id
 from .projects import project_status, register_project, work_index
+from .greenfield_workstreams import create_workstream
+from .reviews import request_review, submit_review
 
 
 class GreenfieldClientError(ValueError):
@@ -71,6 +73,10 @@ class GreenfieldControllerClient:
     def create_conversation(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
             return create_conversation(store, **request)
+
+    def create_workstream(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return create_workstream(store, **request)
 
     def focus_conversation(self, **request: Any) -> dict[str, Any]:
         with self._store() as store:
@@ -141,6 +147,14 @@ class GreenfieldControllerClient:
         with self._store() as store:
             return get_change(store, change_id)
 
+    def request_review(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return request_review(store, **request).as_dict()
+
+    def submit_review(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return submit_review(store, **request).as_dict()
+
     def detect_dependencies(self, **request: Any) -> list[dict[str, Any]]:
         with self._store(mutate=True) as store:
             return detect_dependencies(store, **request)
@@ -164,6 +178,7 @@ class GreenfieldControllerClient:
             "project.status": lambda **kw: self.status(kw["projectId"]),
             "project.work-index": lambda **kw: self.work_index(kw["projectId"]),
             "conversation.create": self.create_conversation,
+            "workstream.create": self.create_workstream,
             "conversation.focus": self.focus_conversation,
             "conversation.archive": self.archive_conversation,
             "message.post": self.post_message,
@@ -177,6 +192,8 @@ class GreenfieldControllerClient:
             "run.attest": self.attest_run,
             "run.stop": self.stop_run,
             "change.submit": self.submit_change,
+            "review.request": self.request_review,
+            "review.submit": self.submit_review,
             "dependency.detect": self.detect_dependencies,
             "dependency.disposition": self.set_dependency_disposition,
             "package-review.record": self.record_package_security_review,

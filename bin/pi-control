@@ -1,62 +1,17 @@
 #!/usr/bin/env python3
-"""Read-only/admin entry point for the host-local Pi controller."""
+"""Fresh Pi system controller entry point."""
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-_INSTALLED_ROOT = Path.home() / ".local" / "share" / "pi" / "control"
-
-
-def _source_controller():
-    # Repository-local operation remains available for tests and development,
-    # but an installed launcher never falls back to the current working
-    # directory or an unrelated checkout.
-    repo = Path(__file__).resolve().parents[1]
-    package = repo / "scripts" / "pi_control"
-    if not package.is_dir() or package.is_symlink():
-        raise SystemExit(f"pi-control installed package is missing: {_INSTALLED_ROOT / 'pi_control'}")
-    if str(repo) not in sys.path:
-        sys.path.insert(0, str(repo))
-    from scripts.pi_control.cli import main
-
-    return main
-
-
-def _installed_controller():
-    configured = Path(os.environ.get("PI_CONTROL_INSTALL_ROOT", str(_INSTALLED_ROOT))).expanduser()
-    if not configured.is_absolute():
-        raise SystemExit("pi-control installed root is invalid")
-    try:
-        root = configured.resolve(strict=True)
-        package = root / "pi_control"
-        package_stat = package.lstat()
-        if not package.is_dir() or package.is_symlink():
-            raise OSError("package is not a regular directory")
-        package.resolve(strict=True).relative_to(root)
-    except (OSError, ValueError) as exc:
-        raise SystemExit(f"pi-control installed package is missing or unsafe: {configured / 'pi_control'}") from exc
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    from pi_control.cli import main
-
-    return main
-
-
-def _main():
-    explicit_root = os.environ.get("PI_CONTROL_INSTALL_ROOT")
-    installed_root = Path(explicit_root or _INSTALLED_ROOT).expanduser()
-    # A launcher activated under ~/.local/bin must use only the managed
-    # artifact.  A checkout invocation is identified by its repository-local
-    # scripts package and may use the source import for existing tests.
-    repo_package = Path(__file__).resolve().parents[1] / "scripts" / "pi_control"
-    if explicit_root is not None or not (repo_package.is_dir() and not repo_package.is_symlink() and Path(__file__).resolve().parent.name == "bin"):
-        return _installed_controller()
-    return _source_controller()
+from scripts.pi_control.greenfield_cli import main
 
 
 if __name__ == "__main__":
-    raise SystemExit(_main()())
+    raise SystemExit(main())

@@ -80,7 +80,7 @@ def work_index(store: Any, project_id: str) -> dict[str, list[dict[str, Any]]]:
             rows["Working now"].append(item)
         elif row["role"] == "secretary":
             rows["Working now"].append(item)
-    for row in store.conn.execute("SELECT * FROM runs WHERE project_id=? AND observed_state IN ('running','needs_attention') ORDER BY updated_at DESC"):
+    for row in store.conn.execute("SELECT * FROM runs WHERE project_id=? AND observed_state IN ('running','needs_attention') ORDER BY updated_at DESC", (project_id,)):
         rows["Working now"].append({"id": row["run_id"], "title": "active run", "agentType": "run", "state": row["observed_state"], "lastUsefulUpdate": row["updated_at"], "focus": row["conversation_id"], "userActionRequired": row["observed_state"] == "needs_attention"})
     for row in store.conn.execute("SELECT * FROM project_messages WHERE project_id=? AND state IN ('pending','delivered') ORDER BY created_at DESC LIMIT 64", (project_id,)):
         item = {"id": row["message_id"], "title": row["kind"], "agentType": "message", "state": row["state"], "lastUsefulUpdate": row["created_at"], "focus": row["conversation_id"], "userActionRequired": row["kind"] == "needs-user"}

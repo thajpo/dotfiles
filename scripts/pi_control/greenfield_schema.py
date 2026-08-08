@@ -325,6 +325,18 @@ CREATE TABLE attention (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 ) STRICT;
+CREATE TABLE investigations (
+  investigation_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(project_id),
+  conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id),
+  run_id TEXT NOT NULL REFERENCES runs(run_id),
+  purpose TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('running','completed','failed','needs-user','interrupted')),
+  result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+) STRICT;
 CREATE TABLE presentation_assignments (
   presentation_assignment_id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(conversation_id),

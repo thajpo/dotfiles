@@ -1,5 +1,12 @@
 # Secretary and worker workflow
 
+> Active first-release topology: the fresh Pi system in
+> [PI_GREENFIELD_IMPLEMENTATION_PLAN.md](../PI_GREENFIELD_IMPLEMENTATION_PLAN.md).
+> The controller database, scoped host tools, exact run manifests, durable
+> project messages, and one-use approvals are authoritative. Historical
+> launcher behavior described below is retained as reference while the new
+> installed journey is being completed.
+
 This document describes the checked-in Pi topology. It is a description of the
 launcher and extension contracts, not a replacement for host policy or user
 approval.

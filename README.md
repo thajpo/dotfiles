@@ -1,5 +1,13 @@
 # dotfiles
 
+## Pi system implementation
+
+The fresh Pi system is implemented in modular slices from
+[PI_GREENFIELD_IMPLEMENTATION_PLAN.md](PI_GREENFIELD_IMPLEMENTATION_PLAN.md).
+Its controller state lives under `~/.local/state/pi-system/`, coding work is
+isolated under `~/.local/share/pi-system-work/`, and OpenCode remains
+available until the installed acceptance and rollback gates pass.
+
 My terminal setup: tmux + neovim (LazyVim).
 
 ## Install and start
