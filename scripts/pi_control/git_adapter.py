@@ -67,6 +67,10 @@ def sanitized_git_environment(extra: Mapping[str, str] | None = None) -> dict[st
         "GIT_PAGER": "cat",
         "GIT_EDITOR": "true",
         "GIT_ASKPASS": "true",
+        # macOS Git emits a warning when Darwin's temp directory is not
+        # discoverable under the scrubbed HOME.  Keep the observation
+        # environment deterministic without leaking the caller's temp path.
+        "TMPDIR": "/private/tmp",
     }
     if extra:
         for key, value in extra.items():

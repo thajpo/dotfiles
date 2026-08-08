@@ -1,0 +1,166 @@
+"""Exact run preparation and lifecycle for fresh Pi conversations."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+import os
+from pathlib import Path
+import secrets
+from typing import Any, Mapping
+
+from .events import append_event_in_transaction
+from .models import canonical_json, new_id, utc_now, validate_id
+from .process_adapter import process_start_identity
+from .writer_lock import WriterLock
+
+
+class LaunchError(RuntimeError):
+    pass
+
+
+def _digest(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def ensure_installed_build(store: Any, *, build_id: str | None = None, pi_version: str = "0.0.0", source_commit: str | None = None, verification: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    selected = build_id or os.environ.get("PI_SYSTEM_BUILD_ID")
+    if selected is None:
+        active = store.conn.execute("SELECT * FROM installed_builds WHERE status='active' ORDER BY installed_at DESC LIMIT 1").fetchone()
+        if active is not None:
+            return dict(active)
+        selected = "build_" + secrets.token_hex(16)
+    row = store.conn.execute("SELECT * FROM installed_builds WHERE build_id=?", (selected,)).fetchone()
+    if row is not None:
+        return dict(row)
+    now = utc_now()
+    with store.transaction():
+        store.conn.execute("INSERT INTO installed_builds(build_id,source_commit,source_tree_hash,artifact_manifest_hash,pi_version,package_lock_hash,status,installed_at,activated_at,rollback_path,verification_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (selected, source_commit, _digest({"sourceCommit": source_commit}), _digest(verification or {}), pi_version, _digest({"packageLock": os.environ.get("PI_SYSTEM_PACKAGE_LOCK", "")}), "active", now, now, None, canonical_json(dict(verification or {"source": "development"}))))
+        return dict(store.conn.execute("SELECT * FROM installed_builds WHERE build_id=?", (selected,)).fetchone())
+
+
+@dataclass
+class PreparedRun:
+    run: dict[str, Any]
+    manifest: dict[str, Any]
+    manifest_path: Path
+    environment: dict[str, str]
+    writer_lock: WriterLock | None = None
+
+    def close(self) -> None:
+        if self.writer_lock is not None:
+            self.writer_lock.close()
+            self.writer_lock = None
+
+    def __enter__(self) -> "PreparedRun":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+
+def prepare_run(store: Any, *, project_id: str, conversation_id: str, working_copy_id: str | None = None, authority: str = "read-only", runtime: Mapping[str, Any] | None = None, task_id: str | None = None, capability_secret: str | bytes | None = None, parent_run_id: str | None = None, build_id: str | None = None, owner_pid: int | None = None) -> PreparedRun:
+    validate_id(project_id, prefix="prj")
+    validate_id(conversation_id, prefix="conv")
+    if working_copy_id is not None:
+        validate_id(working_copy_id, prefix="wc")
+    if authority not in {"read-only", "writer", "secretary", "host-maintenance"}:
+        raise LaunchError("unsupported run authority")
+    if authority == "writer" and working_copy_id is None:
+        raise LaunchError("writer runs require a working copy")
+    project = store.conn.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone()
+    conversation = store.conn.execute("SELECT * FROM conversations WHERE conversation_id=?", (conversation_id,)).fetchone()
+    if project is None or conversation is None or conversation["project_id"] != project_id:
+        raise LaunchError("run project or conversation binding is invalid")
+    working = store.conn.execute("SELECT * FROM working_copies WHERE working_copy_id=?", (working_copy_id,)).fetchone() if working_copy_id else None
+    if working_copy_id and (working is None or working["project_id"] != project_id or conversation["working_copy_id"] not in {None, working_copy_id}):
+        raise LaunchError("run working-copy binding is invalid")
+    if authority == "writer" and working["effective_mode"] == "read-only":
+        raise LaunchError("read-only working copy cannot host a writer")
+    build = ensure_installed_build(store, build_id=build_id)
+    runtime_value = dict(runtime or {})
+    image_reference = runtime_value.pop("imageReference", "host-read-only" if authority != "writer" else "pi-system-local")
+    image_config_id = runtime_value.pop("imageConfigId", "host-read-only" if authority != "writer" else "local-image-config")
+    platform = runtime_value.pop("platform", "host" if authority != "writer" else "linux/amd64")
+    registry_digest = runtime_value.pop("registryDigest", None)
+    execution_target = runtime_value.pop("executionTarget", "host-read-only" if authority != "writer" else "container")
+    if runtime_value:
+        raise LaunchError("runtime contains unsupported fields")
+    run_id = new_id("run")
+    writer_epoch = None
+    lock: WriterLock | None = None
+    now = utc_now()
+    secret = capability_secret or secrets.token_urlsafe(32)
+    raw_secret = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
+    if len(raw_secret) < 32:
+        raise LaunchError("capability secret is too short")
+    capability_hash = "sha256:" + hashlib.sha256(raw_secret).hexdigest()
+    with store.transaction():
+        if authority == "writer":
+            existing_id = working["active_writer_run_id"]
+            if existing_id is not None:
+                existing = store.conn.execute("SELECT observed_state FROM runs WHERE run_id=?", (existing_id,)).fetchone()
+                if existing is None or existing[0] not in {"stopped", "failed", "lost"}:
+                    raise LaunchError("working copy already has a live or uncertain writer")
+            writer_epoch = int(working["writer_epoch"]) + 1
+            store.conn.execute("UPDATE working_copies SET writer_epoch=?,active_writer_run_id=?,updated_at=?,resource_version=resource_version+1 WHERE working_copy_id=?", (writer_epoch, run_id, now, working_copy_id))
+        runtime_spec = {"executionTarget": execution_target, "platform": platform, "imageReference": image_reference, "imageConfigId": image_config_id, "registryDigest": registry_digest, "buildId": build["build_id"], "projectId": project_id, "workingCopyId": working_copy_id, "authority": authority}
+        runtime_spec_hash = _digest(runtime_spec)
+        store.conn.execute("INSERT INTO runs(run_id,conversation_id,project_id,working_copy_id,parent_run_id,child_source_json,authority,desired_state,observed_state,expected_working_copy_version,expected_head_oid,expected_tree_oid,dirty_fingerprint,writer_epoch,runtime_spec_hash,build_id,owner_pid,owner_start_identity,capability_hash,manifest_path,resource_version,created_at,started_at,ended_at,updated_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run_id, conversation_id, project_id, working_copy_id, parent_run_id, None, authority, "running", "preparing", int(working["resource_version"]) if working else None, working["expected_head_oid"] if working else None, working["expected_tree_oid"] if working else None, None, writer_epoch, runtime_spec_hash, build["build_id"], owner_pid or os.getpid(), process_start_identity(owner_pid or os.getpid()), capability_hash, None, 1, now, None, None, now, None, None))
+    if authority == "writer":
+        try:
+            lock = WriterLock.acquire(store.state_root, working_copy_id, writer_epoch or 0)
+        except BaseException:
+            with store.transaction():
+                store.conn.execute("UPDATE runs SET observed_state='failed',error_code='WRITER_LOCK_BUSY',ended_at=?,updated_at=? WHERE run_id=?", (utc_now(), utc_now(), run_id))
+                store.conn.execute("UPDATE working_copies SET active_writer_run_id=NULL,updated_at=?,resource_version=resource_version+1 WHERE working_copy_id=? AND active_writer_run_id=?", (utc_now(), working_copy_id, run_id))
+            raise
+    manifest = {"schemaVersion": 1, "runId": run_id, "conversationId": conversation_id, "projectId": project_id, "workingCopyId": working_copy_id, "authority": authority, "taskId": task_id, "buildId": build["build_id"], "runtime": {"executionTarget": execution_target, "imageReference": image_reference, "imageConfigId": image_config_id, "registryDigest": registry_digest, "platform": platform, "runtimeSpecHash": runtime_spec_hash}, "writerGeneration": writer_epoch, "owner": {"pid": owner_pid or os.getpid(), "processStartIdentity": process_start_identity(owner_pid or os.getpid())}, "capabilityHash": capability_hash, "createdAt": now}
+    manifest["manifestDigest"] = _digest(manifest)
+    path = Path(store.state_root) / "runs" / run_id / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as stream:
+        json.dump(manifest, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    with store.transaction():
+        store.conn.execute("UPDATE runs SET manifest_path=?,observed_state='ready',updated_at=? WHERE run_id=?", (str(path), utc_now(), run_id))
+        append_event_in_transaction(store.conn, event_kind="run.prepared", resource_type="run", resource_id=run_id, resource_version=1, payload={"projectId": project_id, "conversationId": conversation_id, "workingCopyId": working_copy_id, "authority": authority, "manifestDigest": manifest["manifestDigest"]})
+    run = dict(store.conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone())
+    return PreparedRun(run, manifest, path, {"PI_RUNTIME_MANIFEST": str(path), "PI_SYSTEM_RUN_ID": run_id}, lock)
+
+
+def attest_run(store: Any, *, run_id: str, manifest_digest: str, observed: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    validate_id(run_id, prefix="run")
+    row = store.conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
+    if row is None or not row["manifest_path"]:
+        raise LaunchError("run manifest is unavailable")
+    manifest = json.loads(Path(row["manifest_path"]).read_text(encoding="utf-8"))
+    if manifest.get("manifestDigest") != manifest_digest:
+        raise LaunchError("run manifest digest mismatch")
+    observed = dict(observed or {})
+    for key in ("runId", "projectId", "workingCopyId"):
+        expected = manifest.get(key)
+        if key in observed and observed[key] != expected:
+            raise LaunchError(f"runtime attestation mismatch: {key}")
+    with store.transaction():
+        store.conn.execute("UPDATE runs SET observed_state='running',started_at=COALESCE(started_at,?),updated_at=? WHERE run_id=?", (utc_now(), utc_now(), run_id))
+    return {"runId": run_id, "manifestDigest": manifest_digest, "state": "running", "observed": observed}
+
+
+def stop_run(store: Any, *, run_id: str, reason: str = "stopped") -> dict[str, Any]:
+    validate_id(run_id, prefix="run")
+    with store.transaction():
+        row = store.conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        if row is None:
+            raise LaunchError("run not found")
+        now = utc_now()
+        store.conn.execute("UPDATE runs SET desired_state='stopped',observed_state='stopped',ended_at=?,updated_at=? WHERE run_id=?", (now, now, run_id))
+        if row["working_copy_id"] is not None and row["authority"] == "writer":
+            store.conn.execute("UPDATE working_copies SET active_writer_run_id=NULL,updated_at=?,resource_version=resource_version+1 WHERE working_copy_id=? AND active_writer_run_id=?", (now, row["working_copy_id"], run_id))
+        return dict(store.conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone())
+
+
+__all__ = ["LaunchError", "PreparedRun", "attest_run", "ensure_installed_build", "prepare_run", "stop_run"]

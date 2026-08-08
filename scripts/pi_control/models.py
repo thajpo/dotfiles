@@ -49,6 +49,10 @@ ID_PREFIXES = frozenset(
         "evt",
         "consumer",
         "attention",
+        "msg",
+        "cmd",
+        "dep",
+        "pkg",
         "migration",
     }
 )
