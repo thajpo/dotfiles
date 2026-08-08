@@ -454,7 +454,10 @@ def create_build_manifest(
     if manifest_path is not None:
         exclusions.append(manifest_path)
     file_entries = _files(root, files, exclusions=exclusions)
-    repo = Path(repository).expanduser().absolute() if repository is not None else root
+    # Repository identity is manifest evidence: record the canonical physical
+    # path. The caller may pass a symlinked spelling (e.g. ~/.dotfiles ->
+    # ~/dotfiles), which the observation adapter rejects by design.
+    repo = Path(repository).expanduser().resolve() if repository is not None else root
     repository_metadata = _repository_metadata(repo)
     if require_repository_metadata and repository_metadata is None:
         raise ValueError(f"repository metadata is unavailable: {repo}")
