@@ -84,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     command = _command(args.command)
     runtime = _runtime(args.runtime_json)
+    if args.authority == "writer":
+        raise LaunchError("writer runs must use bin/pi-system-container-run; host fallback is disabled")
     state_root = Path(args.state_root).expanduser() if args.state_root else None
     store = GreenfieldStore(state_root)
     prepared = None

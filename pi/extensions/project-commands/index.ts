@@ -49,4 +49,19 @@ export default function projectCommands(pi: ExtensionAPI): void {
       return { content: [{ type: "text", text: value }], details: {} };
     },
   });
+
+  pi.registerTool({
+    name: "execute_project_command",
+    label: "Execute approved project command",
+    description: "Consume one exact user approval and execute the recorded host or container-network command within its assigned working-copy boundary.",
+    parameters: Type.Object({
+      commandRequestId: Type.String({ pattern: "^cmd_[0-9a-f]{32}$" }),
+      requestDigest: Type.String({ minLength: 64, maxLength: 64 }),
+    }, { additionalProperties: false }),
+    async execute(_id, params, signal) {
+      const projectId = id("PI_SYSTEM_PROJECT_ID", "prj");
+      const value = await invoke(pi, "execute", { projectId, ...params }, signal);
+      return { content: [{ type: "text", text: value }], details: {} };
+    },
+  });
 }

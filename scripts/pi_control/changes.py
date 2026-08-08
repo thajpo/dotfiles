@@ -508,6 +508,70 @@ def submit_change(
     return _finish_submission(store, operation_id=operation_id, change_id=change_id, repository=repository, operation=operation)
 
 
+def submit_change_revision(
+    store: Any,
+    *,
+    change_id: str,
+    title: str,
+    summary: str,
+    capture_mode: str = "dirty",
+    selected_paths: Sequence[str] | None = None,
+    excluded_paths: Sequence[str] | None = None,
+    idempotency_key: str,
+    actor_type: str = "conversation",
+    actor_id: str | None = None,
+    created_by_conversation_id: str | None = None,
+) -> ChangeSubmission:
+    """Capture a new immutable revision for an already-open change."""
+
+    _change_id(change_id)
+    title = _safe_title(title, "title")
+    summary = _safe_title(summary, "summary")
+    if capture_mode not in {"clean", "dirty"}:
+        raise InvalidRequestError("capture mode must be clean or dirty")
+    selected = _paths(selected_paths, name="selected_paths")
+    excluded = _paths(excluded_paths, name="excluded_paths")
+    change = store.conn.execute("SELECT * FROM changes WHERE change_id=?", (change_id,)).fetchone()
+    if change is None or change["state"] not in {"open", "draft"}:
+        raise ConstraintError("change is not open for a new revision")
+    if created_by_conversation_id is not None:
+        validate_id(created_by_conversation_id, prefix="conv")
+    operation_request = {"changeId": change_id, "title": title, "summary": summary, "captureMode": capture_mode, "selectedPaths": list(selected), "excludedPaths": list(excluded)}
+    operation_record = store.create_operation(idempotency_key=idempotency_key, kind="change.revise", resource_type="change", resource_id=change_id, actor_type=actor_type, actor_id=actor_id, request=operation_request, state="applying", step="intent-recorded")
+    operation = dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation_record.operation_id,)).fetchone())
+    prior = _load_submission_from_operation(operation)
+    if prior is not None:
+        return prior
+    repository = Path(store.conn.execute("SELECT path FROM working_copies WHERE working_copy_id=?", (change["source_working_copy_id"],)).fetchone()[0]).resolve(strict=True)
+    observation = observe_repository(repository, include_worktrees=False)
+    if observation.head_oid is None or observation.tree_oid is None:
+        raise ConstraintError("change revision requires a committed source HEAD")
+    if capture_mode == "clean" and observation.dirty:
+        raise ChangeSelectionRequired("dirty source requires explicit dirty capture")
+    if capture_mode == "dirty" and (not observation.dirty or not selected):
+        raise ChangeSelectionRequired("dirty revision requires explicit selected paths")
+    if capture_mode == "clean":
+        tip_oid, tree_oid = observation.head_oid, observation.tree_oid
+        changed_paths = _changed_paths(repository, tip_oid)
+        stored_mode = "branch-tip"
+    else:
+        tip_oid, tree_oid, _ = _capture_dirty(repository, baseline_oid=observation.head_oid, title=title, summary=summary, selected_paths=selected, state_root=store.state_root)
+        changed_paths = _changed_paths(repository, tip_oid)
+        stored_mode = "temporary-index"
+    revision_number = int(change["current_revision"]) + 1
+    ref_name = _ref_name(change_id, revision_number)
+    _publish_ref(repository, ref_name, tip_oid)
+    source_fingerprint = _source_fingerprint(observation, _file_digest(_index_path(repository)))
+    result = ChangeSubmission(change_id, revision_number, operation_record.operation_id, ref_name, observation.head_oid, tip_oid, tree_oid, stored_mode, changed_paths, excluded, source_fingerprint)
+    now = utc_now()
+    with store.transaction():
+        store.conn.execute("INSERT INTO change_revisions(change_id,revision,base_oid,tip_oid,tree_oid,source_head_oid,capture_mode,source_status_hash,changed_paths_json,diffstat_json,verification_json,provenance_json,ref_name,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (change_id, revision_number, observation.head_oid, tip_oid, tree_oid, observation.head_oid, stored_mode, observation.status_hash, canonical_json(list(changed_paths)), canonical_json({"changedPaths": list(changed_paths)}), canonical_json({"refVerified": True, "sourceUnchanged": True}), canonical_json({"controller": "pi-control-change-v1", "supersedesRevision": int(change["current_revision"]), "createdByConversationId": created_by_conversation_id}), ref_name, now))
+        store.conn.execute("UPDATE changes SET state='open',current_revision=?,updated_at=?,submitted_at=COALESCE(submitted_at,?),resource_version=resource_version+1 WHERE change_id=? AND resource_version=?", (revision_number, now, now, change_id, int(change["resource_version"])))
+        store.conn.execute("UPDATE operations SET state='succeeded',step='completed',result_json=?,updated_at=?,completed_at=? WHERE operation_id=?", (canonical_json(result.as_dict()), now, now, operation_record.operation_id))
+        append_event_in_transaction(store.conn, event_kind="change.revision-submitted", resource_type="change", resource_id=change_id, resource_version=int(change["resource_version"]) + 1, operation_id=operation_record.operation_id, payload={"changeId": change_id, "revision": revision_number, "supersedesRevision": int(change["current_revision"]), "refName": ref_name})
+    return result
+
+
 def list_changes(store: Any, *, project_id: str | None = None) -> list[dict[str, Any]]:
     if project_id is not None:
         validate_id(project_id, prefix="prj")
@@ -535,5 +599,5 @@ def get_change(store: Any, change_id: str, *, revision: int | None = None) -> di
 
 __all__ = [
     "ChangeIntegrityError", "ChangeSelectionRequired", "ChangeSubmission",
-    "ChangeSubmissionError", "get_change", "list_changes", "submit_change",
+    "ChangeSubmissionError", "get_change", "list_changes", "submit_change", "submit_change_revision",
 ]

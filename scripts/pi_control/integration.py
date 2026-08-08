@@ -298,6 +298,10 @@ def authorize_integration(
         row = store.conn.execute("SELECT * FROM integration_attempts WHERE integration_id=?", (integration_id,)).fetchone()
         if row is None:
             raise NotFoundError("integration attempt was not found")
+        from .dependencies import package_review_gate
+        package_gate = package_review_gate(store, change_id=row["change_id"], revision=int(row["revision"]))
+        if not package_gate["ready"]:
+            raise AuthorizationError("exact package security review is incomplete for this revision")
         analysis = parse_canonical_json(str(row["analysis_json"]))
         reviews = list_reviews(store, change_id=row["change_id"], revision=int(row["revision"]))
         accepted = [

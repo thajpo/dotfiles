@@ -121,7 +121,7 @@ def prepare_run(store: Any, *, project_id: str, conversation_id: str, working_co
             store.conn.execute("UPDATE working_copies SET writer_epoch=?,active_writer_run_id=?,updated_at=?,resource_version=resource_version+1 WHERE working_copy_id=?", (writer_epoch, run_id, now, working_copy_id))
         runtime_spec = {"executionTarget": execution_target, "platform": platform, "imageReference": image_reference, "imageConfigId": image_config_id, "registryDigest": registry_digest, "buildId": build["build_id"], "piVersion": build["pi_version"], "projectId": project_id, "workingCopyId": working_copy_id, "authority": authority}
         runtime_spec_hash = _digest(runtime_spec)
-        store.conn.execute("INSERT INTO runs(run_id,conversation_id,project_id,working_copy_id,parent_run_id,child_source_json,authority,desired_state,observed_state,expected_working_copy_version,expected_head_oid,expected_tree_oid,dirty_fingerprint,writer_epoch,runtime_spec_hash,build_id,owner_pid,owner_start_identity,capability_hash,manifest_path,resource_version,created_at,started_at,ended_at,updated_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run_id, conversation_id, project_id, working_copy_id, parent_run_id, None, authority, "running", "preparing", int(working["resource_version"]) if working else None, working["expected_head_oid"] if working else None, working["expected_tree_oid"] if working else None, None, writer_epoch, runtime_spec_hash, build["build_id"], owner_pid or os.getpid(), process_start_identity(owner_pid or os.getpid()), capability_hash, None, 1, now, None, None, now, None, None))
+        store.conn.execute("INSERT INTO runs(run_id,conversation_id,project_id,working_copy_id,parent_run_id,child_source_json,authority,desired_state,observed_state,expected_working_copy_version,expected_head_oid,expected_tree_oid,dirty_fingerprint,writer_epoch,runtime_spec_hash,build_id,owner_pid,owner_start_identity,capability_hash,manifest_path,container_id,container_observation_json,resource_version,created_at,started_at,ended_at,updated_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run_id, conversation_id, project_id, working_copy_id, parent_run_id, None, authority, "running", "preparing", int(working["resource_version"]) if working else None, working["expected_head_oid"] if working else None, working["expected_tree_oid"] if working else None, None, writer_epoch, runtime_spec_hash, build["build_id"], owner_pid or os.getpid(), process_start_identity(owner_pid or os.getpid()), capability_hash, None, None, None, 1, now, None, None, now, None, None))
     if authority == "writer":
         try:
             lock = WriterLock.acquire(store.state_root, working_copy_id, writer_epoch or 0)
@@ -141,7 +141,7 @@ def prepare_run(store: Any, *, project_id: str, conversation_id: str, working_co
             "kind": working["kind"], "purpose": working["purpose"], "effectiveMode": working["effective_mode"],
             "hostPath": str(working_path), "gitCommonDir": str(git_common_dir), "gitDir": str(git_dir),
             "branchRef": working["branch_ref"], "headOid": working["expected_head_oid"], "treeOid": working["expected_tree_oid"],
-            "dirtyFingerprint": working["dirty_fingerprint"], "writerEpoch": writer_epoch if writer_epoch is not None else int(working["writer_epoch"]),
+            "dirtyFingerprint": None, "writerEpoch": writer_epoch if writer_epoch is not None else int(working["writer_epoch"]),
         }
     operation_id = new_id("op")
     manifest = {
@@ -194,6 +194,39 @@ def attest_run(store: Any, *, run_id: str, manifest_digest: str, observed: Mappi
     return {"runId": run_id, "manifestDigest": manifest_digest, "state": "running", "observed": observed}
 
 
+def start_run(store: Any, *, run_id: str, command: list[str]) -> dict[str, Any]:
+    """Create and start the exact coding container for a prepared writer run."""
+
+    validate_id(run_id, prefix="run")
+    if not isinstance(command, list) or not command or any(not isinstance(item, str) or not item or "\x00" in item for item in command):
+        raise LaunchError("coding run command is invalid")
+    row = store.conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
+    if row is None or row["authority"] != "writer" or not row["manifest_path"]:
+        raise LaunchError("only prepared writer runs can start a coding container")
+    manifest = json.loads(Path(row["manifest_path"]).read_text(encoding="utf-8"))
+    runtime = dict(manifest["runtime"])
+    working = manifest.get("workingCopy")
+    if not working:
+        raise LaunchError("coding run has no assigned working copy")
+    from .docker_runtime import DockerRuntimeError, create_coding_container, start_container
+    container_name = "pi-runtime-" + hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:16]
+    runtime.update({"buildId": manifest["runtime"]["controllerBuildId"], "piVersion": manifest["runtime"]["piVersion"], "authority": manifest["authority"], "runId": run_id, "manifestDigest": manifest["manifestDigest"], "projectId": manifest["project"]["projectId"], "workingCopyId": working["workingCopyId"], "uid": manifest["owner"]["uid"], "gid": manifest["owner"]["gid"], "labels": {"pi.control.managed": "true", "pi.control.run-id": run_id, "pi.control.manifest-digest": manifest["manifestDigest"], "pi.control.project-id": manifest["project"]["projectId"], "pi.control.policy-hash": manifest["project"]["policyHash"], "pi.control.runtime-spec-hash": runtime["runtimeSpecHash"], "pi.control.controller-build-id": manifest["runtime"]["controllerBuildId"], "pi.control.working-copy-id": working["workingCopyId"], "pi.control.writer-epoch": str(working["writerEpoch"] or 0)}})
+    try:
+        created = create_coding_container(image_reference=str(runtime["imageReference"]), working_copy_path=str(working["hostPath"]), container_name=container_name, runtime_spec=runtime, command=command)
+        start_container(created["containerId"])
+        observation = __import__("scripts.pi_control.docker_runtime", fromlist=["inspect_container"]).inspect_container(created["containerId"])
+        if not observation.get("running"):
+            raise LaunchError("coding container did not become running")
+    except DockerRuntimeError as error:
+        with store.transaction():
+            store.conn.execute("UPDATE runs SET observed_state='needs_attention',error_code='CP_RUNTIME_ATTESTATION',error_detail=?,updated_at=? WHERE run_id=?", (str(error)[:1024], utc_now(), run_id))
+        raise LaunchError(str(error)) from error
+    with store.transaction():
+        store.conn.execute("UPDATE runs SET container_id=?,container_observation_json=?,observed_state='running',started_at=COALESCE(started_at,?),updated_at=? WHERE run_id=?", (created["containerId"], canonical_json(observation), utc_now(), utc_now(), run_id))
+        append_event_in_transaction(store.conn, event_kind="run.container-attested", resource_type="run", resource_id=run_id, resource_version=int(row["resource_version"]), payload={"runId": run_id, "containerId": created["containerId"], "imageConfigId": created["image"]["imageConfigId"], "platform": created["image"]["platform"]})
+    return dict(store.conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone())
+
+
 def stop_run(store: Any, *, run_id: str, reason: str = "stopped") -> dict[str, Any]:
     validate_id(run_id, prefix="run")
     with store.transaction():
@@ -202,10 +235,17 @@ def stop_run(store: Any, *, run_id: str, reason: str = "stopped") -> dict[str, A
             raise LaunchError("run not found")
         now = utc_now()
         observed = "failed" if reason.startswith("process-failed") else "stopped"
-        store.conn.execute("UPDATE runs SET desired_state='stopped',observed_state=?,error_code=?,error_detail=?,ended_at=?,updated_at=? WHERE run_id=?", (observed, "PROCESS_EXIT_NONZERO" if observed == "failed" else None, reason[:1024] if observed == "failed" else None, now, now, run_id))
-        if row["working_copy_id"] is not None and row["authority"] == "writer":
+        container_id = row["container_id"]
+        if container_id:
+            try:
+                from .docker_runtime import stop_container
+                stop_container(str(container_id))
+            except Exception:
+                observed = "needs_attention"
+        store.conn.execute("UPDATE runs SET desired_state='stopped',observed_state=?,error_code=?,error_detail=?,ended_at=?,updated_at=? WHERE run_id=?", (observed, "PROCESS_EXIT_NONZERO" if observed == "failed" else ("CP_RUNTIME_STOP" if observed == "needs_attention" else None), reason[:1024], now, now, run_id))
+        if row["working_copy_id"] is not None and row["authority"] == "writer" and observed in {"stopped", "failed"}:
             store.conn.execute("UPDATE working_copies SET active_writer_run_id=NULL,updated_at=?,resource_version=resource_version+1 WHERE working_copy_id=? AND active_writer_run_id=?", (now, row["working_copy_id"], run_id))
         return dict(store.conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone())
 
 
-__all__ = ["LaunchError", "PreparedRun", "attest_run", "ensure_installed_build", "prepare_run", "stop_run"]
+__all__ = ["LaunchError", "PreparedRun", "attest_run", "ensure_installed_build", "prepare_run", "start_run", "stop_run"]

@@ -45,18 +45,20 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--request-json", required=True)
     command = sub.add_parser("command")
     command_sub = command.add_subparsers(dest="command_command", required=True)
-    for name in ("request", "authorize", "reject", "consume"):
+    for name in ("request", "authorize", "reject", "consume", "execute"):
         item = command_sub.add_parser(name)
         item.add_argument("--request-json", required=True)
     run = sub.add_parser("run")
     run_sub = run.add_subparsers(dest="run_command", required=True)
-    for name in ("prepare", "attest", "stop", "reconcile", "recover"):
+    for name in ("prepare", "attest", "start", "stop", "reconcile", "recover"):
         item = run_sub.add_parser(name)
         item.add_argument("--request-json", required=True)
     change = sub.add_parser("change")
     change_sub = change.add_subparsers(dest="change_command", required=True)
     submit = change_sub.add_parser("submit")
     submit.add_argument("--request-json", required=True)
+    revise = change_sub.add_parser("revise")
+    revise.add_argument("--request-json", required=True)
     for name in ("list", "show"):
         item = change_sub.add_parser(name)
         item.add_argument("--request-json", required=True)
@@ -154,12 +156,14 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "message":
                 value = getattr(client, f"{args.message_command}_message")(**request)
             elif args.command == "command":
-                value = {"request": client.request_command(**request)} if args.command_command == "request" else (client.authorize_command(**request) if args.command_command == "authorize" else (client.reject_command(**request) if args.command_command == "reject" else client.consume_command(**request)))
+                value = {"request": client.request_command(**request)} if args.command_command == "request" else (client.authorize_command(**request) if args.command_command == "authorize" else (client.reject_command(**request) if args.command_command == "reject" else (client.consume_command(**request) if args.command_command == "consume" else client.execute_command(**request))))
             elif args.command == "run":
                 value = getattr(client, f"{args.run_command}_run")(**request)
             elif args.command == "change":
                 if args.change_command == "submit":
                     value = client.submit_change(**request)
+                elif args.change_command == "revise":
+                    value = client.submit_change_revision(**request)
                 elif args.change_command == "list":
                     value = client.list_changes(request.get("project_id") or request.get("projectId"))
                 else:

@@ -9,14 +9,14 @@ import shutil
 import subprocess
 from typing import Any, Mapping, Sequence
 
-from .changes import get_change, list_changes, submit_change
-from .command_requests import authorize_command, consume_authorization, reject_command, request_command
+from .changes import get_change, list_changes, submit_change, submit_change_revision
+from .command_requests import authorize_command, consume_authorization, execute_command, reject_command, request_command
 from .conversations import archive_conversation, create_conversation, focus_conversation
 from .dependencies import detect_dependencies, package_review_gate, record_package_security_review, set_dependency_disposition
 from .events import get_events
 from .greenfield_store import GreenfieldStore
 from .integration import analyze_integration, integrate
-from .launch import attest_run, ensure_installed_build, prepare_run, stop_run
+from .launch import attest_run, ensure_installed_build, prepare_run, start_run, stop_run
 from .messages import acknowledge_message, list_messages, mark_delivered, post_message, reply_message
 from .models import canonical_json, new_id, utc_now, validate_id
 from .projects import project_status, register_project, work_index
@@ -56,9 +56,13 @@ class GreenfieldControllerClient:
             raise GreenfieldClientError("read-only client cannot mutate")
         return GreenfieldStore(self.state_root, read_only=not mutate)
 
+    @staticmethod
+    def _public_environment(environment: Mapping[str, str]) -> dict[str, str]:
+        return {key: "<controller-issued>" if key == "PI_RUNTIME_CAPABILITY" else value for key, value in environment.items()}
+
     def negotiate(self) -> dict[str, Any]:
         with self._store() as store:
-            return {"protocolVersion": 1, "schema": store.schema_status().as_dict(), "operations": ["project.register", "project.status", "project.work-index", "conversation.create", "conversation.focus", "conversation.archive", "workstream.create", "message.post", "message.list", "message.acknowledge", "message.reply", "command.request", "command.authorize", "command.reject", "command.consume", "run.prepare", "run.attest", "run.stop", "run.reconcile", "run.recover", "project.reconcile", "change.submit", "review.request", "review.create-assignment", "review.submit", "integration.analyze", "integration.authorize", "integration.integrate", "dependency.detect", "package-review.record"]}
+            return {"protocolVersion": 1, "schema": store.schema_status().as_dict(), "operations": ["project.register", "project.status", "project.work-index", "conversation.create", "conversation.focus", "conversation.archive", "workstream.create", "message.post", "message.list", "message.acknowledge", "message.reply", "command.request", "command.authorize", "command.reject", "command.consume", "command.execute", "run.prepare", "run.attest", "run.stop", "run.reconcile", "run.recover", "project.reconcile", "change.submit", "review.request", "review.create-assignment", "review.submit", "integration.analyze", "integration.authorize", "integration.integrate", "dependency.detect", "package-review.record"]}
 
     def register_project(self, repository: str, display_name: str | None = None) -> dict[str, Any]:
         with self._store(mutate=True) as store:
@@ -124,6 +128,10 @@ class GreenfieldControllerClient:
         with self._store(mutate=True) as store:
             return consume_authorization(store, **request)
 
+    def execute_command(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return execute_command(store, **request)
+
     def analyze_integration(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
             return analyze_integration(store, **request).as_dict()
@@ -138,17 +146,22 @@ class GreenfieldControllerClient:
             return integrate(store, **request).as_dict()
 
     def prepare_run(self, **request: Any) -> dict[str, Any]:
+        if request.get("authority") == "writer":
+            raise GreenfieldClientError("writer run preparation must be held by bin/pi-system-container-run")
         with self._store(mutate=True) as store:
             prepared = prepare_run(store, **request)
             # The controller returns exact launch data; the lock is kept by the
             # actual launcher process, not by this short-lived CLI connection.
-            result = {"run": prepared.run, "manifest": prepared.manifest, "manifestPath": str(prepared.manifest_path), "environment": prepared.environment}
+            result = {"run": prepared.run, "manifest": prepared.manifest, "manifestPath": str(prepared.manifest_path), "environment": self._public_environment(prepared.environment)}
             prepared.close()
             return result
 
     def attest_run(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
             return attest_run(store, **request)
+
+    def start_run(self, **request: Any) -> dict[str, Any]:
+        raise GreenfieldClientError("run.start must be executed by bin/pi-system-container-run so the writer lock remains held")
 
     def stop_run(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
@@ -170,6 +183,10 @@ class GreenfieldControllerClient:
         with self._store(mutate=True) as store:
             return submit_change(store, **request).as_dict()
 
+    def submit_change_revision(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return submit_change_revision(store, **request).as_dict()
+
     def list_changes(self, project_id: str | None = None) -> list[dict[str, Any]]:
         with self._store() as store:
             return list_changes(store, project_id=project_id)
@@ -184,7 +201,10 @@ class GreenfieldControllerClient:
 
     def create_review_assignment(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
-            return create_review_assignment(store, **request)
+            result = create_review_assignment(store, **request)
+            if isinstance(result.get("environment"), Mapping):
+                result["environment"] = self._public_environment(result["environment"])
+            return result
 
     def submit_review(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
@@ -225,13 +245,16 @@ class GreenfieldControllerClient:
             "command.authorize": self.authorize_command,
             "command.reject": self.reject_command,
             "command.consume": self.consume_command,
+            "command.execute": self.execute_command,
             "run.prepare": self.prepare_run,
+            "run.start": self.start_run,
             "run.attest": self.attest_run,
             "run.stop": self.stop_run,
             "run.reconcile": self.reconcile_run,
             "run.recover": self.recover_run,
             "project.reconcile": self.reconcile_project,
             "change.submit": self.submit_change,
+            "change.revise": self.submit_change_revision,
             "review.request": self.request_review,
             "review.submit": self.submit_review,
             "review.create-assignment": self.create_review_assignment,

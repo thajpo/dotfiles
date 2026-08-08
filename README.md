@@ -15,14 +15,20 @@ My terminal setup: tmux + neovim (LazyVim).
 ```bash
 git clone https://github.com/thajpo/dotfiles.git
 cd dotfiles
-./install.sh
-pi-root-session migrate --dry-run
-pi-restart
+stage=$(mktemp -d /tmp/pi-system-stage.XXXXXX)
+rmdir "$stage"
+./bin/pi-install stage --staging-root "$stage"
+./bin/pi-install verify --staging-root "$stage"
+./bin/pi-install activate --staging-root "$stage" --data-root "$HOME/.local/share/pi-system"
+./bin/pi-install init-state --state-root "$HOME/.local/state/pi-system"
+./bin/pi-control schema status
 ```
 
-Review and apply the root-session migration before restarting an existing Pi
-workspace. `pi-image-tools@1.4.0` owns `Ctrl+V` and persists native image
-attachments without sharing host `/tmp` with task containers.
+The greenfield installer creates a fresh controller state database and never
+imports historical Pi or OpenCode state. Existing launchers remain available
+until the installed Pi-core, Docker, presentation, and rollback gates pass.
+`pi-image-tools@1.4.0` owns `Ctrl+V` and persists native image attachments
+without sharing host `/tmp` with task containers.
 
 `pi-restart` applies the new generation and always starts both personal and
 secretary. Desktop tmux is the default for every invocation; add `-mobile`,

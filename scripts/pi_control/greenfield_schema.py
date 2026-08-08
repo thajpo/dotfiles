@@ -155,6 +155,8 @@ CREATE TABLE runs (
   owner_start_identity TEXT,
   capability_hash TEXT NOT NULL,
   manifest_path TEXT,
+  container_id TEXT,
+  container_observation_json TEXT CHECK (container_observation_json IS NULL OR json_valid(container_observation_json)),
   resource_version INTEGER NOT NULL CHECK (resource_version >= 1),
   created_at TEXT NOT NULL,
   started_at TEXT,

@@ -1,73 +1,63 @@
-"""One-command approved execution runners.
-
-The container runner fails closed when Docker is unavailable; it never silently
-falls back to host execution.  Host execution is a distinct, explicit path.
-"""
+"""One-command network runner for explicitly approved project operations."""
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
-import shutil
-import subprocess
 from typing import Any
 
+from .command_requests import CommandRequestError, execute_command
+from .models import validate_id
 
-class CommandExecutionError(RuntimeError):
-    pass
+
+class CommandExecutionError(CommandRequestError):
+    """A bounded execution failure or route mismatch."""
 
 
-def _argv(row: Any) -> list[str]:
-    value = json.loads(row["command_json"])
-    if not isinstance(value, list) or not value or any(not isinstance(item, str) or not item for item in value):
-        raise CommandExecutionError("stored command is invalid")
-    return value
+def _assert_place(store: Any, project_id: str, command_request_id: str, place: str) -> None:
+    row = store.conn.execute("SELECT execution_place FROM command_requests WHERE command_request_id=? AND project_id=?", (command_request_id, project_id)).fetchone()
+    if row is None or row["execution_place"] != place:
+        raise CommandExecutionError(f"request is not approved for {place} execution")
 
 
 def execute_host_command(store: Any, *, project_id: str, command_request_id: str, request_digest: str, timeout_seconds: float = 60.0) -> dict[str, Any]:
-    from .command_requests import consume_authorization
-    row = consume_authorization(store, project_id=project_id, command_request_id=command_request_id, request_digest=request_digest)
-    if row["execution_place"] != "host":
-        raise CommandExecutionError("command is not approved for host execution")
-    argv = _argv(row)
-    cwd = Path(row["working_directory"]).resolve(strict=True)
-    env = {"PATH": os.defpath, "HOME": str(cwd), "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"}
-    try:
-        result = subprocess.run(argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=min(timeout_seconds, 3600), check=False, shell=False)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        _finish(store, command_request_id, "failed", {"error": type(error).__name__})
-        raise CommandExecutionError("approved host command failed to execute") from error
-    payload = {"returnCode": result.returncode, "stdout": result.stdout[-65536:], "stderr": result.stderr[-65536:]}
-    _finish(store, command_request_id, "succeeded" if result.returncode == 0 else "failed", payload)
-    return payload
+    del timeout_seconds  # The exact request duration is controller-owned.
+    validate_id(project_id, prefix="prj")
+    validate_id(command_request_id, prefix="cmd")
+    _assert_place(store, project_id, command_request_id, "host")
+    return execute_command(store, project_id=project_id, command_request_id=command_request_id, request_digest=request_digest)
 
 
-def execute_container_network_command(store: Any, *, project_id: str, command_request_id: str, request_digest: str, working_copy_path: str | Path, image: str, timeout_seconds: float = 120.0) -> dict[str, Any]:
-    from .command_requests import consume_authorization
-    row = consume_authorization(store, project_id=project_id, command_request_id=command_request_id, request_digest=request_digest)
-    if row["execution_place"] != "container-network":
-        raise CommandExecutionError("command is not approved for container network execution")
-    docker = shutil.which("docker", path=os.defpath)
-    if docker is None:
-        _finish(store, command_request_id, "failed", {"error": "docker-unavailable"})
-        raise CommandExecutionError("Docker is unavailable; host fallback is forbidden")
-    argv = _argv(row)
-    source = Path(working_copy_path).resolve(strict=True)
-    command = [docker, "run", "--rm", "--network", "bridge", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "-v", f"{source}:/workspace:rw", "-w", "/workspace", image, *argv]
-    try:
-        result = subprocess.run(command, cwd=str(source), env={"PATH": os.defpath, "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C"}, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=min(timeout_seconds, 3600), check=False, shell=False)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        _finish(store, command_request_id, "failed", {"error": type(error).__name__})
-        raise CommandExecutionError("approved container network command failed to execute") from error
-    payload = {"returnCode": result.returncode, "stdout": result.stdout[-65536:], "stderr": result.stderr[-65536:], "executionPlace": "container-network"}
-    _finish(store, command_request_id, "succeeded" if result.returncode == 0 else "failed", payload)
-    return payload
+def execute_container_network_command(store: Any, *, project_id: str, command_request_id: str, request_digest: str, working_copy_path: str | None = None, image: str | None = None, timeout_seconds: float = 120.0) -> dict[str, Any]:
+    del timeout_seconds  # The exact request duration is controller-owned.
+    validate_id(project_id, prefix="prj")
+    validate_id(command_request_id, prefix="cmd")
+    _assert_place(store, project_id, command_request_id, "container-network")
+    if image is not None and image != os.environ.get("PI_SYSTEM_RUNTIME_IMAGE"):
+        raise CommandExecutionError("caller-supplied network image does not match the controller runtime identity")
+    if working_copy_path is not None:
+        requested = Path(working_copy_path).resolve(strict=True)
+        row = store.conn.execute("SELECT w.path FROM command_requests r JOIN runs x ON x.run_id=r.run_id JOIN working_copies w ON w.working_copy_id=x.working_copy_id WHERE r.command_request_id=? AND r.project_id=?", (command_request_id, project_id)).fetchone()
+        if row is None or requested != Path(row["path"]).resolve(strict=True):
+            raise CommandExecutionError("caller-supplied working copy does not match the assigned worktree")
+    return execute_network_command(store, project_id=project_id, command_request_id=command_request_id, request_digest=request_digest)
 
 
-def _finish(store: Any, command_request_id: str, state: str, result: dict[str, Any]) -> None:
-    with store.transaction():
-        store.conn.execute("UPDATE command_requests SET state=?,result_json=?,completed_at=? WHERE command_request_id=? AND state='running'", (state, json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")), __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(timespec='microseconds').replace('+00:00','Z'), command_request_id))
+def execute_network_command(store: Any, *, project_id: str, command_request_id: str, request_digest: str) -> dict[str, Any]:
+    """Execute an approved request only when its recorded place is container-network.
+
+    The actual Docker invocation lives in the command-request executor so host
+    and network paths share the same digest, expiry, and one-use transition.
+    This narrow entry point prevents a caller from accidentally routing a
+    network-approved request through a host-only helper.
+    """
+
+    validate_id(project_id, prefix="prj")
+    validate_id(command_request_id, prefix="cmd")
+    row = store.conn.execute("SELECT execution_place FROM command_requests WHERE command_request_id=? AND project_id=?", (command_request_id, project_id)).fetchone()
+    if row is None or row["execution_place"] != "container-network":
+        raise CommandRequestError("request is not a container-network command")
+    return execute_command(store, project_id=project_id, command_request_id=command_request_id, request_digest=request_digest)
 
 
-__all__ = ["CommandExecutionError", "execute_container_network_command", "execute_host_command"]
+__all__ = ["CommandExecutionError", "execute_container_network_command", "execute_host_command", "execute_network_command"]

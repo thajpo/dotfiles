@@ -74,7 +74,9 @@ def create_coding_container(*, image_reference: str, working_copy_path: str | Pa
         raise DockerRuntimeError("working copy is not a directory")
     if not isinstance(command, list) or not command or any(not isinstance(item, str) or "\x00" in item for item in command):
         raise DockerRuntimeError("container command is invalid")
-    expected_hash = "sha256:" + hashlib.sha256(json.dumps(dict(runtime_spec), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    hash_fields = ("executionTarget", "platform", "imageReference", "imageConfigId", "registryDigest", "buildId", "piVersion", "projectId", "workingCopyId", "authority")
+    hash_body = {key: runtime_spec.get(key) for key in hash_fields}
+    expected_hash = "sha256:" + hashlib.sha256(json.dumps(hash_body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if runtime_spec.get("runtimeSpecHash") not in {None, expected_hash}:
         raise DockerRuntimeError("runtime specification hash mismatch")
     expected_config = runtime_spec.get("imageConfigId")
@@ -118,4 +120,28 @@ def create_coding_container(*, image_reference: str, working_copy_path: str | Pa
     return {"image": image.as_dict(), "container": observation, "containerId": container_id, "runtimeSpecHash": expected_hash, "network": "none", "writableSource": str(source)}
 
 
-__all__ = ["DockerImageIdentity", "DockerRuntimeError", "create_coding_container", "inspect_container", "inspect_image"]
+def start_container(container_id: str) -> dict[str, Any]:
+    if not isinstance(container_id, str) or not container_id or "\x00" in container_id or any(char.isspace() for char in container_id):
+        raise DockerRuntimeError("container identity is invalid")
+    _run(["container", "start", container_id])
+    return inspect_container(container_id)
+
+
+def stop_container(container_id: str) -> dict[str, Any]:
+    if not isinstance(container_id, str) or not container_id or "\x00" in container_id or any(char.isspace() for char in container_id):
+        raise DockerRuntimeError("container identity is invalid")
+    _run(["container", "stop", "--time", "10", container_id])
+    return inspect_container(container_id)
+
+
+def wait_container(container_id: str) -> int:
+    if not isinstance(container_id, str) or not container_id or "\x00" in container_id or any(char.isspace() for char in container_id):
+        raise DockerRuntimeError("container identity is invalid")
+    output = _run(["container", "wait", container_id], timeout=24 * 60 * 60).strip()
+    try:
+        return int(output)
+    except ValueError as error:
+        raise DockerRuntimeError("Docker returned an invalid container exit code") from error
+
+
+__all__ = ["DockerImageIdentity", "DockerRuntimeError", "create_coding_container", "inspect_container", "inspect_image", "start_container", "stop_container", "wait_container"]

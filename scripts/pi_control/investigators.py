@@ -10,6 +10,7 @@ from .conversations import create_conversation
 from .launch import attest_run, prepare_run, stop_run
 from .models import bounded_text, canonical_json, new_id, utc_now, validate_id
 from .scoped_read import ScopedProjectReader
+from .messages import post_message
 
 _POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pi-investigator")
 
@@ -60,7 +61,10 @@ def complete_investigation(store: Any, investigation_id: str, *, state: str, res
         now = utc_now()
         store.conn.execute("UPDATE investigations SET state=?,result_json=?,updated_at=?,completed_at=? WHERE investigation_id=?", (state, canonical_json(dict(result)), now, now, investigation_id))
         store.conn.execute("UPDATE runs SET desired_state='stopped',observed_state='stopped',ended_at=?,updated_at=? WHERE run_id=? AND observed_state NOT IN ('stopped','failed')", (now, now, row["run_id"]))
-        return dict(store.conn.execute("SELECT * FROM investigations WHERE investigation_id=?", (investigation_id,)).fetchone())
+        completed = dict(store.conn.execute("SELECT * FROM investigations WHERE investigation_id=?", (investigation_id,)).fetchone())
+    kind = "needs-user" if state == "needs-user" else "failure" if state == "failed" else "interrupted" if state == "interrupted" else "progress"
+    post_message(store, project_id=completed["project_id"], conversation_id=completed["conversation_id"], run_id=completed["run_id"], kind=kind, payload={"investigationId": investigation_id, "state": state, "result": dict(result)}, idempotency_key=f"investigation:{investigation_id}:{state}")
+    return completed
 
 
 def interrupt_running(store: Any, *, project_id: str) -> list[dict[str, Any]]:

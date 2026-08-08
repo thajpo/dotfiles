@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from .events import append_event_in_transaction
 from .greenfield_store import default_state_root
 from .models import bounded_text, canonical_json, new_id, utc_now, validate_id, validate_pi_session_id
+from .presentation import PresentationError, ensure_presentation
 
 
 class WorkstreamCreationError(RuntimeError):
@@ -67,10 +68,18 @@ def create_workstream(store: Any, *, project_id: str, title: str, brief: Mapping
         with store.transaction():
             store.conn.execute("INSERT INTO working_copies(working_copy_id,project_id,display_name,kind,purpose,path,git_dir,branch_ref,expected_head_oid,expected_tree_oid,effective_mode,desired_state,observed_state,writer_epoch,active_writer_run_id,resource_version,controller_owned,created_at,updated_at,last_reconciled_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (wc_id, project_id, display_name or title, "worktree", "workstream", str(destination), str(destination / ".git"), f"refs/heads/{branch_name}", primary["expected_head_oid"], primary["expected_tree_oid"], mode, "present", "ready", 0, None, 1, 1, now, now, now, None, None))
             store.conn.execute("INSERT INTO conversations(conversation_id,project_id,working_copy_id,role,display_name,pi_session_id,session_file,desired_state,observed_state,resource_version,created_at,updated_at,last_reconciled_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (conversation_id, project_id, wc_id, "workstream", display_name or title, session_id, str(session_file), "active", "ready", 1, now, now, now, None, None))
-            store.conn.execute("INSERT INTO workstreams(workstream_id,project_id,working_copy_id,conversation_id,title,brief_json,target_ref,starting_oid,desired_state,observed_state,controller_owned,resource_version,created_at,updated_at,last_reconciled_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (ws_id, project_id, wc_id, conversation_id, bounded_text(title, name="title", limit=512), canonical_json(dict(brief or {})), f"refs/heads/{branch_name}", primary["expected_head_oid"], "active", "ready", 1, 1, now, now, now, None, None))
+            store.conn.execute("INSERT INTO workstreams(workstream_id,project_id,working_copy_id,conversation_id,title,brief_json,target_ref,starting_oid,desired_state,observed_state,controller_owned,resource_version,created_at,updated_at,last_reconciled_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (ws_id, project_id, wc_id, conversation_id, bounded_text(title, name="title", limit=512), canonical_json(dict(brief or {})), f"refs/heads/{branch_name}", primary["expected_head_oid"], "active", "creating", 1, 1, now, now, now, None, None))
             pa_id = new_id("pa")
             store.conn.execute("INSERT INTO presentation_assignments(presentation_assignment_id,conversation_id,backend,desired_state,observed_state,locator_json,resource_version,observed_at,updated_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (pa_id, conversation_id, "tmux", "present", "unknown", canonical_json({"conversationId": conversation_id, "workstreamId": ws_id}), 1, None, now, None, None))
             append_event_in_transaction(store.conn, event_kind="workstream.created", resource_type="workstream", resource_id=ws_id, resource_version=1, payload={"projectId": project_id, "workingCopyId": wc_id, "conversationId": conversation_id, "branchRef": f"refs/heads/{branch_name}"})
+        try:
+            ensure_presentation(store, project_id=project_id, conversation_id=conversation_id, title=title)
+        except PresentationError as error:
+            with store.transaction():
+                store.conn.execute("UPDATE workstreams SET observed_state='error',error_code='PRESENTATION_UNAVAILABLE',error_detail=?,updated_at=?,resource_version=resource_version+1 WHERE workstream_id=?", (str(error)[:1024], utc_now(), ws_id))
+            raise WorkstreamCreationError(str(error)) from error
+        with store.transaction():
+            store.conn.execute("UPDATE workstreams SET observed_state='ready',last_reconciled_at=?,updated_at=?,resource_version=resource_version+1 WHERE workstream_id=?", (utc_now(), utc_now(), ws_id))
             return dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (ws_id,)).fetchone())
     except BaseException:
         # Preserve the working copy for forensic recovery.  It is not adopted
