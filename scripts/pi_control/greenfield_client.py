@@ -23,6 +23,7 @@ from .projects import project_status, register_project, work_index
 from .greenfield_workstreams import create_workstream
 from .reviews import request_review, submit_review
 from .greenfield_review import create_review_assignment
+from .greenfield_reconcile import reconcile_project, reconcile_run, recover_lost_run
 
 
 class GreenfieldClientError(ValueError):
@@ -57,7 +58,7 @@ class GreenfieldControllerClient:
 
     def negotiate(self) -> dict[str, Any]:
         with self._store() as store:
-            return {"protocolVersion": 1, "schema": store.schema_status().as_dict(), "operations": ["project.register", "project.status", "project.work-index", "conversation.create", "conversation.focus", "conversation.archive", "workstream.create", "message.post", "message.list", "message.acknowledge", "message.reply", "command.request", "command.authorize", "command.reject", "command.consume", "run.prepare", "run.attest", "run.stop", "change.submit", "review.request", "review.create-assignment", "review.submit", "integration.analyze", "integration.authorize", "integration.integrate", "dependency.detect", "package-review.record"]}
+            return {"protocolVersion": 1, "schema": store.schema_status().as_dict(), "operations": ["project.register", "project.status", "project.work-index", "conversation.create", "conversation.focus", "conversation.archive", "workstream.create", "message.post", "message.list", "message.acknowledge", "message.reply", "command.request", "command.authorize", "command.reject", "command.consume", "run.prepare", "run.attest", "run.stop", "run.reconcile", "run.recover", "project.reconcile", "change.submit", "review.request", "review.create-assignment", "review.submit", "integration.analyze", "integration.authorize", "integration.integrate", "dependency.detect", "package-review.record"]}
 
     def register_project(self, repository: str, display_name: str | None = None) -> dict[str, Any]:
         with self._store(mutate=True) as store:
@@ -153,6 +154,18 @@ class GreenfieldControllerClient:
         with self._store(mutate=True) as store:
             return stop_run(store, **request)
 
+    def reconcile_run(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return reconcile_run(store, **request)
+
+    def recover_run(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return recover_lost_run(store, **request)
+
+    def reconcile_project(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return reconcile_project(store, **request)
+
     def submit_change(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
             return submit_change(store, **request).as_dict()
@@ -215,6 +228,9 @@ class GreenfieldControllerClient:
             "run.prepare": self.prepare_run,
             "run.attest": self.attest_run,
             "run.stop": self.stop_run,
+            "run.reconcile": self.reconcile_run,
+            "run.recover": self.recover_run,
+            "project.reconcile": self.reconcile_project,
             "change.submit": self.submit_change,
             "review.request": self.request_review,
             "review.submit": self.submit_review,

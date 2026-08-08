@@ -10,6 +10,8 @@ import json
 from scripts.pi_control.greenfield_client import GreenfieldControllerClient
 from scripts.pi_control.greenfield_store import GreenfieldStore
 from scripts.pi_control.messages import ProjectMessageError, acknowledge_message, list_messages, post_message
+from scripts.pi_control.greenfield_reconcile import ReconcileError
+from scripts.pi_control.launch import prepare_run
 
 
 def _repo(root: Path, name: str) -> Path:
@@ -81,6 +83,20 @@ class GreenfieldCoreTests(unittest.TestCase):
                 run = store.conn.execute("SELECT * FROM runs WHERE run_id=?", (output["run"],)).fetchone()
                 self.assertEqual(run["observed_state"], "stopped")
                 self.assertEqual(run["desired_state"], "stopped")
+
+    def test_reconcile_fails_closed_until_explicit_recovery(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as raw:
+            root = Path(raw)
+            client = GreenfieldControllerClient(root / "state")
+            registered = client.register_project(str(_repo(root, "recovery")), "recovery")
+            with GreenfieldStore(root / "state") as store:
+                conversation = store.conn.execute("SELECT * FROM conversations WHERE project_id=?", (registered["project_id"],)).fetchone()
+                prepared = prepare_run(store, project_id=registered["project_id"], conversation_id=conversation["conversation_id"], authority="secretary")
+                store.conn.execute("UPDATE runs SET owner_pid=?,owner_start_identity=?,observed_state='running' WHERE run_id=?", (999999, "linux:missing:1", prepared.run["run_id"]))
+            attention = client.reconcile_run(run_id=prepared.run["run_id"])
+            self.assertEqual(attention["decision"], "needs-attention")
+            recovered = client.recover_run(run_id=prepared.run["run_id"], actor_id="test-recovery")
+            self.assertEqual(recovered["observed_state"], "lost")
 
 
 if __name__ == "__main__":

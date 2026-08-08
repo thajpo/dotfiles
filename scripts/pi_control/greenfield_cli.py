@@ -24,7 +24,7 @@ def _parser() -> argparse.ArgumentParser:
     register.add_argument("--repository", required=True)
     register.add_argument("--name", default=None)
     project_sub.add_parser("list")
-    for name in ("status", "work-index"):
+    for name in ("status", "work-index", "reconcile"):
         item = project_sub.add_parser(name)
         item.add_argument("project_id")
     conversation = sub.add_parser("conversation")
@@ -50,7 +50,7 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--request-json", required=True)
     run = sub.add_parser("run")
     run_sub = run.add_subparsers(dest="run_command", required=True)
-    for name in ("prepare", "attest", "stop"):
+    for name in ("prepare", "attest", "stop", "reconcile", "recover"):
         item = run_sub.add_parser(name)
         item.add_argument("--request-json", required=True)
     change = sub.add_parser("change")
@@ -121,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
                     value = [dict(row) for row in store.conn.execute("SELECT * FROM projects ORDER BY display_name,project_id")]
             elif args.project_command == "status":
                 value = client.status(args.project_id)
+            elif args.project_command == "reconcile":
+                value = client.reconcile_project(project_id=args.project_id)
             else:
                 value = client.work_index(args.project_id)
         elif args.command == "protocol":
