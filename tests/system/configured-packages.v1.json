@@ -1,0 +1,333 @@
+{
+  "packages": [
+    {
+      "current": {
+        "availability": "available",
+        "name": "pi-btw",
+        "packageJson": "pi/npm/node_modules/pi-btw/package.json",
+        "source": "npm:pi-btw@0.4.1",
+        "version": "0.4.1"
+      },
+      "loadedResources": [
+        "extension:pi/npm/node_modules/pi-btw/extensions/btw.ts#command:btw",
+        "extension:pi/npm/node_modules/pi-btw/extensions/btw.ts#command:btw:clear",
+        "extension:pi/npm/node_modules/pi-btw/extensions/btw.ts#command:btw:inject",
+        "extension:pi/npm/node_modules/pi-btw/extensions/btw.ts#command:btw:model",
+        "extension:pi/npm/node_modules/pi-btw/extensions/btw.ts#command:btw:new",
+        "extension:pi/npm/node_modules/pi-btw/extensions/btw.ts#command:btw:summarize",
+        "extension:pi/npm/node_modules/pi-btw/extensions/btw.ts#command:btw:tangent",
+        "extension:pi/npm/node_modules/pi-btw/extensions/btw.ts#command:btw:thinking",
+        "package-source:npm:pi-btw@0.4.1#extension:pi/npm/node_modules/pi-btw/extensions/btw.ts",
+        "package:npm:pi-btw@0.4.1",
+        "package:npm:pi-btw@0.4.1#extension:pi/npm/node_modules/pi-btw/extensions/btw.ts"
+      ],
+      "plannedStagedSource": null,
+      "remoteCapability": "remote-read-mocked",
+      "representative": {
+        "actionId": "HA-027",
+        "scenario": "SYS-PKG-001"
+      },
+      "source": "npm:pi-btw@0.4.1"
+    },
+    {
+      "current": {
+        "availability": "available",
+        "name": "pi-image-tools",
+        "packageJson": "pi/npm/node_modules/pi-image-tools/package.json",
+        "source": "npm:pi-image-tools@1.4.0",
+        "version": "1.4.0"
+      },
+      "loadedResources": [
+        "extension:pi/npm/node_modules/pi-image-tools/src/commands.ts#command:paste-image",
+        "package-source:npm:pi-image-tools@1.4.0#extension:pi/npm/node_modules/pi-image-tools/index.ts",
+        "package:npm:pi-image-tools@1.4.0",
+        "package:npm:pi-image-tools@1.4.0#extension:pi/npm/node_modules/pi-image-tools/index.ts"
+      ],
+      "plannedStagedSource": null,
+      "remoteCapability": "local-only",
+      "representative": {
+        "actionId": "HA-086",
+        "scenario": "SYS-PKG-002"
+      },
+      "source": "npm:pi-image-tools@1.4.0"
+    },
+    {
+      "current": {
+        "availability": "available",
+        "name": "@narumitw/pi-goal",
+        "packageJson": "pi/npm/node_modules/@narumitw/pi-goal/package.json",
+        "source": "npm:@narumitw/pi-goal@0.43.0",
+        "version": "0.43.0"
+      },
+      "loadedResources": [
+        "extension:pi/npm/node_modules/@narumitw/pi-goal/src/goal.ts#command:goal",
+        "extension:pi/npm/node_modules/@narumitw/pi-goal/src/goal.ts#tool-dynamic:395",
+        "extension:pi/npm/node_modules/@narumitw/pi-goal/src/goal.ts#tool-dynamic:396",
+        "package-source:npm:@narumitw/pi-goal@0.43.0#extension:pi/npm/node_modules/@narumitw/pi-goal/src/index.ts",
+        "package:npm:@narumitw/pi-goal@0.43.0",
+        "package:npm:@narumitw/pi-goal@0.43.0#extension:pi/npm/node_modules/@narumitw/pi-goal/src/index.ts"
+      ],
+      "plannedStagedSource": null,
+      "remoteCapability": "local-only",
+      "representative": {
+        "actionId": "HA-022",
+        "scenario": "SYS-PKG-003"
+      },
+      "source": "npm:@narumitw/pi-goal@0.43.0"
+    },
+    {
+      "current": {
+        "availability": "available",
+        "name": "@narumitw/pi-plan-mode",
+        "packageJson": "pi/npm/node_modules/@narumitw/pi-plan-mode/package.json",
+        "source": "npm:@narumitw/pi-plan-mode@0.31.0",
+        "version": "0.31.0"
+      },
+      "loadedResources": [
+        "extension:pi/npm/node_modules/@narumitw/pi-plan-mode/src/plan-mode.ts#command:plan",
+        "extension:pi/npm/node_modules/@narumitw/pi-plan-mode/src/plan-mode.ts#tool-dynamic:105",
+        "extension:pi/npm/node_modules/@narumitw/pi-plan-mode/src/plan-mode.ts#tool-dynamic:150",
+        "package-source:npm:@narumitw/pi-plan-mode@0.31.0#extension:pi/npm/node_modules/@narumitw/pi-plan-mode/src/index.ts",
+        "package:npm:@narumitw/pi-plan-mode@0.31.0",
+        "package:npm:@narumitw/pi-plan-mode@0.31.0#extension:pi/npm/node_modules/@narumitw/pi-plan-mode/src/index.ts"
+      ],
+      "plannedStagedSource": null,
+      "remoteCapability": "local-only",
+      "representative": {
+        "actionId": "HA-021",
+        "scenario": "SYS-PKG-004"
+      },
+      "source": "npm:@narumitw/pi-plan-mode@0.31.0"
+    },
+    {
+      "current": {
+        "availability": "available",
+        "name": "pi-vim",
+        "packageJson": "pi/npm/node_modules/pi-vim/package.json",
+        "source": "npm:pi-vim@0.14.1",
+        "version": "0.14.1"
+      },
+      "loadedResources": [
+        "package-source:npm:pi-vim@0.14.1#extension:pi/npm/node_modules/pi-vim/index.ts",
+        "package:npm:pi-vim@0.14.1",
+        "package:npm:pi-vim@0.14.1#extension:pi/npm/node_modules/pi-vim/index.ts"
+      ],
+      "plannedStagedSource": null,
+      "remoteCapability": "local-only",
+      "representative": {
+        "actionId": "HA-088",
+        "scenario": "SYS-PKG-005"
+      },
+      "source": "npm:pi-vim@0.14.1"
+    },
+    {
+      "current": {
+        "availability": "available",
+        "name": "pisesh",
+        "packageJson": "pi/npm/node_modules/pisesh/package.json",
+        "source": "npm:pisesh@0.1.12",
+        "version": "0.1.12"
+      },
+      "loadedResources": [
+        "extension:pi/npm/node_modules/pisesh/extensions/sesh.ts#command:sesh",
+        "package-source:npm:pisesh@0.1.12#extension:pi/npm/node_modules/pisesh/extensions/sesh.ts",
+        "package:npm:pisesh@0.1.12",
+        "package:npm:pisesh@0.1.12#extension:pi/npm/node_modules/pisesh/extensions/sesh.ts"
+      ],
+      "plannedStagedSource": null,
+      "remoteCapability": "local-only",
+      "representative": {
+        "actionId": "HA-088",
+        "scenario": "SYS-PKG-006"
+      },
+      "source": "npm:pisesh@0.1.12"
+    },
+    {
+      "current": {
+        "availability": "available",
+        "name": "@narumitw/pi-statusline",
+        "packageJson": "pi/npm/node_modules/@narumitw/pi-statusline/package.json",
+        "source": "npm:@narumitw/pi-statusline@0.31.0",
+        "version": "0.31.0"
+      },
+      "loadedResources": [
+        "extension:pi/npm/node_modules/@narumitw/pi-statusline/src/commands.ts#command:statusline",
+        "package-source:npm:@narumitw/pi-statusline@0.31.0#extension:pi/npm/node_modules/@narumitw/pi-statusline/src/index.ts",
+        "package:npm:@narumitw/pi-statusline@0.31.0",
+        "package:npm:@narumitw/pi-statusline@0.31.0#extension:pi/npm/node_modules/@narumitw/pi-statusline/src/index.ts"
+      ],
+      "plannedStagedSource": null,
+      "remoteCapability": "local-only",
+      "representative": {
+        "actionId": "HA-085",
+        "scenario": "SYS-PKG-007"
+      },
+      "source": "npm:@narumitw/pi-statusline@0.31.0"
+    },
+    {
+      "current": {
+        "availability": "available",
+        "name": "@narumitw/pi-usage",
+        "packageJson": "pi/npm/node_modules/@narumitw/pi-usage/package.json",
+        "source": "npm:@narumitw/pi-usage@0.31.0",
+        "version": "0.31.0"
+      },
+      "loadedResources": [
+        "extension:pi/npm/node_modules/@narumitw/pi-usage/src/usage.ts#command:codex-status",
+        "extension:pi/npm/node_modules/@narumitw/pi-usage/src/usage.ts#command:usage",
+        "package-source:npm:@narumitw/pi-usage@0.31.0#extension:pi/npm/node_modules/@narumitw/pi-usage/src/index.ts",
+        "package:npm:@narumitw/pi-usage@0.31.0",
+        "package:npm:@narumitw/pi-usage@0.31.0#extension:pi/npm/node_modules/@narumitw/pi-usage/src/index.ts"
+      ],
+      "plannedStagedSource": null,
+      "remoteCapability": "local-only",
+      "representative": {
+        "actionId": "HA-089",
+        "scenario": "SYS-PKG-008"
+      },
+      "source": "npm:@narumitw/pi-usage@0.31.0"
+    },
+    {
+      "current": {
+        "availability": "available",
+        "name": "@narumitw/pi-github-pr",
+        "packageJson": "pi/npm/node_modules/@narumitw/pi-github-pr/package.json",
+        "source": "npm:@narumitw/pi-github-pr@0.31.0",
+        "version": "0.31.0"
+      },
+      "loadedResources": [
+        "package-source:npm:@narumitw/pi-github-pr@0.31.0#extension:pi/npm/node_modules/@narumitw/pi-github-pr/src/index.ts",
+        "package:npm:@narumitw/pi-github-pr@0.31.0",
+        "package:npm:@narumitw/pi-github-pr@0.31.0#extension:pi/npm/node_modules/@narumitw/pi-github-pr/src/index.ts"
+      ],
+      "plannedStagedSource": null,
+      "remoteCapability": "remote-read-mocked",
+      "representative": {
+        "actionId": "HA-089",
+        "scenario": "SYS-PKG-009"
+      },
+      "source": "npm:@narumitw/pi-github-pr@0.31.0"
+    },
+    {
+      "current": {
+        "availability": "available",
+        "name": "pi-nvim",
+        "packageJson": "pi/npm/node_modules/pi-nvim/package.json",
+        "source": "npm:pi-nvim@0.2.4",
+        "version": "0.2.4"
+      },
+      "loadedResources": [
+        "extension:pi/npm/node_modules/pi-nvim/extension.ts#command:pi-nvim-info",
+        "package-source:npm:pi-nvim@0.2.4#extension:pi/npm/node_modules/pi-nvim/extension.ts",
+        "package:npm:pi-nvim@0.2.4",
+        "package:npm:pi-nvim@0.2.4#extension:pi/npm/node_modules/pi-nvim/extension.ts"
+      ],
+      "plannedStagedSource": null,
+      "remoteCapability": "local-only",
+      "representative": {
+        "actionId": "HA-088",
+        "scenario": "SYS-PKG-010"
+      },
+      "source": "npm:pi-nvim@0.2.4"
+    },
+    {
+      "current": {
+        "availability": "unavailable",
+        "name": "pi-web-access",
+        "packageJson": null,
+        "source": "npm:pi-web-access@0.18.0",
+        "version": "0.18.0"
+      },
+      "loadedResources": [
+        "package-source:npm:pi-web-access@0.18.0#extension:pi/npm/node_modules/pi-web-access/index.ts",
+        "package:npm:pi-web-access@0.18.0",
+        "package-source:npm:pi-web-access@0.18.0#extension:pi/npm/node_modules/pi-web-access/index.ts"
+      ],
+      "plannedStagedSource": null,
+      "remoteCapability": "remote-read-mocked",
+      "representative": {
+        "actionId": "HA-089",
+        "scenario": "SYS-PKG-011"
+      },
+      "source": "npm:pi-web-access@0.18.0"
+    },
+    {
+      "current": {
+        "availability": "available",
+        "name": "pi-subagents",
+        "packageJson": "pi/npm/node_modules/pi-subagents/package.json",
+        "source": "npm:pi-subagents@0.35.1",
+        "version": "0.35.1"
+      },
+      "loadedResources": [
+        "extension:pi/npm/node_modules/pi-subagents/src/extension/index.ts#tool-dynamic:505",
+        "extension:pi/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts#tool-dynamic:541",
+        "extension:pi/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts#tool-dynamic:844",
+        "extension:pi/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts#tool-dynamic:845",
+        "extension:pi/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts#tool:intercom",
+        "extension:pi/npm/node_modules/pi-subagents/src/runs/background/wait-tool.ts#tool-dynamic:25",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/prompt-workflows.ts#command:chain-prompts",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/prompt-workflows.ts#command:prompt-workflow",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:chain",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:parallel",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:run",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:run-chain",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagent-cost",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagents",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagents-check-profile",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagents-doctor",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagents-fleet",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagents-generate-profiles",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagents-load-profile",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagents-models",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagents-profiles",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagents-refresh-provider-models",
+        "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagents-stop",
+        "extension:pi/npm/node_modules/pi-subagents/src/watchdog/register-main.ts#command:subagents-watchdog",
+        "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+        "package:npm:pi-subagents@0.35.1",
+        "package:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+        "planned-source:./packages/pi-subagents-control"
+      ],
+      "plannedStagedSource": "./packages/pi-subagents-control",
+      "remoteCapability": "local-only",
+      "representative": {
+        "actionId": "HA-090",
+        "scenario": "SYS-PKG-012"
+      },
+      "source": "npm:pi-subagents@0.35.1"
+    },
+    {
+      "current": {
+        "availability": "available",
+        "name": "@kjrjay/pi-sandbox",
+        "packageJson": "pi/npm/node_modules/@kjrjay/pi-sandbox/package.json",
+        "source": "npm:@kjrjay/pi-sandbox@0.2.0",
+        "version": "0.2.0"
+      },
+      "loadedResources": [
+        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#command:sandbox",
+        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:3992",
+        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:3997",
+        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4006",
+        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4023",
+        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4028",
+        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4033",
+        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4039",
+        "package-source:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+        "package:npm:@kjrjay/pi-sandbox@0.2.0",
+        "package:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+        "planned-source:./packages/pi-sandbox-control"
+      ],
+      "plannedStagedSource": "./packages/pi-sandbox-control",
+      "remoteCapability": "local-only",
+      "representative": {
+        "actionId": "HA-090",
+        "scenario": "SYS-PKG-013"
+      },
+      "source": "npm:@kjrjay/pi-sandbox@0.2.0"
+    }
+  ],
+  "sourcePlan": "pi/settings.json",
+  "version": 1
+}
