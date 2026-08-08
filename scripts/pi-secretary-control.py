@@ -3275,7 +3275,7 @@ def create_workstream(repository: str | Path, capability: str, title: str, role:
             # mistake a pre-existing branch for one owned by this invocation.
             run(["git", "branch", branch, oid], repo)
             branch_created = True
-            run(["git", "worktree", "add", str(workspace), branch], repo)
+            run(["git", "-c", "core.hooksPath=/dev/null", "worktree", "add", str(workspace), branch], repo)
             worktree_created = True
             actual = _canonical_repo(workspace)
             actual_common = _git_path(workspace, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -3459,7 +3459,7 @@ def create_reviewer(project_id: str, event_id: str) -> dict[str, Any]:
                     _validate_review_worktree_identity(candidate_request, project, project_record, repo,
                                                        require_clean=True)
                 else:
-                    created = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(workspace), request["candidateOid"]],
+                    created = subprocess.run(["git", "-C", str(repo), "-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", str(workspace), request["candidateOid"]],
                                              env=_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
                     if created.returncode:
                         raise SecretaryError("could not create exact review worktree")
@@ -3711,7 +3711,7 @@ def land_reviewed(project_id: str, request_id: str) -> dict[str, Any]:
                 with _temporary_worktree_index(target_index) as temporary_index:
                     merge_env = _env()
                     merge_env["GIT_INDEX_FILE"] = str(temporary_index)
-                    merged = subprocess.run(["git", "-C", str(target), "merge", "--ff-only", "--no-edit", candidate],
+                    merged = subprocess.run(["git", "-C", str(target), "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", "--no-edit", candidate],
                                             env=merge_env, text=True, stdout=subprocess.PIPE,
                                             stderr=subprocess.PIPE, check=False)
                     if merged.returncode:

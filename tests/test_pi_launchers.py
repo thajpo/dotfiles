@@ -45,8 +45,16 @@ def setup_home(root: Path):
     fake = package / "dist/cli.js"
     fake.write_text("""#!/usr/bin/env python3
 import json, os, pathlib, sys
+lease_fds = []
+for descriptor in os.listdir('/dev/fd'):
+    try:
+        target = os.readlink('/dev/fd/' + descriptor)
+    except OSError:
+        continue
+    if '/worktree-leases/' in target and target.endswith('.lock'):
+        lease_fds.append(target)
 out = pathlib.Path(os.environ['FAKE_PI_OUTPUT'])
-out.write_text(json.dumps({'args': sys.argv[1:], 'cwd': os.getcwd(), 'env': {k:v for k,v in os.environ.items() if k.startswith('PI_TASK_') or k.startswith('PI_HARNESS_') or k == 'PI_SUBAGENTS_WORKTREE_DIR'}}))
+out.write_text(json.dumps({'args': sys.argv[1:], 'cwd': os.getcwd(), 'leaseFds': lease_fds, 'env': {k:v for k,v in os.environ.items() if k.startswith('PI_TASK_') or k.startswith('PI_HARNESS_') or k == 'PI_SUBAGENTS_WORKTREE_DIR'}}))
 """)
     fake.chmod(0o755)
     (package.parent.parent / ".bin/pi").symlink_to(fake)
@@ -281,6 +289,7 @@ class LauncherTests(unittest.TestCase):
             expected_project_id = hashlib.sha256(str((repo / ".git").resolve()).encode()).hexdigest()
             self.assertEqual(invocation["env"]["PI_HARNESS_PROJECT_ID"], expected_project_id)
             self.assertEqual(invocation["env"]["PI_HARNESS_REPOSITORY"], str(repo.resolve()))
+            self.assertTrue(invocation["leaseFds"])
             self.assertNotIn("hijacked", result.stderr)
 
     def test_installed_launchers_use_control_plane_helper_when_repo_path_is_absent(self):

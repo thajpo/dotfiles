@@ -143,6 +143,8 @@ class ArtifactTests(unittest.TestCase):
     def test_artifact_identity_cannot_be_overwritten_or_symlinked(self) -> None:
         artifacts = ArtifactStore(self.state)
         record = self._artifact(artifact_id="art_" + "8" * 32)
+        replay = self._artifact(artifact_id=record.artifact_id)
+        self.assertEqual(replay, record)
         with self.assertRaises(ArtifactConflictError):
             self._artifact(artifact_id=record.artifact_id, content=b"other")
         link_id = "art_" + "9" * 32

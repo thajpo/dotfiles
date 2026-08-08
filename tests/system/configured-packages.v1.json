@@ -232,9 +232,9 @@
     },
     {
       "current": {
-        "availability": "unavailable",
+        "availability": "available",
         "name": "pi-web-access",
-        "packageJson": null,
+        "packageJson": "pi/npm/node_modules/pi-web-access/package.json",
         "source": "npm:pi-web-access@0.18.0",
         "version": "0.18.0"
       },
@@ -256,7 +256,7 @@
         "availability": "available",
         "name": "pi-subagents",
         "packageJson": "pi/npm/node_modules/pi-subagents/package.json",
-        "source": "npm:pi-subagents@0.35.1",
+        "source": "./npm/node_modules/pi-subagents",
         "version": "0.35.1"
       },
       "loadedResources": [
@@ -284,9 +284,9 @@
         "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagents-refresh-provider-models",
         "extension:pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts#command:subagents-stop",
         "extension:pi/npm/node_modules/pi-subagents/src/watchdog/register-main.ts#command:subagents-watchdog",
-        "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
-        "package:npm:pi-subagents@0.35.1",
-        "package:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+        "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
+        "package:./npm/node_modules/pi-subagents",
+        "package:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
         "planned-source:./packages/pi-subagents-control"
       ],
       "plannedStagedSource": "./packages/pi-subagents-control",
@@ -295,28 +295,28 @@
         "actionId": "HA-090",
         "scenario": "SYS-PKG-012"
       },
-      "source": "npm:pi-subagents@0.35.1"
+      "source": "./npm/node_modules/pi-subagents"
     },
     {
       "current": {
         "availability": "available",
-        "name": "@kjrjay/pi-sandbox",
-        "packageJson": "pi/npm/node_modules/@kjrjay/pi-sandbox/package.json",
-        "source": "npm:@kjrjay/pi-sandbox@0.2.0",
-        "version": "0.2.0"
+        "name": "pi-sandbox-control",
+        "packageJson": "pi/npm/node_modules/pi-sandbox-control/package.json",
+        "source": "./npm/node_modules/pi-sandbox-control",
+        "version": "0.2.0-control.1"
       },
       "loadedResources": [
-        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#command:sandbox",
-        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:3992",
-        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:3997",
-        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4006",
-        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4023",
-        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4028",
-        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4033",
-        "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4039",
-        "package-source:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
-        "package:npm:@kjrjay/pi-sandbox@0.2.0",
-        "package:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+        "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#command:sandbox",
+        "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4095",
+        "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4100",
+        "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4109",
+        "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4126",
+        "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4131",
+        "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4136",
+        "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4142",
+        "package-source:./npm/node_modules/pi-sandbox-control#extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts",
+        "package:./npm/node_modules/pi-sandbox-control",
+        "package:./npm/node_modules/pi-sandbox-control#extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts",
         "planned-source:./packages/pi-sandbox-control"
       ],
       "plannedStagedSource": "./packages/pi-sandbox-control",
@@ -325,7 +325,7 @@
         "actionId": "HA-090",
         "scenario": "SYS-PKG-013"
       },
-      "source": "npm:@kjrjay/pi-sandbox@0.2.0"
+      "source": "./npm/node_modules/pi-sandbox-control"
     }
   ],
   "sourcePlan": "pi/settings.json",

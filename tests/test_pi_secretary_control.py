@@ -735,6 +735,19 @@ class SecretaryControlTests(unittest.TestCase):
     def test_fast_forward_landing_integration_escalation_and_guarded_cleanup(self):
         registered = secretary.register_project(self.source, "landing-project")
         import hashlib
+        hooks = Path(git(self.source, "rev-parse", "--git-path", "hooks"))
+        if not hooks.is_absolute():
+            hooks = self.source / hooks
+        checkout_marker = Path(self.tmp.name) / "post-checkout-ran"
+        merge_marker = Path(self.tmp.name) / "post-merge-ran"
+        for name, marker in (("post-checkout", checkout_marker), ("post-merge", merge_marker)):
+            hook = hooks / name
+            hook.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('ran\\n')\n"
+            )
+            hook.chmod(0o700)
         def accepted(title, workstream_id):
             brief = self._brief(title, "landing brief")
             workstream = self._workstream(brief["briefId"], title=title, workstream_id=workstream_id)
@@ -770,6 +783,8 @@ class SecretaryControlTests(unittest.TestCase):
             landed_again = secretary.land_reviewed(registered["projectId"], request_id)
         self.assertTrue(landed["landed"]); self.assertTrue(landed_again["landed"])
         self.assertEqual(git(self.source, "rev-parse", "HEAD"), request["candidateOid"])
+        self.assertFalse(checkout_marker.exists())
+        self.assertFalse(merge_marker.exists())
         feature = Path(workstream["workspace"])
         with mock.patch.dict(os.environ, secretary_env, clear=False), \
              mock.patch.object(secretary, "_tmux_window_live", side_effect=secretary.SecretaryError("tmux uncertain")):

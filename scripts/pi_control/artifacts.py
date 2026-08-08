@@ -350,7 +350,12 @@ class ArtifactStore:
         if directory.exists() or directory.is_symlink():
             _secure_directory(directory, create=False)
             existing = self.verify(artifact_id)
-            if existing.as_dict() != record.as_dict() or _secure_file(content_path, max_bytes=_MAX_ARTIFACT_BYTES) != payload:
+            existing_identity = existing.as_dict()
+            requested_identity = record.as_dict()
+            for generated in ("createdAt", "expiresAt", "manifestDigest"):
+                existing_identity.pop(generated)
+                requested_identity.pop(generated)
+            if existing_identity != requested_identity or _secure_file(content_path, max_bytes=_MAX_ARTIFACT_BYTES) != payload:
                 raise ArtifactConflictError("artifact identity is already bound to different content")
             return existing
         directory.mkdir(mode=0o700)

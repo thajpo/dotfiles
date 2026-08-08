@@ -7,7 +7,7 @@ inheritSkills: false
 model: openai-codex/gpt-5.6-luna
 thinking: max
 tools: read, bash, grep, find, ls, web_search, fetch_content, get_search_content, source_check, contact_supervisor, intercom, host_command, harness_feedback
-extensions: __PI_AGENT_DIR__/extensions/host-command/index.ts, __PI_AGENT_DIR__/extensions/harness-feedback/index.ts, __PI_AGENT_DIR__/npm/node_modules/@kjrjay/pi-sandbox/index.ts
+extensions: __PI_AGENT_DIR__/extensions/host-command/index.ts, __PI_AGENT_DIR__/extensions/harness-feedback/index.ts, __PI_AGENT_DIR__/npm/node_modules/pi-sandbox-control/src/index.ts
 subagentOnlyExtensions: __PI_AGENT_DIR__/extensions/workflow-state/index.ts, __PI_AGENT_DIR__/extensions/auto-continue/index.ts, __PI_AGENT_DIR__/extensions/fast-mode/index.ts, __PI_AGENT_DIR__/npm/node_modules/pi-web-access/index.ts
 defaultContext: fresh
 acceptanceRole: read-only

@@ -741,100 +741,100 @@
       "source": "pi/extensions/workstream-channel/index.ts"
     },
     {
-      "declaredBy": "package-source:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-sandbox-control#extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 4094,
       "name": "sandbox",
       "owningLauncher": "pi/settings.json",
       "profile": "configured-package",
-      "provenance": "static registration scan at pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts:4094",
-      "resourceId": "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#command:sandbox",
-      "source": "pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts"
+      "provenance": "static registration scan at pi/npm/node_modules/pi-sandbox-control/src/index.ts:4197",
+      "resourceId": "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#command:sandbox",
+      "source": "pi/npm/node_modules/pi-sandbox-control/src/index.ts"
     },
     {
-      "declaredBy": "package-source:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-sandbox-control#extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts",
       "dynamic": true,
       "kind": "tool",
       "line": 3992,
       "name": null,
       "owningLauncher": "pi/settings.json",
       "profile": "configured-package",
-      "provenance": "static registration scan at pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts:3992",
-      "resourceId": "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:3992",
-      "source": "pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts"
+      "provenance": "static registration scan at pi/npm/node_modules/pi-sandbox-control/src/index.ts:4095",
+      "resourceId": "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4095",
+      "source": "pi/npm/node_modules/pi-sandbox-control/src/index.ts"
     },
     {
-      "declaredBy": "package-source:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-sandbox-control#extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts",
       "dynamic": true,
       "kind": "tool",
       "line": 3997,
       "name": null,
       "owningLauncher": "pi/settings.json",
       "profile": "configured-package",
-      "provenance": "static registration scan at pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts:3997",
-      "resourceId": "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:3997",
-      "source": "pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts"
+      "provenance": "static registration scan at pi/npm/node_modules/pi-sandbox-control/src/index.ts:4100",
+      "resourceId": "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4100",
+      "source": "pi/npm/node_modules/pi-sandbox-control/src/index.ts"
     },
     {
-      "declaredBy": "package-source:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-sandbox-control#extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts",
       "dynamic": true,
       "kind": "tool",
       "line": 4006,
       "name": null,
       "owningLauncher": "pi/settings.json",
       "profile": "configured-package",
-      "provenance": "static registration scan at pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts:4006",
-      "resourceId": "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4006",
-      "source": "pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts"
+      "provenance": "static registration scan at pi/npm/node_modules/pi-sandbox-control/src/index.ts:4109",
+      "resourceId": "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4109",
+      "source": "pi/npm/node_modules/pi-sandbox-control/src/index.ts"
     },
     {
-      "declaredBy": "package-source:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-sandbox-control#extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts",
       "dynamic": true,
       "kind": "tool",
       "line": 4023,
       "name": null,
       "owningLauncher": "pi/settings.json",
       "profile": "configured-package",
-      "provenance": "static registration scan at pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts:4023",
-      "resourceId": "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4023",
-      "source": "pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts"
+      "provenance": "static registration scan at pi/npm/node_modules/pi-sandbox-control/src/index.ts:4126",
+      "resourceId": "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4126",
+      "source": "pi/npm/node_modules/pi-sandbox-control/src/index.ts"
     },
     {
-      "declaredBy": "package-source:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-sandbox-control#extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts",
       "dynamic": true,
       "kind": "tool",
       "line": 4028,
       "name": null,
       "owningLauncher": "pi/settings.json",
       "profile": "configured-package",
-      "provenance": "static registration scan at pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts:4028",
-      "resourceId": "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4028",
-      "source": "pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts"
+      "provenance": "static registration scan at pi/npm/node_modules/pi-sandbox-control/src/index.ts:4131",
+      "resourceId": "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4131",
+      "source": "pi/npm/node_modules/pi-sandbox-control/src/index.ts"
     },
     {
-      "declaredBy": "package-source:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-sandbox-control#extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts",
       "dynamic": true,
       "kind": "tool",
       "line": 4033,
       "name": null,
       "owningLauncher": "pi/settings.json",
       "profile": "configured-package",
-      "provenance": "static registration scan at pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts:4033",
-      "resourceId": "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4033",
-      "source": "pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts"
+      "provenance": "static registration scan at pi/npm/node_modules/pi-sandbox-control/src/index.ts:4136",
+      "resourceId": "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4136",
+      "source": "pi/npm/node_modules/pi-sandbox-control/src/index.ts"
     },
     {
-      "declaredBy": "package-source:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-sandbox-control#extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts",
       "dynamic": true,
       "kind": "tool",
       "line": 4039,
       "name": null,
       "owningLauncher": "pi/settings.json",
       "profile": "configured-package",
-      "provenance": "static registration scan at pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts:4039",
-      "resourceId": "extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts#tool-dynamic:4039",
-      "source": "pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts"
+      "provenance": "static registration scan at pi/npm/node_modules/pi-sandbox-control/src/index.ts:4142",
+      "resourceId": "extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts#tool-dynamic:4142",
+      "source": "pi/npm/node_modules/pi-sandbox-control/src/index.ts"
     },
     {
       "declaredBy": "package-source:npm:@narumitw/pi-goal@0.43.0#extension:pi/npm/node_modules/@narumitw/pi-goal/src/index.ts",
@@ -1065,7 +1065,7 @@
       "source": "pi/npm/node_modules/pi-nvim/extension.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": true,
       "kind": "tool",
       "line": 505,
@@ -1077,7 +1077,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/extension/index.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": true,
       "kind": "tool",
       "line": 541,
@@ -1089,7 +1089,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": true,
       "kind": "tool",
       "line": 844,
@@ -1101,7 +1101,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": true,
       "kind": "tool",
       "line": 845,
@@ -1113,7 +1113,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "tool",
       "line": 524,
@@ -1125,7 +1125,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/intercom/native-supervisor-channel.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": true,
       "kind": "tool",
       "line": 25,
@@ -1137,7 +1137,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/runs/background/wait-tool.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 303,
@@ -1149,7 +1149,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/prompt-workflows.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 269,
@@ -1161,7 +1161,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/prompt-workflows.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1196,
@@ -1173,7 +1173,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1240,
@@ -1185,7 +1185,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1166,
@@ -1197,7 +1197,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1210,
@@ -1209,7 +1209,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1264,
@@ -1221,7 +1221,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1159,
@@ -1233,7 +1233,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1497,
@@ -1245,7 +1245,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1271,
@@ -1257,7 +1257,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1278,
@@ -1269,7 +1269,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1459,
@@ -1281,7 +1281,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1372,
@@ -1293,7 +1293,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1337,
@@ -1305,7 +1305,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1360,
@@ -1317,7 +1317,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1425,
@@ -1329,7 +1329,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 1288,
@@ -1341,7 +1341,7 @@
       "source": "pi/npm/node_modules/pi-subagents/src/slash/slash-commands.ts"
     },
     {
-      "declaredBy": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "declaredBy": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "dynamic": false,
       "kind": "command",
       "line": 400,
@@ -1370,10 +1370,10 @@
       "kind": "extension-source",
       "owningLauncher": "pi/settings.json",
       "profile": "configured-package",
-      "provenance": "pi package metadata pi.extensions for npm:@kjrjay/pi-sandbox@0.2.0",
-      "resourceId": "package-source:npm:@kjrjay/pi-sandbox@0.2.0#extension:pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+      "provenance": "pi package metadata pi.extensions for ./npm/node_modules/pi-sandbox-control",
+      "resourceId": "package-source:./npm/node_modules/pi-sandbox-control#extension:pi/npm/node_modules/pi-sandbox-control/src/index.ts",
       "scan": true,
-      "source": "pi/npm/node_modules/@kjrjay/pi-sandbox/index.ts"
+      "source": "pi/npm/node_modules/pi-sandbox-control/src/index.ts"
     },
     {
       "availability": "available",
@@ -1469,8 +1469,8 @@
       "kind": "extension-source",
       "owningLauncher": "pi/settings.json",
       "profile": "configured-package",
-      "provenance": "pi package metadata pi.extensions for npm:pi-subagents@0.35.1",
-      "resourceId": "package-source:npm:pi-subagents@0.35.1#extension:pi/npm/node_modules/pi-subagents/index.ts",
+      "provenance": "pi package metadata pi.extensions for ./npm/node_modules/pi-subagents",
+      "resourceId": "package-source:./npm/node_modules/pi-subagents#extension:pi/npm/node_modules/pi-subagents/index.ts",
       "scan": true,
       "source": "pi/npm/node_modules/pi-subagents/index.ts"
     },

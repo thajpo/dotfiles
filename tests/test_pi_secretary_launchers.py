@@ -87,7 +87,7 @@ class SecretaryLauncherTests(unittest.TestCase):
             home, repos, records, env = setup_registry(root, 1)
             agent_dir = home / ".pi/agent"
             for path in [
-                agent_dir / "npm/node_modules/@kjrjay/pi-sandbox/index.ts",
+                agent_dir / "npm/node_modules/pi-sandbox-control/src/index.ts",
                 agent_dir / "extensions/secretary/index.ts",
                 agent_dir / "extensions/root-session/index.ts",
                 agent_dir / "extensions/auto-continue/index.ts",

@@ -415,6 +415,12 @@ def discover_loaded_extensions(root: Path = ROOT, loaded_path: Path | None = Non
 
 
 def _package_name_version(source: str) -> tuple[str, str]:
+    local_packages = {
+        "./npm/node_modules/pi-subagents": ("pi-subagents", "0.35.1"),
+        "./npm/node_modules/pi-sandbox-control": ("pi-sandbox-control", "0.2.0-control.1"),
+    }
+    if source in local_packages:
+        return local_packages[source]
     spec = source.removeprefix("npm:")
     index = spec.rfind("@")
     if index <= 0:
@@ -460,9 +466,9 @@ def discover_packages(root: Path = ROOT, package_path: Path | None = None) -> li
         if current.get("source") != source or current.get("name") != name or current.get("version") != version:
             raise ValidationFailure([f"package {source} current source/name/version mismatch"])
         staged = row.get("plannedStagedSource")
-        if source == "npm:pi-subagents@0.35.1" and staged != "./packages/pi-subagents-control":
+        if source == "./npm/node_modules/pi-subagents" and staged != "./packages/pi-subagents-control":
             raise ValidationFailure(["pi-subagents staged source is not first-party control package"])
-        if source == "npm:@kjrjay/pi-sandbox@0.2.0" and staged != "./packages/pi-sandbox-control":
+        if source == "./npm/node_modules/pi-sandbox-control" and staged != "./packages/pi-sandbox-control":
             raise ValidationFailure(["pi-sandbox staged source is not first-party control package"])
         if not isinstance(row.get("loadedResources"), list) or not row["loadedResources"]:
             raise ValidationFailure([f"package {source} has no loaded resources"])

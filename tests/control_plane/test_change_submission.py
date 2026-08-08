@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -148,6 +149,23 @@ class ChangeSubmissionTests(unittest.TestCase):
             result = self._submit(store, key="crash")
             self.assertEqual(store.conn.execute("SELECT count(*) FROM change_revisions").fetchone()[0], 1)
             self.assertEqual(result.revision, 1)
+
+    def test_revision_and_lifecycle_state_commit_atomically(self) -> None:
+        with ControllerStore(self.state) as store:
+            store.conn.execute(
+                "CREATE TRIGGER reject_change_transition BEFORE UPDATE ON changes "
+                "BEGIN SELECT RAISE(ABORT, 'injected transition failure'); END"
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "injected transition failure"):
+                self._submit(store, key="atomic")
+            self.assertEqual(store.conn.execute("SELECT count(*) FROM change_revisions").fetchone()[0], 0)
+            self.assertEqual(store.conn.execute("SELECT state FROM changes").fetchone()[0], "draft")
+            self.assertEqual(store.conn.execute("SELECT state FROM operations").fetchone()[0], "applying")
+            store.conn.execute("DROP TRIGGER reject_change_transition")
+            result = self._submit(store, key="atomic")
+            self.assertEqual(result.revision, 1)
+            self.assertEqual(tuple(store.conn.execute("SELECT state,current_revision FROM changes").fetchone()), ("open", 1))
+            self.assertEqual(store.conn.execute("SELECT state FROM operations").fetchone()[0], "succeeded")
 
     def test_retry_ref_is_not_finalized_after_source_moves(self) -> None:
         class Failpoint:

@@ -360,20 +360,21 @@ def _finish_submission(store: Any, *, operation_id: str, change_id: str, reposit
         verification = {"refVerified": True, "sourceUnchanged": True, "objectFormat": before.get("objectFormat")}
         provenance = {"controller": "pi-control-change-v1", "sourceStatusHash": before.get("statusHash"), "indexDigest": before.get("indexDigest")}
         now = utc_now()
-        store.conn.execute(
-            "INSERT INTO change_revisions(change_id,revision,base_oid,tip_oid,tree_oid,source_head_oid,capture_mode,source_status_hash,changed_paths_json,diffstat_json,verification_json,provenance_json,ref_name,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (change_id, revision_number, base_oid, ref_oid, tree_oid, before.get("headOid"), capture_mode, before.get("statusHash"), canonical_json(list(changed)), canonical_json({"changedPaths": list(changed)}), canonical_json(verification), canonical_json(provenance), ref_name, now),
-        )
-        store.conn.execute(
-            "UPDATE changes SET state='open',current_revision=?,submitted_at=?,updated_at=?,resource_version=resource_version+1 WHERE change_id=? AND state='draft' AND resource_version=?",
-            (revision_number, now, now, change_id, int(change["resource_version"])),
-        )
-        if store.conn.execute("SELECT state,current_revision FROM changes WHERE change_id=?", (change_id,)).fetchone()["current_revision"] != revision_number:
-            raise ResourceStaleError(change_id, int(change["resource_version"]), int(change["resource_version"]))
         result = ChangeSubmission(change_id, revision_number, operation_id, ref_name, base_oid, ref_oid, tree_oid, capture_mode, changed, excluded, before)
         result_json = canonical_json(result.as_dict())
-        store.conn.execute("UPDATE operations SET state='succeeded',step='completed',result_json=?,updated_at=?,completed_at=? WHERE operation_id=?", (result_json, now, now, operation_id))
-        append_event_in_transaction(store.conn, event_kind="change.submitted", resource_type="change", resource_id=change_id, resource_version=int(change["resource_version"]) + 1, operation_id=operation_id, payload={"changeId": change_id, "revision": revision_number, "tipOid": ref_oid, "treeOid": tree_oid, "refName": ref_name})
+        with store.transaction():
+            store.conn.execute(
+                "INSERT INTO change_revisions(change_id,revision,base_oid,tip_oid,tree_oid,source_head_oid,capture_mode,source_status_hash,changed_paths_json,diffstat_json,verification_json,provenance_json,ref_name,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (change_id, revision_number, base_oid, ref_oid, tree_oid, before.get("headOid"), capture_mode, before.get("statusHash"), canonical_json(list(changed)), canonical_json({"changedPaths": list(changed)}), canonical_json(verification), canonical_json(provenance), ref_name, now),
+            )
+            updated = store.conn.execute(
+                "UPDATE changes SET state='open',current_revision=?,submitted_at=?,updated_at=?,resource_version=resource_version+1 WHERE change_id=? AND state='draft' AND resource_version=?",
+                (revision_number, now, now, change_id, int(change["resource_version"])),
+            )
+            if updated.rowcount != 1:
+                raise ResourceStaleError(change_id, int(change["resource_version"]), int(change["resource_version"]))
+            store.conn.execute("UPDATE operations SET state='succeeded',step='completed',result_json=?,updated_at=?,completed_at=? WHERE operation_id=?", (result_json, now, now, operation_id))
+            append_event_in_transaction(store.conn, event_kind="change.submitted", resource_type="change", resource_id=change_id, resource_version=int(change["resource_version"]) + 1, operation_id=operation_id, payload={"changeId": change_id, "revision": revision_number, "tipOid": ref_oid, "treeOid": tree_oid, "refName": ref_name})
         return result
     if revision["tip_oid"] != ref_oid or revision["tree_oid"] != tree_oid:
         raise ChangeIntegrityError("stored change revision does not match immutable Git ref")

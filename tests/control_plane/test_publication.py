@@ -9,7 +9,19 @@ class PublicationTests(unittest.TestCase):
         calls=[]
         result = apply_publication(plan, authorization={"kind":"publish","state":"active"}, observed={"remote":"origin","currentOid":"b" * 40,"sourceRef":"refs/heads/feature","sourceOid":"a" * 40}, runner=lambda args: calls.append(tuple(args)) or (0,"", ""))
         self.assertFalse(result["force"])
-        self.assertEqual(calls[0][0:3], ("git","push","--porcelain"))
+        self.assertEqual(calls, [
+            ("git", "merge-base", "--is-ancestor", "b" * 40, "a" * 40),
+            ("git", "push", "--porcelain", "--force-with-lease=refs/heads/feature:" + "b" * 40,
+             "origin", "a" * 40 + ":refs/heads/feature"),
+        ])
+
+    def test_non_fast_forward_source_refuses_before_push(self):
+        plan = plan_publication(project_id="prj_" + "1" * 32, source_ref="refs/heads/feature", remote="origin", target_ref="refs/heads/main", expected_oid="a" * 40, current_oid="b" * 40)
+        calls=[]
+        with self.assertRaisesRegex(ConstraintError, "fast-forward"):
+            apply_publication(plan, authorization={"kind":"publish","state":"active"}, observed={"remote":"origin","currentOid":"b" * 40,"sourceRef":"refs/heads/feature","sourceOid":"a" * 40}, runner=lambda args: calls.append(tuple(args)) or (1,"", ""))
+        self.assertEqual(calls, [("git", "merge-base", "--is-ancestor", "b" * 40, "a" * 40)])
+
     def test_invalid_oid_and_ref_refuse_planning(self):
         with self.assertRaises(ConstraintError): plan_publication(project_id="prj_" + "1" * 32, source_ref="main", remote="origin", target_ref="refs/heads/f", expected_oid="bad", current_oid="b" * 40)
 

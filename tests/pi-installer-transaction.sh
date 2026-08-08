@@ -77,8 +77,8 @@ else
   cp -a "$root/pi/npm/node_modules" "\$prefix/node_modules"
   # A clean lockfile install no longer contains the removed legacy sandbox.
   rm -rf "\$prefix/node_modules/@kjrjay/pi-sandbox" "\$prefix/node_modules/pi-sandbox-control" "\$prefix/node_modules/pi-subagents"
-  ln -s ../../packages/pi-sandbox-control "\$prefix/node_modules/pi-sandbox-control"
-  ln -s ../../packages/pi-subagents-control "\$prefix/node_modules/pi-subagents"
+  cp -a "\$prefix/../packages/pi-sandbox-control" "\$prefix/node_modules/pi-sandbox-control"
+  cp -a "\$prefix/../packages/pi-subagents-control" "\$prefix/node_modules/pi-subagents"
 fi
 SH
   cat > "$fake/mv" <<'SH'

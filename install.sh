@@ -156,9 +156,8 @@ fi
 mkdir -p "$PI_CONFIG_DIR"
 STAGING_DIR=$(mktemp -d "$PI_CONFIG_DIR/.install.XXXXXX")
 mkdir -p "$STAGING_DIR/npm" "$STAGING_DIR/packages" "$STAGING_DIR/control"
-# npm's file:../packages dependencies intentionally remain relative links. Copy
-# the reviewed first-party trees into the disposable root before npm ci, then
-# activate that sibling root beside $PI_CONFIG_DIR/npm so those links survive.
+# Keep reviewed first-party packages in a separate source tree. npm installs
+# regular runtime copies so their dependencies resolve through npm/node_modules.
 for package in pi-sandbox-control pi-subagents-control; do
     source_package="$SCRIPT_DIR/pi/packages/$package"
     [ -d "$source_package" ] && [ ! -L "$source_package" ] || {
@@ -193,34 +192,33 @@ for raw in sys.argv[2:]:
         except (OSError, ValueError) as exc:
             raise SystemExit(f"unsafe staged first-party package entry: {entry}") from exc
 PY
-cp "$SCRIPT_DIR/pi/npm/package.json" "$SCRIPT_DIR/pi/npm/package-lock.json" "$STAGING_DIR/npm/"
-npm ci --prefix "$STAGING_DIR/npm" --legacy-peer-deps --no-audit --no-fund
-# npm may materialize a local dependency as a relative symlink. It must remain
-# present, resolvable, and rooted in the reviewed package tree before staging
-# can continue.
-python3 - "$STAGING_DIR" "$STAGING_DIR/npm/node_modules/pi-sandbox-control" "$STAGING_DIR/npm/node_modules/pi-subagents" <<'PY'
+cp "$SCRIPT_DIR/pi/npm/package.json" "$SCRIPT_DIR/pi/npm/package-lock.json" "$SCRIPT_DIR/pi/npm/.npmrc" "$STAGING_DIR/npm/"
+npm ci --prefix "$STAGING_DIR/npm" --install-links --legacy-peer-deps --no-audit --no-fund
+python3 - "$STAGING_DIR" "$STAGING_DIR/npm/node_modules/pi-sandbox-control" "$STAGING_DIR/packages/pi-sandbox-control" "$STAGING_DIR/npm/node_modules/pi-subagents" "$STAGING_DIR/packages/pi-subagents-control" <<'PY'
+import json
 from pathlib import Path
 import sys
 
 root = Path(sys.argv[1]).resolve(strict=True)
-allowed = {
-    (root / "packages" / "pi-sandbox-control").resolve(strict=True),
-    (root / "packages" / "pi-subagents-control").resolve(strict=True),
-}
-for raw in sys.argv[2:]:
-    dependency = Path(raw)
-    if not dependency.exists() and not dependency.is_symlink():
-        raise SystemExit(f"npm local dependency is missing after clean install: {dependency}")
+runtime_root = (root / "npm" / "node_modules").resolve(strict=True)
+for runtime_raw, source_raw in zip(sys.argv[2::2], sys.argv[3::2]):
+    dependency = Path(runtime_raw)
+    source = Path(source_raw)
+    if dependency.is_symlink() or not dependency.is_dir():
+        raise SystemExit(f"npm local dependency is not a regular directory: {dependency}")
     try:
-        resolved = dependency.resolve(strict=True)
+        dependency.resolve(strict=True).relative_to(runtime_root)
     except OSError as exc:
         raise SystemExit(f"npm local dependency is broken: {dependency}") from exc
-    try:
-        resolved.relative_to(root)
     except ValueError as exc:
-        raise SystemExit(f"npm local dependency escapes staging root: {dependency} -> {resolved}") from exc
-    if resolved not in allowed and not any(resolved.is_relative_to(item) for item in allowed):
-        raise SystemExit(f"npm local dependency has unexpected provenance: {dependency} -> {resolved}")
+        raise SystemExit(f"npm local dependency escapes npm tree: {dependency}") from exc
+    source_package = json.loads((source / "package.json").read_text(encoding="utf-8"))
+    runtime_package = json.loads((dependency / "package.json").read_text(encoding="utf-8"))
+    if (runtime_package.get("name"), runtime_package.get("version")) != (
+        source_package.get("name"),
+        source_package.get("version"),
+    ):
+        raise SystemExit(f"npm local dependency does not match reviewed source: {dependency}")
 PY
 # Pi extensions declare the SDK as peer dependencies; expose the exact SDK
 # packages owned by the dedicated core to the isolated extension tree. Without
@@ -533,9 +531,12 @@ honor_pending_signal
 activate_path "$POLICY_STAGING" "$POLICY_PATH"
 POLICY_STAGING=""
 activate_path "$STAGING_DIR/control/build-manifest.json" "$PI_CONFIG_DIR/control-build-manifest.json"
+# Stop package reconciliation before replacing the shared npm tree. The new
+# local package sources are valid against both the previous and next generation.
+activate_path "$STAGING_DIR/control/settings.json" "$PI_CONFIG_DIR/settings.json"
 activate_path "$STAGING_DIR/packages" "$PI_CONFIG_DIR/packages"
 activate_path "$STAGING_DIR/npm" "$PI_CONFIG_DIR/npm"
-for config in settings.json keybindings.json pi-goal.json pi-chrome-devtools.json pi-plan-mode.json pi-statusline.json pr-review.json AGENTS.md; do
+for config in keybindings.json pi-goal.json pi-chrome-devtools.json pi-plan-mode.json pi-statusline.json pr-review.json AGENTS.md; do
     activate_path "$STAGING_DIR/control/$config" "$PI_CONFIG_DIR/$config"
 done
 for tree in extensions agents prompts themes; do activate_path "$STAGING_DIR/control/$tree" "$PI_CONFIG_DIR/$tree"; done
@@ -566,6 +567,7 @@ activate_path "$STAGING_DIR/control/pi-control" "$HOME/.local/bin/pi-control"
 # verification covers every split activation target rather than only IDs.
 python3 - "$PI_CONFIG_DIR/control-build-manifest.json" "$PI_CONFIG_DIR" "$HOME" "$MACHINE_CONFIG_PATH" "$STAGING_DIR" <<'PY'
 from pathlib import Path
+import json
 import os
 import shutil
 import stat
@@ -608,16 +610,25 @@ for package in sorted(allowed_packages):
         elif not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
             raise SystemExit(f"special file in activated first-party package: {entry}")
 
-for name, expected in {
+runtime_root = (pi_config / "npm" / "node_modules").resolve(strict=True)
+for name, source in {
     "pi-sandbox-control": package_root / "pi-sandbox-control",
     "pi-subagents": package_root / "pi-subagents-control",
 }.items():
-    dependency = pi_config / "npm" / "node_modules" / name
+    dependency = runtime_root / name
+    if dependency.is_symlink() or not dependency.is_dir():
+        raise SystemExit(f"activated npm dependency is not a regular directory: {dependency}")
     try:
-        resolved = dependency.resolve(strict=True)
-        resolved.relative_to(expected.resolve(strict=True))
+        dependency.resolve(strict=True).relative_to(runtime_root)
     except (OSError, ValueError) as exc:
-        raise SystemExit(f"activated npm dependency has invalid provenance: {dependency}") from exc
+        raise SystemExit(f"activated npm dependency has invalid placement: {dependency}") from exc
+    source_package = json.loads((source / "package.json").read_text(encoding="utf-8"))
+    runtime_package = json.loads((dependency / "package.json").read_text(encoding="utf-8"))
+    if (runtime_package.get("name"), runtime_package.get("version")) != (
+        source_package.get("name"),
+        source_package.get("version"),
+    ):
+        raise SystemExit(f"activated npm dependency does not match reviewed source: {dependency}")
 
 configs = {"settings.json", "keybindings.json", "pi-goal.json", "pi-chrome-devtools.json", "pi-plan-mode.json", "pi-statusline.json", "pr-review.json", "AGENTS.md"}
 helpers = {"pi-workspace.py", "pi-runtime.py", "pi-sandbox-gc.py", "pi-secretary-control.py", "pi-root-session.py", "pi-secretary-stats.py", "pi-harness-feedback.py", "pi-secretary-herdr.py", "pi-personal-herdr.py"}

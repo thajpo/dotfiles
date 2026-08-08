@@ -50,7 +50,14 @@ def apply_publication(plan: PublicationPlan | Mapping[str, Any], *, authorizatio
         raise ConstraintError("publication source or target state changed since planning")
     if payload.get("force") is not False: raise ConstraintError("forced publication is forbidden")
     if runner is None: raise ConstraintError("publication requires an explicit host adapter")
-    result = runner(("git", "push", "--porcelain", payload["remote"], f"{payload['sourceRef']}:{payload['targetRef']}"))
+    ancestry = runner(("git", "merge-base", "--is-ancestor", payload["currentOid"], payload["expectedOid"]))
+    ancestry_code = int(getattr(ancestry, "returncode", ancestry[0] if isinstance(ancestry, tuple) else 1))
+    if ancestry_code != 0: raise ConstraintError("publication would not be a fast-forward update")
+    result = runner((
+        "git", "push", "--porcelain",
+        f"--force-with-lease={payload['targetRef']}:{payload['currentOid']}",
+        payload["remote"], f"{payload['expectedOid']}:{payload['targetRef']}",
+    ))
     code = int(getattr(result, "returncode", result[0] if isinstance(result, tuple) else 1))
     if code != 0: raise ConstraintError("publication adapter refused the exact plan")
     return {"state": "succeeded", "planHash": computed, "remote": payload["remote"], "targetRef": payload["targetRef"], "force": False}

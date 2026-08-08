@@ -6,15 +6,15 @@ temporary=$(mktemp -d)
 cleanup() { rm -rf "$temporary"; }
 trap cleanup EXIT
 mkdir -p "$temporary/npm" "$temporary/packages"
-# Local first-party package dependencies resolve relative to the staged npm
-# prefix, so preserve the reviewed package provenance tree in the disposable
-# candidate root without touching installed node_modules.
-ln -s "$root/pi/packages/pi-sandbox-control" "$temporary/packages/pi-sandbox-control"
-ln -s "$root/pi/packages/pi-subagents-control" "$temporary/packages/pi-subagents-control"
-cp "$root/pi/npm/package.json" "$root/pi/npm/package-lock.json" "$temporary/npm/"
+# Reproduce the disposable installer layout without touching checkout modules.
+cp -a "$root/pi/packages/pi-sandbox-control" "$root/pi/packages/pi-subagents-control" "$temporary/packages/"
+cp "$root/pi/npm/package.json" "$root/pi/npm/package-lock.json" "$root/pi/npm/.npmrc" "$temporary/npm/"
 # Always verify patches against a clean lockfile install. Reusing the checkout's
 # node_modules can silently test an obsolete, previously patched generation.
-npm ci --prefix "$temporary/npm" --legacy-peer-deps --no-audit --no-fund >/dev/null
+npm ci --prefix "$temporary/npm" --install-links --legacy-peer-deps --no-audit --no-fund >/dev/null
+[[ -d "$temporary/npm/node_modules/pi-subagents" && ! -L "$temporary/npm/node_modules/pi-subagents" ]]
+[[ -d "$temporary/npm/node_modules/pi-sandbox-control" && ! -L "$temporary/npm/node_modules/pi-sandbox-control" ]]
+node -e 'require.resolve("yaml", { paths: [process.argv[1]] })' "$temporary/npm/node_modules/pi-subagents"
 PI_CODING_AGENT_DIR="$temporary" "$root/scripts/pi-patch-subagents" >/dev/null
 # The full patch chain must also accept its own final hashes on repeat runs.
 PI_CODING_AGENT_DIR="$temporary" "$root/scripts/pi-patch-subagents" >/dev/null
