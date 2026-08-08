@@ -28,7 +28,7 @@ const WORKING_KEYS = new Set([
 	"branchRef", "headOid", "treeOid", "dirtyFingerprint", "writerEpoch",
 ]);
 const RUNTIME_KEYS = new Set([
-	"runtimeSpecVersion", "runtimeSpecHash", "executionTarget", "platform", "imageDigest", "controllerBuildId", "piVersion",
+	"runtimeSpecVersion", "runtimeSpecHash", "executionTarget", "platform", "imageReference", "imageConfigId", "registryDigest", "controllerBuildId", "piVersion",
 ]);
 const OWNER_KEYS = new Set(["uid", "gid", "pid", "processStartIdentity"]);
 
@@ -72,7 +72,9 @@ export interface RuntimeManifest {
 		runtimeSpecHash: string;
 		executionTarget: string;
 		platform: string;
-		imageDigest: string;
+		imageReference: string | null;
+		imageConfigId: string | null;
+		registryDigest: string | null;
 		controllerBuildId: string;
 		piVersion: string;
 	};
@@ -255,9 +257,14 @@ export function validateRuntimeManifest(value: unknown): RuntimeManifest {
 	const runtime = {
 		runtimeSpecVersion: runtimeRaw.runtimeSpecVersion, runtimeSpecHash: digest(runtimeRaw.runtimeSpecHash, "runtimeSpecHash"),
 		executionTarget: text(runtimeRaw.executionTarget, "executionTarget", 256), platform: text(runtimeRaw.platform, "platform", 256),
-		imageDigest: digest(runtimeRaw.imageDigest, "imageDigest"), controllerBuildId: text(runtimeRaw.controllerBuildId, "controllerBuildId", 512), piVersion: text(runtimeRaw.piVersion, "piVersion", 512),
+		imageReference: runtimeRaw.imageReference === null ? null : text(runtimeRaw.imageReference, "imageReference", 1024),
+		imageConfigId: runtimeRaw.imageConfigId === null ? null : digest(runtimeRaw.imageConfigId, "imageConfigId"),
+		registryDigest: runtimeRaw.registryDigest === null ? null : digest(runtimeRaw.registryDigest, "registryDigest"),
+		controllerBuildId: text(runtimeRaw.controllerBuildId, "controllerBuildId", 512), piVersion: text(runtimeRaw.piVersion, "piVersion", 512),
 	} as RuntimeManifest["runtime"];
 	if (runtime.runtimeSpecVersion !== 1) throw new ManifestAdapterError("unsupported runtime specification");
+	if (authority === "writer" && (!runtime.imageReference || !runtime.imageConfigId || runtime.executionTarget !== "container")) throw new ManifestAdapterError("writer manifest requires a container image identity");
+	if (authority !== "writer" && (runtime.executionTarget !== "host-read-only" || runtime.imageReference !== null || runtime.imageConfigId !== null || runtime.registryDigest !== null)) throw new ManifestAdapterError("host manifest must not select a coding image");
 	const ownerRaw = object(raw.owner, "owner");
 	exact(ownerRaw, OWNER_KEYS, "owner");
 	const owner = { uid: integer(ownerRaw.uid, "owner.uid"), gid: integer(ownerRaw.gid, "owner.gid"), pid: integer(ownerRaw.pid, "owner.pid", 1), processStartIdentity: text(ownerRaw.processStartIdentity, "owner.processStartIdentity", 256) };
@@ -301,7 +308,10 @@ export function assertRouteBinding(manifest: RuntimeManifest, route: RuntimeRout
 	if (route.policyHash !== undefined && route.policyHash !== manifest.project.policyHash) throw new ManifestAdapterError("route policy differs from manifest");
 	if (route.containerPlatform !== undefined && route.containerPlatform !== manifest.runtime.platform) throw new ManifestAdapterError("route platform differs from manifest");
 	if (route.runtimeHelper !== undefined && route.runtimeHelper.length === 0) throw new ManifestAdapterError("route runtime helper is empty");
-	if (route.image !== undefined && (!IMAGE_REF.test(route.image) || !route.image.endsWith(`@${manifest.runtime.imageDigest}`))) throw new ManifestAdapterError("route image must be an immutable manifest-pinned image");
+	if (route.image !== undefined) {
+		if (!manifest.runtime.imageReference || route.image !== manifest.runtime.imageReference) throw new ManifestAdapterError("route image differs from the controller image reference");
+		if (manifest.runtime.registryDigest && (!IMAGE_REF.test(route.image) || !route.image.endsWith(`@${manifest.runtime.registryDigest}`))) throw new ManifestAdapterError("route image must be pinned to the controller registry digest");
+	}
 }
 
 export function runtimeContainerName(manifest: RuntimeManifest): string {
@@ -325,8 +335,8 @@ export function runtimeContainerLabels(manifest: RuntimeManifest): Record<string
 }
 
 export function buildRuntimeCreateRequest(manifest: RuntimeManifest, image: string, name: string): RuntimeCreateRequest {
-	const separator = image.lastIndexOf("@");
-	if (separator <= 0 || !IMAGE_REF.test(image) || image.slice(separator + 1) !== manifest.runtime.imageDigest) throw new ManifestAdapterError("runtime image must be repository@manifest-digest");
+	if (!manifest.runtime.imageReference || image !== manifest.runtime.imageReference) throw new ManifestAdapterError("runtime image must equal the controller image reference");
+	if (manifest.runtime.registryDigest && (!IMAGE_REF.test(image) || image.slice(image.lastIndexOf("@") + 1) !== manifest.runtime.registryDigest)) throw new ManifestAdapterError("runtime image must use the controller registry digest");
 	if (name !== runtimeContainerName(manifest)) throw new ManifestAdapterError("runtime name must be derived from the manifest run identity");
 	const working = manifest.workingCopy;
 	const readOnly = manifest.authority !== "writer" || working?.effectiveMode === "read-only";
@@ -348,7 +358,7 @@ export function assertContainerAttestation(manifest: RuntimeManifest, observatio
 	const expectedLabels = runtimeContainerLabels(manifest);
 	if (!labels || Object.entries(expectedLabels).some(([key, expected]) => labels[key] !== expected) || Object.keys(labels).some((key) => key.startsWith("pi.control.") && !(key in expectedLabels))) throw new ManifestAdapterError("runtime labels do not match manifest");
 	if (!observation.running) throw new ManifestAdapterError("runtime is not running");
-	if (observation.imageId !== manifest.runtime.imageDigest || observation.imageDigest !== manifest.runtime.imageDigest || observation.platform !== manifest.runtime.platform || observation.uid !== manifest.owner.uid || observation.gid !== manifest.owner.gid) throw new ManifestAdapterError("runtime image, platform, or identity differs from manifest");
+	if (!manifest.runtime.imageConfigId || observation.imageId !== manifest.runtime.imageConfigId || (manifest.runtime.registryDigest && observation.imageDigest !== manifest.runtime.registryDigest) || observation.platform !== manifest.runtime.platform || observation.uid !== manifest.owner.uid || observation.gid !== manifest.owner.gid) throw new ManifestAdapterError("runtime image, platform, or identity differs from manifest");
 	if (observation.projectId !== manifest.project.projectId) throw new ManifestAdapterError("runtime project differs from manifest");
 	const working = manifest.workingCopy;
 	if (observation.workingCopyId !== (working?.workingCopyId ?? null) || observation.branchRef !== (working?.branchRef ?? null) || observation.headOid !== (working?.headOid ?? null) || observation.treeOid !== (working?.treeOid ?? null) || observation.gitCommonDir !== (working?.gitCommonDir ?? null) || observation.gitDir !== (working?.gitDir ?? null)) throw new ManifestAdapterError("runtime source identity differs from manifest");

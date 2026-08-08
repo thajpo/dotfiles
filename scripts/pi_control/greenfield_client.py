@@ -22,6 +22,7 @@ from .models import canonical_json, new_id, utc_now, validate_id
 from .projects import project_status, register_project, work_index
 from .greenfield_workstreams import create_workstream
 from .reviews import request_review, submit_review
+from .greenfield_review import create_review_assignment
 
 
 class GreenfieldClientError(ValueError):
@@ -56,7 +57,7 @@ class GreenfieldControllerClient:
 
     def negotiate(self) -> dict[str, Any]:
         with self._store() as store:
-            return {"protocolVersion": 1, "schema": store.schema_status().as_dict(), "operations": ["project.register", "project.status", "project.work-index", "conversation.create", "conversation.focus", "conversation.archive", "message.post", "message.list", "message.acknowledge", "message.reply", "command.request", "command.authorize", "command.reject", "run.prepare", "run.attest", "run.stop", "change.submit", "review.request", "review.submit", "integration.analyze", "integration.integrate", "dependency.detect", "package-review.record"]}
+            return {"protocolVersion": 1, "schema": store.schema_status().as_dict(), "operations": ["project.register", "project.status", "project.work-index", "conversation.create", "conversation.focus", "conversation.archive", "workstream.create", "message.post", "message.list", "message.acknowledge", "message.reply", "command.request", "command.authorize", "command.reject", "command.consume", "run.prepare", "run.attest", "run.stop", "change.submit", "review.request", "review.create-assignment", "review.submit", "integration.analyze", "integration.authorize", "integration.integrate", "dependency.detect", "package-review.record"]}
 
     def register_project(self, repository: str, display_name: str | None = None) -> dict[str, Any]:
         with self._store(mutate=True) as store:
@@ -94,6 +95,10 @@ class GreenfieldControllerClient:
         with self._store() as store:
             return list_messages(store, **request)
 
+    def deliver_message(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return mark_delivered(store, **request)
+
     def acknowledge_message(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
             return acknowledge_message(store, **request)
@@ -117,6 +122,19 @@ class GreenfieldControllerClient:
     def consume_command(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
             return consume_authorization(store, **request)
+
+    def analyze_integration(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return analyze_integration(store, **request).as_dict()
+
+    def authorize_integration(self, **request: Any) -> dict[str, Any]:
+        from .integration import authorize_integration
+        with self._store(mutate=True) as store:
+            return authorize_integration(store, **request)
+
+    def integrate(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return integrate(store, **request).as_dict()
 
     def prepare_run(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
@@ -151,6 +169,10 @@ class GreenfieldControllerClient:
         with self._store(mutate=True) as store:
             return request_review(store, **request).as_dict()
 
+    def create_review_assignment(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return create_review_assignment(store, **request)
+
     def submit_review(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
             return submit_review(store, **request).as_dict()
@@ -183,17 +205,23 @@ class GreenfieldControllerClient:
             "conversation.archive": self.archive_conversation,
             "message.post": self.post_message,
             "message.list": self.list_messages,
+            "message.deliver": self.deliver_message,
             "message.acknowledge": self.acknowledge_message,
             "message.reply": self.reply_message,
             "command.request": self.request_command,
             "command.authorize": self.authorize_command,
             "command.reject": self.reject_command,
+            "command.consume": self.consume_command,
             "run.prepare": self.prepare_run,
             "run.attest": self.attest_run,
             "run.stop": self.stop_run,
             "change.submit": self.submit_change,
             "review.request": self.request_review,
             "review.submit": self.submit_review,
+            "review.create-assignment": self.create_review_assignment,
+            "integration.analyze": self.analyze_integration,
+            "integration.authorize": self.authorize_integration,
+            "integration.integrate": self.integrate,
             "dependency.detect": self.detect_dependencies,
             "dependency.disposition": self.set_dependency_disposition,
             "package-review.record": self.record_package_security_review,

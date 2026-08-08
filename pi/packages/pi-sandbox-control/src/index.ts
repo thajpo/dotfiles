@@ -2399,11 +2399,14 @@ class SandboxEngine {
 		const platformResult = await this.runtimeExec(["inspect", "--format", "{{.Platform}}", name], { timeoutMs: 30_000 });
 		const platform = platformResult.stdout.toString().trim();
 		if (platformResult.code !== 0 || platform !== manifest.runtime.platform) throw new Error("Container platform does not match the manifest");
-		const imageResult = await this.runtimeExec(["image", "inspect", "--format", "{{json .RepoDigests}}", this.config.image], { timeoutMs: 30_000 });
+		if (!manifest.runtime.imageReference || this.config.image !== manifest.runtime.imageReference || !manifest.runtime.imageConfigId) throw new Error("Container image reference does not match the controller manifest");
+		const imageResult = await this.runtimeExec(["image", "inspect", "--format", "{{json .RepoDigests}}", manifest.runtime.imageReference], { timeoutMs: 30_000 });
 		let repoDigests: unknown;
 		try { repoDigests = JSON.parse(imageResult.stdout.toString()); } catch { repoDigests = undefined; }
-		const imageDigest = Array.isArray(repoDigests) ? repoDigests.find((value): value is string => typeof value === "string" && value.endsWith(`@${manifest.runtime.imageDigest}`))?.split("@").pop() : undefined;
-		if (imageResult.code !== 0 || imageDigest !== manifest.runtime.imageDigest) throw new Error("Container image digest does not match the manifest");
+		const imageDigest = manifest.runtime.registryDigest && Array.isArray(repoDigests)
+			? repoDigests.find((value): value is string => typeof value === "string" && value.endsWith(`@${manifest.runtime.registryDigest}`))?.split("@").pop()
+			: undefined;
+		if (imageResult.code !== 0 || inspected.Image !== manifest.runtime.imageConfigId || (manifest.runtime.registryDigest && imageDigest !== manifest.runtime.registryDigest)) throw new Error("Container image identity does not match the manifest");
 		const uidResult = await this.runtimeExec(["exec", name, "id", "-u"], { timeoutMs: 30_000 });
 		const gidResult = await this.runtimeExec(["exec", name, "id", "-g"], { timeoutMs: 30_000 });
 		const uid = Number(uidResult.stdout.toString().trim());

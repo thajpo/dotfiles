@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import json
 
 from scripts.pi_control.greenfield_client import GreenfieldControllerClient
 from scripts.pi_control.greenfield_store import GreenfieldStore
@@ -63,6 +64,23 @@ class GreenfieldCoreTests(unittest.TestCase):
                 client.attest_run(run_id=r2["run"]["run_id"], manifest_digest=r2["manifest"]["manifestDigest"])
                 with self.assertRaises(ProjectMessageError):
                     post_message(store, project_id=second["project_id"], conversation_id=c2["conversation_id"], run_id=r2["run"]["run_id"], kind="decision-reply", payload={"a": 1}, idempotency_key="two", reply_to_message_id=message["message_id"])
+
+    def test_process_launcher_holds_and_releases_run(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as raw:
+            root = Path(raw)
+            client = GreenfieldControllerClient(root / "state")
+            registered = client.register_project(str(_repo(root, "launcher")), "launcher")
+            with GreenfieldStore(root / "state") as store:
+                conversation = store.conn.execute("SELECT * FROM conversations WHERE project_id=?", (registered["project_id"],)).fetchone()
+            launcher = Path(__file__).resolve().parents[1] / "bin" / "pi-system-run"
+            code = "import json,os; print(json.dumps({'manifest':os.environ['PI_RUNTIME_MANIFEST'],'run':os.environ['PI_SYSTEM_RUN_ID']}))"
+            result = subprocess.run([str(launcher), "--state-root", str(root / "state"), "--project-id", registered["project_id"], "--conversation-id", conversation["conversation_id"], "--authority", "secretary", "--", "python3", "-c", code], cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = json.loads(result.stdout.strip())
+            with GreenfieldStore(root / "state") as store:
+                run = store.conn.execute("SELECT * FROM runs WHERE run_id=?", (output["run"],)).fetchone()
+                self.assertEqual(run["observed_state"], "stopped")
+                self.assertEqual(run["desired_state"], "stopped")
 
 
 if __name__ == "__main__":

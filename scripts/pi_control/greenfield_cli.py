@@ -40,12 +40,12 @@ def _parser() -> argparse.ArgumentParser:
     workstream_create.add_argument("--request-json", required=True)
     message = sub.add_parser("message")
     message_sub = message.add_subparsers(dest="message_command", required=True)
-    for name in ("post", "list", "acknowledge", "reply"):
+    for name in ("post", "list", "deliver", "acknowledge", "reply"):
         item = message_sub.add_parser(name)
         item.add_argument("--request-json", required=True)
     command = sub.add_parser("command")
     command_sub = command.add_subparsers(dest="command_command", required=True)
-    for name in ("request", "authorize", "reject"):
+    for name in ("request", "authorize", "reject", "consume"):
         item = command_sub.add_parser(name)
         item.add_argument("--request-json", required=True)
     run = sub.add_parser("run")
@@ -62,7 +62,7 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--request-json", required=True)
     review = sub.add_parser("review")
     review_sub = review.add_subparsers(dest="review_command", required=True)
-    for name in ("request", "submit"):
+    for name in ("request", "create-assignment", "submit"):
         item = review_sub.add_parser(name)
         item.add_argument("--request-json", required=True)
     dependency = sub.add_parser("dependency")
@@ -75,6 +75,19 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("record", "gate"):
         item = package_sub.add_parser(name)
         item.add_argument("--request-json", required=True)
+    integration = sub.add_parser("integration")
+    integration_sub = integration.add_subparsers(dest="integration_command", required=True)
+    for name in ("analyze", "authorize", "integrate"):
+        item = integration_sub.add_parser(name)
+        item.add_argument("--request-json", required=True)
+    investigation = sub.add_parser("investigation")
+    investigation_sub = investigation.add_subparsers(dest="investigation_command", required=True)
+    investigation_start = investigation_sub.add_parser("start")
+    investigation_start.add_argument("--request-json", required=True)
+    presentation = sub.add_parser("presentation")
+    presentation_sub = presentation.add_subparsers(dest="presentation_command", required=True)
+    presentation_ensure = presentation_sub.add_parser("ensure")
+    presentation_ensure.add_argument("--request-json", required=True)
     scoped = sub.add_parser("scoped-read")
     scoped.add_argument("--request-json", required=True)
     protocol = sub.add_parser("protocol")
@@ -139,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "message":
                 value = getattr(client, f"{args.message_command}_message")(**request)
             elif args.command == "command":
-                value = {"request": client.request_command(**request)} if args.command_command == "request" else (client.authorize_command(**request) if args.command_command == "authorize" else client.reject_command(**request))
+                value = {"request": client.request_command(**request)} if args.command_command == "request" else (client.authorize_command(**request) if args.command_command == "authorize" else (client.reject_command(**request) if args.command_command == "reject" else client.consume_command(**request)))
             elif args.command == "run":
                 value = getattr(client, f"{args.run_command}_run")(**request)
             elif args.command == "change":
@@ -150,11 +163,21 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     value = client.get_change(request.get("change_id") or request.get("changeId"))
             elif args.command == "review":
-                value = client.request_review(**request) if args.review_command == "request" else client.submit_review(**request)
+                value = client.request_review(**request) if args.review_command == "request" else (client.create_review_assignment(**request) if args.review_command == "create-assignment" else client.submit_review(**request))
             elif args.command == "dependency":
                 value = client.detect_dependencies(**request) if args.dependency_command == "detect" else client.set_dependency_disposition(**request)
             elif args.command == "package-review":
                 value = client.record_package_security_review(**request) if args.package_command == "record" else client.package_review_gate(**request)
+            elif args.command == "integration":
+                value = client.analyze_integration(**request) if args.integration_command == "analyze" else (client.authorize_integration(**request) if args.integration_command == "authorize" else client.integrate(**request))
+            elif args.command == "investigation":
+                from .investigators import start_investigation
+                with client._store(mutate=True) as store:
+                    value = start_investigation(store, **request)
+            elif args.command == "presentation":
+                from .presentation import ensure_presentation
+                with client._store(mutate=True) as store:
+                    value = ensure_presentation(store, **request)
             else:
                 raise GreenfieldClientError("unsupported CLI command")
         _print(value)

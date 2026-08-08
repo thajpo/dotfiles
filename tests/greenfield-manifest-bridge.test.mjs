@@ -1,0 +1,28 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { createJiti } from "../pi/npm/node_modules/jiti/lib/jiti.mjs";
+
+const root = process.cwd();
+const jiti = createJiti(root, { interopDefault: true });
+const adapter = await jiti.import("./pi/packages/pi-sandbox-control/src/manifest-adapter.ts");
+const fixture = realpathSync(mkdtempSync(path.join(tmpdir(), "pi-greenfield-bridge-")));
+const repo = path.join(fixture, "repo");
+const state = path.join(fixture, "state");
+execFileSync("git", ["init", "-q", repo]);
+writeFileSync(path.join(repo, "README"), "bridge\n");
+execFileSync("git", ["-C", repo, "add", "README"]);
+execFileSync("git", ["-C", repo, "-c", "user.name=bridge", "-c", "user.email=bridge@example.invalid", "commit", "-qm", "bridge"]);
+const controller = path.join(root, "bin", "pi-control");
+const register = JSON.parse(execFileSync(controller, ["--state-root", state, "project", "register", "--repository", repo], { encoding: "utf8" }));
+const status = JSON.parse(execFileSync(controller, ["--state-root", state, "project", "status", register.project_id], { encoding: "utf8" }));
+const conversation = status.conversations.find((item) => item.role === "secretary");
+const prepared = JSON.parse(execFileSync(controller, ["--state-root", state, "run", "prepare", "--request-json", JSON.stringify({ project_id: register.project_id, conversation_id: conversation.conversation_id, authority: "secretary" })], { encoding: "utf8" }));
+const manifest = adapter.readRuntimeManifest(realpathSync(prepared.manifestPath));
+assert.equal(manifest.project.projectId, register.project_id);
+assert.equal(manifest.authority, "secretary");
+assert.equal(manifest.runtime.executionTarget, "host-read-only");
+assert.equal(manifest.runtime.imageReference, null);
+console.log("greenfield manifest bridge: ok");

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schemaVersion", "scenarioId", "status", "source", "role", "registeredTools", "invokedTool", "forbiddenTool", "packageFiles", "process", "stateRoot", "evidenceOutsideRepository", "noRemoteProvider"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "scenarioId": {"type": "string", "minLength": 1},
+    "status": {"enum": ["PASS", "FAIL", "STOP"]},
+    "role": {"enum": ["host-read-only", "writer", "reviewer"]},
+    "registeredTools": {"type": "array", "items": {"type": "string"}},
+    "invokedTool": {"type": "object", "required": ["name", "request", "result"]},
+    "forbiddenTool": {"type": "object", "required": ["name", "accepted"]},
+    "packageFiles": {"type": "array", "items": {"type": "object", "required": ["path", "digest"]}},
+    "process": {"type": "object", "required": ["argv", "pid", "elapsedNs"]},
+    "stateRoot": {"type": "string", "minLength": 1},
+    "evidenceOutsideRepository": {"const": true},
+    "noRemoteProvider": {"const": true}
+  }
+}
