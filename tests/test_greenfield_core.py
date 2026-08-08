@@ -12,6 +12,7 @@ from scripts.pi_control.greenfield_store import GreenfieldStore
 from scripts.pi_control.messages import ProjectMessageError, acknowledge_message, list_messages, post_message
 from scripts.pi_control.greenfield_reconcile import ReconcileError
 from scripts.pi_control.launch import prepare_run
+from scripts.pi_control.command_requests import CommandRequestError, authorize_command, execute_command, request_command
 
 
 def _repo(root: Path, name: str) -> Path:
@@ -42,6 +43,7 @@ class GreenfieldCoreTests(unittest.TestCase):
                 self.assertIn("project_messages", tables)
                 conversation = store.conn.execute("SELECT * FROM conversations WHERE project_id=?", (project_id,)).fetchone()
                 prepared = client.prepare_run(project_id=project_id, conversation_id=conversation["conversation_id"], authority="secretary")
+                self.assertEqual(prepared["environment"]["PI_RUNTIME_CAPABILITY"], "<controller-issued>")
                 client.attest_run(run_id=prepared["run"]["run_id"], manifest_digest=prepared["manifest"]["manifestDigest"])
                 first = post_message(store, project_id=project_id, conversation_id=conversation["conversation_id"], run_id=prepared["run"]["run_id"], kind="needs-user", payload={"question": "continue?"}, idempotency_key="same")
                 replay = post_message(store, project_id=project_id, conversation_id=conversation["conversation_id"], run_id=prepared["run"]["run_id"], kind="needs-user", payload={"question": "continue?"}, idempotency_key="same")
@@ -97,6 +99,43 @@ class GreenfieldCoreTests(unittest.TestCase):
             self.assertEqual(attention["decision"], "needs-attention")
             recovered = client.recover_run(run_id=prepared.run["run_id"], actor_id="test-recovery")
             self.assertEqual(recovered["observed_state"], "lost")
+
+    def test_change_revision_is_immutable_and_increments_exactly(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as raw:
+            root = Path(raw)
+            repository = _repo(root, "revision")
+            client = GreenfieldControllerClient(root / "state")
+            registered = client.register_project(str(repository), "revision")
+            with GreenfieldStore(root / "state") as store:
+                primary = store.conn.execute("SELECT * FROM working_copies WHERE project_id=? AND kind='primary'", (registered["project_id"],)).fetchone()
+            (repository / "README").write_text("first revision\n", encoding="utf-8")
+            first = client.submit_change(project_id=registered["project_id"], working_copy_id=primary["working_copy_id"], target_ref=primary["branch_ref"], title="feature", summary="first", capture_mode="dirty", selected_paths=["README"], idempotency_key="revision-1")
+            (repository / "README").write_text("second revision\n", encoding="utf-8")
+            second = client.submit_change_revision(change_id=first["changeId"], title="feature", summary="second", capture_mode="dirty", selected_paths=["README"], idempotency_key="revision-2")
+            self.assertEqual(first["revision"], 1)
+            self.assertEqual(second["revision"], 2)
+            with GreenfieldStore(root / "state") as store:
+                rows = store.conn.execute("SELECT revision,ref_name FROM change_revisions WHERE change_id=? ORDER BY revision", (first["changeId"],)).fetchall()
+                self.assertEqual([int(row[0]) for row in rows], [1, 2])
+
+    def test_approved_host_command_is_bounded_and_one_use(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as raw:
+            root = Path(raw)
+            repository = _repo(root, "commands")
+            client = GreenfieldControllerClient(root / "state")
+            registered = client.register_project(str(repository), "commands")
+            with GreenfieldStore(root / "state") as store:
+                primary = store.conn.execute("SELECT * FROM working_copies WHERE project_id=? AND kind='primary'", (registered["project_id"],)).fetchone()
+                conversation = client.create_conversation(project_id=registered["project_id"], role="personal", display_name="command worker", pi_session_id="pi-command-worker", working_copy_id=primary["working_copy_id"])
+                prepared = prepare_run(store, project_id=registered["project_id"], conversation_id=conversation["conversation_id"], working_copy_id=primary["working_copy_id"], authority="writer", runtime={"imageReference": "pi-test:local", "imageConfigId": "sha256:" + "a" * 64, "platform": "linux/amd64"})
+                request = request_command(store, project_id=registered["project_id"], conversation_id=conversation["conversation_id"], run_id=prepared.run["run_id"], execution_place="host", command=["python3", "-c", "open('approved-command-output','w').write('ok')"], working_directory=str(repository), required_resource="project working copy", purpose="write an explicitly approved fixture", expected_effect="one bounded fixture file", change_scope={"paths": ["approved-command-output"]})
+                authorize_command(store, project_id=registered["project_id"], command_request_id=request["command_request_id"], request_digest=request["request_digest"], actor_id="test-user")
+                result = execute_command(store, project_id=registered["project_id"], command_request_id=request["command_request_id"], request_digest=request["request_digest"])
+                self.assertEqual(result["state"], "succeeded")
+                self.assertEqual((repository / "approved-command-output").read_text(encoding="utf-8"), "ok")
+                with self.assertRaises(CommandRequestError):
+                    execute_command(store, project_id=registered["project_id"], command_request_id=request["command_request_id"], request_digest=request["request_digest"])
+                prepared.close()
 
 
 if __name__ == "__main__":

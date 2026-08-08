@@ -28,12 +28,17 @@ REQUIRED_MODULES = [
     "scripts/pi_control/conversations.py",
     "scripts/pi_control/messages.py",
     "scripts/pi_control/command_requests.py",
+    "scripts/pi_control/network_runner.py",
     "scripts/pi_control/launch.py",
     "scripts/pi_control/writer_lock.py",
     "scripts/pi_control/docker_runtime.py",
     "scripts/pi_control/dependencies.py",
     "scripts/pi_control/package_environment.py",
     "scripts/pi_control/scoped_read.py",
+    "scripts/pi_control/greenfield_reconcile.py",
+    "scripts/pi_control/greenfield_install.py",
+    "scripts/pi-system-run.py",
+    "scripts/pi-system-container-run.py",
 ]
 FORBIDDEN_ACTIVE_PHRASES = (
     "legacy -> shadow -> controller",
