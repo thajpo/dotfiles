@@ -194,7 +194,7 @@ def attest_run(store: Any, *, run_id: str, manifest_digest: str, observed: Mappi
     return {"runId": run_id, "manifestDigest": manifest_digest, "state": "running", "observed": observed}
 
 
-def start_run(store: Any, *, run_id: str, command: list[str]) -> dict[str, Any]:
+def start_run(store: Any, *, run_id: str, command: list[str], capability_secret: str | bytes | None = None) -> dict[str, Any]:
     """Create and start the exact coding container for a prepared writer run."""
 
     validate_id(run_id, prefix="run")
@@ -210,7 +210,10 @@ def start_run(store: Any, *, run_id: str, command: list[str]) -> dict[str, Any]:
         raise LaunchError("coding run has no assigned working copy")
     from .docker_runtime import DockerRuntimeError, create_coding_container, start_container
     container_name = "pi-runtime-" + hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:16]
-    runtime.update({"buildId": manifest["runtime"]["controllerBuildId"], "piVersion": manifest["runtime"]["piVersion"], "authority": manifest["authority"], "runId": run_id, "manifestDigest": manifest["manifestDigest"], "projectId": manifest["project"]["projectId"], "workingCopyId": working["workingCopyId"], "uid": manifest["owner"]["uid"], "gid": manifest["owner"]["gid"], "labels": {"pi.control.managed": "true", "pi.control.run-id": run_id, "pi.control.manifest-digest": manifest["manifestDigest"], "pi.control.project-id": manifest["project"]["projectId"], "pi.control.policy-hash": manifest["project"]["policyHash"], "pi.control.runtime-spec-hash": runtime["runtimeSpecHash"], "pi.control.controller-build-id": manifest["runtime"]["controllerBuildId"], "pi.control.working-copy-id": working["workingCopyId"], "pi.control.writer-epoch": str(working["writerEpoch"] or 0)}})
+    raw_capability = capability_secret.encode("utf-8") if isinstance(capability_secret, str) else bytes(capability_secret) if capability_secret is not None else None
+    if raw_capability is not None and "sha256:" + hashlib.sha256(raw_capability).hexdigest() != manifest["capabilityHash"]:
+        raise LaunchError("coding runtime capability does not match the prepared manifest")
+    runtime.update({"buildId": manifest["runtime"]["controllerBuildId"], "piVersion": manifest["runtime"]["piVersion"], "authority": manifest["authority"], "runId": run_id, "manifestDigest": manifest["manifestDigest"], "manifestPath": str(row["manifest_path"]), "capabilityHash": manifest["capabilityHash"], "runtimeCapability": raw_capability.decode("utf-8", errors="strict") if raw_capability is not None else None, "conversationId": manifest["conversationId"], "projectId": manifest["project"]["projectId"], "workingCopyId": working["workingCopyId"], "uid": manifest["owner"]["uid"], "gid": manifest["owner"]["gid"], "labels": {"pi.control.managed": "true", "pi.control.run-id": run_id, "pi.control.manifest-digest": manifest["manifestDigest"], "pi.control.project-id": manifest["project"]["projectId"], "pi.control.policy-hash": manifest["project"]["policyHash"], "pi.control.runtime-spec-hash": runtime["runtimeSpecHash"], "pi.control.controller-build-id": manifest["runtime"]["controllerBuildId"], "pi.control.working-copy-id": working["workingCopyId"], "pi.control.writer-epoch": str(working["writerEpoch"] or 0)}})
     try:
         created = create_coding_container(image_reference=str(runtime["imageReference"]), working_copy_path=str(working["hostPath"]), container_name=container_name, runtime_spec=runtime, command=command)
         start_container(created["containerId"])
@@ -238,8 +241,9 @@ def stop_run(store: Any, *, run_id: str, reason: str = "stopped") -> dict[str, A
         container_id = row["container_id"]
         if container_id:
             try:
-                from .docker_runtime import stop_container
-                stop_container(str(container_id))
+                from .docker_runtime import inspect_container, stop_container
+                if inspect_container(str(container_id)).get("running"):
+                    stop_container(str(container_id))
             except Exception:
                 observed = "needs_attention"
         store.conn.execute("UPDATE runs SET desired_state='stopped',observed_state=?,error_code=?,error_detail=?,ended_at=?,updated_at=? WHERE run_id=?", (observed, "PROCESS_EXIT_NONZERO" if observed == "failed" else ("CP_RUNTIME_STOP" if observed == "needs_attention" else None), reason[:1024], now, now, run_id))

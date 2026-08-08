@@ -62,6 +62,7 @@ def _command(raw: list[str]) -> list[str]:
 
 
 def _safe_env(prepared: Any, state_root: Path, authority: str) -> dict[str, str]:
+    run = prepared.run
     env = {
         "PATH": os.defpath,
         "HOME": "/nonexistent" if authority == "writer" else str(Path.home()),
@@ -71,7 +72,14 @@ def _safe_env(prepared: Any, state_root: Path, authority: str) -> dict[str, str]
         "PI_SYSTEM_CONTROL": str(Path(__file__).resolve().parent.parent / "bin" / "pi-control"),
         "PI_SYSTEM_STATE_ROOT": str(state_root),
         "PI_SYSTEM_RUN_AUTHORITY": authority,
+        "PI_SYSTEM_PROJECT_ID": str(run["project_id"]),
+        "PI_SYSTEM_CONVERSATION_ID": str(run["conversation_id"]),
+        "PI_SYSTEM_RUN_ID": str(run["run_id"]),
     }
+    if run["working_copy_id"]:
+        env["PI_SYSTEM_WORKING_COPY_ID"] = str(run["working_copy_id"])
+    if run["writer_epoch"] is not None:
+        env["PI_SYSTEM_WRITER_GENERATION"] = str(run["writer_epoch"])
     env.update(prepared.environment)
     for key in ("PI_SYSTEM_WORKSTREAM_ID", "PI_SYSTEM_PACKAGE_ENVIRONMENT_ID"):
         value = os.environ.get(key)

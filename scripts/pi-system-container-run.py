@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
         store.open()
         prepared = prepare_run(store, project_id=args.project_id, conversation_id=args.conversation_id, working_copy_id=args.working_copy_id, authority="writer", runtime=runtime, owner_pid=os.getpid())
         attest_run(store, run_id=prepared.run["run_id"], manifest_digest=prepared.manifest["manifestDigest"])
-        started = start_run(store, run_id=prepared.run["run_id"], command=command)
+        started = start_run(store, run_id=prepared.run["run_id"], command=command, capability_secret=prepared.environment["PI_RUNTIME_CAPABILITY"])
         return_code = wait_container(str(started["container_id"]))
         stop_run(store, run_id=prepared.run["run_id"], reason="container-exited" if return_code == 0 else f"process-failed:{return_code}")
         return int(return_code)

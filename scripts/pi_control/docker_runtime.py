@@ -97,17 +97,28 @@ def create_coding_container(*, image_reference: str, working_copy_path: str | Pa
     manifest_path = runtime_spec.get("manifestPath")
     if manifest_path is not None and (not isinstance(manifest_path, str) or not Path(manifest_path).is_file()):
         raise DockerRuntimeError("controller manifest path is unavailable")
+    raw_capability = runtime_spec.get("runtimeCapability")
+    if raw_capability is not None:
+        if not isinstance(raw_capability, str) or not raw_capability:
+            raise DockerRuntimeError("runtime capability is invalid")
+        capability_hash = "sha256:" + hashlib.sha256(raw_capability.encode("utf-8")).hexdigest()
+        if runtime_spec.get("capabilityHash") != capability_hash:
+            raise DockerRuntimeError("runtime capability does not match the manifest")
     docker_args = ["create", "--name", container_name]
     for key, value in labels.items():
         docker_args.extend(["--label", f"{key}={value}"])
+    container_manifest_path = "/run/pi/manifest.json" if manifest_path is not None else None
     for key, value in {
         "PI_RUN_ID": runtime_spec.get("runId"), "PI_MANIFEST_DIGEST": runtime_spec.get("manifestDigest"),
-        "PI_PROJECT_ID": runtime_spec.get("projectId"), "PI_WORKING_COPY_ID": runtime_spec.get("workingCopyId"),
+        "PI_PROJECT_ID": runtime_spec.get("projectId"), "PI_SYSTEM_PROJECT_ID": runtime_spec.get("projectId"), "PI_SYSTEM_CONVERSATION_ID": runtime_spec.get("conversationId"), "PI_SYSTEM_WORKING_COPY_ID": runtime_spec.get("workingCopyId"), "PI_SYSTEM_RUN_ID": runtime_spec.get("runId"), "PI_SYSTEM_RUN_AUTHORITY": runtime_spec.get("authority"), "PI_SYSTEM_CONTROL": runtime_spec.get("containerControlPath", "/usr/local/bin/pi-control"), "PI_RUNTIME_MANIFEST": container_manifest_path, "PI_RUNTIME_CAPABILITY": raw_capability,
         "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0",
     }.items():
         if value is not None:
             docker_args.extend(["--env", f"{key}={value}"])
-    docker_args.extend(["--network", "none", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", f"{uid}:{gid}", "--mount", f"type=bind,src={source},dst=/workspace,readonly=false,bind-propagation=rprivate", "-w", "/workspace", image_reference, *command])
+    docker_args.extend(["--network", "none", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", f"{uid}:{gid}", "--mount", f"type=bind,src={source},dst=/workspace,readonly=false,bind-propagation=rprivate"])
+    if manifest_path is not None:
+        docker_args.extend(["--mount", f"type=bind,src={manifest_path},dst=/run/pi/manifest.json,readonly,bind-propagation=rprivate"])
+    docker_args.extend(["-w", "/workspace", image_reference, *command])
     container_id = _run(docker_args).strip()
     observation = inspect_container(container_id)
     if observation["imageConfigId"] != image.image_config_id or observation["networkMode"] not in {"none", ""} or observation["name"] != container_name or observation["user"] != f"{uid}:{gid}":
