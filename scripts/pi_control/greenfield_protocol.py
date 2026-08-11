@@ -63,17 +63,17 @@ SPECS: Mapping[str, RequestSpec] = {
     "package-review.gate": _spec({"changeId": "change_id", "revision": "revision"}),
     "package.request": _spec({"projectId": "project_id", "conversationId": "conversation_id", "runId": "run_id", "writerGeneration": "writer_generation", "changeId": "change_id", "revision": "revision", "ecosystem": "ecosystem", "action": "action", "packageName": "package_name", "exactVersion": "exact_version"}, {"projectId", "conversationId", "runId", "writerGeneration", "changeId", "revision", "ecosystem", "action"}),
     "package.status": _spec({"projectId": "project_id", "packageRequestId": "package_request_id"}),
-    "change.submit": _spec({"projectId": "project_id", "workingCopyId": "working_copy_id", "targetRef": "target_ref", "title": "title", "summary": "summary", "captureMode": "capture_mode", "selectedPaths": "selected_paths", "excludedPaths": "excluded_paths", "expectedStatusHash": "expected_status_hash", "idempotencyKey": "idempotency_key", "createdByConversationId": "created_by_conversation_id", "actorType": "actor_type", "actorId": "actor_id", "authorizationId": "authorization_id"}, {"projectId", "workingCopyId", "targetRef", "title", "summary", "idempotencyKey"}),
-    "change.revise": _spec({"projectId": "project_id", "changeId": "change_id", "targetRef": "target_ref", "title": "title", "summary": "summary", "idempotencyKey": "idempotency_key"}, {"projectId", "changeId", "idempotencyKey"}),
+    "change.submit": _spec({"projectId": "project_id", "project_id": "project_id", "workingCopyId": "working_copy_id", "working_copy_id": "working_copy_id", "targetRef": "target_ref", "target_ref": "target_ref", "title": "title", "summary": "summary", "captureMode": "capture_mode", "capture_mode": "capture_mode", "selectedPaths": "selected_paths", "selected_paths": "selected_paths", "excludedPaths": "excluded_paths", "excluded_paths": "excluded_paths", "expectedStatusHash": "expected_status_hash", "expected_status_hash": "expected_status_hash", "idempotencyKey": "idempotency_key", "idempotency_key": "idempotency_key", "createdByConversationId": "created_by_conversation_id", "created_by_conversation_id": "created_by_conversation_id", "actorType": "actor_type", "actor_type": "actor_type", "actorId": "actor_id", "actor_id": "actor_id", "authorizationId": "authorization_id", "authorization_id": "authorization_id"}, {"projectId", "workingCopyId", "targetRef", "title", "summary", "idempotencyKey"}),
+    "change.revise": _spec({"changeId": "change_id", "change_id": "change_id", "title": "title", "summary": "summary", "captureMode": "capture_mode", "capture_mode": "capture_mode", "selectedPaths": "selected_paths", "selected_paths": "selected_paths", "excludedPaths": "excluded_paths", "excluded_paths": "excluded_paths", "idempotencyKey": "idempotency_key", "idempotency_key": "idempotency_key", "actorType": "actor_type", "actor_type": "actor_type", "actorId": "actor_id", "actor_id": "actor_id", "createdByConversationId": "created_by_conversation_id", "created_by_conversation_id": "created_by_conversation_id"}, {"changeId", "idempotencyKey"}),
     "change.list": _spec({"projectId": "project_id"}),
     "change.show": _spec({"changeId": "change_id"}),
-    "review.request": _spec({"changeId": "change_id", "revision": "revision", "reviewerConversationId": "reviewer_conversation_id", "reviewerRunId": "reviewer_run_id", "reviewerActorId": "reviewer_actor_id", "reviewerCapabilitySecret": "reviewer_capability_secret", "evidence": "evidence", "reviewId": "review_id", "dependencyReviewDigest": "dependency_review_digest"}, {"changeId", "revision"}),
-    "review.create-assignment": _spec({"changeId": "change_id", "revision": "revision"}, {"changeId", "revision"}),
-    "review.submit": _spec({"reviewId": "review_id", "verdict": "verdict", "summary": "summary", "findings": "findings", "evidence": "evidence", "reviewerRunId": "reviewer_run_id", "reviewerActorId": "reviewer_actor_id", "reviewerCapabilitySecret": "reviewer_capability_secret"}, {"reviewId", "verdict"}),
-    "integration.analyze": _spec({"projectId": "project_id", "changeId": "change_id", "revision": "revision", "targetWorkingCopyId": "target_working_copy_id", "targetRef": "target_ref", "integrationId": "integration_id"}, {"projectId", "changeId", "revision", "targetWorkingCopyId", "targetRef"}),
-    "integration.authorize": _spec({"integrationId": "integration_id", "actorId": "actor_id", "requestContextId": "request_context_id", "expiresAt": "expires_at", "reviewId": "review_id"}, {"integrationId", "actorId", "requestContextId", "expiresAt"}),
-    "integration.integrate": _spec({"integrationId": "integration_id", "authorizationId": "authorization_id", "expectedResourceVersion": "expected_resource_version"}, {"integrationId", "authorizationId"}),
-    "investigation.start": _spec({"projectId": "project_id", "purpose": "purpose", "workingCopyId": "working_copy_id"}, {"projectId", "purpose"}),
+    "review.request": _spec({"changeId": "change_id", "change_id": "change_id", "revision": "revision", "reviewerConversationId": "reviewer_conversation_id", "reviewer_conversation_id": "reviewer_conversation_id", "reviewerRunId": "reviewer_run_id", "reviewer_run_id": "reviewer_run_id", "reviewerActorId": "reviewer_actor_id", "reviewer_actor_id": "reviewer_actor_id", "reviewerCapabilitySecret": "reviewer_capability_secret", "reviewer_capability_secret": "reviewer_capability_secret", "evidence": "evidence", "reviewId": "review_id", "review_id": "review_id", "dependencyReviewDigest": "dependency_review_digest", "dependency_review_digest": "dependency_review_digest"}, {"changeId", "revision"}),
+    "review.create-assignment": _spec({"changeId": "change_id", "change_id": "change_id", "revision": "revision"}, {"changeId", "revision"}),
+    "review.submit": _spec({"reviewId": "review_id", "review_id": "review_id", "verdict": "verdict", "summary": "summary", "findings": "findings", "evidence": "evidence", "reviewerRunId": "reviewer_run_id", "reviewer_run_id": "reviewer_run_id", "reviewerActorId": "reviewer_actor_id", "reviewer_actor_id": "reviewer_actor_id", "reviewerCapabilitySecret": "reviewer_capability_secret", "reviewer_capability_secret": "reviewer_capability_secret"}, {"reviewId", "verdict"}),
+    "integration.analyze": _spec({"projectId": "project_id", "project_id": "project_id", "changeId": "change_id", "change_id": "change_id", "revision": "revision", "targetWorkingCopyId": "target_working_copy_id", "target_working_copy_id": "target_working_copy_id", "targetRef": "target_ref", "target_ref": "target_ref", "integrationId": "integration_id", "integration_id": "integration_id"}, {"projectId", "changeId", "revision", "targetWorkingCopyId", "targetRef"}),
+    "integration.authorize": _spec({"integrationId": "integration_id", "integration_id": "integration_id", "actorId": "actor_id", "actor_id": "actor_id", "requestContextId": "request_context_id", "request_context_id": "request_context_id", "expiresAt": "expires_at", "expires_at": "expires_at", "reviewId": "review_id", "review_id": "review_id"}, {"integrationId", "actorId", "requestContextId", "expiresAt"}),
+    "integration.integrate": _spec({"integrationId": "integration_id", "integration_id": "integration_id", "authorizationId": "authorization_id", "authorization_id": "authorization_id", "expectedResourceVersion": "expected_resource_version", "expected_resource_version": "expected_resource_version"}, {"integrationId", "authorizationId"}),
+    "investigation.start": _spec({"projectId": "project_id", "project_id": "project_id", "purpose": "purpose", "workingCopyId": "working_copy_id", "working_copy_id": "working_copy_id"}, {"projectId", "purpose"}),
     "presentation.ensure": _spec({"projectId": "project_id", "conversationId": "conversation_id", "title": "title"}, {"projectId", "conversationId"}),
 }
 
@@ -86,14 +86,21 @@ def adapt_request(operation: str, request: Mapping[str, Any]) -> dict[str, Any]:
         raise ProtocolError("protocol request must be an object", code=ErrorCode.PROTOCOL_REQUEST)
     keys = set(request)
     unknown = keys - set(spec.fields)
-    missing = spec.required - keys
-    if unknown or missing:
-        raise ProtocolError("protocol request fields do not match operation schema", code=ErrorCode.PROTOCOL_REQUEST, detail={"operation": operation, "unknown": ",".join(sorted(unknown)), "missing": ",".join(sorted(missing))})
+    if unknown:
+        raise ProtocolError("protocol request fields do not match operation schema", code=ErrorCode.PROTOCOL_REQUEST, detail={"operation": operation, "unknown": ",".join(sorted(unknown))})
     result: dict[str, Any] = {}
+    provided_internal: set[str] = set()
     for external, value in request.items():
         internal = spec.fields[external]
+        provided_internal.add(internal)
         converter = spec.conversions.get(external)
-        result[internal] = converter(value) if converter else value
+        if converter is not None:
+            value = converter(value)
+        result[internal] = value
+    required_internal = {spec.fields[field] for field in spec.required}
+    missing = required_internal - provided_internal
+    if missing:
+        raise ProtocolError("protocol request fields do not match operation schema", code=ErrorCode.PROTOCOL_REQUEST, detail={"operation": operation, "missing": ",".join(sorted(missing))})
     return result
 
 

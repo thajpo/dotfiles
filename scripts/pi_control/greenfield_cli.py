@@ -11,7 +11,7 @@ from typing import Any
 
 from .greenfield_client import GreenfieldClientError, GreenfieldControllerClient
 from .errors import ControlPlaneError, ErrorCode
-from .greenfield_protocol import PROTOCOL_VERSION, protocol_request
+from .greenfield_protocol import PROTOCOL_VERSION, adapt_request, protocol_request
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -189,9 +189,13 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "integration":
                 value = client.dispatch(f"integration.{args.integration_command}", request)
             elif args.command == "investigation":
-                value = client.dispatch("investigation.start", request)
+                from .investigators import start_investigation
+                with client._store(mutate=True) as store:
+                    value = start_investigation(store, **adapt_request("investigation.start", request))
             elif args.command == "presentation":
-                value = client.dispatch("presentation.ensure", request)
+                from .presentation import ensure_presentation
+                with client._store(mutate=True) as store:
+                    value = ensure_presentation(store, **adapt_request("presentation.ensure", request))
             else:
                 raise GreenfieldClientError("unsupported CLI command")
         _print(value)

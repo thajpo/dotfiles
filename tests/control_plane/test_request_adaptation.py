@@ -84,6 +84,38 @@ class RequestAdaptationTests(unittest.TestCase):
         self.assertEqual(integrate["integration_id"], "int_" + "g" * 32)
         self.assertEqual(integrate["authorization_id"], "auth_" + "h" * 32)
 
+    def test_investigation_start_accepts_both_field_spellings(self) -> None:
+        # The release journeys drive `investigation start` with snake_case
+        # request keys; the protocol form uses camelCase. Both must adapt to
+        # the same internal fields.
+        snake = adapt_request("investigation.start", {"project_id": "prj_" + "a" * 32, "purpose": "probe", "working_copy_id": "wc_" + "b" * 32})
+        self.assertEqual(snake["project_id"], "prj_" + "a" * 32)
+        self.assertEqual(snake["working_copy_id"], "wc_" + "b" * 32)
+        camel = adapt_request("investigation.start", {"projectId": "prj_" + "a" * 32, "purpose": "probe", "workingCopyId": "wc_" + "b" * 32})
+        self.assertEqual(camel, snake)
+        with self.assertRaises(ProtocolError):
+            adapt_request("investigation.start", {"purpose": "probe"})
+
+    def test_release_journeys_snake_case_spellings_are_accepted(self) -> None:
+        # The installed release journeys drive change/review/integration with
+        # snake_case request keys; the protocol form uses camelCase. Both must
+        # adapt to the same internal fields.
+        pairs = [
+            ("change.submit", {"projectId": "prj_" + "a" * 32, "workingCopyId": "wc_" + "b" * 32, "targetRef": "refs/heads/main", "title": "t", "summary": "s", "idempotencyKey": "k"},
+             {"project_id": "prj_" + "a" * 32, "working_copy_id": "wc_" + "b" * 32, "target_ref": "refs/heads/main", "title": "t", "summary": "s", "idempotency_key": "k"}),
+            ("review.request", {"changeId": "chg_" + "c" * 32, "revision": 1, "reviewerConversationId": "conv_" + "d" * 32, "reviewerRunId": "run_" + "e" * 32, "reviewerActorId": "a"},
+             {"change_id": "chg_" + "c" * 32, "revision": 1, "reviewer_conversation_id": "conv_" + "d" * 32, "reviewer_run_id": "run_" + "e" * 32, "reviewer_actor_id": "a"}),
+            ("review.submit", {"reviewId": "review_" + "f" * 32, "verdict": "accept"},
+             {"review_id": "review_" + "f" * 32, "verdict": "accept"}),
+            ("integration.analyze", {"projectId": "prj_" + "a" * 32, "changeId": "chg_" + "c" * 32, "revision": 1, "targetWorkingCopyId": "wc_" + "b" * 32, "targetRef": "refs/heads/main"},
+             {"project_id": "prj_" + "a" * 32, "change_id": "chg_" + "c" * 32, "revision": 1, "target_working_copy_id": "wc_" + "b" * 32, "target_ref": "refs/heads/main"}),
+            ("integration.integrate", {"integrationId": "int_" + "g" * 32, "authorizationId": "auth_" + "h" * 32},
+             {"integration_id": "int_" + "g" * 32, "authorization_id": "auth_" + "h" * 32}),
+        ]
+        for operation, camel, snake in pairs:
+            with self.subTest(operation=operation):
+                self.assertEqual(adapt_request(operation, camel), adapt_request(operation, snake))
+
     def test_unknown_or_missing_fields_are_rejected(self) -> None:
         with self.assertRaises(ProtocolError):
             adapt_request("review.request", {"changeId": "chg_" + "c" * 32})
