@@ -1,20 +1,25 @@
-# Pi System Observability and Continuity Contract
+# Pi Greenfield Observability And Continuity Contract
 
-Each real scenario records source commit/tree, installed build, package and
-extension hashes, registered tools, authority, run manifest, process and
-container identity, mounts, working-copy/Git state, writer generation,
-controller versions, session identity, project messages, user-visible result,
-host mutations, remote mutations, and rollback result.
+Owns: evidence envelopes, user attention, and restart continuity.
 
-The project work index is derived from controller state and durable messages.
-It reports working now, investigations, changes ready for review, changes
-ready to merge, needs attention, recently integrated work, and unmanaged Git
-work. Pane text is never lifecycle truth.
+Every evidence envelope binds schema version, source/build/fixture identity,
+catalog action IDs, one catalog scenario, one declared tier, assertions,
+commands, before/after observations, capability, and fault seed. It explicitly
+records `installedProductActionObserved`, `productionMutationPerformed`, and
+`remoteProviderContacted`. Evidence is immutable and retained outside the
+repository.
 
-Durable secretary, personal, workstream, and integration conversations resume
-after restart. Temporary investigations become interrupted and are not
-resumed. Pending user decisions and unacknowledged messages survive.
+An envelope cannot prove more than it observed. Help, syntax, import, direct
+module, idle-pane, planned, skipped, no-op, or fabricated-runtime observations
+are not installed product evidence. Missing or unobservable assertions fail
+closed. Digests and redaction preserve identity without storing secrets.
 
-Evidence is written outside the project repository. Static help, syntax, and
-import checks are narrow checks only; installed-process evidence must invoke a
-real tool through the real Pi process.
+Durable secretary, personal, workstream, and integration conversations retain
+their controller identity, session identity, working copy, task, messages,
+pending decisions, and attention across restart. Restart creates a new process
+and run. Temporary investigators are interrupted and are not automatically
+resumed; completed results remain durable.
+
+The project work index is derived from controller records and durable messages,
+not pane text, timestamps, process names, container names, or marker files.
+Unknown liveness is shown as attention and does not grant writer authority.

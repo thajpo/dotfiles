@@ -8,6 +8,7 @@ root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 node "$root/tests/pi-subagents-control-provenance.mjs"
 NODE_PATH="$root/pi/npm/node_modules" node --test \
   "$root/tests/pi-sandbox-control-manifest.test.mjs" \
+  "$root/tests/pi-sandbox-control-broker.test.mjs" \
   "$root/tests/control_plane/continuity-extension.test.mjs" \
   "$root/tests/control_plane/secretary-extension.test.mjs" \
   "$root/tests/pi-child-control-plane-e2e.mjs"

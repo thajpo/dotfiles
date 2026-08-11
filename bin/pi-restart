@@ -49,6 +49,11 @@ done
   printf 'pi-restart: invalid no-attach setting\n' >&2; exit 2;
 }
 
+# Controller assignments belong to one prepared run. Never let an ambient
+# assignment become the scope of a newly rebuilt personal or secretary pane.
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable PI_SYSTEM_)
+unset PI_RUNTIME_MANIFEST PI_RUNTIME_CAPABILITY
+
 HERDR_BIN=$(command -v herdr 2>/dev/null || true)
 herdr_session_running() {
   local name=$1 payload

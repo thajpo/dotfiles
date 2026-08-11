@@ -1,0 +1,296 @@
+{
+ "excludedLaunchers": [
+  "bin/pi",
+  "bin/pi-secretary",
+  "bin/pisec",
+  "bin/pi-start",
+  "bin/pi-restart"
+ ],
+ "extensions": [
+  {
+   "path": "pi/extensions/controller-channel/index.ts",
+   "resourceId": "extension:controller-channel",
+   "roles": [
+    "secretary",
+    "investigator",
+    "reviewer",
+    "personal",
+    "workstream",
+    "integration"
+   ]
+  },
+  {
+   "path": "pi/extensions/scoped-project-read/index.ts",
+   "resourceId": "extension:scoped-project-read",
+   "roles": [
+    "secretary",
+    "investigator",
+    "reviewer"
+   ]
+  },
+  {
+   "path": "pi/extensions/project-messages/index.ts",
+   "resourceId": "extension:project-messages",
+   "roles": [
+    "secretary",
+    "personal",
+    "workstream",
+    "integration"
+   ]
+  },
+  {
+   "path": "pi/extensions/project-commands/index.ts",
+   "resourceId": "extension:project-commands",
+   "roles": [
+    "personal",
+    "workstream",
+    "integration"
+   ]
+  },
+  {
+   "path": "pi/extensions/dependency-review/index.ts",
+   "resourceId": "extension:dependency-review",
+   "roles": [
+    "secretary",
+    "investigator",
+    "reviewer",
+    "personal",
+    "workstream",
+    "integration"
+   ]
+  }
+ ],
+ "hostLaunchProfiles": [
+  {
+   "resources": [
+    "package:pi-core",
+    "package:pi-subagents",
+    "extension:controller-channel",
+    "extension:scoped-project-read",
+    "extension:project-messages",
+    "extension:dependency-review"
+   ],
+   "role": "secretary",
+   "supported": true,
+   "tools": [
+    "acknowledge_project_message",
+    "check_package_review_gate",
+    "git_read",
+    "grep",
+    "list_project_messages",
+    "ls",
+    "post_project_message",
+    "read",
+    "record_dependency_disposition",
+    "reply_project_message",
+    "subagent"
+   ]
+  },
+  {
+   "resources": [
+    "package:pi-core",
+    "extension:controller-channel",
+    "extension:scoped-project-read",
+    "extension:dependency-review"
+   ],
+   "role": "investigator",
+   "supported": true,
+   "tools": [
+    "git_read",
+    "grep",
+    "ls",
+    "read",
+    "record_package_security_review"
+   ]
+  },
+  {
+   "resources": [
+    "package:pi-core",
+    "extension:controller-channel",
+    "extension:scoped-project-read",
+    "extension:dependency-review"
+   ],
+   "role": "reviewer",
+   "supported": true,
+   "tools": [
+    "check_package_review_gate",
+    "git_read",
+    "grep",
+    "ls",
+    "read"
+   ]
+  },
+  {
+   "resources": [
+    "package:pi-core",
+    "package:pi-subagents",
+    "extension:controller-channel",
+    "package:pi-sandbox-control",
+    "extension:project-messages",
+    "extension:project-commands",
+    "extension:dependency-review"
+   ],
+   "role": "personal",
+   "supported": true,
+   "tools": [
+    "acknowledge_project_message",
+    "bash",
+    "edit",
+    "inventory_dependency_changes",
+    "list_project_messages",
+    "package_operation_status",
+    "post_project_message",
+    "project_command_status",
+    "read",
+    "reply_project_message",
+    "request_package_operation",
+    "request_project_command",
+    "subagent",
+    "write"
+   ]
+  },
+  {
+   "resources": [
+    "package:pi-core",
+    "package:pi-subagents",
+    "extension:controller-channel",
+    "package:pi-sandbox-control",
+    "extension:project-messages",
+    "extension:project-commands",
+    "extension:dependency-review"
+   ],
+   "role": "workstream",
+   "supported": true,
+   "tools": [
+    "acknowledge_project_message",
+    "bash",
+    "edit",
+    "inventory_dependency_changes",
+    "list_project_messages",
+    "package_operation_status",
+    "post_project_message",
+    "project_command_status",
+    "read",
+    "reply_project_message",
+    "request_package_operation",
+    "request_project_command",
+    "subagent",
+    "write"
+   ]
+  },
+  {
+   "resources": [
+    "package:pi-core",
+    "extension:controller-channel"
+   ],
+   "role": "integration",
+   "supported": false,
+   "tools": []
+  }
+ ],
+ "launchers": [
+  "bin/pi-control",
+  "bin/pi-authorize",
+  "bin/pi-install",
+  "bin/pi-system-run",
+  "bin/pi-system-secretary",
+  "bin/pi-system-investigator",
+  "bin/pi-system-reviewer",
+  "bin/pi-system-container-run",
+  "bin/pi-system-workstream-run",
+  "bin/pi-workstream",
+  "bin/pi-integration",
+  "bin/pi-activate"
+ ],
+ "packages": [
+  {
+   "installedPath": "runtime/node_modules/@earendil-works/pi-coding-agent",
+   "name": "@earendil-works/pi-coding-agent",
+   "resourceId": "package:pi-core",
+   "source": "pi/PI_VERSION",
+   "version": "0.83.0"
+  },
+  {
+   "installedPath": "runtime/node_modules/pi-sandbox-control",
+   "name": "pi-sandbox-control",
+   "resourceId": "package:pi-sandbox-control",
+   "source": "pi/packages/pi-sandbox-control",
+   "version": "0.3.0-control.1"
+  },
+  {
+   "installedPath": "runtime/node_modules/pi-subagents",
+   "name": "pi-subagents",
+   "resourceId": "package:pi-subagents",
+   "source": "pi/packages/pi-subagents-control",
+   "version": "0.35.1"
+  }
+ ],
+ "roles": [
+  {
+   "resources": [
+    "package:pi-core",
+    "package:pi-subagents",
+    "extension:controller-channel",
+    "extension:scoped-project-read",
+    "extension:project-messages",
+    "extension:dependency-review"
+   ],
+   "role": "secretary"
+  },
+  {
+   "resources": [
+    "package:pi-core",
+    "extension:controller-channel",
+    "extension:scoped-project-read",
+    "extension:dependency-review"
+   ],
+   "role": "investigator"
+  },
+  {
+   "resources": [
+    "package:pi-core",
+    "extension:controller-channel",
+    "extension:scoped-project-read",
+    "extension:dependency-review"
+   ],
+   "role": "reviewer"
+  },
+  {
+   "resources": [
+    "package:pi-core",
+    "package:pi-subagents",
+    "package:pi-sandbox-control",
+    "extension:controller-channel",
+    "extension:project-messages",
+    "extension:project-commands",
+    "extension:dependency-review"
+   ],
+   "role": "personal"
+  },
+  {
+   "resources": [
+    "package:pi-core",
+    "package:pi-subagents",
+    "package:pi-sandbox-control",
+    "extension:controller-channel",
+    "extension:project-messages",
+    "extension:project-commands",
+    "extension:dependency-review"
+   ],
+   "role": "workstream"
+  },
+  {
+   "resources": [
+    "package:pi-core",
+    "package:pi-subagents",
+    "package:pi-sandbox-control",
+    "extension:controller-channel",
+    "extension:project-messages",
+    "extension:project-commands",
+    "extension:dependency-review"
+   ],
+   "role": "integration"
+  }
+ ],
+ "schemaVersion": 1
+}

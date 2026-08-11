@@ -10,7 +10,7 @@ import unittest
 
 from scripts.pi_control.changes import submit_change
 from scripts.pi_control.errors import ConstraintError, IdempotencyConflictError, InvalidRequestError
-from scripts.pi_control.integration import AnalysisStaleError, IntegrationNeedsResolution, analyze_integration, authorize_integration, integrate
+from scripts.pi_control.integration import AnalysisStaleError, AuthorizationError, IntegrationNeedsResolution, analyze_integration, authorize_integration, integrate
 from scripts.pi_control.reviews import request_review, submit_review
 from scripts.pi_control.run_manifest import capability_hash
 from scripts.pi_control.store import ControllerStore
@@ -39,6 +39,7 @@ class IntegrationAnalysisTests(unittest.TestCase):
         self.review_secret = "review-secret-" + "a" * 48
         self.state = self.root / "state"
         with ControllerStore(self.state) as store:
+            store.conn.execute("CREATE TABLE IF NOT EXISTS dependency_changes(dependency_change_id TEXT PRIMARY KEY,change_id TEXT NOT NULL,revision INTEGER NOT NULL,disposition TEXT NOT NULL,lock_digest TEXT,exact_version TEXT)")
             store.register_build("build", source_tree_hash="tree", artifact_manifest_hash="manifest", pi_version="pi", package_lock_hash="lock", status="active")
             store.conn.execute("INSERT INTO projects(project_id,display_name,git_common_dir,git_common_device,git_common_inode,primary_checkout,object_format,trust_mode,policy_hash,desired_state,observed_state,resource_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (self.project_id, "p", str(self.repo / ".git"), 1, 1, str(self.repo), "sha1", "trusted", "policy", "active", "ready", 1, "t", "t"))
             store.conn.execute("INSERT INTO working_copies(working_copy_id,project_id,display_name,kind,purpose,path,branch_ref,effective_mode,desired_state,observed_state,writer_epoch,resource_version,controller_owned,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (self.wc_id, self.project_id, "primary", "primary", "personal", str(self.repo), "refs/heads/main", "trusted-live", "present", "ready", 0, 1, 1, "t", "t"))
@@ -46,6 +47,7 @@ class IntegrationAnalysisTests(unittest.TestCase):
             store.conn.execute("INSERT INTO conversations(conversation_id,project_id,working_copy_id,role,display_name,pi_session_id,session_file,desired_state,observed_state,resource_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (self.conv_id, self.project_id, self.wc_id, "personal", "personal", "personal-session", str(self.root / "session.jsonl"), "active", "ready", 1, "t", "t"))
             store.conn.execute("INSERT INTO conversations(conversation_id,project_id,working_copy_id,role,display_name,pi_session_id,session_file,desired_state,observed_state,resource_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (self.review_conv_id, self.project_id, self.review_wc_id, "review", "review", "review-session", str(self.root / "review.jsonl"), "active", "ready", 1, "t", "t"))
             store.create_run(run_id=self.review_run_id, conversation_id=self.review_conv_id, project_id=self.project_id, working_copy_id=self.review_wc_id, authority="read-only", runtime_spec_hash="runtime", build_id="build", capability_hash=capability_hash(self.review_secret))
+            store.conn.execute("UPDATE runs SET observed_state='running' WHERE run_id=?", (self.review_run_id,))
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -142,6 +144,59 @@ class IntegrationAnalysisTests(unittest.TestCase):
             with self.assertRaises(IntegrationNeedsResolution):
                 integrate(store, integration_id=analysis.integration_id, authorization_id=auth["authorizationId"])
             self.assertEqual(self._rev("refs/heads/target"), self.base)
+
+    def _review_with_verdict(self, store: ControllerStore, analysis, verdict: str, *, key: str) -> dict:
+        evidence = {"integrationId": analysis.integration_id, "analysisDigest": analysis.analysis_digest, "targetOid": analysis.target_oid}
+        review = request_review(store, change_id=analysis.change_id, revision=analysis.revision, reviewer_conversation_id=self.review_conv_id, reviewer_run_id=self.review_run_id, reviewer_actor_id="reviewer", reviewer_capability_secret=self.review_secret, evidence=evidence)
+        submit_review(store, review_id=review.review_id, verdict=verdict, summary=key, evidence=evidence, reviewer_run_id=self.review_run_id, reviewer_actor_id="reviewer", reviewer_capability_secret=self.review_secret)
+        return review
+
+    def test_all_submitted_reviews_must_accept(self) -> None:
+        with ControllerStore(self.state) as store:
+            candidate = self._candidate(store, key="all-accept")
+            analysis = analyze_integration(store, project_id=self.project_id, change_id=candidate.change_id, revision=1, target_working_copy_id=self.wc_id, target_ref="refs/heads/target")
+            self._review_with_verdict(store, analysis, "accept", key="review-a")
+            self._review_with_verdict(store, analysis, "changes_requested", key="review-b")
+            with self.assertRaises(AuthorizationError):
+                authorize_integration(store, integration_id=analysis.integration_id, actor_id="user", request_context_id="blocked-accept", expires_at="2099-01-01T00:00:00Z")
+
+    def test_accept_plus_accept_authorizes(self) -> None:
+        with ControllerStore(self.state) as store:
+            candidate = self._candidate(store, key="accept-accept")
+            analysis = analyze_integration(store, project_id=self.project_id, change_id=candidate.change_id, revision=1, target_working_copy_id=self.wc_id, target_ref="refs/heads/target")
+            self._review_with_verdict(store, analysis, "accept", key="review-c")
+            self._review_with_verdict(store, analysis, "accept", key="review-d")
+            auth = authorize_integration(store, integration_id=analysis.integration_id, actor_id="user", request_context_id="two-accepts", expires_at="2099-01-01T00:00:00Z")
+            self.assertEqual(auth["state"], "active")
+
+    def test_changes_requested_alone_blocks_authorization(self) -> None:
+        with ControllerStore(self.state) as store:
+            candidate = self._candidate(store, key="only-requested")
+            analysis = analyze_integration(store, project_id=self.project_id, change_id=candidate.change_id, revision=1, target_working_copy_id=self.wc_id, target_ref="refs/heads/target")
+            self._review_with_verdict(store, analysis, "changes_requested", key="review-e")
+            with self.assertRaises(AuthorizationError):
+                authorize_integration(store, integration_id=analysis.integration_id, actor_id="user", request_context_id="only-requested", expires_at="2099-01-01T00:00:00Z")
+
+    def test_superseded_revision_cannot_authorize(self) -> None:
+        with ControllerStore(self.state) as store:
+            candidate = self._candidate(store, key="supersede-auth")
+            analysis = analyze_integration(store, project_id=self.project_id, change_id=candidate.change_id, revision=1, target_working_copy_id=self.wc_id, target_ref="refs/heads/target")
+            self._review_with_verdict(store, analysis, "accept", key="review-f")
+            (self.repo / "candidate.txt").write_text("candidate v2\n", encoding="utf-8")
+            from scripts.pi_control.changes import submit_change_revision
+            submit_change_revision(store, change_id=candidate.change_id, title="v2", summary="supersede", capture_mode="dirty", selected_paths=["candidate.txt"], idempotency_key="supersede-auth-v2")
+            (self.repo / "candidate.txt").unlink()
+            with self.assertRaises(AuthorizationError):
+                authorize_integration(store, integration_id=analysis.integration_id, actor_id="user", request_context_id="superseded", expires_at="2099-01-01T00:00:00Z")
+
+    def test_review_rejected_for_merged_change(self) -> None:
+        with ControllerStore(self.state) as store:
+            candidate = self._candidate(store, key="merged-review")
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            store.conn.execute("UPDATE changes SET state='merged',merged_at=? WHERE change_id=?", (now, candidate.change_id))
+            evidence = {"integrationId": "int_" + "1" * 32, "analysisDigest": "digest", "targetOid": candidate.tip_oid}
+            with self.assertRaises(ConstraintError):
+                request_review(store, change_id=candidate.change_id, revision=1, reviewer_conversation_id=self.review_conv_id, reviewer_run_id=self.review_run_id, reviewer_actor_id="reviewer", reviewer_capability_secret=self.review_secret, evidence=evidence)
 
 
 if __name__ == "__main__":

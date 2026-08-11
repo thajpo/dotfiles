@@ -1,19 +1,70 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["schemaVersion", "scenarioId", "status", "source", "role", "registeredTools", "invokedTool", "forbiddenTool", "packageFiles", "process", "stateRoot", "evidenceOutsideRepository", "noRemoteProvider"],
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "scenarioId",
+    "actionIds",
+    "status",
+    "tier",
+    "fixtureId",
+    "sourceBuildId",
+    "buildId",
+    "before",
+    "after",
+    "capability",
+    "faultSeed",
+    "installedProductActionObserved",
+    "productionMutationPerformed",
+    "remoteProviderContacted",
+    "assertions",
+    "commands"
+  ],
   "properties": {
     "schemaVersion": {"const": 1},
     "scenarioId": {"type": "string", "minLength": 1},
-    "status": {"enum": ["PASS", "FAIL", "STOP"]},
-    "role": {"enum": ["host-read-only", "writer", "reviewer"]},
-    "registeredTools": {"type": "array", "items": {"type": "string"}},
-    "invokedTool": {"type": "object", "required": ["name", "request", "result"]},
-    "forbiddenTool": {"type": "object", "required": ["name", "accepted"]},
-    "packageFiles": {"type": "array", "items": {"type": "object", "required": ["path", "digest"]}},
-    "process": {"type": "object", "required": ["argv", "pid", "elapsedNs"]},
-    "stateRoot": {"type": "string", "minLength": 1},
-    "evidenceOutsideRepository": {"const": true},
-    "noRemoteProvider": {"const": true}
-  }
+    "actionIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^HA-[0-9]{3}$"}},
+    "status": {"enum": ["PASS", "FAIL", "STOP", "SKIP"]},
+    "tier": {"type": "string", "minLength": 1},
+    "fixtureId": {"type": "string", "minLength": 1},
+    "sourceBuildId": {"type": "string", "minLength": 1},
+    "buildId": {"type": "string", "minLength": 1},
+    "before": {"type": "object"},
+    "after": {"type": "object"},
+    "capability": {"type": "object"},
+    "faultSeed": {"type": "string", "minLength": 1},
+    "installedProductActionObserved": {"type": "boolean"},
+    "productionMutationPerformed": {"type": "boolean"},
+    "remoteProviderContacted": {"type": "boolean"},
+    "assertions": {"type": "object"},
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["argv", "returncode", "stdoutDigest", "stderrDigest"],
+        "properties": {
+          "argv": {"type": "array", "items": {"type": "string"}},
+          "returncode": {"type": "integer"},
+          "stdoutDigest": {"type": "string"},
+          "stderrDigest": {"type": "string"}
+        }
+      }
+    },
+    "reason": {"type": "string"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "PASS"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "before": {"minProperties": 1},
+          "after": {"minProperties": 1},
+          "capability": {"minProperties": 1},
+          "assertions": {"minProperties": 1},
+          "commands": {"minItems": 1}
+        }
+      }
+    }
+  ]
 }

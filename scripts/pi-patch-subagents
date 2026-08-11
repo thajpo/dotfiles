@@ -41,6 +41,17 @@ apply_verified_patch() {
   printf '%s: applied verified patch %s\n' "$label" "$actual"
 }
 
+# Greenfield controller-broker package: the working tree ships the slim
+# pi-subagents redesign (index.ts -> src/controller-broker.ts) which does not
+# contain the upstream extension tree the legacy patch chain targets. The
+# greenfield controller loads the broker as its own subagent extension, so the
+# legacy upstream patches do not apply and must not be required.
+pi_subagents_dir="$agent_dir/npm/node_modules/pi-subagents"
+if [[ -f "$pi_subagents_dir/src/controller-broker.ts" && ! -f "$pi_subagents_dir/src/extension/index.ts" ]]; then
+  printf '%s\n' 'pi-subagents: greenfield controller-broker package present; skipping legacy upstream patches'
+  exit 0
+fi
+
 apply_verified_patch \
   pi-subagents \
   "$agent_dir/npm/node_modules/pi-subagents" \

@@ -79,6 +79,50 @@ class PiRestartTests(unittest.TestCase):
             self.assertIn("pisec --mobile", calls)
             self.assertFalse(any(line.startswith("personal-herdr ") for line in calls))
 
+    def test_pi_start_clears_controller_scope_from_process_and_tmux(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, fake_bin, home_bin, log, env = make_start_fixture(root)
+            (home_bin / "pi-personal").write_text("""#!/bin/sh
+printf 'personal project=%s runtime=%s args=%s\n' "${PI_SYSTEM_PROJECT_ID-unset}" "${PI_RUNTIME_CAPABILITY-unset}" "$*" >> "$PI_START_LOG"
+""")
+            (home_bin / "pi-personal").chmod(0o755)
+            tmux = fake_bin / "tmux"
+            tmux.write_text("""#!/bin/sh
+printf 'tmux %s\n' "$*" >> "$PI_START_LOG"
+if [ "$1" = show-environment ]; then
+  printf '%s\n' 'PI_SYSTEM_PROJECT_ID=prj_stale' 'PI_RUNTIME_CAPABILITY=stale'
+  exit 0
+fi
+[ "$1" != has-session ]
+""")
+            tmux.chmod(0o755)
+            env.update({"PI_SYSTEM_PROJECT_ID": "prj_" + "1" * 32, "PI_SYSTEM_STATE_ROOT": "/stale", "PI_RUNTIME_CAPABILITY": "stale"})
+            result = subprocess.run([str(ROOT / "bin/pi-start"), "personal"], env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = log.read_text().splitlines()
+            self.assertIn("personal project=unset runtime=unset args=--ensure", calls)
+            self.assertIn("tmux set-environment -gu PI_SYSTEM_PROJECT_ID", calls)
+            self.assertIn("tmux set-environment -gu PI_RUNTIME_CAPABILITY", calls)
+            self.assertLess(calls.index("tmux set-environment -gu PI_SYSTEM_PROJECT_ID"), calls.index("tmux new-session -d -s main -n shell -c " + str(root / "home") + " exec bash"))
+
+    def test_pi_start_fails_closed_when_tmux_scope_cannot_be_cleared(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, fake_bin, _, log, env = make_start_fixture(root)
+            tmux = fake_bin / "tmux"
+            tmux.write_text("""#!/bin/sh
+printf 'tmux %s\n' "$*" >> "$PI_START_LOG"
+if [ "$1" = show-environment ]; then printf '%s\n' 'PI_SYSTEM_PROJECT_ID=prj_stale'; exit 0; fi
+if [ "$1" = set-environment ]; then exit 1; fi
+[ "$1" != has-session ]
+""")
+            tmux.chmod(0o755)
+            result = subprocess.run([str(ROOT / "bin/pi-start"), "personal"], env=env, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("cannot clear stale tmux controller scope", result.stderr)
+            self.assertFalse(any(line.startswith("personal ") for line in log.read_text().splitlines()))
+
     def test_pi_start_all_mobile_herdr_starts_two_named_surfaces(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -233,6 +277,31 @@ exit 1
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("backend=tmux layout=desktop", result.stderr)
             self.assertEqual(log.read_text().splitlines(), ["tmux kill-server", "pi-start all"])
+
+    def test_restart_does_not_forward_controller_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home"; fake_bin = root / "bin"; home_bin = home / ".local/bin"
+            home_bin.mkdir(parents=True); fake_bin.mkdir()
+            log = root / "calls.log"
+            tmux = fake_bin / "tmux"
+            tmux.write_text("#!/bin/sh\nprintf 'tmux %s\\n' \"$*\" >> \"$PI_RESTART_LOG\"\n")
+            tmux.chmod(0o755)
+            pi_start = home_bin / "pi-start"
+            pi_start.write_text("""#!/bin/sh
+printf 'pi-start project=%s state=%s runtime=%s args=%s\n' "${PI_SYSTEM_PROJECT_ID-unset}" "${PI_SYSTEM_STATE_ROOT-unset}" "${PI_RUNTIME_CAPABILITY-unset}" "$*" >> "$PI_RESTART_LOG"
+""")
+            pi_start.chmod(0o755)
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(home), "PATH": f"{fake_bin}:/usr/bin:/bin", "PI_RESTART_LOG": str(log),
+                "PI_SYSTEM_PROJECT_ID": "prj_" + "1" * 32, "PI_SYSTEM_STATE_ROOT": "/stale",
+                "PI_RUNTIME_CAPABILITY": "stale",
+            })
+            env.pop("TMUX", None)
+            result = subprocess.run([str(ROOT / "bin/pi-restart"), "--no-attach"], env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("pi-start project=unset state=unset runtime=unset args=all", log.read_text().splitlines())
 
     def test_restart_stops_both_herdr_sessions_and_forwards_flags(self):
         with tempfile.TemporaryDirectory() as temporary:

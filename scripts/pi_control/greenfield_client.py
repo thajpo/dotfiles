@@ -10,15 +10,18 @@ import subprocess
 from typing import Any, Mapping, Sequence
 
 from .changes import get_change, list_changes, submit_change, submit_change_revision
-from .command_requests import authorize_command, consume_authorization, execute_command, reject_command, request_command
+from .command_requests import command_status, request_command
 from .conversations import archive_conversation, create_conversation, focus_conversation
-from .dependencies import detect_dependencies, package_review_gate, record_package_security_review, set_dependency_disposition
+from .dependencies import inventory_dependencies, package_review_gate, record_package_security_review, set_dependency_disposition
 from .events import get_events
 from .greenfield_store import GreenfieldStore
+from .greenfield_protocol import PROTOCOL_VERSION, SPECS, adapt_request
 from .integration import analyze_integration, integrate
-from .launch import attest_run, ensure_installed_build, prepare_run, start_run, stop_run
+from .installed_builds import register_staged_build
+from .launch import attest_run, prepare_run, start_run, stop_run
 from .messages import acknowledge_message, list_messages, mark_delivered, post_message, reply_message
 from .models import canonical_json, new_id, utc_now, validate_id
+from .package_environment import package_status, request_package_operation
 from .projects import project_status, register_project, work_index
 from .greenfield_workstreams import create_workstream
 from .reviews import request_review, submit_review
@@ -58,11 +61,11 @@ class GreenfieldControllerClient:
 
     @staticmethod
     def _public_environment(environment: Mapping[str, str]) -> dict[str, str]:
-        return {key: "<controller-issued>" if key == "PI_RUNTIME_CAPABILITY" else value for key, value in environment.items()}
+        return dict(environment)
 
     def negotiate(self) -> dict[str, Any]:
         with self._store() as store:
-            return {"protocolVersion": 1, "schema": store.schema_status().as_dict(), "operations": ["project.register", "project.status", "project.work-index", "conversation.create", "conversation.focus", "conversation.archive", "workstream.create", "message.post", "message.list", "message.acknowledge", "message.reply", "command.request", "command.authorize", "command.reject", "command.consume", "command.execute", "run.prepare", "run.attest", "run.stop", "run.reconcile", "run.recover", "project.reconcile", "change.submit", "review.request", "review.create-assignment", "review.submit", "integration.analyze", "integration.authorize", "integration.integrate", "dependency.detect", "package-review.record"]}
+            return {"protocolVersion": PROTOCOL_VERSION, "schema": store.schema_status().as_dict(), "operations": sorted(SPECS)}
 
     def register_project(self, repository: str, display_name: str | None = None) -> dict[str, Any]:
         with self._store(mutate=True) as store:
@@ -79,6 +82,10 @@ class GreenfieldControllerClient:
     def create_conversation(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
             return create_conversation(store, **request)
+
+    def register_build(self, staged_root: str) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return register_staged_build(store, staged_root)
 
     def create_workstream(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
@@ -116,39 +123,49 @@ class GreenfieldControllerClient:
         with self._store(mutate=True) as store:
             return request_command(store, **request)
 
-    def authorize_command(self, **request: Any) -> dict[str, Any]:
-        with self._store(mutate=True) as store:
-            return authorize_command(store, **request)
-
-    def reject_command(self, **request: Any) -> dict[str, Any]:
-        with self._store(mutate=True) as store:
-            return reject_command(store, **request)
-
-    def consume_command(self, **request: Any) -> dict[str, Any]:
-        with self._store(mutate=True) as store:
-            return consume_authorization(store, **request)
-
-    def execute_command(self, **request: Any) -> dict[str, Any]:
-        with self._store(mutate=True) as store:
-            return execute_command(store, **request)
+    def command_status(self, **request: Any) -> dict[str, Any]:
+        with self._store() as store:
+            return command_status(store, **request)
 
     def analyze_integration(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
-            return analyze_integration(store, **request).as_dict()
+            return analyze_integration(
+                store,
+                project_id=request["projectId"],
+                change_id=request["changeId"],
+                revision=request["revision"],
+                target_working_copy_id=request["targetWorkingCopyId"],
+                target_ref=request["targetRef"],
+                integration_id=request.get("integrationId"),
+            ).as_dict()
 
     def authorize_integration(self, **request: Any) -> dict[str, Any]:
         from .integration import authorize_integration
         with self._store(mutate=True) as store:
-            return authorize_integration(store, **request)
+            return authorize_integration(
+                store,
+                integration_id=request["integrationId"],
+                actor_id=request["actorId"],
+                request_context_id=request["requestContextId"],
+                expires_at=request["expiresAt"],
+                review_id=request.get("reviewId"),
+            )
 
     def integrate(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
-            return integrate(store, **request).as_dict()
+            return integrate(
+                store,
+                integration_id=request["integrationId"],
+                authorization_id=request["authorizationId"],
+                expected_resource_version=request.get("expectedResourceVersion"),
+                failpoint=request.get("failpoint"),
+            ).as_dict()
 
     def prepare_run(self, **request: Any) -> dict[str, Any]:
-        if request.get("authority") == "writer":
-            raise GreenfieldClientError("writer run preparation must be held by bin/pi-system-container-run")
         with self._store(mutate=True) as store:
+            conversation = store.conn.execute("SELECT authority_profile FROM conversations WHERE conversation_id=?", (request.get("conversation_id"),)).fetchone()
+            if conversation is not None and conversation[0] == "writer-container":
+                raise GreenfieldClientError("writer run preparation must be held by bin/pi-system-container-run")
             prepared = prepare_run(store, **request)
             # The controller returns exact launch data; the lock is kept by the
             # actual launcher process, not by this short-lived CLI connection.
@@ -197,7 +214,18 @@ class GreenfieldControllerClient:
 
     def request_review(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
-            return request_review(store, **request).as_dict()
+            return request_review(
+                store,
+                change_id=request["changeId"],
+                revision=request["revision"],
+                reviewer_conversation_id=request.get("reviewerConversationId"),
+                reviewer_run_id=request.get("reviewerRunId"),
+                reviewer_actor_id=request.get("reviewerActorId"),
+                reviewer_capability_secret=request.get("reviewerCapabilitySecret"),
+                evidence=request.get("evidence"),
+                review_id=request.get("reviewId"),
+                dependency_review_digest=request.get("dependencyReviewDigest"),
+            ).as_dict()
 
     def create_review_assignment(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
@@ -208,11 +236,29 @@ class GreenfieldControllerClient:
 
     def submit_review(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
-            return submit_review(store, **request).as_dict()
+            return submit_review(
+                store,
+                review_id=request["reviewId"],
+                verdict=request["verdict"],
+                summary=request.get("summary", ""),
+                findings=request.get("findings", ""),
+                evidence=request.get("evidence"),
+                reviewer_run_id=request.get("reviewerRunId"),
+                reviewer_actor_id=request.get("reviewerActorId"),
+                reviewer_capability_secret=request.get("reviewerCapabilitySecret"),
+            ).as_dict()
 
     def detect_dependencies(self, **request: Any) -> list[dict[str, Any]]:
         with self._store(mutate=True) as store:
-            return detect_dependencies(store, **request)
+            return inventory_dependencies(store, **request)
+
+    def request_package_operation(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return request_package_operation(store, **request)
+
+    def package_status(self, **request: Any) -> dict[str, Any]:
+        with self._store() as store:
+            return package_status(store, **request)
 
     def set_dependency_disposition(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
@@ -227,11 +273,12 @@ class GreenfieldControllerClient:
             return package_review_gate(store, **request)
 
     def dispatch(self, operation: str, request: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        value = dict(request or {})
+        value = adapt_request(operation, request or {})
         routes = {
+            "build.register": self.register_build,
             "project.register": self.register_project,
-            "project.status": lambda **kw: self.status(kw["projectId"]),
-            "project.work-index": lambda **kw: self.work_index(kw["projectId"]),
+            "project.status": lambda **kw: self.status(kw["project_id"]),
+            "project.work-index": lambda **kw: self.work_index(kw["project_id"]),
             "conversation.create": self.create_conversation,
             "workstream.create": self.create_workstream,
             "conversation.focus": self.focus_conversation,
@@ -242,10 +289,7 @@ class GreenfieldControllerClient:
             "message.acknowledge": self.acknowledge_message,
             "message.reply": self.reply_message,
             "command.request": self.request_command,
-            "command.authorize": self.authorize_command,
-            "command.reject": self.reject_command,
-            "command.consume": self.consume_command,
-            "command.execute": self.execute_command,
+            "command.status": self.command_status,
             "run.prepare": self.prepare_run,
             "run.start": self.start_run,
             "run.attest": self.attest_run,
@@ -261,9 +305,12 @@ class GreenfieldControllerClient:
             "integration.analyze": self.analyze_integration,
             "integration.authorize": self.authorize_integration,
             "integration.integrate": self.integrate,
-            "dependency.detect": self.detect_dependencies,
+            "dependency.inventory": self.detect_dependencies,
             "dependency.disposition": self.set_dependency_disposition,
             "package-review.record": self.record_package_security_review,
+            "package-review.gate": self.package_review_gate,
+            "package.request": self.request_package_operation,
+            "package.status": self.package_status,
         }
         if operation == "negotiate":
             return self.negotiate()

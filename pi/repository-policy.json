@@ -12,5 +12,5 @@
     "main",
     "master"
   ],
-  "worktreeRoot": "~/.local/share/pi/worktrees"
+  "worktreeRoot": "~/.local/share/pi-system-work"
 }

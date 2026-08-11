@@ -16,7 +16,7 @@ from typing import Any, Iterator, Sequence
 
 from .errors import DatabaseCorruptError, SchemaNewerError, UnsafeDatabaseError
 from .greenfield_schema import GREENFIELD_MIGRATION_NAME, GREENFIELD_SCHEMA_VERSION, apply_schema, schema_digest
-from .models import SchemaStatus, utc_now
+from .models import SchemaStatus, new_id, utc_now
 
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
@@ -114,6 +114,11 @@ class GreenfieldStore:
         try:
             self.conn.execute("PRAGMA foreign_keys=ON")
             if not self.read_only:
+                version = int(self.conn.execute("PRAGMA user_version").fetchone()[0])
+                if version not in {0, GREENFIELD_SCHEMA_VERSION}:
+                    if version > GREENFIELD_SCHEMA_VERSION:
+                        raise SchemaNewerError("Pi system database is newer than this controller")
+                    raise DatabaseCorruptError("Pi system schema epoch is obsolete and cannot be migrated")
                 mode = str(self.conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
                 if mode != "wal":
                     raise UnsafeDatabaseError("Pi system database could not use WAL")
@@ -148,7 +153,7 @@ class GreenfieldStore:
                 apply_schema(self.conn)
                 now = utc_now()
                 self.conn.execute("INSERT INTO schema_migrations(version,name,source_sha256,applied_at) VALUES(?,?,?,?)", (GREENFIELD_SCHEMA_VERSION, GREENFIELD_MIGRATION_NAME, schema_digest(), now))
-                self.conn.execute("INSERT INTO control_meta(singleton,schema_version,controller_build_id,created_at,updated_at) VALUES(1,?,?,?,?)", (GREENFIELD_SCHEMA_VERSION, self.controller_build_id, now, now))
+                self.conn.execute("INSERT INTO control_meta(singleton,schema_version,controller_build_id,controller_restart_epoch,controller_started_at,created_at,updated_at) VALUES(1,?,?,?,?,?,?)", (GREENFIELD_SCHEMA_VERSION, self.controller_build_id, new_id("ctl"), now, now, now))
                 self.conn.execute(f"PRAGMA user_version={GREENFIELD_SCHEMA_VERSION}")
             else:
                 self._verify_schema()
@@ -193,6 +198,21 @@ class GreenfieldStore:
             sqlite_version=str(self.conn.execute("SELECT sqlite_version()").fetchone()[0]), journal_mode=str(self.conn.execute("PRAGMA journal_mode").fetchone()[0]),
             synchronous=int(self.conn.execute("PRAGMA synchronous").fetchone()[0]), foreign_keys=bool(self.conn.execute("PRAGMA foreign_keys").fetchone()[0]),
         )
+
+    def controller_identity(self) -> dict[str, str]:
+        row = self.conn.execute("SELECT controller_build_id,controller_restart_epoch,controller_started_at FROM control_meta WHERE singleton=1").fetchone()
+        if row is None:
+            raise DatabaseCorruptError("Pi system controller identity is missing")
+        return {"buildId": str(row[0]), "restartEpoch": str(row[1]), "startedAt": str(row[2])}
+
+    def rotate_controller_restart_epoch(self) -> dict[str, str]:
+        if self.read_only:
+            raise UnsafeDatabaseError("read-only Pi system store cannot rotate controller identity")
+        now = utc_now()
+        epoch = new_id("ctl")
+        with self.transaction():
+            self.conn.execute("UPDATE control_meta SET controller_restart_epoch=?,controller_started_at=?,updated_at=? WHERE singleton=1", (epoch, now, now))
+        return self.controller_identity()
 
     # Reuse the controller's transactional operation helpers without exposing
     # any historical schema or migration behavior.

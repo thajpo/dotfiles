@@ -1,216 +1,169 @@
 from __future__ import annotations
 
-import copy
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
 try:
-    from . import validate_plan_docs as validator
-except ImportError:  # unittest discovery with tests/system as top-level start dir
-    import validate_plan_docs as validator
+    from . import validate_plan_docs
+except ImportError:
+    import validate_plan_docs
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SYSTEM = ROOT / "tests" / "system"
+
+
+def copy_validation_fixture(destination: Path) -> None:
+    for source in validate_plan_docs.CANONICAL_DOCS:
+        target = destination / source.relative_to(ROOT)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    for relative in validate_plan_docs.CATALOG_FILES:
+        source = ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    manifest = json.loads((ROOT / "tests/system/action-manifest.v1.json").read_text(encoding="utf-8"))
+    source_paths = {entrypoint.split(" ", 1)[0] for action in manifest["actions"] if action["status"] == "implemented-source" for entrypoint in action["entrypoints"] if "/" in entrypoint}
+    launchers = json.loads((ROOT / "tests/system/launcher-surface.v1.json").read_text(encoding="utf-8"))
+    source_paths.update(launchers["releaseCanary"])
+    extensions = json.loads((ROOT / "tests/system/loaded-extensions.v1.json").read_text(encoding="utf-8"))
+    source_paths.update(row["path"] for row in extensions["extensions"])
+    for relative in source_paths:
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.touch(exist_ok=True)
+    packages = json.loads((ROOT / "tests/system/configured-packages.v1.json").read_text(encoding="utf-8"))
+    for row in packages["packages"]:
+        target = destination / row["source"]
+        actual = ROOT / row["source"]
+        if actual.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(actual.read_bytes())
+        else:
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "package.json").write_bytes((actual / "package.json").read_bytes())
 
 
 class ActionManifestTests(unittest.TestCase):
-    def _copy(self, name: str, temp: Path) -> Path:
-        target = temp / name
-        target.write_bytes((SYSTEM / name).read_bytes())
-        return target
+    def test_repository_greenfield_catalog_is_valid(self):
+        self.assertEqual(validate_plan_docs.validate(ROOT), [])
 
-    def _fails(self, message: str, *, manifest=None, launcher=None, loaded=None, packages=None):
-        with self.subTest(message=message):
-            with self.assertRaises(validator.ValidationFailure) as caught:
-                validator.validate_action_manifest(
-                    ROOT,
-                    manifest_path=manifest,
-                    launcher_path=launcher,
-                    loaded_path=loaded,
-                    package_path=packages,
-                )
-            self.assertIn(message, str(caught.exception), str(caught.exception))
-
-    def _manifest(self):
-        return json.loads((SYSTEM / "action-manifest.v1.json").read_text())
-
-    def _remove_entrypoint(self, document, predicate):
-        for row in document["actions"]:
-            for index, value in enumerate(row["entrypoints"]):
-                if predicate(value):
-                    del row["entrypoints"][index]
-                    return value
-        self.fail("test fixture did not contain the requested entrypoint")
-
-    def test_baseline_is_valid_and_reports_catalog(self):
-        report = validator.validate_repository(ROOT)
-        self.assertEqual(report["briefs"]["briefCount"], 40)
-        self.assertEqual(report["manifest"]["actionCount"], 87)
-        self.assertGreater(report["manifest"]["resourceCount"], 100)
-        self.assertIn("extension-source:pi/extensions/secretary/index.ts", report["manifest"]["dynamicResources"])
-
-    def test_missing_cli_action_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)
-            document = self._manifest()
-            removed = self._remove_entrypoint(document, lambda value: value.startswith("cli:subcommand:"))
-            manifest = path / "manifest.json"
-            manifest.write_text(json.dumps(document))
-            self._fails("discovered resource has no manifest owner", manifest=manifest)
-            self.assertTrue(removed)
-
-    def test_missing_launcher_flag_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)
-            document = self._manifest()
-            self._remove_entrypoint(document, lambda value: "#flag:--no-attach" in value)
-            manifest = path / "manifest.json"
-            manifest.write_text(json.dumps(document))
-            self._fails("discovered resource has no manifest owner", manifest=manifest)
-
-    def test_missing_extension_source_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)
-            loaded = json.loads((SYSTEM / "loaded-extensions.v1.json").read_text())
-            loaded["resources"] = [
-                row for row in loaded["resources"]
-                if row["resourceId"] != "extension-source:pi/extensions/secretary/index.ts"
-            ]
-            loaded_path = path / "loaded.json"
-            loaded_path.write_text(json.dumps(loaded))
-            self._fails("manifest entrypoint is not discoverable", loaded=loaded_path)
-
-    def test_missing_dynamic_extension_load_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            loaded = json.loads((SYSTEM / "loaded-extensions.v1.json").read_text())
-            target = next(row["resourceId"] for row in loaded["resources"] if row["kind"] == "extension-load")
-            loaded["resources"] = [row for row in loaded["resources"] if row["resourceId"] != target]
-            loaded_path = Path(directory) / "loaded.json"
-            loaded_path.write_text(json.dumps(loaded))
-            self._fails("dynamic extension load missing from loaded catalog", loaded=loaded_path)
-
-    def test_side_effect_import_is_followed_and_missing_import_fails_closed(self):
+    def test_invalid_action_manifest_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            entry = root / "entry.ts"
-            imported = root / "registrations.js"
-            entry.write_text('import "./registrations.js";\n')
-            imported.write_text('pi.registerCommand("side-effect");\n')
-            files = validator._local_source_files(root, entry)
-            self.assertEqual([item.name for item in files], ["entry.ts", "registrations.js"])
-            imported.unlink()
-            with self.assertRaises(validator.ValidationFailure) as caught:
-                validator._local_source_files(root, entry)
-            self.assertIn("unresolved relative extension import", str(caught.exception))
+            copy_validation_fixture(root)
+            (root / "tests/system/action-manifest.v1.json").write_text("{\n", encoding="utf-8")
 
-    def test_missing_literal_tool_or_command_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)
-            loaded = json.loads((SYSTEM / "loaded-extensions.v1.json").read_text())
-            candidates = [
-                row["resourceId"] for row in loaded["resources"]
-                if "#tool:" in row["resourceId"] or "#command:" in row["resourceId"]
-            ]
-            self.assertTrue(candidates)
-            loaded["resources"] = [row for row in loaded["resources"] if row["resourceId"] != candidates[0]]
-            loaded_path = path / "loaded.json"
-            loaded_path.write_text(json.dumps(loaded))
-            self._fails("unlisted extension registration", loaded=loaded_path)
+            errors = validate_plan_docs.validate(root)
 
-    def test_missing_package_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)
-            packages = json.loads((SYSTEM / "configured-packages.v1.json").read_text())
-            packages["packages"].pop()
-            package_path = path / "packages.json"
-            package_path.write_text(json.dumps(packages))
-            self._fails("configured package is missing from catalog", packages=package_path)
+        self.assertTrue(any(error.startswith("greenfield catalog is invalid JSON (tests/system/action-manifest.v1.json):") for error in errors), errors)
 
-    def test_missing_scenario_is_rejected(self):
+    def test_planned_action_does_not_require_future_entrypoint(self):
         with tempfile.TemporaryDirectory() as directory:
-            document = self._manifest()
-            document["actions"][0]["scenarios"] = []
-            manifest = Path(directory) / "manifest.json"
-            manifest.write_text(json.dumps(document))
-            self._fails("requires non-empty string array scenarios", manifest=manifest)
+            root = Path(directory)
+            copy_validation_fixture(root)
 
-    def test_orphan_resource_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            document = self._manifest()
-            document["actions"][0]["entrypoints"].append("orphan:resource")
-            manifest = Path(directory) / "manifest.json"
-            manifest.write_text(json.dumps(document))
-            self._fails("manifest entrypoint is not discoverable", manifest=manifest)
+            errors = validate_plan_docs.validate(root)
 
-    def test_invalid_status_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            document = self._manifest()
-            document["actions"][0]["status"] = "maybe"
-            manifest = Path(directory) / "manifest.json"
-            manifest.write_text(json.dumps(document))
-            self._fails("invalid status", manifest=manifest)
+        self.assertFalse(any("bin/pi-approve" in error for error in errors), errors)
 
-    def test_planned_current_mismatch_is_rejected(self):
+    def test_old_product_mode_in_action_catalog_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
-            document = self._manifest()
-            row = next(item for item in document["actions"] if item["status"] in {"supported", "compatibility"})
-            row["status"] = "planned"
-            row["owningSlice"] = "C0b"
-            manifest = Path(directory) / "manifest.json"
-            manifest.write_text(json.dumps(document))
-            self._fails("planned action is currently discovered", manifest=manifest)
+            root = Path(directory)
+            copy_validation_fixture(root)
+            manifest = root / "tests/system/action-manifest.v1.json"
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            value["actions"][0]["modes"] = ["shadow"]
+            manifest.write_text(json.dumps(value), encoding="utf-8")
 
-    def test_missing_owner_tier_assertions_and_refusal_are_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)
-            document = self._manifest()
-            planned = next(item for item in document["actions"] if item["status"] == "planned")
-            planned.pop("owningSlice", None)
-            supported = next(item for item in document["actions"] if item["status"] == "supported")
-            supported["tiers"] = []
-            supported["assertions"] = []
-            out = next(item for item in document["actions"] if item["status"] == "out-of-scope")
-            out.pop("refusalScenarios", None)
-            manifest = path / "manifest.json"
-            manifest.write_text(json.dumps(document))
-            with self.assertRaises(validator.ValidationFailure) as caught:
-                validator.validate_action_manifest(ROOT, manifest_path=manifest)
-            text = str(caught.exception)
-            self.assertIn("planned action has invalid owningSlice", text)
-            self.assertIn("requires non-empty string array tiers", text)
-            self.assertIn("requires non-empty string array assertions", text)
-            self.assertIn("out-of-scope action has no refusal scenarios", text)
+            errors = validate_plan_docs.validate(root)
 
-    def test_unknown_dynamic_resource_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            loaded = json.loads((SYSTEM / "loaded-extensions.v1.json").read_text())
-            loaded["resources"].append({
-                "resourceId": "extension:unknown#tool:surprise",
-                "kind": "tool",
-                "source": "missing/extension.ts",
-                "owningLauncher": "bin/unknown",
-                "profile": "unknown",
-                "dynamic": True,
-                "provenance": "synthetic test allowlist entry",
-                "scan": False,
-                "availability": "dynamic",
-            })
-            loaded_path = Path(directory) / "loaded.json"
-            loaded_path.write_text(json.dumps(loaded))
-            self._fails("discovered resource has no manifest owner", loaded=loaded_path)
+        self.assertIn("retired product mode appears in greenfield catalog: tests/system/action-manifest.v1.json", errors)
+        self.assertIn("action manifest row 1 must use only greenfield mode", errors)
 
-    def test_launcher_surface_missing_flag_is_rejected(self):
+    def test_invalid_action_status_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
-            surface = json.loads((SYSTEM / "launcher-surface.v1.json").read_text())
-            row = next(item for item in surface["launchers"] if item["source"] == "bin/pi-restart")
-            flag = row["publicFlags"][0]
-            row["publicFlags"].remove(flag)
-            surface_path = Path(directory) / "surface.json"
-            surface_path.write_text(json.dumps(surface))
-            self._fails("launcher flag missing from surface catalog", launcher=surface_path)
+            root = Path(directory)
+            copy_validation_fixture(root)
+            manifest = root / "tests/system/action-manifest.v1.json"
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            value["actions"][0]["status"] = "supported"
+            manifest.write_text(json.dumps(value), encoding="utf-8")
+
+            errors = validate_plan_docs.validate(root)
+
+        self.assertIn("action manifest row 1 has an invalid status", errors)
+
+    def test_action_owning_phase_drift_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_validation_fixture(root)
+            manifest = root / "tests/system/action-manifest.v1.json"
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            value["actions"][0]["owningPhase"] = "P1"
+            manifest.write_text(json.dumps(value), encoding="utf-8")
+
+            errors = validate_plan_docs.validate(root)
+
+        self.assertIn("action manifest row 1 has owningPhase drift", errors)
+
+    def test_invalid_schema_linkage_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_validation_fixture(root)
+            manifest = root / "tests/system/action-manifest.v1.json"
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            value["$schema"] = "other.schema.json"
+            manifest.write_text(json.dumps(value), encoding="utf-8")
+
+            errors = validate_plan_docs.validate(root)
+
+        self.assertIn("action manifest does not link the canonical schema", errors)
+        self.assertTrue(any(error.startswith("action manifest schema violation at $schema:") for error in errors), errors)
+
+    def test_excluded_controller_family_is_not_release_reachable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_validation_fixture(root)
+            manifest = root / "tests/system/action-manifest.v1.json"
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            value["actions"][0]["entrypoints"] = ["scripts/pi_control/cli.py"]
+            manifest.write_text(json.dumps(value), encoding="utf-8")
+
+            errors = validate_plan_docs.validate(root)
+
+        self.assertIn("action manifest row 1 makes an excluded runtime/controller family release-reachable: scripts/pi_control/cli.py", errors)
+
+    def test_empty_support_catalog_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_validation_fixture(root)
+            catalog = root / "tests/system/loaded-extensions.v1.json"
+            catalog.write_text('{"version":1,"extensions":[]}\n', encoding="utf-8")
+
+            errors = validate_plan_docs.validate(root)
+
+        self.assertIn("greenfield extension catalog has an invalid shape", errors)
+
+    def test_fabricated_surface_and_package_version_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_validation_fixture(root)
+            manifest = root / "tests/system/action-manifest.v1.json"
+            manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+            manifest_value["actions"][0]["surface"] = "bogus"
+            manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+            packages = root / "tests/system/configured-packages.v1.json"
+            package_value = json.loads(packages.read_text(encoding="utf-8"))
+            package_value["packages"][1]["version"] = "999.0.0"
+            packages.write_text(json.dumps(package_value), encoding="utf-8")
+
+            errors = validate_plan_docs.validate(root)
+
+        self.assertIn("action manifest row 1 has an invalid surface", errors)
+        self.assertIn("greenfield package catalog row 2 does not match package metadata", errors)
 
 
 if __name__ == "__main__":

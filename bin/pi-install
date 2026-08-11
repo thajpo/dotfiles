@@ -7,9 +7,10 @@ import json
 import sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True
 root = Path(sys.argv[1])
 sys.path.insert(0, str(root))
-from scripts.pi_control.greenfield_install import activate, ensure_fresh_state, rollback, stage, verify_stage
+from scripts.pi_control.greenfield_install import InstallUnavailable, activate, ensure_fresh_state, rollback, stage, verify_stage
 
 parser = argparse.ArgumentParser(prog="pi-install")
 sub = parser.add_subparsers(dest="command", required=True)
@@ -26,15 +27,19 @@ state_parser.add_argument("--state-root", required=True)
 rollback_parser = sub.add_parser("rollback")
 rollback_parser.add_argument("--data-root", required=True)
 args = parser.parse_args(sys.argv[2:])
-if args.command == "stage":
-    result = stage(args.source_root, args.staging_root)
-elif args.command == "verify":
-    result = verify_stage(args.staging_root)
-elif args.command == "activate":
-    result = activate(args.staging_root, args.data_root)
-elif args.command == "init-state":
-    result = ensure_fresh_state(args.state_root)
-else:
-    result = rollback(args.data_root)
+try:
+    if args.command == "stage":
+        result = stage(args.source_root, args.staging_root)
+    elif args.command == "verify":
+        result = verify_stage(args.staging_root)
+    elif args.command == "activate":
+        result = activate(args.staging_root, args.data_root)
+    elif args.command == "init-state":
+        result = ensure_fresh_state(args.state_root)
+    else:
+        result = rollback(args.data_root)
+except InstallUnavailable as error:
+    print(f"STOP/77: {error}", file=sys.stderr)
+    raise SystemExit(77)
 print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 PY

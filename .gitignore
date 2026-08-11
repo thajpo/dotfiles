@@ -5,3 +5,6 @@ skills/.system/**/*.pyc
 **/.DS_Store
 pi/npm/node_modules/
 pi/npm/*.log
+
+# build artifacts
+*.tgz

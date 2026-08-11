@@ -298,25 +298,33 @@ def authorize_integration(
         row = store.conn.execute("SELECT * FROM integration_attempts WHERE integration_id=?", (integration_id,)).fetchone()
         if row is None:
             raise NotFoundError("integration attempt was not found")
+        change_row = store.conn.execute("SELECT state,current_revision FROM changes WHERE change_id=?", (row["change_id"],)).fetchone()
+        if change_row is None or change_row["state"] != "open" or int(change_row["current_revision"]) != int(row["revision"]):
+            raise AuthorizationError("integration change is not open at the analyzed revision")
         from .dependencies import package_review_gate
         package_gate = package_review_gate(store, change_id=row["change_id"], revision=int(row["revision"]))
         if not package_gate["ready"]:
             raise AuthorizationError("exact package security review is incomplete for this revision")
         analysis = parse_canonical_json(str(row["analysis_json"]))
         reviews = list_reviews(store, change_id=row["change_id"], revision=int(row["revision"]))
-        accepted = [
+        analysis_bound = [
             item for item in reviews
             if item.state == "submitted"
-            and item.verdict == "accept"
             and item.reviewer_run_id is not None
             and item.reviewer_actor_id is not None
             and item.reviewer_source.get("changeId") == row["change_id"]
             and int(item.reviewer_source.get("revision", -1)) == int(row["revision"])
+            and item.evidence.get("integrationId") == integration_id
+            and item.evidence.get("analysisDigest") == analysis.get("analysisDigest")
+            and item.evidence.get("targetOid") == row["requested_target_oid"]
         ]
+        blocking = [item for item in analysis_bound if item.verdict != "accept"]
+        if blocking:
+            raise AuthorizationError("exact revision requires every submitted review to accept this analysis and target")
+        accepted = [item for item in analysis_bound if item.verdict == "accept"]
         if review_id is not None:
             validate_id(review_id, prefix="review")
             accepted = [item for item in accepted if item.review_id == review_id]
-        accepted = [item for item in accepted if item.evidence.get("integrationId") == integration_id and item.evidence.get("analysisDigest") == analysis.get("analysisDigest") and item.evidence.get("targetOid") == row["requested_target_oid"]]
         if not accepted:
             raise AuthorizationError("exact revision requires an accepted review bound to this analysis and target")
         scope = {"integrationId": integration_id, "projectId": row["project_id"], "changeId": row["change_id"], "revision": int(row["revision"]), "targetOid": row["requested_target_oid"], "strategy": row["strategy"], "analysisDigest": analysis["analysisDigest"], "reviewId": accepted[-1].review_id, "actorId": actor_id, "requestContextId": request_context_id, "expiresAt": expires_at}
@@ -455,6 +463,9 @@ def integrate(
         raise NotFoundError("integration attempt was not found")
     if row["state"] == "succeeded":
         raise AuthorizationError("integration authorization was already consumed")
+    change_row = store.conn.execute("SELECT state,current_revision FROM changes WHERE change_id=?", (row["change_id"],)).fetchone()
+    if change_row is None or change_row["state"] != "open" or int(change_row["current_revision"]) != int(row["revision"]):
+        raise AuthorizationError("integration change is not open at the analyzed revision")
     if expected_resource_version is not None and int(row["resource_version"]) != expected_resource_version:
         raise ResourceStaleError(integration_id, expected_resource_version, int(row["resource_version"]))
     auth = store.conn.execute("SELECT * FROM authorizations WHERE authorization_id=?", (authorization_id,)).fetchone()

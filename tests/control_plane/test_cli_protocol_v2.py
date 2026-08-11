@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 
-from scripts.pi_control.store import ControllerStore
+from scripts.pi_control.greenfield_store import GreenfieldStore
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,7 +20,7 @@ class CLIProtocolV2Tests(unittest.TestCase):
         path = root / "request.json"
         path.write_text(json.dumps(request))
         return subprocess.run(
-            [str(ROOT / "bin/pi-control"), "--state-root", str(root / "state"), "protocol", "--request-json", str(path), "--json"],
+            [str(ROOT / "bin/pi-control"), "--state-root", str(root / "state"), "--json", "protocol", "--request-json", str(path)],
             check=False,
             capture_output=True,
             text=True,
@@ -30,7 +30,7 @@ class CLIProtocolV2Tests(unittest.TestCase):
     def test_cli_negotiates_v2_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with ControllerStore(root / "state"):
+            with GreenfieldStore(root / "state"):
                 pass
             result = self._run(root, {"protocolVersion": 2, "operation": "negotiate", "request": {}})
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -39,16 +39,16 @@ class CLIProtocolV2Tests(unittest.TestCase):
     def test_cli_host_only_and_malformed_requests_are_projected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with ControllerStore(root / "state"):
+            with GreenfieldStore(root / "state"):
                 pass
             result = self._run(root, {"protocolVersion": 2, "operation": "activation.apply", "request": {}})
             self.assertEqual(result.returncode, 2)
-            error = json.loads(result.stderr)
-            self.assertEqual(error["code"], "CP_INVALID_REQUEST")
-            self.assertNotIn("Traceback", result.stderr)
+            error = json.loads(result.stdout)["error"]
+            self.assertEqual(error["code"], "CP_PROTOCOL_OPERATION")
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
             result = self._run(root, {"protocolVersion": 1, "operation": "negotiate", "request": {}})
             self.assertEqual(result.returncode, 2)
-            self.assertEqual(json.loads(result.stderr)["code"], "CP_INVALID_REQUEST")
+            self.assertEqual(json.loads(result.stdout)["error"]["code"], "CP_PROTOCOL_VERSION")
 
 
 if __name__ == "__main__":

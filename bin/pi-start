@@ -84,6 +84,11 @@ restarting=${PI_RESTARTING:-0}
 unset PI_START_NO_ATTACH PI_START_SECRETARY_BACKEND
 unset PI_SECRETARY_BACKEND PI_SECRETARY_HERDR_BIN PI_SECRETARY_HERDR_WORKER PI_SECRETARY_HERDR_CONFIG
 
+# These launchers reconstruct their own task routes. Controller assignments are
+# immutable per-run capabilities and must never be inherited from the caller.
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable PI_SYSTEM_)
+unset PI_RUNTIME_MANIFEST PI_RUNTIME_CAPABILITY
+
 if (( mobile_layout )); then export PI_TMUX_LAYOUT=mobile; else unset PI_TMUX_LAYOUT; fi
 
 herdr_session_running() {
@@ -108,6 +113,34 @@ tmux_session_running() {
   if tmux has-session -t "=$name" 2>/dev/null; then return 0; else rc=$?; fi
   [[ $rc -eq 1 ]] && return 1
   return 2
+}
+
+clear_tmux_controller_scope() {
+  local payload rc entry name
+  if payload=$(tmux show-environment -g 2>/dev/null); then
+    :
+  else
+    rc=$?
+    # No tmux server means the first server will inherit this already-sanitized
+    # process environment. Any inspect failure on a live server is unsafe.
+    if tmux list-sessions >/dev/null 2>&1; then
+      printf 'pi-start: cannot inspect tmux global environment\n' >&2
+      return 1
+    fi
+    return 0
+  fi
+  while IFS= read -r entry; do
+    name=${entry%%=*}
+    name=${name#-}
+    case "$name" in
+      PI_SYSTEM_*|PI_RUNTIME_MANIFEST|PI_RUNTIME_CAPABILITY)
+        tmux set-environment -gu "$name" >/dev/null 2>&1 || {
+          printf 'pi-start: cannot clear stale tmux controller scope\n' >&2
+          return 1
+        }
+        ;;
+    esac
+  done <<<"$payload"
 }
 
 tmux_personal_layout() {
@@ -295,6 +328,10 @@ else
       rc=$?; (( rc == 1 )) || { printf 'pi-start: cannot inspect Herdr secretary\n' >&2; exit 1; }
     fi
   fi
+
+  # Clean a pre-existing server before creating any process in it. New servers
+  # inherit the already-sanitized environment of this launcher.
+  clear_tmux_controller_scope || exit 1
 
   # Start the tmux server without stealing the caller terminal.
   if tmux has-session -t =main 2>/dev/null; then :; else

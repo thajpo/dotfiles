@@ -1,16 +1,21 @@
 # dotfiles
 
-## Pi system implementation
+## Pi Greenfield System
 
-The fresh Pi system is implemented in modular slices from
+The desired Pi product is the fresh system in
 [PI_GREENFIELD_IMPLEMENTATION_PLAN.md](PI_GREENFIELD_IMPLEMENTATION_PLAN.md).
-Its controller state lives under `~/.local/state/pi-system/`, coding work is
-isolated under `~/.local/share/pi-system-work/`, and OpenCode remains
-available until the installed acceptance and rollback gates pass.
+Controller and runtime components exist in source, but the complete installed
+product has not passed its launch, Docker, presentation, and rollback gates.
+OpenCode remains the working environment until those gates pass.
+
+Greenfield state uses `~/.local/state/pi-system/`, installed artifacts use
+`~/.local/share/pi-system/`, and controller-owned working copies use
+`~/.local/share/pi-system-work/`. Pre-greenfield chats and lifecycle files are
+not imported or consulted.
 
 My terminal setup: tmux + neovim (LazyVim).
 
-## Install and start
+## Greenfield Development
 
 ```bash
 git clone https://github.com/thajpo/dotfiles.git
@@ -24,23 +29,13 @@ rmdir "$stage"
 ./bin/pi-control schema status
 ```
 
-The greenfield installer creates a fresh controller state database and never
-imports historical Pi or OpenCode state. Existing launchers remain available
-until the installed Pi-core, Docker, presentation, and rollback gates pass.
-`pi-image-tools@1.4.0` owns `Ctrl+V` and persists native image attachments
-without sharing host `/tmp` with task containers.
+These commands exercise the staging API; they are not proof that the installed
+Pi chat product is ready. Acceptance must launch real controller-bound
+secretary and coding conversations through the final installed paths.
 
-`pi-restart` applies the new generation and always starts both personal and
-secretary. Desktop tmux is the default for every invocation; add `-mobile`,
-`-herdr`, or both to select mobile tmux, desktop Herdr, or mobile Herdr. Herdr
-uses separate named `pi-personal` and `pi-secretary` sessions. Flags are not
-persisted. If the launcher is not on `PATH` yet, run
-`~/.local/bin/pi-restart` instead.
-
-Machine-specific non-secret settings live in `machines/`. On Apple Silicon
-macOS and Linux x86_64, `install.sh` selects the matching profile and installs
-it as `~/.config/dotfiles/machine.env`; this is where the Pi personal project
-paths and trusted project roots are defined.
+Machine-specific non-secret settings live in `machines/`. Repository trust for
+the greenfield system is bound to controller-registered projects by host policy,
+not inferred from old chat or presentation state.
 
 ## Shared CLI Skills + Dotfiles Auto-Sync
 
@@ -195,10 +190,8 @@ Core loop:
   history is explicitly required.
 - Keep current task state in Pi's session-scoped task packet and keep detailed
   artifacts outside repositories.
-- Let the host policy select trusted-live for authored repositories and isolated
-  private clones for unknown/external repositories.
-- Share one task container across collaborating agents; use linked worktrees and
-  separate containers only for explicit independent candidates.
+- Let host policy and the registered project select the allowed execution mode.
+- Bind each coding run to one controller-assigned working copy and runtime.
 - Use Sol for unresolved architecture, difficult debugging, and high-risk review.
 - Use `pi-host` explicitly for unsandboxed machine maintenance and reviewed Pi
   control-plane activation.
@@ -234,25 +227,17 @@ threshold is `-55 dBFS`. Override calibration with
 - Syncs to `~/.config/nvim`
 
 ### Pi
-- Reproducible Pi CLI and exact extension package pins with verified patches
-- Pi keeps the prompt editor and footer pinned while mouse-wheel scrolling through conversation history, so drafts remain editable while reading earlier responses
-- Deterministic trusted-live/isolated repository policy and hardened Docker task containers
-- One shared execution plane for parent, subagents, and pi-btw
-- Explicit unsandboxed `pi-host` maintenance launcher; it resumes one stable host conversation per invocation directory, enforces one writer for that session directory, stays in that directory, and does not create a Git worktree
-- `pi-start all` always starts personal plus secretary with a simple per-invocation matrix: no flags = desktop tmux, `-mobile` = mobile tmux, `-herdr` = desktop Herdr, and `-mobile -herdr` = mobile Herdr; if a proven managed grid is in another matrix cell, `pi-start all` performs the same guarded rebuild automatically, while `pi-restart` with the same flags forces a clean rebuild; flags are not persisted; `pi help` is the short memorable guide, `pi help all` is the full workspace/recovery reference, and `pi --help` remains the upstream CLI reference
-- `pidev` is the managed Pi development launcher; it records the canonical project directory and uses a stable session store so tmux-resurrect can reopen the same conversation even after a temporary worktree disappears
-- In Pi, `Ctrl-g` enters conversation browse mode: use `j/k`, `Ctrl-u/d`, `gg/G`, `v`, and `y`; press `i`, `q`, or `Esc` to return to the pinned prompt
-- `/fast` uses OpenAI's priority service tier by default for the current session; use `/fast off` to disable it or `/fast on` to re-enable it
-- `/goal <objective>` uses pi-goal for same-session continuation until the task
-  completes, blocks on an external dependency, or the user stops it; no default
-  response-count, elapsed-time, or no-progress cutoff is imposed
-- `/observe` or `Ctrl+I` opens a read-only Task/Fleet/Messages Inspector for explicit task packets, child instructions, context summaries, status, results, and failures
-- Every project and subagent can submit bounded harness self-improvement feedback through `harness_feedback` or the parent channel; Pi logs it centrally under `~/.pi/agent/feedback/records/`, and `pi-harness-feedback` reviews the all-project feed
-- Interactive subagent runs return control instead of blocking on `subagent_wait`; completion notifications and status/control actions remain available
-- `pisec` opens the persisted active secretary set (initially `vla-lens`, `csv-agent`, and `SleepyDreamyV3`) without restarting live panes; `pisec launch` is the explicit idle-pane repair path; secretaries may fan out to any useful number of existing read-only investigator agents without creating Git worktrees, while implementation still requires an explicit full workstream; with an odd active count `pisec` gives the first project its own window and puts the remaining projects into two side-by-side panes; use `pisec activate ALIAS ...` or `pisec swap OLD_ALIAS NEW_ALIAS` to change the backend-neutral active set; add `--mobile` for one full-width conversation per window
-- `-herdr` starts two named Herdr surfaces: `pi-personal` for the four durable personal conversations and `pi-secretary` with one project Space per active project; desktop personal pairs roles in two Spaces, while mobile personal gives each role its own Space; workstreams remain guarded and backend-pinned, and are never auto-migrated
-- `pi-personal` maintains a separate session with at most two side-by-side panes per window for `mlre-transition`, the financial workbook (`investing/investment-os`), dotfiles, and an explicit `pi-host` session; additional roles get additional windows, and `Ctrl-a p` switches to it; `pi-personal --mobile` gives each role its own full-width window
-- Installs to `~/.pi/agent` without tracking credentials, sessions, or runtime state
+- Fresh controller projects, conversations, runs, workstreams, and messages
+- Controller-scoped host readers and exact one-use command approvals
+- One assigned working copy, writer generation, and isolated runtime per coding run
+- Exact submitted revisions, independent review receipts, and guarded integration
+- Fresh session continuity without importing pre-greenfield Pi chats
+- Tmux presentation derived from controller state rather than pane identity
+- Reproducible installation and rollback gates before replacing OpenCode
+
+See [`pi/README.md`](pi/README.md) for the product boundary and
+[`pi/control-plane/README.md`](pi/control-plane/README.md) for canonical
+contracts and current readiness.
 
 ### Tools installed
 - **gitmux** - git status in tmux

@@ -1,27 +1,32 @@
-# Pi System Product Contract
+# Pi Greenfield Product Contract
 
-This document is the active product contract for the fresh Pi system. The
-implementation authority is [PI_GREENFIELD_IMPLEMENTATION_PLAN.md](../../PI_GREENFIELD_IMPLEMENTATION_PLAN.md).
+Owns: user-visible roles, capabilities, and release-1 scope.
 
-Pi provides one durable secretary per registered project, temporary host
-investigations and exact-revision reviewers, durable container coding agents,
-durable project messages, exact one-use command approvals, isolated package
-environments, reviewed change submission, safe fast-forward integration, and
-an integration-agent path for conflicts.
+Pi provides one durable secretary per explicitly registered project,
+temporary investigators, exact-revision reviewers, durable personal and
+workstream coding conversations, integration conversations, durable project
+messages, dependency review, and a bounded project work index.
 
-The controller database is the only lifecycle authority. Git objects and
-working-copy files are source authority. Session JSONL is conversation
-authority. Tmux is presentation only.
+The user can create or focus work, inspect current work and attention, request
+an exact host/network operation, review immutable submitted content, approve a
+local target update, restart durable conversations, and roll back a staged
+generation without losing greenfield work.
 
-Host read-only roles have scoped read/web/message/review tools only. Coding
-roles have one assigned working copy in one container, no host credentials,
-no Docker socket, no SSH agent, no direct ref updates, and no push authority.
+Role behavior:
 
-The first release does not import historical controller state, publish remote
-Git changes, deploy, clean automatically, or use a model-visible generic
-intercom as project state.
+| Role | User-visible capability |
+|---|---|
+| Secretary | Scoped project understanding, work coordination, messages, and requests |
+| Investigator | Temporary scoped research with a durable result |
+| Reviewer | Read-only review of one immutable revision |
+| Personal/workstream writer | Read, edit, shell, test, and submit within one assignment |
+| Integration writer | Combine exact revisions, test, and submit an independently reviewed result |
 
-## Release invariant
+Release 1 includes local projects and local target updates. It excludes remote
+Git publication, deployment, automatic cleanup, historical state/chat import,
+and any user-facing mode that selects an earlier product family.
 
-OpenCode remains available until the installed acceptance journey, rollback
-proof, and comparison gates in the implementation plan pass.
+The project work index is human-readable and accounts for active work,
+investigations, review/integration queues, pending decisions, failures,
+recently integrated work, and observed unmanaged Git work. Presentation never
+creates product identity.

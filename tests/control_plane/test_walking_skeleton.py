@@ -39,6 +39,7 @@ class WalkingSkeletonTests(unittest.TestCase):
                 review_secret = "review-secret-" + f"{iteration + 1:01x}" * 48
                 state = root / "state"
                 with ControllerStore(state) as store:
+                    store.conn.execute("CREATE TABLE IF NOT EXISTS dependency_changes(dependency_change_id TEXT PRIMARY KEY,change_id TEXT NOT NULL,revision INTEGER NOT NULL,disposition TEXT NOT NULL,lock_digest TEXT,exact_version TEXT)")
                     store.register_build("build", source_tree_hash="tree", artifact_manifest_hash="manifest", pi_version="pi", package_lock_hash="lock", status="active")
                     store.conn.execute("INSERT INTO projects(project_id,display_name,git_common_dir,git_common_device,git_common_inode,primary_checkout,object_format,trust_mode,policy_hash,desired_state,observed_state,resource_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (project_id, "skeleton", str(repo / ".git"), 1, 1, str(repo), "sha1", "trusted", "policy", "active", "ready", 1, "t", "t"))
                     store.conn.execute("INSERT INTO working_copies(working_copy_id,project_id,display_name,kind,purpose,path,branch_ref,effective_mode,desired_state,observed_state,writer_epoch,resource_version,controller_owned,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (wc_id, project_id, "primary", "primary", "personal", str(repo), "refs/heads/main", "trusted-live", "present", "ready", 0, 1, 1, "t", "t"))
@@ -46,6 +47,7 @@ class WalkingSkeletonTests(unittest.TestCase):
                     store.conn.execute("INSERT INTO conversations(conversation_id,project_id,working_copy_id,role,display_name,pi_session_id,session_file,desired_state,observed_state,resource_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (conv_id, project_id, wc_id, "personal", "skeleton", "skeleton-session", str(root / "session.jsonl"), "active", "ready", 1, "t", "t"))
                     store.conn.execute("INSERT INTO conversations(conversation_id,project_id,working_copy_id,role,display_name,pi_session_id,session_file,desired_state,observed_state,resource_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (review_conv_id, project_id, review_wc_id, "review", "review", "review-session", str(root / "review.jsonl"), "active", "ready", 1, "t", "t"))
                     store.create_run(run_id=review_run_id, conversation_id=review_conv_id, project_id=project_id, working_copy_id=review_wc_id, authority="read-only", runtime_spec_hash="runtime", build_id="build", capability_hash=capability_hash(review_secret))
+                    store.conn.execute("UPDATE runs SET observed_state='running' WHERE run_id=?", (review_run_id,))
                     client = ControllerClient(state)
                     self.assertEqual(client.status(project_id, refresh=False)["project"]["project_id"], project_id)
                     (repo / "candidate.txt").write_text("candidate\n", encoding="utf-8")

@@ -15,6 +15,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
 from .models import bounded_text, utc_now
@@ -70,7 +71,7 @@ def sanitized_git_environment(extra: Mapping[str, str] | None = None) -> dict[st
         # macOS Git emits a warning when Darwin's temp directory is not
         # discoverable under the scrubbed HOME.  Keep the observation
         # environment deterministic without leaking the caller's temp path.
-        "TMPDIR": "/private/tmp",
+        "TMPDIR": tempfile.gettempdir(),
     }
     if extra:
         for key, value in extra.items():

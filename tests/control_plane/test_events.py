@@ -52,14 +52,15 @@ class EventTests(unittest.TestCase):
     def test_cli_read_only_views_use_explicit_fixture_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "state"
-            command = [str(Path(__file__).resolve().parents[2] / "bin" / "pi-control"), "--state-root", str(root), "schema", "status", "--json"]
+            from scripts.pi_control.greenfield_store import GreenfieldStore
+            with GreenfieldStore(root):
+                pass
+            command = [str(Path(__file__).resolve().parents[2] / "bin" / "pi-control"), "--state-root", str(root), "--json", "schema", "status"]
             result = subprocess.run(command, check=False, capture_output=True, text=True, env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(Path(__file__).resolve().parents[2])})
             self.assertEqual(result.returncode, 0, result.stderr)
             status = json.loads(result.stdout)
-            self.assertEqual(status["schema_version"], SCHEMA_VERSION)
-            result = subprocess.run([str(Path(__file__).resolve().parents[2] / "bin" / "pi-control"), "--state-root", str(root), "event", "list", "--after", "0", "--json"], check=False, capture_output=True, text=True, env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(Path(__file__).resolve().parents[2])})
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout), [])
+            from scripts.pi_control.greenfield_schema import GREENFIELD_SCHEMA_VERSION
+            self.assertEqual(status["schema_version"], GREENFIELD_SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

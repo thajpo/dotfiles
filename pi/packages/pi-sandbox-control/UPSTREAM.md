@@ -1,7 +1,8 @@
 # pi-sandbox-control provenance
 
-This first-party package is the Phase 5B maintained target for the Pi runtime
-adapter. It was extracted without editing the installed `node_modules` copy.
+This first-party package began as the Phase 5 adapter extraction and is now the
+small greenfield manifest/channel broker. Installed `node_modules` is never
+edited in place.
 
 ## Source
 
@@ -15,10 +16,10 @@ adapter. It was extracted without editing the installed `node_modules` copy.
   `826b43df0ef974858d6c3dd2738fe94712947c6821bc38cdbd1993bfcdac7e27`
 - Reviewed patched source extracted before first-party adapter integration SHA-256:
   `2be39ad741d284e3a669efad35423beebe5507692ca70d29c40c17c7e1193fa3`
-- Current first-party `src/index.ts` SHA-256 after the manifest adapter and lifecycle gate integration:
-  `b2498e87a2971f085aff8774b7f4063108a85dfdbe94e6d10426d4ef249e9223`
+- Current broker-only `src/index.ts` SHA-256:
+  `f14255ceae1b262aa7ac7b0aebfe9f2e6855686c496349f77452fe209f851205`
 - First-party `src/manifest-adapter.ts` SHA-256:
-  `33f823d875d47f7041b62413eab2e14c0548b45222968d38134eeca9b1490d4c`
+  `42085ec0159e0e2733527924b84777433170f5e43606a1f2305bade2aa36f04c`
 
 The extracted source is the repository's reviewed patched `pi/npm/node_modules`
 copy at the Phase 5B gate. Its patch history is preserved in the repository
@@ -27,10 +28,11 @@ user-workspace, child-lifecycle, and fast-mode review patches. The extraction
 freezes the resulting source hash so subsequent maintenance changes are normal
 first-party source changes rather than an accumulating patch chain.
 
-## Phase 5B boundary
+## P5 boundary
 
-This package contains the selected adapter source, license, and provenance
-only. It does not activate Docker, change installed host `node_modules`, mutate
-Pi sessions, perform deployment, or authorize a live canary. Disposable runtime
-proof belongs to Phase 5C; staged artifact and rollback proof belong to Phase
-5D.
+The active source contains only canonical manifest validation and four
+model-visible tools forwarded over the inherited controller channel. It has no
+Docker, host shell, Git, workspace, route, package installation, network,
+checkpoint, ref, or lifecycle implementation. Docker lifecycle and tool exec
+belong exclusively to the host controller. Packaging or testing this source
+does not activate it, alter live Pi paths, deploy, or authorize a live canary.

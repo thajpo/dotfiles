@@ -654,6 +654,11 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn('pi-restart-handoff', restart)
         self.assertIn("client_tty", restart)
         self.assertIn("PI_RESTARTING=1", restart)
+        self.assertIn("compgen -A variable PI_SYSTEM_", restart)
+        self.assertIn("compgen -A variable PI_SYSTEM_", (ROOT / "bin/pi-start").read_text())
+        self.assertIn("PI_RUNTIME_CAPABILITY", restart)
+        self.assertIn("tmux show-environment -g", (ROOT / "bin/pi-start").read_text())
+        self.assertLess((ROOT / "bin/pi-start").read_text().index("clear_tmux_controller_scope || exit 1"), (ROOT / "bin/pi-start").read_text().index("tmux new-session -d -s main"))
         self.assertIn("set-environment -gu PI_RESTARTING", (ROOT / "bin/pi-start").read_text())
         self.assertIn('PI_RESTARTING:-0', (ROOT / "tmux.conf").read_text())
 

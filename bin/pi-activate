@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""Controlling-TTY entry point for one exact Pi generation activation."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import sys
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE_PACKAGE = ROOT / "scripts" / "pi_control"
+if SOURCE_PACKAGE.is_dir() and not SOURCE_PACKAGE.is_symlink():
+    sys.path.insert(0, str(ROOT))
+    from scripts.pi_control.activation_cli import main
+else:
+    configured = Path(os.environ.get("PI_SYSTEM_CONTROL_ROOT", "~/.local/share/pi/control")).expanduser().resolve(strict=True)
+    sys.path.insert(0, str(configured))
+    from pi_control.activation_cli import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

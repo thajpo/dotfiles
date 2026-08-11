@@ -24,10 +24,9 @@ from .git_adapter import GitObservationError, observe_repository
 
 _MAX_MANIFEST_BYTES = 32 * 1024 * 1024
 # The staged generation is dominated by the npm tree; the current dependency
-# set produces roughly 9.5k file/symlink entries. The bound is a runaway
-# guard, not a tight budget: keep it well above the reviewed baseline while
-# still failing closed on pathological trees.
-_MAX_FILES = 16_384
+# set plus Pi core's shrinkwrap materialization produces more than 16k
+# file/symlink entries. The bound is a runaway guard, not a tight budget.
+_MAX_FILES = 65_536
 _MAX_FILE_BYTES = 64 * 1024 * 1024
 _MAX_SYMLINK_BYTES = 1024
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")

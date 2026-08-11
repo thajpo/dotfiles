@@ -39,7 +39,10 @@ Default routing:
 - Reviewers and all other roles:
   `openai-codex/gpt-5.6-luna:max`
 
-Use Luna Max consistently for every Pi role.
+Subagents (`general`, `explore`, and any other opencode subagent invoked via
+the task tool) run `opencode-go/deepseek-v4-flash` per the opencode config
+`agent` overrides. Use Luna Max consistently for every Pi role except
+opencode subagents.
 
 Use pi-subagents as the coding-agent orchestrator. Keep delegation lightweight:
 the parent chooses the number and shape of investigators from the task rather

@@ -1,20 +1,30 @@
-# Pi System Change and Integration Contract
+# Pi Greenfield Change And Integration Contract
 
-Submission captures one exact working-copy state, records paths, tests,
-package identity, provenance, and source fingerprints, then creates an
-immutable revision and immutable local change ref. The assigned branch moves
-only with an expected-old-object check.
+Owns: Git mutation authority, submission, review, and local integration.
 
-Review binds to one exact change revision and exact package-security state. A
-new revision makes earlier review receipts stale. The required reviewer must
-be independent of the submitting worker.
+The host controller alone creates commits, immutable submitted refs, review
+views, integration setup, assigned-branch updates, rollback refs, and final
+local target-ref updates. A writer may edit assigned working-tree files and
+request an operation. Its container has no writable Git metadata, credential,
+push transport, or direct ref-update path.
 
-The fast path requires one submitted revision, clean submission, current
-tests, current package reports, one accepted exact review, an unchanged target,
-direct ancestry, and one exact user approval. It never pushes.
+Submission captures one observed working-tree state, changed paths, tests,
+dependency identity, provenance, and expected current branch object. The
+controller creates exactly one commit, advances only the assigned branch with
+compare-and-swap, and records an immutable submitted revision.
 
-The integration path selects immutable input revisions, creates a fresh
-integration working copy, resolves conflicts, runs combined tests, submits a
-new linked revision, requires independent review, and performs the final
-target update only after exact approval. Retries return recorded outcomes and
-never integrate a newer object than the approved one.
+Review binds one immutable revision, dependency-review state, reviewer
+identity, and verdict. A new revision or dependency identity makes the receipt
+stale. The required reviewer is independent from the submitting writer, and a
+review verdict grants no integration authority.
+
+A simple local target update requires one current accepted review, current
+tests and dependency evidence, direct ancestry, unchanged expected target, and
+one exact user authorization. Otherwise the controller creates an integration
+assignment from exact immutable input revisions. Its writer submits a new
+revision that receives independent review and a separate exact target-update
+authorization.
+
+Every ref mutation names expected old and new object IDs and is idempotently
+reconciled. No operation pushes, publishes, deploys, force-resets unrelated
+work, or integrates a newer object than the authorized object.

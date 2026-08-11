@@ -11,7 +11,6 @@ from .models import bounded_text, canonical_json, json_digest, new_id, parse_can
 from .run_manifest import capability_hash
 
 _VERDICTS = frozenset({"accept", "changes_requested", "comment"})
-_TERMINAL_STATES = frozenset({"stopped", "failed", "lost", "needs_attention"})
 
 
 class ReviewError(ControlPlaneError):
@@ -27,6 +26,7 @@ class ReviewRecord:
     reviewer_run_id: str | None
     reviewer_actor_id: str | None
     reviewer_source: Mapping[str, Any]
+    dependency_review_digest: str | None
     verdict: str | None
     summary: str | None
     findings: str | None
@@ -44,6 +44,7 @@ class ReviewRecord:
             "reviewerRunId": self.reviewer_run_id,
             "reviewerActorId": self.reviewer_actor_id,
             "reviewerSource": dict(self.reviewer_source),
+            "dependencyReviewDigest": self.dependency_review_digest,
             "verdict": self.verdict,
             "summary": self.summary,
             "findings": self.findings,
@@ -64,6 +65,7 @@ def _record(row: Mapping[str, Any]) -> ReviewRecord:
         reviewer_run_id=row["reviewer_run_id"],
         reviewer_actor_id=row["reviewer_actor_id"],
         reviewer_source=parse_canonical_json(str(source_json)) if source_json is not None else {},
+        dependency_review_digest=row["dependency_review_digest"],
         verdict=row["verdict"],
         summary=row["summary"],
         findings=row["findings"],
@@ -84,30 +86,36 @@ def _reviewer_binding(
     reviewer_capability_secret: str | None,
     require_active: bool = True,
 ) -> dict[str, str]:
-    if reviewer_conversation_id is None or reviewer_run_id is None or reviewer_actor_id is None or reviewer_capability_secret is None:
-        raise ConstraintError("review requires an authenticated reviewer conversation, run, actor, and capability")
+    if reviewer_conversation_id is None or reviewer_run_id is None or reviewer_actor_id is None:
+        raise ConstraintError("review requires an authenticated reviewer conversation, run, and actor")
     validate_id(reviewer_conversation_id, prefix="conv")
     validate_id(reviewer_run_id, prefix="run")
     actor = bounded_text(reviewer_actor_id, name="reviewer actor", limit=256)
-    if not isinstance(reviewer_capability_secret, str) or len(reviewer_capability_secret) < 32 or "\x00" in reviewer_capability_secret:
-        raise ConstraintError("reviewer capability is invalid")
     conversation = store.conn.execute(
         "SELECT project_id,working_copy_id,role FROM conversations WHERE conversation_id=?",
         (reviewer_conversation_id,),
     ).fetchone()
-    if conversation is None or conversation["project_id"] != project_id or conversation["role"] != "review":
+    if conversation is None or conversation["project_id"] != project_id or conversation["role"] not in {"review", "reviewer"}:
         raise ConstraintError("reviewer conversation is not bound to the change project")
     run = store.conn.execute(
         "SELECT * FROM runs WHERE run_id=? AND conversation_id=?",
         (reviewer_run_id, reviewer_conversation_id),
     ).fetchone()
-    if run is None or run["authority"] != "read-only" or run["project_id"] != project_id or run["working_copy_id"] != conversation["working_copy_id"]:
+    if run is None or run["authority"] not in {"read-only", "host-read-only"} or run["project_id"] != project_id or run["working_copy_id"] != conversation["working_copy_id"]:
         raise ConstraintError("reviewer run is not bound to the review conversation")
-    if require_active and (run["desired_state"] != "running" or run["observed_state"] in _TERMINAL_STATES):
-        raise ConstraintError("reviewer run is not active")
-    if capability_hash(reviewer_capability_secret) != run["capability_hash"]:
-        raise ConstraintError("reviewer capability is stale")
-    return {"conversationId": reviewer_conversation_id, "runId": reviewer_run_id, "actorId": actor}
+    if require_active:
+        ongoing = run["desired_state"] == "running" and run["observed_state"] == "running"
+        cleanly_completed = run["desired_state"] == "stopped" and run["observed_state"] == "stopped"
+        if not (ongoing or cleanly_completed):
+            raise ConstraintError("reviewer run is not active or cleanly completed")
+    capability_hash_value: str | None = None
+    if "capability_hash" in run.keys():
+        if not isinstance(reviewer_capability_secret, str) or len(reviewer_capability_secret) < 32 or "\x00" in reviewer_capability_secret:
+            raise ConstraintError("reviewer capability is invalid")
+        capability_hash_value = capability_hash(reviewer_capability_secret)
+        if capability_hash_value != run["capability_hash"]:
+            raise ConstraintError("reviewer capability is stale")
+    return {"conversationId": reviewer_conversation_id, "runId": reviewer_run_id, "actorId": actor, "capabilityHash": capability_hash_value}
 
 
 def request_review(
@@ -121,6 +129,7 @@ def request_review(
     reviewer_capability_secret: str | None = None,
     evidence: Mapping[str, Any] | None = None,
     review_id: str | None = None,
+    dependency_review_digest: str | None = None,
 ) -> ReviewRecord:
     validate_id(change_id, prefix="chg")
     if not isinstance(revision, int) or revision < 1:
@@ -131,11 +140,13 @@ def request_review(
     validate_id(review_id, prefix="review")
     with store.transaction():
         revision_row = store.conn.execute(
-            "SELECT c.project_id,c.current_revision,r.base_oid,r.tip_oid,r.tree_oid,r.ref_name,r.source_head_oid FROM changes c JOIN change_revisions r ON r.change_id=c.change_id AND r.revision=? WHERE c.change_id=?",
+            "SELECT c.project_id,c.current_revision,c.state,r.base_oid,r.tip_oid,r.tree_oid,r.ref_name,r.source_head_oid FROM changes c JOIN change_revisions r ON r.change_id=c.change_id AND r.revision=? WHERE c.change_id=?",
             (revision, change_id),
         ).fetchone()
         if revision_row is None or int(revision_row["current_revision"]) != revision:
             raise ConstraintError("review must bind the current exact change revision")
+        if revision_row["state"] not in {"open", "draft"}:
+            raise ConstraintError("reviews are not accepted for a change that is not open")
         binding = _reviewer_binding(
             store,
             project_id=str(revision_row["project_id"]),
@@ -161,15 +172,16 @@ def request_review(
                 and existing["reviewer_conversation_id"] == binding["conversationId"]
                 and existing["reviewer_run_id"] == binding["runId"]
                 and existing["reviewer_actor_id"] == binding["actorId"]
-                and existing["reviewer_capability_hash"] == capability_hash(reviewer_capability_secret)
+                and existing["reviewer_capability_hash"] == binding["capabilityHash"]
+                and existing["dependency_review_digest"] == dependency_review_digest
                 and parse_canonical_json(str(existing["evidence_json"])) == evidence_value
             )
             if same_request:
                 return _record(existing)
-            raise IdempotencyConflictError(review_id, existing_digest=json_digest({"changeId": existing["change_id"], "revision": existing["revision"], "reviewerRunId": existing["reviewer_run_id"], "reviewerActorId": existing["reviewer_actor_id"], "evidence": parse_canonical_json(str(existing["evidence_json"]))}), request_digest=json_digest({"changeId": change_id, "revision": revision, "reviewerRunId": binding["runId"], "reviewerActorId": binding["actorId"], "evidence": evidence_value}))
+            raise IdempotencyConflictError(review_id, existing_digest=json_digest({"changeId": existing["change_id"], "revision": existing["revision"], "reviewerRunId": existing["reviewer_run_id"], "reviewerActorId": existing["reviewer_actor_id"], "dependencyReviewDigest": existing["dependency_review_digest"], "evidence": parse_canonical_json(str(existing["evidence_json"]))}), request_digest=json_digest({"changeId": change_id, "revision": revision, "reviewerRunId": binding["runId"], "reviewerActorId": binding["actorId"], "dependencyReviewDigest": dependency_review_digest, "evidence": evidence_value}))
         now = utc_now()
         store.conn.execute(
-            "INSERT INTO reviews(review_id,change_id,revision,reviewer_conversation_id,reviewer_run_id,reviewer_actor_id,reviewer_capability_hash,reviewer_source_json,verdict,summary,findings,evidence_json,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO reviews(review_id,change_id,revision,reviewer_conversation_id,reviewer_run_id,reviewer_actor_id,reviewer_capability_hash,dependency_review_digest,reviewer_source_json,verdict,summary,findings,evidence_json,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 review_id,
                 change_id,
@@ -177,7 +189,8 @@ def request_review(
                 binding["conversationId"],
                 binding["runId"],
                 binding["actorId"],
-                capability_hash(reviewer_capability_secret),
+                binding["capabilityHash"],
+                dependency_review_digest,
                 canonical_json(reviewer_source),
                 None,
                 None,

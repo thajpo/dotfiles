@@ -1,17 +1,23 @@
-# Greenfield Cutover and Rollback
+# Pi Greenfield Cutover And Rollback Contract
 
-Build into a sibling staging directory. Verify the exact file set, hashes,
-first-party package bytes, Pi version, staged process journey, Docker matrix,
-permission matrix, and evidence before cutover.
+Owns: atomic cutover and rollback transaction.
 
-Acquire the launch lock, rename the old installed build to a rollback path,
-rename the verified staging build into place, sync the parent directory, and
-run the installed smoke test. A new production database is created only
-after smoke passes. Historical Pi files are preserved and are not lifecycle
-input.
+OpenCode and its configuration remain unchanged before final activation
+approval. Pre-activation builds use a sibling staging path and explicit staged
+entrypoint; they do not replace live commands or read historical Pi state.
 
-Rollback stops only exact managed Pi processes, preserves the new database,
-sessions, worktrees, refs, changes, and evidence, disables the new launchers,
-restores the previous command state, and proves the existing OpenCode setup,
-historical files, and unrelated Git state are unchanged. It does not start an
-older Pi controller or delete new work.
+Cutover requires one exact approved build and plan. Under a launch lock, the
+controller verifies bytes and evidence, renames the current command generation
+to a rollback path, renames staging into the final path, syncs the parent, and
+runs a bounded installed smoke. Greenfield production state is fresh. Any
+identity change invalidates approval.
+
+On failure, rollback stops only processes and containers proven to belong to
+the exact new generation, restores the prior command generation atomically,
+and verifies OpenCode remains usable. It preserves the greenfield database,
+sessions, worktrees, Git objects/refs, changes, messages, and evidence. It does
+not start an earlier Pi product, import historical data, delete new work, move
+unrelated refs, contact remotes, or mutate production services.
+
+Historical Pi files, unrelated tmux sessions, unmanaged worktrees, OpenCode,
+and remote Git state are protected surfaces before, during, and after cutover.

@@ -1,27 +1,38 @@
-# Pi System State Contract
+# Pi Greenfield State Contract
 
-The active state root is `~/.local/state/pi-system/` with mode `0700` and a
-WAL SQLite database. New installations start at schema epoch one. The fresh
-schema is defined in `scripts/pi_control/greenfield_schema.py` and is never
-populated from another controller database.
+Owns: state identity, authority, freshness, and transitions.
 
-Authorities:
+Greenfield uses a new schema epoch under a new state root. It creates project,
+working-copy, conversation, run, message, request, change, review, integration,
+attention, and evidence identities only from explicit greenfield operations.
+It never reads, imports, maps, resumes, reconciles, or adopts historical Pi
+state or chats. Historical bytes remain untouched external data.
 
-- SQLite owns projects, working copies, conversations, workstreams, runs,
-  messages, requests, reviews, operations, attention, and package records.
-- Git owns source objects, submitted immutable refs, branches, and files.
-- Session JSONL owns conversation history.
-- A process-lifetime kernel lock plus the database writer generation owns
-  active writer fencing.
-- The target branch moves only through an exact expected-old-object operation.
-- Tmux owns no lifecycle identity.
+State authorities are disjoint:
 
-Every cross-resource operation checks project identity, resource versions,
-exact revisions, writer generations, and idempotency keys. Message delivery
-and acknowledgement are separate states. A repeated idempotency key with
-different content fails.
+| Data | Authority |
+|---|---|
+| Lifecycle records and resource versions | Greenfield controller SQLite store |
+| Source content | Assigned working-copy files and controller-observed Git objects |
+| Conversation history | Controller-selected Pi session JSONL |
+| Active writer ownership | Database unique live-writer constraint, current claim/epoch, run identity, and kernel lifecycle lock together |
+| Presentation | No state authority |
 
-The schema includes durable `project_messages`, exact `command_requests`,
-`dependency_changes`, `package_security_reviews`, and per-working-copy
-`package_environments`. Uncertain recovery is retained as attention; it is not
-repaired by deletion or guessed liveness.
+The canonical store and CLI are the greenfield families. Earlier store, schema,
+client, CLI, runtime, workspace, registry, route-file, and chat-discovery
+families are absent from release reachability.
+
+Every mutation checks project identity, expected resource version, exact input
+identity, and idempotency key. Reuse with different content fails. Message
+delivery, acknowledgement, and resolution are distinct transitions. Unknown
+liveness or partial effects become bounded attention records; they never
+authorize deletion, adoption, or a replacement writer.
+
+Writer acquisition takes the secure lifecycle lock before the SQLite claim,
+then transactionally re-reads and compare-and-swap updates the working-copy
+version, writer epoch, claim, and unique live run. A stale read cannot overwrite
+a newer claim. Idempotent replay must reacquire and retain the same kernel lock;
+the database, rather than the kernel lock alone, remains durable authority.
+
+Normal schema upgrades may evolve this fresh epoch after release. They may not
+be used as an import path from an earlier product.

@@ -1,7 +1,7 @@
 # Control-plane disposable fixtures
 
-This directory documents the ownership and safety boundary for Phase 1 test
-fixtures.  The fixture implementation lives in
+This directory documents the ownership and safety boundary for disposable
+controller tests. The fixture implementation lives in
 `tests/control_plane/helpers.py`; it is test-only and is not installed or
 imported by runtime/controller code.
 
@@ -23,7 +23,7 @@ Each `DisposableEnvironment` owns one temporary root created with Python's
   object-format capability probe succeeds.
 
 The temporary root, including its dedicated `tmp/` directory, is the only
-location the fixture may create, modify, or remove.  The inert bare repository is never a network endpoint.  No fixture
+location the fixture may create, modify, or remove. The inert bare repository is never a network endpoint. No fixture
 owns or cleans resources under the caller's HOME, current repository, Git refs
 or worktrees, Pi sessions, processes, containers, presentation backends, or
 installed artifacts.
@@ -49,7 +49,9 @@ real HOME snapshot before setup.  `assert_untouched()` compares entries,
 permissions, inodes, regular-file hashes, refs/OIDs, linked worktrees, and
 status after the test.  Tests must call it before the temporary root is
 released.  If a scenario cannot remain inside the temporary root, it is not a
-Phase 1 fixture.
+  disposable fixture.
 
-The directory is documentation only; it is not a runtime state directory and
-must not be populated with generated sessions, databases, logs, or artifacts.
+The directory is not a runtime state directory. The one committed
+`run-manifest.v2.json` contract fixture is canonical static test input shared
+unchanged by Python and TypeScript; generated sessions, databases, logs, and
+artifacts remain forbidden here.

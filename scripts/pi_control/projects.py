@@ -7,7 +7,9 @@ from typing import Any, Mapping
 
 from .events import append_event_in_transaction
 from .git_adapter import GitObservationError, observe_repository
-from .models import bounded_text, canonical_json, new_id, utc_now, validate_id, validate_pi_session_id
+from .conversations import conversation_session_binding
+from .models import bounded_text, canonical_json, new_id, utc_now, validate_id
+from .operations import update_operation_in_transaction
 from .project_policy import ProjectPolicy, load_policy
 
 
@@ -41,9 +43,8 @@ def register_project(store: Any, repository: str | Path, display_name: str | Non
     trust = policy.trust_for_repository(primary)
     effective_mode = policy.effective_mode(trust)
     wc_state = "dirty" if observation.dirty else ("ready" if observation.head_oid else "unknown")
-    session_dir = Path(store.state_root) / "sessions" / project_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-    session_file = session_dir / "secretary.jsonl"
+    pi_session_id, session_file = conversation_session_binding(store, project_id, conversation_id)
+    operation = store.create_operation(idempotency_key="project.register:" + str(common), kind="project.register", resource_type="project", resource_id=project_id, actor_type="controller", request={"gitCommonDir": str(common), "primaryCheckout": str(primary), "displayName": name, "policyHash": policy.policy_hash})
     with store.transaction():
         store.conn.execute(
             "INSERT INTO projects(project_id,display_name,git_common_dir,git_common_device,git_common_inode,primary_checkout,object_format,trust_mode,policy_hash,desired_state,observed_state,resource_version,created_at,updated_at,last_reconciled_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -54,10 +55,11 @@ def register_project(store: Any, repository: str | Path, display_name: str | Non
             (working_copy_id, project_id, name, "primary", "personal", str(primary), observation.git_dir, observation.branch_ref, observation.head_oid, observation.tree_oid, effective_mode, "present", wc_state, 0, None, 1, 0, now, now, now, None, None),
         )
         store.conn.execute(
-            "INSERT INTO conversations(conversation_id,project_id,working_copy_id,role,display_name,pi_session_id,session_file,desired_state,observed_state,resource_version,created_at,updated_at,last_reconciled_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (conversation_id, project_id, working_copy_id, "secretary", f"{name} secretary", f"pi-secretary-{project_id}", str(session_file), "active", "ready", 1, now, now, now, None, None),
+            "INSERT INTO conversations(conversation_id,project_id,working_copy_id,role,authority_profile,display_name,pi_session_id,session_file,desired_state,observed_state,resource_version,created_at,updated_at,last_reconciled_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (conversation_id, project_id, None, "secretary", "host-read-only", f"{name} secretary", pi_session_id, session_file, "active", "ready", 1, now, now, now, None, None),
         )
         append_event_in_transaction(store.conn, event_kind="project.registered", resource_type="project", resource_id=project_id, resource_version=1, payload={"projectId": project_id, "repository": str(primary), "gitCommonDir": str(common), "authority": "greenfield-controller"})
+        update_operation_in_transaction(store.conn, operation.operation_id, state="succeeded", step="project-registered", result={"projectId": project_id})
     return dict(store.conn.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone())
 
 

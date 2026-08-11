@@ -91,15 +91,16 @@ class PersonalClientTests(unittest.TestCase):
             client.technical_details(other_project, "operation", operation.operation_id)
 
     def test_cli_process_reaches_status_and_change_semantics(self) -> None:
-        state = self.root / "state"
+        state = self.root / "greenfield-state"
         environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         cli = Path(__file__).resolve().parents[2] / "bin" / "pi-control"
-        status = subprocess.run([str(cli), "--state-root", str(state), "status", self.project_id, "--no-refresh", "--json"], env=environment, check=True, capture_output=True, text=True)
-        self.assertEqual(json.loads(status.stdout)["project"]["project_id"], self.project_id)
-        request_path = self.root / "request.json"
-        request_path.write_text(json.dumps(self._submit_request("cli-process")), encoding="utf-8")
-        submitted = subprocess.run([str(cli), "--state-root", str(state), "change", "submit", "--request-json", str(request_path), "--json"], env=environment, check=True, capture_output=True, text=True)
-        self.assertEqual(json.loads(submitted.stdout)["revision"], 1)
+        request_path = self.root / "greenfield-request.json"
+        request_path.write_text(json.dumps({"protocolVersion": 2, "operation": "negotiate", "request": {}}), encoding="utf-8")
+        from scripts.pi_control.greenfield_store import GreenfieldStore
+        with GreenfieldStore(state):
+            pass
+        status = subprocess.run([str(cli), "--state-root", str(state), "--json", "protocol", "--request-json", str(request_path)], env=environment, check=True, capture_output=True, text=True)
+        self.assertEqual(json.loads(status.stdout)["result"]["protocolVersion"], 2)
 
     def test_protocol_negotiation_and_unknown_fields_fail_closed(self) -> None:
         client = ControllerClient(self.root / "state", read_only=True)

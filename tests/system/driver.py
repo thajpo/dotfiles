@@ -1,12 +1,9 @@
-"""Small non-live process driver used by C9 process-fixture scenarios."""
+"""Bounded command runner for disposable greenfield system tests."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import os
-from pathlib import Path
 import subprocess
-import sys
 from typing import Sequence
 
 try:
@@ -56,32 +53,4 @@ def _run(fixture: SystemFixture, argv: Sequence[str], *, expected: str = "zero")
     return record
 
 
-def run_group(fixture: SystemFixture, group: str) -> dict:
-    """Invoke real repository launchers plus strict fake boundary commands.
-
-    These are intentionally read-only/help/refusal requests.  A mutating or
-    backend-dependent path is not silently simulated; its owning tier remains
-    STOP/77 until a staged/backend fixture is supplied.
-    """
-    commands: list[CommandRecord] = []
-    before = fixture.snapshot_namespace()
-    commands.append(_run(fixture, [sys.executable, str(Path(__file__).resolve().parent / "fake_process.py"), "--version"]))
-    commands.append(_run(fixture, [str(Path(__file__).resolve().parents[2] / "bin" / "pi-control"), "--help"]))
-    commands.append(_run(fixture, [str(Path(__file__).resolve().parents[2] / "bin" / "pi"), "help"]))
-    # Exercise the host-owned refusal boundary without invoking the real Pi.
-    commands.append(_run(fixture, [str(Path(__file__).resolve().parents[2] / "bin" / "pi"), "--no-sandbox"], expected="nonzero"))
-    # Commands above are read-only/refusal requests; capture a second snapshot
-    # after the final command and require exact equality.
-    after = fixture.snapshot_namespace()
-    fixture.assert_namespace_unchanged(before)
-    fixture.assert_host_unchanged()
-    return {
-        "commands": [item.as_dict() for item in commands],
-        "before": {"namespaceDigest": fixture.digest_snapshot(before)},
-        "after": {"namespaceDigest": fixture.digest_snapshot(after)},
-        "capability": {"processFixture": True, "realLaunchers": True, "strictFake": True, "network": False, "liveAction": False},
-        "assertions": {"namespaceUnchanged": before == after, "hostUnchanged": True, "noLiveAction": True, "noNetwork": all(not item.network for item in commands), "commandExpectations": all(item.expected in {"zero", "nonzero"} for item in commands)},
-    }
-
-
-__all__ = ["CommandExecutionError", "CommandRecord", "run_group"]
+__all__ = ["CommandExecutionError", "CommandRecord", "_run"]

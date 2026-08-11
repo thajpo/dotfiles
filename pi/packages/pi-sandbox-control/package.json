@@ -1,8 +1,8 @@
 {
   "name": "pi-sandbox-control",
-  "version": "0.2.0-control.1",
+  "version": "0.3.0-control.1",
   "private": true,
-  "description": "First-party manifest-controlled Pi sandbox adapter extracted from @kjrjay/pi-sandbox 0.2.0",
+  "description": "First-party manifest and inherited-channel broker for controller-owned writer tools",
   "type": "module",
   "license": "MIT",
   "author": "Jayakar Katika",
@@ -17,10 +17,6 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "@earendil-works/pi-coding-agent": "*"
   }
 }

@@ -1347,7 +1347,7 @@ def _file_digest(path: Path) -> str:
 # sound and reproducible.
 _SNAPSHOT_PRUNE_DIRS = frozenset({
     "node_modules", ".git", "__pycache__", ".bun", ".npm", ".cache",
-    ".antigravity", ".antigravity-server", ".pi", ".config", ".dropbox",
+    ".antigravity", ".antigravity-server", ".pi", ".codex", ".config", ".dropbox",
     ".venv", "venv",
 })
 _MAX_SNAPSHOT_ENTRIES = 50_000

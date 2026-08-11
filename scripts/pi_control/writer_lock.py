@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import stat
 from typing import Any
 
 
@@ -26,9 +27,17 @@ class WriterLock:
         if not isinstance(generation, int) or generation < 1:
             raise WriterLockError("writer generation must be positive")
         directory = Path(state_root) / "locks"
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        directory_info = directory.lstat()
+        if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.geteuid() or stat.S_IMODE(directory_info.st_mode) != 0o700:
+            raise WriterLockError("writer lock directory is unsafe")
         path = directory / f"{working_copy_id}.lock"
-        handle = path.open("a+")
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        handle = os.fdopen(descriptor, "a+")
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            handle.close()
+            raise WriterLockError("writer lock file is unsafe")
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:

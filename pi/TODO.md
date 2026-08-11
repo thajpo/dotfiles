@@ -1,20 +1,12 @@
 # Pi TODO
 
-## Security hardening: outside-project-root context mounts
+P6 now adds canonical coordination RPC, controlling-TTY approval, one-shot
+network operations, immutable lock adapters, deterministic cache-backed npm
+and Python materialization, and exact no-cache refusal to the P5
+writer-container lifecycle. Later phases still own these boundaries:
 
-The control-plane route now has a deliberately narrow, read-only aperture for
-Pi's pinned `docs/` and `examples/` directories outside the project root.
-Before treating this as a durable security boundary:
-
-- run the real Docker create/reuse integration tests against the activated
-  patched `pi-sandbox` package;
-- verify route provenance, exact source identity, package version/hash, and
-  TOCTOU behavior immediately before every create/reuse;
-- decide whether a sanitized immutable mirror is safer than direct host binds;
-- test recursive symlink, permission, ownership, duplicate, stale-container,
-  and unexpected-mount cases;
-- prove ordinary trusted and isolated projects cannot receive these resources
-  and that sessions, credentials, host commands, sockets, and the Docker
-  socket remain unavailable;
-- activate only through reviewed `pi-host` installation and record rollback
-  evidence.
+- P7 adds durable workstream and broader personal lifecycle behavior.
+- P10 adds exhaustive crash, daemon-loss, cancellation, and ambiguous-cleanup
+  recovery. Until then, unknown cleanup remains `needs_attention` with the
+  durable writer claim retained.
+- P12 alone may activate a reviewed generation or touch live Pi paths.

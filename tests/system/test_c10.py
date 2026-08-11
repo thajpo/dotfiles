@@ -1,71 +1,58 @@
 from __future__ import annotations
-import json
+
 import os
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import unittest
 
-from scripts.pi_control.staged_build import create_build_manifest, write_build_manifest
+from scripts.pi_control.greenfield_install import stage
+from tests.test_greenfield_install import pack_test_pi_core
+
 try:
-    from .staged_proof import copy_manifest_entries, prove_loaded_root
-    from .scenarios.rollback import ROLLBACK_MATRIX
-    from .rollback_matrix import run_matrix
+    from .staged_install import StagedInstallUnavailable, _raise_offline_install_error, build_generation, install
+    from .staged_proof import prove_loaded_root
 except ImportError:
-    from staged_proof import copy_manifest_entries, prove_loaded_root
-    from scenarios.rollback import ROLLBACK_MATRIX
-    from rollback_matrix import run_matrix
+    from staged_install import StagedInstallUnavailable, _raise_offline_install_error, build_generation, install
+    from staged_proof import prove_loaded_root
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
+
 class C10Tests(unittest.TestCase):
-    def test_source_stage_loaded_manifest_is_exact(self):
-        with tempfile.TemporaryDirectory(prefix="pi-c10-test-") as raw:
-            source = Path(raw) / "source"; stage = Path(raw) / "stage"
-            source.mkdir(); stage.mkdir(mode=0o700)
-            (source / "launcher").write_text("#!/bin/sh\n", encoding="utf-8"); (source / "launcher").chmod(0o750)
-            (source / "config.json").write_text("{}\n", encoding="utf-8")
-            manifest = create_build_manifest(source, metadata={"test": True}, test_outcomes={"source": "PASS"})
-            copy_manifest_entries(source, stage, manifest); write_build_manifest(manifest, stage / "build-manifest.json")
-            (stage / "loaded-resources.json").write_text(json.dumps({"buildId": manifest.build_id, "legacyCoLoad": []}), encoding="utf-8")
-            result = prove_loaded_root(stage, manifest.build_id)
-            self.assertEqual(result["buildId"], manifest.build_id)
+    def test_compatibility_wrapper_returns_the_production_artifact(self):
+        self.assertIs(build_generation, stage)
+        with tempfile.TemporaryDirectory(prefix="pi-c10-production-") as raw:
+            root = Path(raw)
+            core = pack_test_pi_core(root)
+            built = install(root / "stage", pi_core_tarball=core)
+            loaded = prove_loaded_root(root / "stage", built["buildId"])
+            self.assertEqual(loaded["buildId"], built["buildId"])
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                prove_loaded_root(root / "stage", "build_" + "0" * 32)
 
-    def test_tamper_and_loaded_mismatch_fail(self):
-        with tempfile.TemporaryDirectory(prefix="pi-c10-test-") as raw:
-            source = Path(raw) / "source"; stage = Path(raw) / "stage"
-            source.mkdir(); stage.mkdir(mode=0o700)
-            (source / "entry").write_text("good\n", encoding="utf-8")
-            manifest = create_build_manifest(source, metadata={}, test_outcomes={})
-            copy_manifest_entries(source, stage, manifest); write_build_manifest(manifest, stage / "build-manifest.json")
-            (stage / "entry").write_text("tampered\n", encoding="utf-8")
-            with self.assertRaises(RuntimeError): prove_loaded_root(stage, manifest.build_id)
+    def test_npm_integrity_failure_is_not_unavailable(self):
+        integrity = subprocess.CalledProcessError(1, ["npm", "install"], stderr=b"npm ERR! code EINTEGRITY")
+        with self.assertRaisesRegex(RuntimeError, "integrity or resolution") as raised:
+            _raise_offline_install_error(integrity)
+        self.assertNotIsInstance(raised.exception, StagedInstallUnavailable)
+        unavailable = subprocess.CalledProcessError(1, ["npm", "install"], stderr=b"npm ERR! code ENOTCACHED")
+        with self.assertRaises(StagedInstallUnavailable):
+            _raise_offline_install_error(unavailable)
+        mixed = subprocess.CalledProcessError(1, ["npm", "install"], stderr=b"npm ERR! code EINTEGRITY while using only-if-cached")
+        with self.assertRaisesRegex(RuntimeError, "integrity or resolution") as raised:
+            _raise_offline_install_error(mixed)
+        self.assertNotIsInstance(raised.exception, StagedInstallUnavailable)
 
-    def test_staged_runner_without_installed_attestation_is_stop_77(self):
-        result = subprocess.run(["bash", "tests/system/run-staged-installed.sh", "--group", "packages"], cwd=ROOT, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 77)
-
-    def test_docker_runner_preserves_unavailable_as_stop_77(self):
-        result = subprocess.run(["bash", "tests/system/run-docker.sh"], cwd=ROOT, capture_output=True, text=True)
+    def test_staged_runner_passes_or_truthfully_reports_missing_prerequisite(self):
+        with tempfile.TemporaryDirectory(prefix="pi-c10-evidence-") as evidence:
+            result = subprocess.run(["bash", "tests/system/run-staged-installed.sh"], cwd=ROOT, capture_output=True, text=True, env={**os.environ, "PI_SYSTEM_EVIDENCE_DIR": evidence})
         if result.returncode == 77:
             self.assertIn("STOP/77", result.stderr)
         else:
-            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("PASS: two identical production builds", result.stdout)
 
-    def test_rollback_gate_preserves_docker_stop(self):
-        result = subprocess.run(["bash", "tests/system/run-rollback.sh"], cwd=ROOT, capture_output=True, text=True, timeout=180)
-        if result.returncode == 77:
-            self.assertTrue("Docker" in result.stdout or "Docker" in result.stderr)
-        else:
-            self.assertEqual(result.returncode, 0)
-
-    def test_rollback_matrix_preserves_recovery_resources(self):
-        self.assertEqual(len(ROLLBACK_MATRIX), 5)
-        for item in ROLLBACK_MATRIX:
-            self.assertEqual(set(item["preserve"]), {"db", "refs", "worktrees", "evidence"})
-        results = run_matrix()
-        self.assertEqual(len(results), 5)
-        self.assertTrue(all(item["restored"] and item["recoveryPreserved"] for item in results))
-
-if __name__ == "__main__": unittest.main()
+if __name__ == "__main__":
+    unittest.main()

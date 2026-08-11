@@ -1,8 +1,19 @@
 # Pi Harness Observability Contract
 
-Status: read-only Inspector slice implemented; metrics/trace planes remain design-first.
+Status: the base greenfield installed-process driver is accepted; Inspector
+loading and the metrics and trace planes remain incomplete.
 
-Human-facing inspector plan: `OBSERVABILITY_UI_PLAN.md`.
+## Implemented Inspector Contract
+
+The read-only Inspector exposes Task, Fleet, and Messages views through
+`/observe` and `Ctrl+I`. It shows the active task packet, explicit child briefs,
+bounded context-source summaries, child status/current tool/progress, results,
+failures, and parent-child messages. It does not expose hidden reasoning.
+
+The view supports bounded selection and transcript drill-down, tolerates
+missing or malformed artifacts, and does not write project files. Source-level
+tests cover projection and rendering, but greenfield acceptance still requires
+loading the Inspector in a real installed controller-bound Pi process.
 
 This document defines the observability boundary for a custom Pi build. The
 purpose is to make the harness itself understandable and measurable before
@@ -400,12 +411,12 @@ Upstream Pi already supplies the hooks and session data needed for this design:
 - context-usage access;
 - provider response metadata hooks.
 
-The current project additionally has:
+The greenfield target additionally has:
 
-- durable root-session registry metadata;
+- controller project, conversation, working-copy, and run identities;
+- controller-selected Pi session JSONL;
 - workflow task packets and optional context-audit manifests;
-- subagent `status.json`, `events.jsonl`, transcripts, results, artifacts, and
-  bounded secretary statistics;
+- subagent status, events, transcripts, results, and artifacts;
 - worker/subagent parent-child relationships.
 
 Important gaps remain:

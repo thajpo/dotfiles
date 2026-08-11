@@ -151,9 +151,12 @@ class BuildManifestTests(unittest.TestCase):
             shutil.copy2(Path("bin/pi-control"), launcher)
             launcher.chmod(0o755)
             state = root / "state"
-            env = {**os.environ, "HOME": str(root / "home"), "PI_CONTROL_INSTALL_ROOT": str(install_root)}
+            from scripts.pi_control.greenfield_store import GreenfieldStore
+            with GreenfieldStore(state):
+                pass
+            env = {**os.environ, "HOME": str(root / "home"), "PI_SYSTEM_CONTROL_ROOT": str(install_root)}
             result = subprocess.run(
-                [sys.executable, str(launcher), "--state-root", str(state), "schema", "status", "--json"],
+                [sys.executable, str(launcher), "--state-root", str(state), "--json", "schema", "status"],
                 env=env,
                 text=True,
                 capture_output=True,
@@ -164,7 +167,7 @@ class BuildManifestTests(unittest.TestCase):
 
             shutil.rmtree(install_root / "pi_control")
             result = subprocess.run(
-                [sys.executable, str(launcher), "--state-root", str(state), "schema", "status", "--json"],
+                [sys.executable, str(launcher), "--state-root", str(state), "--json", "schema", "status"],
                 env=env,
                 text=True,
                 capture_output=True,

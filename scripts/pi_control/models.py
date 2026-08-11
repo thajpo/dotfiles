@@ -28,7 +28,7 @@ _MAX_TEXT = 4096
 # Controller IDs have a type prefix and exactly 128 bits represented as lower
 # case hex.  The prefix is part of the identifier's type, not a path/name.
 ID_RE = re.compile(r"^(?P<prefix>[a-z][a-z0-9]{0,15})_(?P<random>[0-9a-f]{32})$")
-PI_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}$")
+PI_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,191}$")
 ID_PREFIXES = frozenset(
     {
         "prj",
@@ -51,9 +51,14 @@ ID_PREFIXES = frozenset(
         "attention",
         "msg",
         "cmd",
+        "ctl",
         "dep",
         "pkg",
+        "pkreq",
+        "child",
+        "snap",
         "migration",
+        "act",
     }
 )
 

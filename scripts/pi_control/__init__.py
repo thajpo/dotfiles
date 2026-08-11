@@ -1,20 +1,5 @@
-"""Host-local Pi control-plane SQLite library (Phase 2)."""
+"""Fresh Pi controller package.
 
-from .errors import *
-from .events import *
-from .models import *
-from .operations import *
-from .schema import *
-from .store import ControllerStore, SQLiteStore, Store
-
-__all__ = [
-    "ControllerStore",
-    "SQLiteStore",
-    "Store",
-    "SCHEMA_VERSION",
-    "SCHEMA_SQL",
-    "probe_capabilities",
-    "canonical_json",
-    "json_digest",
-    "new_id",
-]
+Modules are imported explicitly so an installed greenfield artifact does not
+eagerly load historical controller schemas or stores.
+"""

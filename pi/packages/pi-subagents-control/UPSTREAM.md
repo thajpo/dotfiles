@@ -1,8 +1,9 @@
 # pi-subagents-control provenance
 
-This is the Phase 6B first-party package extracted mechanically from the
-reviewed, fully patched `pi-subagents@0.35.1` tree. The installed
-`node_modules` copy was read-only input; it was not edited.
+This package began as the reviewed `pi-subagents@0.35.1` extraction. P7
+replaces its production entrypoint with a narrow controller-channel broker.
+The retained upstream source is historical input only and is excluded by the
+package `files` allowlist.
 
 ## Upstream identity
 
@@ -27,11 +28,9 @@ exposes MIT only through package metadata.
 
 ## Package boundary
 
-The package keeps the original npm name and public exports so existing Pi
-extension imports remain unchanged. `pi/npm/package.json` resolves that name
-to this repository-local package directory. This Phase 6B slice changes no
-child behavior, lifecycle ownership, snapshot/artifact behavior, patch driver,
-installed `node_modules`, Pi sessions, Docker resources, or activation paths.
-
-Behavioral child execution and the subagent adapter contract are later Phase
-6B work; this slice freezes the mechanical source extraction and provenance.
+The package keeps the original npm name and extension entrypoint. Its packed
+artifact contains only `index.ts`, `src/controller-broker.ts`, metadata, and
+license/provenance documents. It has no child-process, worktree, persistence,
+credential-discovery, intercom, or inherited-environment implementation. The
+broker can request only semantic read-only roles over the authenticated
+controller channel; the host controller creates every child resource.

@@ -3,14 +3,27 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
+SOURCE_PACKAGE = ROOT / "scripts" / "pi_control"
+if SOURCE_PACKAGE.is_dir() and not SOURCE_PACKAGE.is_symlink():
     sys.path.insert(0, str(ROOT))
-
-from scripts.pi_control.greenfield_cli import main
+    from scripts.pi_control.greenfield_cli import main
+else:
+    configured = Path(os.environ.get("PI_SYSTEM_CONTROL_ROOT", "~/.local/share/pi/control")).expanduser()
+    try:
+        installed = configured.resolve(strict=True)
+        package = installed / "pi_control"
+        if package.is_symlink() or not package.is_dir():
+            raise OSError
+    except OSError as error:
+        raise SystemExit(f"pi-control installed package is missing: {configured / 'pi_control'}") from error
+    sys.path.insert(0, str(installed))
+    from pi_control.greenfield_cli import main
 
 
 if __name__ == "__main__":

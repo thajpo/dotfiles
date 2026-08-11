@@ -640,6 +640,7 @@ CREATE TABLE reviews (
   reviewer_run_id TEXT REFERENCES runs(run_id),
   reviewer_actor_id TEXT,
   reviewer_capability_hash TEXT,
+  dependency_review_digest TEXT,
   reviewer_source_json TEXT CHECK (reviewer_source_json IS NULL OR json_valid(reviewer_source_json)),
   verdict TEXT CHECK (verdict IN ('accept','changes_requested','comment')),
   summary TEXT,

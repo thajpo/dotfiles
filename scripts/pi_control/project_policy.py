@@ -90,11 +90,17 @@ class ProjectPolicy:
 def load_policy(source: os.PathLike[str] | str | Mapping[str, Any] | None = None, *, base_dir: os.PathLike[str] | str | None = None) -> ProjectPolicy:
     base = Path(base_dir).expanduser().resolve() if base_dir is not None else Path.cwd().resolve()
     if source is None:
-        source = Path(__file__).resolve().parents[2] / "pi" / "repository-policy.json"
+        configured = os.environ.get("PI_SYSTEM_PROJECT_POLICY")
+        config_root = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        user_policy = config_root / "pi" / "repository-policy.json"
+        bundled_policy = Path(__file__).resolve().parents[2] / "pi" / "repository-policy.json"
+        source = Path(configured).expanduser() if configured else (user_policy if user_policy.is_file() and not user_policy.is_symlink() else bundled_policy)
     if isinstance(source, Mapping):
         data = dict(source)
     else:
         path = Path(source).expanduser()
+        if path.is_symlink() or not path.is_file():
+            raise PolicyError("policy must be a regular non-symlink file")
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:

@@ -1,18 +1,11 @@
-"""Temporary host read-only investigator lifecycle."""
+"""Controller-created temporary host investigator assignments and terminals."""
 
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
-import json
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from .conversations import create_conversation
-from .launch import attest_run, prepare_run, stop_run
 from .models import bounded_text, canonical_json, new_id, utc_now, validate_id
-from .scoped_read import ScopedProjectReader
-from .messages import post_message
-
-_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pi-investigator")
 
 
 class InvestigatorError(RuntimeError):
@@ -20,63 +13,87 @@ class InvestigatorError(RuntimeError):
 
 
 def start_investigation(store: Any, *, project_id: str, purpose: str, working_copy_id: str | None = None) -> dict[str, Any]:
+    """Create an assignment only; the host supervisor creates and owns its run."""
+
     validate_id(project_id, prefix="prj")
-    conversation = create_conversation(store, project_id=project_id, role="host", display_name="investigator: " + purpose[:96], pi_session_id="pi-investigator-" + new_id("run"), working_copy_id=working_copy_id)
-    prepared = prepare_run(store, project_id=project_id, conversation_id=conversation["conversation_id"], working_copy_id=working_copy_id, authority="read-only")
-    attest_run(store, run_id=prepared.run["run_id"], manifest_digest=prepared.manifest["manifestDigest"])
+    project = store.conn.execute("SELECT * FROM projects WHERE project_id=? AND desired_state='active'", (project_id,)).fetchone()
+    if project is None:
+        raise InvestigatorError("active investigation project was not found")
+    if working_copy_id is None:
+        working = store.conn.execute("SELECT * FROM working_copies WHERE project_id=? AND kind='primary' AND desired_state='present'", (project_id,)).fetchone()
+    else:
+        validate_id(working_copy_id, prefix="wc")
+        working = store.conn.execute("SELECT * FROM working_copies WHERE project_id=? AND working_copy_id=? AND desired_state='present'", (project_id, working_copy_id)).fetchone()
+    if working is None or working["observed_state"] not in {"ready", "dirty"}:
+        raise InvestigatorError("investigation read scope is unavailable")
+    conversation = create_conversation(
+        store,
+        project_id=project_id,
+        role="investigator",
+        display_name="investigator: " + bounded_text(purpose, name="purpose", limit=1024)[:96],
+        working_copy_id=working["working_copy_id"],
+    )
     investigation_id = new_id("inv")
     now = utc_now()
     with store.transaction():
-        store.conn.execute("INSERT INTO investigations(investigation_id,project_id,conversation_id,run_id,purpose,state,result_json,created_at,updated_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (investigation_id, project_id, conversation["conversation_id"], prepared.run["run_id"], bounded_text(purpose, name="purpose", limit=1024), "running", None, now, now, None))
-    prepared.close()
-    return dict(store.conn.execute("SELECT * FROM investigations WHERE investigation_id=?", (investigation_id,)).fetchone())
+        store.conn.execute("UPDATE conversations SET observed_state='ready',updated_at=? WHERE conversation_id=?", (now, conversation["conversation_id"]))
+        store.conn.execute(
+            "INSERT INTO investigations(investigation_id,project_id,conversation_id,run_id,purpose,state,result_json,created_at,updated_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (investigation_id, project_id, conversation["conversation_id"], None, bounded_text(purpose, name="purpose", limit=1024), "running", None, now, now, None),
+        )
+    result = dict(store.conn.execute("SELECT * FROM investigations WHERE investigation_id=?", (investigation_id,)).fetchone())
+    result["working_copy_id"] = str(working["working_copy_id"])
+    result["pi_session_id"] = conversation["pi_session_id"]
+    result["session_file"] = conversation["session_file"]
+    return result
 
 
-def run_investigation(store: Any, investigation_id: str, task: Callable[[ScopedProjectReader], Mapping[str, Any]]) -> Future[Any]:
-    validate_id(investigation_id, prefix="inv")
-    row = store.conn.execute("SELECT * FROM investigations WHERE investigation_id=?", (investigation_id,)).fetchone()
-    if row is None or row["state"] != "running":
-        raise InvestigatorError("investigation is not running")
-    def worker() -> dict[str, Any]:
-        try:
-            with store.__class__(store.state_root, read_only=True) as read_store:
-                reader = ScopedProjectReader(read_store, project_id=row["project_id"], working_copy_id=store.conn.execute("SELECT working_copy_id FROM conversations WHERE conversation_id=?", (row["conversation_id"],)).fetchone()[0])
-                result = dict(task(reader))
-            complete_investigation(store, investigation_id, state="completed", result=result)
-            return result
-        except Exception as error:
-            complete_investigation(store, investigation_id, state="failed", result={"error": type(error).__name__, "message": str(error)[:1024]})
-            raise
-    return _POOL.submit(worker)
+def bind_investigation_run(store: Any, *, conversation_id: str, run_id: str) -> dict[str, Any]:
+    validate_id(conversation_id, prefix="conv")
+    validate_id(run_id, prefix="run")
+    with store.transaction():
+        row = store.conn.execute("SELECT * FROM investigations WHERE conversation_id=? AND state='running'", (conversation_id,)).fetchone()
+        if row is None or (row["run_id"] is not None and row["run_id"] != run_id):
+            raise InvestigatorError("investigator conversation has no unbound active assignment")
+        store.conn.execute("UPDATE investigations SET run_id=?,updated_at=? WHERE investigation_id=?", (run_id, utc_now(), row["investigation_id"]))
+        return dict(store.conn.execute("SELECT * FROM investigations WHERE investigation_id=?", (row["investigation_id"],)).fetchone())
 
 
 def complete_investigation(store: Any, investigation_id: str, *, state: str, result: Mapping[str, Any]) -> dict[str, Any]:
     validate_id(investigation_id, prefix="inv")
-    if state not in {"completed", "failed", "needs-user", "interrupted"}:
+    if state not in {"result", "failed", "needs-user", "interrupted"}:
         raise InvestigatorError("investigation terminal state is invalid")
     with store.transaction():
         row = store.conn.execute("SELECT * FROM investigations WHERE investigation_id=?", (investigation_id,)).fetchone()
         if row is None:
             raise InvestigatorError("investigation not found")
+        if row["state"] != "running":
+            if row["state"] == state and canonical_json(dict(result)) == row["result_json"]:
+                return dict(row)
+            raise InvestigatorError("investigation already has a different terminal record")
+        if row["run_id"] is None:
+            raise InvestigatorError("investigation has no controller-supervised run")
         now = utc_now()
         store.conn.execute("UPDATE investigations SET state=?,result_json=?,updated_at=?,completed_at=? WHERE investigation_id=?", (state, canonical_json(dict(result)), now, now, investigation_id))
-        store.conn.execute("UPDATE runs SET desired_state='stopped',observed_state='stopped',ended_at=?,updated_at=? WHERE run_id=? AND observed_state NOT IN ('stopped','failed')", (now, now, row["run_id"]))
+        store.conn.execute("UPDATE conversations SET desired_state='archived',updated_at=?,resource_version=resource_version+1 WHERE conversation_id=? AND desired_state='active'", (now, row["conversation_id"]))
         completed = dict(store.conn.execute("SELECT * FROM investigations WHERE investigation_id=?", (investigation_id,)).fetchone())
-    kind = "needs-user" if state == "needs-user" else "failure" if state == "failed" else "interrupted" if state == "interrupted" else "progress"
-    post_message(store, project_id=completed["project_id"], conversation_id=completed["conversation_id"], run_id=completed["run_id"], kind=kind, payload={"investigationId": investigation_id, "state": state, "result": dict(result)}, idempotency_key=f"investigation:{investigation_id}:{state}")
     return completed
+
+
+def complete_conversation_investigation(store: Any, *, conversation_id: str, state: str, result: Mapping[str, Any]) -> dict[str, Any]:
+    row = store.conn.execute("SELECT investigation_id FROM investigations WHERE conversation_id=?", (conversation_id,)).fetchone()
+    if row is None:
+        raise InvestigatorError("investigator assignment was not found")
+    return complete_investigation(store, row["investigation_id"], state=state, result=result)
 
 
 def interrupt_running(store: Any, *, project_id: str) -> list[dict[str, Any]]:
     validate_id(project_id, prefix="prj")
-    rows = []
-    with store.transaction():
-        for row in store.conn.execute("SELECT * FROM investigations WHERE project_id=? AND state='running'", (project_id,)):
-            now = utc_now()
-            store.conn.execute("UPDATE investigations SET state='interrupted',updated_at=?,completed_at=? WHERE investigation_id=?", (now, now, row["investigation_id"]))
-            store.conn.execute("UPDATE runs SET desired_state='stopped',observed_state='stopped',ended_at=?,updated_at=? WHERE run_id=?", (now, now, row["run_id"]))
-            rows.append(dict(store.conn.execute("SELECT * FROM investigations WHERE investigation_id=?", (row["investigation_id"],)).fetchone()))
-    return rows
+    rows = [dict(row) for row in store.conn.execute("SELECT * FROM investigations WHERE project_id=? AND state='running' AND run_id IS NOT NULL", (project_id,))]
+    return [complete_investigation(store, row["investigation_id"], state="interrupted", result={"reason": "controller-interrupted"}) for row in rows]
 
 
-__all__ = ["InvestigatorError", "complete_investigation", "interrupt_running", "run_investigation", "start_investigation"]
+__all__ = [
+    "InvestigatorError", "bind_investigation_run", "complete_conversation_investigation",
+    "complete_investigation", "interrupt_running", "start_investigation",
+]

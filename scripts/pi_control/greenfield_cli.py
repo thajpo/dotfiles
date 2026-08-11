@@ -10,6 +10,8 @@ import sys
 from typing import Any
 
 from .greenfield_client import GreenfieldClientError, GreenfieldControllerClient
+from .errors import ControlPlaneError, ErrorCode
+from .greenfield_protocol import PROTOCOL_VERSION, protocol_request
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -18,6 +20,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", dest="json_output")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("schema").add_argument("schema_command", choices=["status"])
+    build = sub.add_parser("build")
+    build_sub = build.add_subparsers(dest="build_command", required=True)
+    build_register = build_sub.add_parser("register")
+    build_register.add_argument("--staged-root", required=True)
     project = sub.add_parser("project")
     project_sub = project.add_subparsers(dest="project_command", required=True)
     register = project_sub.add_parser("register")
@@ -45,7 +51,7 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--request-json", required=True)
     command = sub.add_parser("command")
     command_sub = command.add_subparsers(dest="command_command", required=True)
-    for name in ("request", "authorize", "reject", "consume", "execute"):
+    for name in ("request", "status"):
         item = command_sub.add_parser(name)
         item.add_argument("--request-json", required=True)
     run = sub.add_parser("run")
@@ -69,13 +75,18 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--request-json", required=True)
     dependency = sub.add_parser("dependency")
     dependency_sub = dependency.add_subparsers(dest="dependency_command", required=True)
-    for name in ("detect", "disposition"):
+    for name in ("inventory", "disposition"):
         item = dependency_sub.add_parser(name)
         item.add_argument("--request-json", required=True)
     package = sub.add_parser("package-review")
     package_sub = package.add_subparsers(dest="package_command", required=True)
     for name in ("record", "gate"):
         item = package_sub.add_parser(name)
+        item.add_argument("--request-json", required=True)
+    package_operation = sub.add_parser("package")
+    package_operation_sub = package_operation.add_subparsers(dest="package_operation_command", required=True)
+    for name in ("request", "status"):
+        item = package_operation_sub.add_parser(name)
         item.add_argument("--request-json", required=True)
     integration = sub.add_parser("integration")
     integration_sub = integration.add_subparsers(dest="integration_command", required=True)
@@ -115,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "schema":
             value = client.negotiate()["schema"]
+        elif args.command == "build":
+            value = client.register_build(args.staged_root)
         elif args.command == "project":
             if args.project_command == "register":
                 value = client.register_project(args.repository, args.name)
@@ -129,10 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                 value = client.work_index(args.project_id)
         elif args.command == "protocol":
             request = _request(args.request_json)
-            operation = request.get("operation")
-            if not isinstance(operation, str):
-                raise GreenfieldClientError("protocol operation is required")
-            value = {"protocolVersion": 1, "operation": operation, "value": client.dispatch(operation, request.get("request") or {})}
+            value = protocol_request(client, request)
         elif args.command == "scoped-read":
             from .scoped_read import ScopedProjectReader
             request = _request(args.request_json)
@@ -150,15 +160,15 @@ def main(argv: list[str] | None = None) -> int:
         else:
             request = _request(args.request_json)
             if args.command == "conversation":
-                value = getattr(client, f"{args.conversation_command}_conversation")(**request)
+                value = client.dispatch(f"conversation.{args.conversation_command}", request)
             elif args.command == "workstream":
-                value = client.create_workstream(**request)
+                value = client.dispatch("workstream.create", request)
             elif args.command == "message":
-                value = getattr(client, f"{args.message_command}_message")(**request)
+                value = client.dispatch(f"message.{args.message_command}", request)
             elif args.command == "command":
-                value = {"request": client.request_command(**request)} if args.command_command == "request" else (client.authorize_command(**request) if args.command_command == "authorize" else (client.reject_command(**request) if args.command_command == "reject" else (client.consume_command(**request) if args.command_command == "consume" else client.execute_command(**request))))
+                value = client.dispatch(f"command.{args.command_command}", request)
             elif args.command == "run":
-                value = getattr(client, f"{args.run_command}_run")(**request)
+                value = client.dispatch(f"run.{args.run_command}", request)
             elif args.command == "change":
                 if args.change_command == "submit":
                     value = client.submit_change(**request)
@@ -171,9 +181,11 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "review":
                 value = client.request_review(**request) if args.review_command == "request" else (client.create_review_assignment(**request) if args.review_command == "create-assignment" else client.submit_review(**request))
             elif args.command == "dependency":
-                value = client.detect_dependencies(**request) if args.dependency_command == "detect" else client.set_dependency_disposition(**request)
+                value = client.dispatch(f"dependency.{args.dependency_command}", request)
             elif args.command == "package-review":
-                value = client.record_package_security_review(**request) if args.package_command == "record" else client.package_review_gate(**request)
+                value = client.dispatch(f"package-review.{args.package_command}", request)
+            elif args.command == "package":
+                value = client.dispatch(f"package.{args.package_operation_command}", request)
             elif args.command == "integration":
                 value = client.analyze_integration(**request) if args.integration_command == "analyze" else (client.authorize_integration(**request) if args.integration_command == "authorize" else client.integrate(**request))
             elif args.command == "investigation":
@@ -188,8 +200,11 @@ def main(argv: list[str] | None = None) -> int:
                 raise GreenfieldClientError("unsupported CLI command")
         _print(value)
         return 0
-    except (GreenfieldClientError, KeyError, ValueError, OSError, RuntimeError) as error:
-        _print({"error": type(error).__name__, "message": str(error)[:1024]})
+    except (ControlPlaneError, GreenfieldClientError, KeyError, ValueError, OSError, RuntimeError) as error:
+        if isinstance(error, ControlPlaneError):
+            _print({"error": error.as_dict()})
+        else:
+            _print({"error": {"code": ErrorCode.INVALID_REQUEST, "message": str(error)[:1024], "detail": {}}})
         return 2
 
 

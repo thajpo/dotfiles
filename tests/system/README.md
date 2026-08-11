@@ -1,49 +1,80 @@
-# C0b static action catalog
+# Greenfield System Tests
 
-This directory contains the **machine-readable target mapping** for the
-configured Pi harness. It is contract/test infrastructure, not system-tier
-acceptance evidence. The runners and scenarios described by
-`pi/control-plane/SYSTEM_INTEGRATION_TEST_PLAN.md` are not created by C0b.
-Missing future runners remain STOP/77 and no action in this catalog means that a
-scenario has passed.
+This directory contains the machine-readable action catalog and the disposable
+installed-system test infrastructure for the fresh Pi product.
 
-## Validation
+## Evidence Tiers
 
-From the repository root:
+1. **Contract:** validate active documents, manifests, and required source
+   surfaces.
+2. **Source/process:** exercise controller behavior and deterministic process
+   fixtures from the repository.
+3. **Staged installed:** run the exact staged artifact from disposable HOME,
+   state, data, cache, runtime, and Git roots.
+4. **Docker:** exercise the controller-created coding runtime and its manifest,
+   mounts, tools, stop, and recovery behavior.
+5. **Rollback:** prove the installed command generation can be restored without
+   losing new state or work.
+
+No tier inherits acceptance from a lower tier. Help output, syntax checks,
+direct imports, fabricated Docker observations, idle panes, skipped actions, or
+planned actions are not release evidence. Every envelope must bind cataloged
+action, scenario, and tier values and explicitly record installed-product,
+production-mutation, and remote-provider observations.
+
+Program phase status is recorded only in `PI_GREENFIELD_IMPLEMENTATION_PLAN.md`.
+P0 remains source-only. P1 source tests build the production generation with a
+disposable local Pi-core package input; the installed runner requires the exact
+pinned Pi core from the offline npm cache and reports STOP/77 when it is absent.
+
+## Primary Commands
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-  tests.system.test_action_manifest tests.system.test_slice_briefs
 python3 tests/system/validate_plan_docs.py
-git diff --check -- tests/system
+python3 -m unittest tests.system.test_action_manifest
+bash tests/system/run-source-gate.sh
+bash tests/system/run-contract.sh
+bash tests/system/run-staged-installed.sh
+bash tests/system/run-docker.sh
+bash tests/system/run-p6-installed.sh
+bash tests/system/run-rollback.sh
 ```
 
-`validate_plan_docs.py` is read-only. It uses only the Python standard library,
-JSON, Python AST parsing, regular-expression source scans, and bounded file
-reads. It never imports or executes product code, launchers, extensions,
-packages, Git, Docker, tmux, Herdr, or a provider.
+Capability-dependent runners must return STOP/77 when their required runtime is
+unavailable. They must never convert missing evidence into a pass.
 
-## Catalog files
+The staged installed runner builds the production generation twice, requires
+equal build IDs, and executes durable secretary resume plus real investigator
+and exact-revision reviewer Pi processes from each generation. The reviewer
+continues to inspect its assigned revision after the fixture branch moves. The
+runner prints the retained evidence directory. Set
+`PI_SYSTEM_EVIDENCE_DIR` to choose an existing external destination; evidence
+paths inside this repository are rejected.
 
-- `action-manifest.v1.json` has stable HA IDs from System Plan §7. Statuses are
-  explicitly `supported`, `compatibility`, `planned`, `host-only`, or
-  `out-of-scope`. Planned rows name their future C sub-slice; out-of-scope rows
-  name refusal scenarios.
-- `launcher-surface.v1.json` records actions and flags discovered from launcher
-  source, including public and internal-only forms.
-- `loaded-extensions.v1.json` is the provenance allowlist for dynamic installed
-  extension paths and registrations. Each dynamic resource has a source,
-  owning launcher/profile, and stable provenance. An unlisted registration is an
-  error; a missing package remains explicitly unavailable rather than green.
-- `configured-packages.v1.json` mirrors all 13 `pi/settings.json` packages,
-  installed metadata when available, planned first-party staged replacements,
-  loaded resources, representative action/scenario, and remote-capability class.
-- `action-manifest.schema.json` is the machine-readable shape; the validator
-  adds cross-file discovery and status rules that JSON Schema alone cannot
-  express.
+The Docker runner uses the final staged `bin/pi-system-container-run` and the
+already-local pinned Python image. It does not build or pull an image and does
+not contain a direct container-create fixture. It records the real broker tool
+calls, host Pi/container PID split, second-writer refusal, working-copy delta,
+isolation checks, and exact managed-label/name cleanup in an external evidence
+file. Missing Docker or the exact local image is STOP/77.
 
-The manifest validates discovery in both directions: every statically found
-CLI argument/subcommand, launcher action/flag, literal `-e`/`--tools` resource,
-loaded registration, package resource, and documented host operation must have
-an owning HA entrypoint, and every current HA entrypoint must be discoverable.
-Only `planned:` and `refusal:` entrypoints are intentionally non-current.
+## Catalog Files
+
+- `action-manifest.v1.json` distinguishes source implementation from planned or
+  out-of-scope actions and binds each action to evidence tiers.
+- `launcher-surface.v1.json` separates release canaries, planned launchers, and
+  excluded launcher paths.
+- `loaded-extensions.v1.json` records packaged extension role mappings and
+  whether installed-process evidence exists.
+- `configured-packages.v1.json` records the exact package sources and versions
+  packaged by the production builder.
+- `pi/greenfield-resources.v1.json` is the production role/resource catalog;
+  the builder emits its installed relative-path inventory as
+  `release-resources.json` before calculating the build ID.
+- `evidence.schema.json` defines the common evidence envelope. The release
+  verifier rejects planned actions and PASS evidence without an observed
+  installed product action.
+
+The catalog describes required coverage. An action is accepted only when its
+runner invokes the exact staged or installed product path and records the
+observable result.
