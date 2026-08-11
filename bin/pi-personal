@@ -42,12 +42,14 @@ fi
 
 for row in "${projects[@]}"; do
   read -r project_id display_name <<<"$row"
+  window_name=$(printf '%s' "${display_name:-$project_id}" | tr -c 'A-Za-z0-9._-' '-')
+  if tmux has-window -t "=$session:$window_name" 2>/dev/null; then
+    continue
+  fi
+  printf 'pi-personal: ensuring %s conversation (may build the surface stage once)\n' "$display_name" >&2
   conversation=$(python3 "$helper" workstream-conversation "$project_id" | python3 -c "import sys,json;print(json.load(sys.stdin)['conversation_id'])")
   argv=$(python3 "$helper" launch-argv-shell workstream "$conversation" "Resume the assigned project as a personal coding conversation.")
-  window_name=$(printf '%s' "${display_name:-$project_id}" | tr -c 'A-Za-z0-9._-' '-')
-  if ! tmux has-window -t "=$session:$window_name" 2>/dev/null; then
-    tmux new-window -d -t "=$session" -n "$window_name" -c "$HOME" "exec $argv"
-  fi
+  tmux new-window -d -t "=$session" -n "$window_name" -c "$HOME" "exec $argv"
 done
 
 if (( ensure_only )); then exit 0; fi

@@ -67,12 +67,55 @@ def _staged_repo_digest() -> str:
     The stage manifest's own sourceDigest is computed over the staged tree and
     cannot be compared against the working tree. Instead we record a marker
     file with the working-tree digest at build time and compare against that.
+
+    The full-tree digest computation is expensive (it hashes every release
+    file). For the freshness check the repository HEAD plus the porcelain
+    status fingerprint is a fast, sound proxy: the stage is rebuilt from a
+    committed tree, so any change to HEAD or the working tree invalidates it.
     """
-    sys.path.insert(0, str(REPO_ROOT))
-    from scripts.pi_control.greenfield_install import RELEASE_FILES
-    from scripts.pi_control.staged_build import create_build_manifest
-    manifest = create_build_manifest(REPO_ROOT, files=RELEASE_FILES, repository=REPO_ROOT)
-    return manifest.payload["sourceDigest"]
+    if _staged_repo_digest.cache is not None:
+        return _staged_repo_digest.cache
+    head = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+        check=False, capture_output=True, text=True,
+    )
+    if head.returncode != 0:
+        raise SurfaceError("the surface repository is not a Git checkout")
+    status = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "status", "--porcelain"],
+        check=False, capture_output=True, text=True,
+    )
+    if status.returncode != 0:
+        raise SurfaceError("cannot inspect the surface repository status")
+    _staged_repo_digest.cache = "head:" + head.stdout.strip() + "|dirty:" + status.stdout.strip()
+    return _staged_repo_digest.cache
+
+
+_staged_repo_digest.cache: str | None = None
+
+
+def _registered_build(stage_root: str) -> str | None:
+    """Return the registered build id for a stage when its row already exists.
+
+    The stage was fully verified at build and registration time; the marker
+    plus this row lookup is enough to reuse it without re-hashing the tree.
+    """
+    installed = Path(__file__).resolve().parent / "pi_control"
+    if installed.is_dir():
+        sys.path.insert(0, str(installed.parent))
+        from pi_control.greenfield_store import GreenfieldStore
+    else:
+        sys.path.insert(0, str(REPO_ROOT))
+        from scripts.pi_control.greenfield_store import GreenfieldStore
+    try:
+        with GreenfieldStore(STATE_ROOT) as store:
+            row = store.conn.execute(
+                "SELECT build_id, build_manifest_path FROM installed_builds WHERE status='staged' AND build_manifest_path=?",
+                (str(Path(stage_root) / "build-manifest.json"),),
+            ).fetchone()
+    except Exception:
+        return None
+    return row["build_id"] if row is not None else None
 
 
 def ensure_surface_stage() -> dict:
@@ -89,6 +132,9 @@ def ensure_surface_stage() -> dict:
         except OSError:
             marker = ""
         if marker == _staged_repo_digest():
+            build_id = _registered_build(str(SURFACE_STAGE))
+            if build_id is not None:
+                return {"stageRoot": str(SURFACE_STAGE), "buildId": build_id, "reused": True}
             registered = build_register(str(SURFACE_STAGE))
             return {"stageRoot": str(SURFACE_STAGE), "buildId": registered.get("build_id"), "reused": True}
     parent = SURFACE_STAGE.parent

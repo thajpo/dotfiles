@@ -57,12 +57,15 @@ if [[ "$action" == open || "$action" == launch ]]; then
   window_index=1
   for row in "${projects[@]}"; do
     read -r project_id display_name <<<"$row"
+    window_name=$(printf '%s' "${display_name:-$project_id}" | tr -c 'A-Za-z0-9._-' '-')
+    if tmux has-window -t "=$session:$window_name" 2>/dev/null; then
+      window_index=$((window_index + 1))
+      continue
+    fi
+    printf 'pisec: ensuring %s secretary (may build the surface stage once)\n' "$display_name" >&2
     conversation=$(python3 "$helper" secretary-conversation "$project_id" | python3 -c "import sys,json;print(json.load(sys.stdin)['conversation_id'])")
     argv=$(python3 "$helper" launch-argv-shell secretary "$conversation" "Resume the assigned project as secretary.")
-    window_name=$(printf '%s' "${display_name:-$project_id}" | tr -c 'A-Za-z0-9._-' '-')
-    if ! tmux has-window -t "=$session:$window_name" 2>/dev/null; then
-      tmux new-window -d -t "=$session" -n "$window_name" -c "$HOME" "exec $argv"
-    fi
+    tmux new-window -d -t "=$session" -n "$window_name" -c "$HOME" "exec $argv"
     window_index=$((window_index + 1))
   done
   if [[ "$action" == open ]]; then
