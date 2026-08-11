@@ -2,11 +2,13 @@
 
 ## Pi Greenfield System
 
-The desired Pi product is the fresh system in
-[PI_GREENFIELD_IMPLEMENTATION_PLAN.md](PI_GREENFIELD_IMPLEMENTATION_PLAN.md).
-Controller and runtime components exist in source, but the complete installed
-product has not passed its launch, Docker, presentation, and rollback gates.
-OpenCode remains the working environment until those gates pass.
+The fresh Pi system in
+[PI_GREENFIELD_IMPLEMENTATION_PLAN.md](PI_GREENFIELD_IMPLEMENTATION_PLAN.md)
+is the working Pi product. It is installed and activated on this machine
+(`release-passed` on 2026-08-11 against
+`build_2faecfee6b4280149422721827640bb4`), and the daily surface commands
+(`pi-restart`, `pisec`, `pi-personal`, `pi-start`, `pidev`) drive the
+greenfield controller and its controller-bound conversations.
 
 Greenfield state uses `~/.local/state/pi-system/`, installed artifacts use
 `~/.local/share/pi-system/`, and controller-owned working copies use
