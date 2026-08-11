@@ -307,7 +307,7 @@ def _provision_provider_auth(runtime: Path, model: str) -> None:
         pass
 
 
-def _environment(state_root: Path, run_id: str, fd: int, model: str, *, acceptance: bool, manifest_path: Path) -> dict[str, str]:
+def _environment(state_root: Path, run_id: str, fd: int, model: str, *, acceptance: bool, manifest_path: Path, interactive: bool = False) -> dict[str, str]:
     runtime = state_root / "runtime" / run_id
     values = {
         "HOME": runtime / "home", "XDG_CONFIG_HOME": runtime / "config",
@@ -320,7 +320,8 @@ def _environment(state_root: Path, run_id: str, fd: int, model: str, *, acceptan
     if not acceptance:
         _provision_provider_auth(runtime, model)
     env = {key: str(value) for key, value in values.items()}
-    env.update({"PATH": os.defpath, "LANG": "C", "LC_ALL": "C", "TERM": "dumb", "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0", CHANNEL_ENVIRONMENT_KEY: str(fd), "PI_RUNTIME_MANIFEST": str(manifest_path)})
+    term = os.environ.get("TERM", "dumb") if interactive else "dumb"
+    env.update({"PATH": os.defpath, "LANG": "C", "LC_ALL": "C", "TERM": term, "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0", CHANNEL_ENVIRONMENT_KEY: str(fd), "PI_RUNTIME_MANIFEST": str(manifest_path)})
     if not acceptance:
         provider = model.split("/", 1)[0]
         for key in _PROVIDER_ENVIRONMENT.get(provider, ()):
@@ -606,8 +607,12 @@ def launch_host_pi(
     child_request_id: str | None = None,
     child_test_provider: str | None = None,
     cancellation: threading.Event | None = None,
+    interactive: bool = False,
 ) -> int:
-    if not isinstance(prompt, str) or not prompt or "\x00" in prompt or len(prompt.encode("utf-8")) > 16 * 1024:
+    if interactive:
+        if acceptance_test_profile is not None:
+            raise HostSupervisorError("interactive launches cannot use the acceptance-test profile")
+    elif not isinstance(prompt, str) or not prompt or "\x00" in prompt or len(prompt.encode("utf-8")) > 16 * 1024:
         raise HostSupervisorError("prompt is empty or exceeds its bound")
     acceptance = acceptance_test_profile is not None
     if acceptance_test_profile not in {None, ACCEPTANCE_PROFILE}:
@@ -647,19 +652,31 @@ def launch_host_pi(
     cwd = Path(working["path"]).resolve(strict=True)
     ensure_session(session_path, state_root=Path(store.state_root), session_id=selected["conversation"]["pi_session_id"], cwd=cwd)
     tools = sorted(profile["tools"])
-    argv = [
-        str(selected["node"]), resource_paths["package:pi-core"], "--mode", "json", "--offline", "--no-approve", "--no-extensions",
-    ]
+    if interactive:
+        argv = [
+            str(selected["node"]), resource_paths["package:pi-core"], "--offline", "--no-approve", "--no-extensions",
+        ]
+    else:
+        argv = [
+            str(selected["node"]), resource_paths["package:pi-core"], "--mode", "json", "--offline", "--no-approve", "--no-extensions",
+        ]
     for item in resources:
         if item["resourceId"].startswith("extension:") or item["resourceId"] in {"package:pi-sandbox-control", "package:pi-subagents"}:
             argv.extend(["-e", item["path"]])
     for item in acceptance_resources:
         argv.extend(["-e", item["path"]])
-    argv.extend([
-        "--no-builtin-tools", "--tools", ",".join(tools), "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-themes",
-        "--system-prompt", "Installed-process deterministic test." if acceptance else "You are a controller-scoped Pi role.",
-        "--model", model, "--thinking", "off", "--session", str(session_path), prompt,
-    ])
+    if interactive:
+        argv.extend([
+            "--no-builtin-tools", "--tools", ",".join(tools), "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-themes",
+            "--system-prompt", "You are a controller-scoped Pi role.",
+            "--model", model, "--session", str(session_path),
+        ])
+    else:
+        argv.extend([
+            "--no-builtin-tools", "--tools", ",".join(tools), "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-themes",
+            "--system-prompt", "Installed-process deterministic test." if acceptance else "You are a controller-scoped Pi role.",
+            "--model", model, "--thinking", "off", "--session", str(session_path), prompt,
+        ])
     provider_keys = tuple(key for key in (() if acceptance else _PROVIDER_ENVIRONMENT.get(model.split("/", 1)[0], ())) if os.environ.get(key))
     environment_keys = sorted({
         "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "TMPDIR", "PI_CODING_AGENT_DIR",
@@ -702,7 +719,7 @@ def launch_host_pi(
             create_start_container(store, run_id=prepared.run["run_id"], manifest=prepared.manifest)
             container_prepared = True
         parent_channel, child_channel = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        environment = _environment(Path(store.state_root), prepared.run["run_id"], child_channel.fileno(), model, acceptance=acceptance, manifest_path=prepared.manifest_path)
+        environment = _environment(Path(store.state_root), prepared.run["run_id"], child_channel.fileno(), model, acceptance=acceptance, manifest_path=prepared.manifest_path, interactive=interactive)
         if sorted(environment) != [key for key in environment_keys if key in environment]:
             raise HostSupervisorError("constructed child environment differs from the manifest allowlist")
         if before_spawn is not None:

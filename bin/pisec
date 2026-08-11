@@ -64,7 +64,7 @@ if [[ "$action" == open || "$action" == launch ]]; then
     fi
     printf 'pisec: ensuring %s secretary (may build the surface stage once)\n' "$display_name" >&2
     conversation=$(python3 "$helper" secretary-conversation "$project_id" | python3 -c "import sys,json;print(json.load(sys.stdin)['conversation_id'])")
-    argv=$(python3 "$helper" launch-argv-shell secretary "$conversation" "Resume the assigned project as secretary.")
+    argv=$(python3 "$helper" launch-argv-shell secretary "$conversation" --interactive)
     tmux new-window -d -t "=$session" -n "$window_name" -c "$HOME" "exec $argv"
     window_index=$((window_index + 1))
   done

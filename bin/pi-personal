@@ -48,7 +48,7 @@ for row in "${projects[@]}"; do
   fi
   printf 'pi-personal: ensuring %s conversation (may build the surface stage once)\n' "$display_name" >&2
   conversation=$(python3 "$helper" workstream-conversation "$project_id" | python3 -c "import sys,json;print(json.load(sys.stdin)['conversation_id'])")
-  argv=$(python3 "$helper" launch-argv-shell workstream "$conversation" "Resume the assigned project as a personal coding conversation.")
+  argv=$(python3 "$helper" launch-argv-shell workstream "$conversation" --interactive)
   tmux new-window -d -t "=$session" -n "$window_name" -c "$HOME" "exec $argv"
 done
 

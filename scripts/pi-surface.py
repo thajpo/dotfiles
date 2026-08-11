@@ -99,7 +99,17 @@ def _registered_build(stage_root: str) -> str | None:
 
     The stage was fully verified at build and registration time; the marker
     plus this row lookup is enough to reuse it without re-hashing the tree.
+    Look up by build id (from the stage manifest), not by path: the stage is
+    staged to a temporary name and renamed into its stable path, so the
+    registered row's manifest path may be the earlier temporary location.
     """
+    try:
+        manifest = json.loads((Path(stage_root) / "build-manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    build_id = manifest.get("buildId")
+    if not isinstance(build_id, str) or not build_id:
+        return None
     installed = Path(__file__).resolve().parent / "pi_control"
     if installed.is_dir():
         sys.path.insert(0, str(installed.parent))
@@ -110,8 +120,8 @@ def _registered_build(stage_root: str) -> str | None:
     try:
         with GreenfieldStore(STATE_ROOT) as store:
             row = store.conn.execute(
-                "SELECT build_id, build_manifest_path FROM installed_builds WHERE status='staged' AND build_manifest_path=?",
-                (str(Path(stage_root) / "build-manifest.json"),),
+                "SELECT build_id FROM installed_builds WHERE status='staged' AND build_id=?",
+                (build_id,),
             ).fetchone()
     except Exception:
         return None
@@ -156,8 +166,8 @@ def ensure_surface_stage() -> dict:
         build_id = manifest.get("buildId")
         if not isinstance(build_id, str):
             raise SurfaceError("surface stage produced no build id")
-        build_register(str(temporary))
         temporary.rename(SURFACE_STAGE)
+        build_register(str(SURFACE_STAGE))
         marker_path = SURFACE_MARKER
         marker_path.write_text(_staged_repo_digest(), encoding="utf-8")
         return {"stageRoot": str(SURFACE_STAGE), "buildId": build_id, "reused": False}
@@ -318,7 +328,7 @@ _LAUNCHER_NAMES = {
 }
 
 
-def launch_argv(role: str, conversation_id: str, prompt: str, **extra: str) -> list[str]:
+def launch_argv(role: str, conversation_id: str, prompt: str = "", **extra: str) -> list[str]:
     stage = ensure_surface_stage()
     launcher_name = _LAUNCHER_NAMES.get(role)
     if launcher_name is None:
@@ -329,9 +339,12 @@ def launch_argv(role: str, conversation_id: str, prompt: str, **extra: str) -> l
         "--state-root", str(STATE_ROOT),
         "--conversation-id", conversation_id,
         "--build-id", stage["buildId"],
-        "--prompt", prompt,
         "--model", MODEL,
     ]
+    if extra.get("interactive"):
+        argv += ["--interactive"]
+    elif prompt:
+        argv += ["--prompt", prompt]
     if role in {"personal", "workstream"}:
         argv += ["--tool-image", TOOL_IMAGE]
     return argv
@@ -365,11 +378,13 @@ def main(argv: list[str] | None = None) -> int:
     launch = sub.add_parser("launch-argv")
     launch.add_argument("role", choices=("secretary", "personal", "workstream", "reviewer", "investigator"))
     launch.add_argument("conversation_id")
-    launch.add_argument("prompt")
+    launch.add_argument("prompt", nargs="?", default="")
+    launch.add_argument("--interactive", action="store_true")
     launch_shell = sub.add_parser("launch-argv-shell")
     launch_shell.add_argument("role", choices=("secretary", "personal", "workstream", "reviewer", "investigator"))
     launch_shell.add_argument("conversation_id")
-    launch_shell.add_argument("prompt")
+    launch_shell.add_argument("prompt", nargs="?", default="")
+    launch_shell.add_argument("--interactive", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.command == "env":
@@ -393,9 +408,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "workstream-conversation":
             value = workstream_conversation(args.project_id, args.name)
         elif args.command == "launch-argv-shell":
-            value = " ".join(shlex.quote(part) for part in launch_argv(args.role, args.conversation_id, args.prompt))
+            value = " ".join(shlex.quote(part) for part in launch_argv(args.role, args.conversation_id, args.prompt, interactive=args.interactive))
         else:
-            value = launch_argv(args.role, args.conversation_id, args.prompt)
+            value = launch_argv(args.role, args.conversation_id, args.prompt, interactive=args.interactive)
         if args.command == "launch-argv-shell":
             print(value)
         else:

@@ -42,7 +42,7 @@ project_id=$(python3 -c "import sys,json;print(json.load(sys.stdin).get('project
 [[ -n "$project_id" ]] || { printf 'pidev: could not register project with the controller\n' >&2; exit 1; }
 
 conversation=$(python3 "$helper" workstream-conversation "$project_id" | python3 -c "import sys,json;print(json.load(sys.stdin)['conversation_id'])")
-argv=$(python3 "$helper" launch-argv-shell workstream "$conversation" "Resume the assigned project as a personal coding conversation.")
+argv=$(python3 "$helper" launch-argv-shell workstream "$conversation" --interactive)
 
 if ! command -v tmux >/dev/null 2>&1; then printf 'pidev: tmux is required\n' >&2; exit 127; fi
 project_session="project-$(printf '%s' "$repository" | sha256sum | cut -c1-12)"
