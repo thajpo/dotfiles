@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts.pi_control.controller_channel import ControllerChannelError, MAX_FRAME_BYTES, receive_frame, send_frame, validate_handshake
+from scripts.pi_control.controller_channel import ChannelReader, ControllerChannelError, MAX_FRAME_BYTES, receive_frame, send_frame, validate_handshake
 from scripts.pi_control.greenfield_client import GreenfieldControllerClient
 from scripts.pi_control.greenfield_store import GreenfieldStore
 from scripts.pi_control.host_supervisor import HostSupervisorError, _rpc, ensure_session, launch_host_pi
@@ -91,6 +91,74 @@ class ControllerChannelTests(unittest.TestCase):
         finally:
             left.close()
             right.close()
+
+    def test_channel_reader_delivers_pipelined_frames_in_order(self) -> None:
+        left, right = socket.socketpair()
+        try:
+            send_frame(left, {"protocolVersion": 1, "type": "request", "requestId": "request-1", "operation": "read", "payload": {"path": "a"}})
+            send_frame(left, {"protocolVersion": 1, "type": "request", "requestId": "request-2", "operation": "grep", "payload": {"pattern": "b"}})
+            send_frame(left, {"protocolVersion": 1, "type": "cancel", "requestId": "request-1"})
+            reader = ChannelReader(right)
+            first = reader.receive(timeout=0.1)
+            second = reader.receive(timeout=0.1)
+            third = reader.receive(timeout=0.1)
+            self.assertEqual(first["requestId"], "request-1")
+            self.assertEqual(first["operation"], "read")
+            self.assertEqual(second["requestId"], "request-2")
+            self.assertEqual(second["operation"], "grep")
+            self.assertEqual(third["type"], "cancel")
+            self.assertEqual(third["requestId"], "request-1")
+        finally:
+            left.close()
+            right.close()
+
+    def test_channel_frame_accepts_large_text_payload(self) -> None:
+        # Live tool payloads (file contents, command output) legitimately exceed
+        # the 4096-char controller-record text bound; the channel bound is the
+        # frame size itself.
+        large_text = "x" * 9000
+        left, right = socket.socketpair()
+        try:
+            send_frame(left, {"protocolVersion": 1, "type": "request", "requestId": "request-1", "operation": "read", "payload": {"content": large_text}})
+            value = receive_frame(right, timeout=0.1)
+            self.assertEqual(value["payload"]["content"], large_text)
+        finally:
+            left.close()
+            right.close()
+
+
+class ProviderAuthProvisioningTests(unittest.TestCase):
+    def test_provision_copies_only_the_selected_provider(self) -> None:
+        from scripts.pi_control.host_supervisor import _provision_provider_auth
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            agent_dir = root / "agent"
+            agent_dir.mkdir(mode=0o700)
+            (agent_dir / "auth.json").write_text(json.dumps({
+                "openai-codex": {"type": "oauth", "access": "codex-secret", "refresh": "codex-refresh", "expires": 9999999999999, "accountId": "acc-1"},
+                "deepseek": {"type": "key", "key": "deepseek-secret"},
+            }))
+            runtime = root / "runtime"
+            (runtime / "agent").mkdir(parents=True, mode=0o700)
+            with mock.patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(agent_dir)}, clear=False):
+                _provision_provider_auth(runtime, "deepseek/deepseek-v4-flash")
+            destination = runtime / "agent" / "auth.json"
+            self.assertTrue(destination.is_file())
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+            provisioned = json.loads(destination.read_text())
+            self.assertEqual(set(provisioned), {"deepseek"})
+            self.assertEqual(provisioned["deepseek"]["key"], "deepseek-secret")
+            self.assertNotIn("openai-codex", provisioned)
+
+    def test_provision_skips_envkey_providers_and_missing_auth(self) -> None:
+        from scripts.pi_control.host_supervisor import _provision_provider_auth
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runtime = root / "runtime"
+            runtime.mkdir(mode=0o700)
+            with mock.patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(root / "missing")}, clear=False):
+                _provision_provider_auth(runtime, "deepseek/deepseek-v4-flash")
+            self.assertFalse((runtime / "agent" / "auth.json").exists())
 
 
 class SessionTests(unittest.TestCase):

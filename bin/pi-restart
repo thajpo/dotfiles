@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop every managed Pi surface, then start personal + secretary with explicit flags.
+# Stop every managed Pi surface, then rebuild personal via pi-start.
 set -euo pipefail
 
 if (( EUID == 0 )); then
@@ -9,37 +9,27 @@ fi
 command -v tmux >/dev/null 2>&1 || { printf 'pi-restart: tmux is required\n' >&2; exit 127; }
 
 self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-self_path=$(realpath "$self_dir/$(basename -- "${BASH_SOURCE[0]}")")
 pi_start="$HOME/.local/bin/pi-start"
 [[ -x "$pi_start" ]] || pi_start="$self_dir/pi-start"
 [[ -x "$pi_start" ]] || { printf 'pi-restart: pi-start is missing\n' >&2; exit 1; }
 
 mobile_layout=0
-herdr_backend=0
 no_attach=${PI_RESTART_NO_ATTACH:-0}
-internal_handoff=0
 while (( $# )); do
   case "$1" in
     --mobile|-mobile)
       (( mobile_layout == 0 )) || { printf 'pi-restart: mobile selected more than once\n' >&2; exit 2; }
       mobile_layout=1
       ;;
-    --herdr|-herdr)
-      (( herdr_backend == 0 )) || { printf 'pi-restart: Herdr selected more than once\n' >&2; exit 2; }
-      herdr_backend=1
-      ;;
     --no-attach)
       no_attach=1
       ;;
-    --internal-handoff)
-      [[ ${PI_RESTART_HANDOFF:-0} == 1 && $internal_handoff == 0 ]] || {
-        printf 'pi-restart: invalid internal handoff\n' >&2; exit 2;
-      }
-      internal_handoff=1
-      no_attach=1
+    --herdr|-herdr)
+      printf 'pi-restart: the greenfield surface is tmux-only; -herdr is no longer supported\n' >&2
+      exit 2
       ;;
     *)
-      printf 'usage: pi-restart [-mobile|--mobile] [-herdr|--herdr] [--no-attach]\n' >&2
+      printf 'usage: pi-restart [-mobile|--mobile] [--no-attach]\n' >&2
       exit 2
       ;;
   esac
@@ -50,93 +40,9 @@ done
 }
 
 # Controller assignments belong to one prepared run. Never let an ambient
-# assignment become the scope of a newly rebuilt personal or secretary pane.
+# assignment become the scope of a newly rebuilt personal pane.
 while IFS= read -r name; do unset "$name"; done < <(compgen -A variable PI_SYSTEM_)
 unset PI_RUNTIME_MANIFEST PI_RUNTIME_CAPABILITY
-
-HERDR_BIN=$(command -v herdr 2>/dev/null || true)
-herdr_session_running() {
-  local name=$1 payload
-  [[ -n "$HERDR_BIN" ]] || return 1
-  payload=$("$HERDR_BIN" session list --json 2>/dev/null) || return 2
-  python3 -c '
-import json, sys
-name = sys.argv[1]
-try:
-    sessions = json.load(sys.stdin)["sessions"]
-    if not isinstance(sessions, list): raise ValueError
-except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-    raise SystemExit(2)
-raise SystemExit(0 if any(isinstance(item, dict) and item.get("name") == name and item.get("running") is True for item in sessions) else 1)
-' "$name" <<<"$payload"
-}
-
-personal_herdr_active=0
-secretary_herdr_active=0
-for surface in personal secretary; do
-  name="pi-$surface"
-  if herdr_session_running "$name"; then
-    if [[ "$surface" == personal ]]; then personal_herdr_active=1; else secretary_herdr_active=1; fi
-  else
-    rc=$?
-    (( rc == 1 )) || {
-      printf 'pi-restart: cannot inspect Herdr session %s; leaving all surfaces untouched\n' "$name" >&2
-      exit 1
-    }
-  fi
-done
-if (( herdr_backend )) && [[ -z "$HERDR_BIN" ]]; then
-  printf 'pi-restart: herdr is required for -herdr\n' >&2
-  exit 127
-fi
-
-# Stopping the current Herdr server kills its pane. Hand the restart to a
-# private tmux server first so it can stop both named Herdr sessions and the
-# normal tmux server without being reaped with the caller.
-inside_herdr=0
-if [[ ${HERDR_SESSION:-} == pi-personal || ${HERDR_SESSION:-} == pi-secretary ||
-      ( ${HERDR_ENV:-0} == 1 && -n ${HERDR_WORKSPACE_ID:-} ) ]]; then
-  inside_herdr=1
-fi
-if (( (personal_herdr_active || secretary_herdr_active) && inside_herdr && ! internal_handoff )); then
-  state_root=${XDG_STATE_HOME:-$HOME/.local/state}/pi-restart
-  [[ ! -L "$state_root" ]] || { printf 'pi-restart: unsafe state directory\n' >&2; exit 1; }
-  mkdir -p -m 700 "$state_root"
-  chmod 700 "$state_root"
-  handoff_log="$state_root/handoff.log"
-  [[ ! -L "$handoff_log" ]] || { printf 'pi-restart: unsafe handoff log\n' >&2; exit 1; }
-  : > "$handoff_log"; chmod 600 "$handoff_log"
-  handoff_socket="pi-restart-${UID}-$$-${RANDOM}"
-  printf -v handoff_command 'exec env PI_RESTART_HANDOFF=1 PI_RESTART_NO_ATTACH=1 %q --internal-handoff' "$self_path"
-  (( mobile_layout )) && handoff_command+=' -mobile'
-  (( herdr_backend )) && handoff_command+=' -herdr'
-  printf -v handoff_command '%s >>%q 2>&1' "$handoff_command" "$handoff_log"
-  if ! env -u TMUX tmux -L "$handoff_socket" -f /dev/null new-session -d \
-      -s pi-restart-handoff "$handoff_command"; then
-    printf 'pi-restart: cannot create restart handoff; leaving all surfaces untouched\n' >&2
-    exit 1
-  fi
-  printf 'pi-restart: restart handed off; log: %s\n' "$handoff_log" >&2
-  exit 0
-fi
-
-handoff_tmux_socket=""
-cleanup_handoff_socket() {
-  if [[ -n "$handoff_tmux_socket" && -S "$handoff_tmux_socket" && -O "$handoff_tmux_socket" ]]; then
-    rm -f -- "$handoff_tmux_socket" || :
-  fi
-}
-if (( internal_handoff )); then
-  handoff_tmux_socket=${TMUX%%,*}
-  handoff_socket_dir=${TMUX_TMPDIR:-/tmp}/tmux-$UID
-  [[ "$(dirname -- "$handoff_tmux_socket")" == "$handoff_socket_dir" &&
-     "$(basename -- "$handoff_tmux_socket")" == pi-restart-* ]] || {
-    printf 'pi-restart: invalid handoff tmux socket\n' >&2; exit 1;
-  }
-  trap cleanup_handoff_socket EXIT
-  unset TMUX HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID
-  unset PI_PERSONAL_BACKEND PI_SECRETARY_BACKEND PI_SECRETARY_HERDR_BIN PI_SECRETARY_HERDR_WORKER PI_SECRETARY_HERDR_CONFIG
-fi
 
 client_tty=""
 if [[ -n ${TMUX:-} && $no_attach == 0 ]]; then
@@ -148,32 +54,7 @@ if [[ -n ${TMUX:-} && $no_attach == 0 ]]; then
   trap '' HUP
 fi
 
-stop_herdr_session() {
-  local name=$1 stopped=0 rc
-  "$HERDR_BIN" session stop "$name" --json >/dev/null || return 1
-  for _attempt in {1..100}; do
-    if herdr_session_running "$name"; then
-      sleep 0.05
-    else
-      rc=$?
-      if (( rc == 1 )); then stopped=1; break; fi
-      return 2
-    fi
-  done
-  (( stopped == 1 ))
-}
-
-backend=tmux
-(( herdr_backend )) && backend=herdr
-layout=desktop
-(( mobile_layout )) && layout=mobile
-printf 'pi-restart: rebuilding personal + secretary with backend=%s layout=%s\n' "$backend" "$layout" >&2
-if (( personal_herdr_active )); then
-  stop_herdr_session pi-personal || { printf 'pi-restart: failed to stop Herdr personal\n' >&2; exit 1; }
-fi
-if (( secretary_herdr_active )); then
-  stop_herdr_session pi-secretary || { printf 'pi-restart: failed to stop Herdr secretary\n' >&2; exit 1; }
-fi
+printf 'pi-restart: rebuilding personal (layout=%s)\n' "$([[ $mobile_layout == 1 ]] && printf mobile || printf desktop)" >&2
 
 # Skip tmux-resurrect while building a fresh tmux backend. Stable Pi IDs own
 # conversation recovery; resurrecting old process panes would duplicate them.
@@ -186,11 +67,6 @@ if (( no_attach )); then export PI_START_NO_ATTACH=1; fi
 
 start_args=(all)
 (( mobile_layout )) && start_args+=(-mobile)
-(( herdr_backend )) && start_args+=(-herdr)
-if (( internal_handoff )); then
-  cleanup_handoff_socket
-  trap - EXIT
-fi
 if [[ -n "$client_tty" ]]; then
   exec "$pi_start" "${start_args[@]}" <"$client_tty" >"$client_tty" 2>&1
 fi

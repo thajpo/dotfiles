@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deterministic entry point for Pi personal and secretary surfaces.
+# Deterministic entry point for the Pi personal surface.
 set -euo pipefail
 
 if (( EUID == 0 )); then
@@ -9,27 +9,20 @@ fi
 
 self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 personal="$HOME/.local/bin/pi-personal"
-personal_herdr="$HOME/.local/bin/pi-personal-herdr"
-pisec="$HOME/.local/bin/pisec"
-secretary="$HOME/.local/bin/pi-secretary"
 pidev="$HOME/.local/bin/pidev"
 restart="$HOME/.local/bin/pi-restart"
 [[ -x "$personal" ]] || personal="$self_dir/pi-personal"
-[[ -x "$personal_herdr" ]] || personal_herdr="$self_dir/pi-personal-herdr"
-[[ -x "$pisec" ]] || pisec="$self_dir/pisec"
-[[ -x "$secretary" ]] || secretary="$self_dir/pi-secretary"
 [[ -x "$pidev" ]] || pidev="$self_dir/pidev"
 [[ -x "$restart" ]] || restart="$self_dir/pi-restart"
 
 usage() {
   printf '%s\n' \
-    'usage: pi-start [personal|secretary|project [DIR]|host|all|help] [-mobile|--mobile] [-herdr|--herdr]' \
+    'usage: pi-start [personal|project [DIR]|all|help] [-mobile|--mobile]' \
     '       defaults: desktop layout and tmux backend' \
-    '       all always starts both personal and secretary' >&2
+    '       all always starts personal' >&2
 }
 
 mobile_layout=0
-herdr_backend=0
 filtered_args=()
 while (( $# )); do
   case "$1" in
@@ -39,9 +32,8 @@ while (( $# )); do
       shift
       ;;
     --herdr|-herdr)
-      (( herdr_backend == 0 )) || { printf 'pi-start: Herdr selected more than once\n' >&2; exit 2; }
-      herdr_backend=1
-      shift
+      printf 'pi-start: the greenfield surface is tmux-only; -herdr is no longer supported\n' >&2
+      exit 2
       ;;
     --)
       shift
@@ -58,19 +50,19 @@ set -- "${filtered_args[@]}"
 action=${1:-personal}
 case "$action" in
   personal) [[ $# -le 1 ]] || { usage; exit 2; } ;;
-  secretary|host|all) [[ $# -eq 1 ]] || { usage; exit 2; } ;;
+  personal|all) [[ $# -eq 1 ]] || { usage; exit 2; } ;;
   help) [[ $# -le 2 && ${2:-all} == all ]] || { usage; exit 2; } ;;
   project) [[ $# -le 2 ]] || { usage; exit 2; } ;;
+  secretary)
+    printf 'pi-start: the legacy secretary surface was decommissioned; use the greenfield system when it ships\n' >&2
+    exit 2
+    ;;
   *) usage; exit 2 ;;
 esac
 
 if [[ "$action" == help ]]; then
   if [[ ${2:-} == all ]]; then exec "$self_dir/pi-help-custom" all; fi
   exec "$self_dir/pi-help-custom"
-fi
-if (( herdr_backend )) && [[ "$action" == project ]]; then
-  printf 'pi-start: -herdr applies to managed personal/secretary surfaces, not project workspaces\n' >&2
-  exit 2
 fi
 
 no_attach=${PI_START_NO_ATTACH:-0}
@@ -90,22 +82,6 @@ while IFS= read -r name; do unset "$name"; done < <(compgen -A variable PI_SYSTE
 unset PI_RUNTIME_MANIFEST PI_RUNTIME_CAPABILITY
 
 if (( mobile_layout )); then export PI_TMUX_LAYOUT=mobile; else unset PI_TMUX_LAYOUT; fi
-
-herdr_session_running() {
-  local name=$1 herdr_bin payload
-  herdr_bin=$(command -v herdr 2>/dev/null) || return 1
-  payload=$("$herdr_bin" session list --json 2>/dev/null) || return 2
-  python3 -c '
-import json, sys
-name = sys.argv[1]
-try:
-    sessions = json.load(sys.stdin)["sessions"]
-    if not isinstance(sessions, list): raise ValueError
-except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-    raise SystemExit(2)
-raise SystemExit(0 if any(isinstance(item, dict) and item.get("name") == name and item.get("running") is True for item in sessions) else 1)
-' "$name" <<<"$payload"
-}
 
 tmux_session_running() {
   local name=$1 rc
@@ -162,246 +138,72 @@ else:
 ' <<<"$payload"
 }
 
-tmux_secretary_layout() {
-  local payload
-  payload=$(tmux list-windows -t =pisec -F $'#{window_name}\t#{window_panes}' 2>/dev/null) || return 2
-  python3 -c '
-import re, sys
-rows = [line.split("\t") for line in sys.stdin.read().splitlines() if line]
-try:
-    counts = [int(count) for _name, count in rows]
-except (TypeError, ValueError):
-    raise SystemExit(2)
-if not rows or any(not re.fullmatch(r"projects(?:-[1-9][0-9]*)?", name) for name, _count in rows):
-    raise SystemExit(1)
-if any(count < 1 or count > 2 for count in counts):
-    raise SystemExit(1)
-# With one active project the two layouts are equivalent. Multiple one-pane
-# windows are mobile; any paired window proves desktop.
-print("desktop" if any(count == 2 for count in counts) else "mobile" if len(counts) > 1 else "either")
-' <<<"$payload"
-}
-
-herdr_personal_layout() {
-  local herdr_bin payload
-  herdr_bin=$(command -v herdr 2>/dev/null) || return 2
-  payload=$("$herdr_bin" --session pi-personal workspace list 2>/dev/null) || return 2
-  python3 -c '
-import json, sys
-try:
-    workspaces = json.load(sys.stdin)["result"]["workspaces"]
-    labels = [item["label"] for item in workspaces]
-    if not all(isinstance(label, str) for label in labels): raise ValueError
-except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-    raise SystemExit(2)
-if labels == ["personal/personal-1", "personal/personal-2"]:
-    print("desktop")
-elif labels == ["personal/mlre-transition", "personal/financials", "personal/dotfiles", "personal/pi-host"]:
-    print("mobile")
-else:
-    raise SystemExit(1)
-' <<<"$payload"
-}
-
 rebuild_all() {
   local reason=$1
   local -a args=()
   [[ -x "$restart" ]] || { printf 'pi-start: pi-restart is missing\n' >&2; exit 1; }
   (( mobile_layout )) && args+=(-mobile)
-  (( herdr_backend )) && args+=(-herdr)
   (( no_attach )) && args+=(--no-attach)
   printf 'pi-start: %s; rebuilding the managed grid\n' "$reason" >&2
   exec "$restart" "${args[@]}"
 }
 
 personal_needed=0
-secretary_needed=0
 case "$action" in
-  personal|host) personal_needed=1 ;;
-  secretary) secretary_needed=1 ;;
-  all) personal_needed=1; secretary_needed=1 ;;
+  personal|all) personal_needed=1 ;;
 esac
 
-# `all` is a desired-state command for the complete managed grid. If a proven
-# existing owner occupies another matrix cell, use the same guarded rebuild as
-# pi-restart instead of producing a partial grid or asking the user to repeat
-# the flags on a different command. Unknown process/layout state still fails
-# closed in the backend launchers.
+# `all` is a desired-state command for the managed grid. If a proven existing
+# owner occupies the personal cell, use the same guarded rebuild as pi-restart
+# instead of producing a partial grid or asking the user to repeat the flags on
+# a different command. Unknown process/layout state still fails closed in the
+# backend launchers.
 if [[ "$action" == all && "$restarting" == 0 ]]; then
   desired_layout=desktop
   (( mobile_layout )) && desired_layout=mobile
-  if (( herdr_backend )); then
-    tmux_conflict=0
-    for name in pi-personal pisec; do
-      if tmux_session_running "$name"; then tmux_conflict=1; else
-        rc=$?
-        (( rc == 1 )) || { printf 'pi-start: cannot inspect tmux %s\n' "$name" >&2; exit 1; }
-      fi
-    done
-    (( tmux_conflict == 0 )) || rebuild_all 'tmux currently owns personal or secretary'
-
-    if herdr_session_running pi-personal; then
-      if current_layout=$(herdr_personal_layout); then
-        [[ "$current_layout" == "$desired_layout" ]] || \
-          rebuild_all "Herdr personal is $current_layout, not $desired_layout"
-      else
-        rc=$?
-        (( rc == 1 )) || { printf 'pi-start: cannot inspect the Herdr personal layout\n' >&2; exit 1; }
-      fi
+  if tmux_session_running pi-personal; then
+    if current_layout=$(tmux_personal_layout); then
+      [[ "$current_layout" == "$desired_layout" ]] || \
+        rebuild_all "tmux personal is $current_layout, not $desired_layout"
     else
       rc=$?
-      (( rc == 1 )) || { printf 'pi-start: cannot inspect Herdr personal\n' >&2; exit 1; }
+      (( rc == 1 )) || { printf 'pi-start: cannot inspect the tmux personal layout\n' >&2; exit 1; }
     fi
   else
-    herdr_conflict=0
-    for name in pi-personal pi-secretary; do
-      if herdr_session_running "$name"; then herdr_conflict=1; else
-        rc=$?
-        (( rc == 1 )) || { printf 'pi-start: cannot inspect Herdr %s\n' "$name" >&2; exit 1; }
-      fi
-    done
-    (( herdr_conflict == 0 )) || rebuild_all 'Herdr currently owns personal or secretary'
-
-    if tmux_session_running pi-personal; then
-      if current_layout=$(tmux_personal_layout); then
-        [[ "$current_layout" == "$desired_layout" ]] || \
-          rebuild_all "tmux personal is $current_layout, not $desired_layout"
-      else
-        rc=$?
-        (( rc == 1 )) || { printf 'pi-start: cannot inspect the tmux personal layout\n' >&2; exit 1; }
-      fi
-    else
-      rc=$?
-      (( rc == 1 )) || { printf 'pi-start: cannot inspect tmux personal\n' >&2; exit 1; }
-      if tmux_session_running pisec; then
-        if current_layout=$(tmux_secretary_layout); then
-          [[ "$current_layout" == either || "$current_layout" == "$desired_layout" ]] || \
-            rebuild_all "tmux secretary is $current_layout, not $desired_layout"
-        else
-          rc=$?
-          (( rc == 1 )) || { printf 'pi-start: cannot inspect the tmux secretary layout\n' >&2; exit 1; }
-        fi
-      else
-        rc=$?
-        (( rc == 1 )) || { printf 'pi-start: cannot inspect tmux secretary\n' >&2; exit 1; }
-      fi
-    fi
+    rc=$?
+    (( rc == 1 )) || { printf 'pi-start: cannot inspect tmux personal\n' >&2; exit 1; }
   fi
 fi
 
 # Stable conversations are single-owner across terminal backends. Single-
 # surface starts remain non-destructive; `all` handled proven switches above.
-if (( herdr_backend )); then
-  command -v herdr >/dev/null 2>&1 || { printf 'pi-start: herdr is required\n' >&2; exit 127; }
-  if (( personal_needed )); then
-    if tmux_session_running pi-personal; then
-      printf 'pi-start: tmux personal is running; use pi-restart -herdr to switch safely\n' >&2
-      exit 1
-    else
-      rc=$?; (( rc == 1 )) || { printf 'pi-start: cannot inspect tmux personal\n' >&2; exit 1; }
-    fi
-  fi
-  if (( secretary_needed )); then
-    if tmux_session_running pisec; then
-      printf 'pi-start: tmux secretary is running; use pi-restart -herdr to switch safely\n' >&2
-      exit 1
-    else
-      rc=$?; (( rc == 1 )) || { printf 'pi-start: cannot inspect tmux secretary\n' >&2; exit 1; }
-    fi
-  fi
-  unset PI_RESTARTING TMUX
-else
-  command -v tmux >/dev/null 2>&1 || { printf 'pi-start: tmux is required\n' >&2; exit 127; }
-  if (( personal_needed )); then
-    if herdr_session_running pi-personal; then
-      printf 'pi-start: Herdr personal is running; use pi-restart to switch to tmux safely\n' >&2
-      exit 1
-    else
-      rc=$?; (( rc == 1 )) || { printf 'pi-start: cannot inspect Herdr personal\n' >&2; exit 1; }
-    fi
-  fi
-  if (( secretary_needed )); then
-    if herdr_session_running pi-secretary; then
-      printf 'pi-start: Herdr secretary is running; use pi-restart to switch to tmux safely\n' >&2
-      exit 1
-    else
-      rc=$?; (( rc == 1 )) || { printf 'pi-start: cannot inspect Herdr secretary\n' >&2; exit 1; }
-    fi
-  fi
+command -v tmux >/dev/null 2>&1 || { printf 'pi-start: tmux is required\n' >&2; exit 127; }
 
-  # Clean a pre-existing server before creating any process in it. New servers
-  # inherit the already-sanitized environment of this launcher.
-  clear_tmux_controller_scope || exit 1
+# Clean a pre-existing server before creating any process in it. New servers
+# inherit the already-sanitized environment of this launcher.
+clear_tmux_controller_scope || exit 1
 
-  # Start the tmux server without stealing the caller terminal.
-  if tmux has-session -t =main 2>/dev/null; then :; else
-    rc=$?
-    [[ $rc -eq 1 ]] || { printf 'pi-start: cannot query tmux sessions\n' >&2; exit 1; }
-    tmux new-session -d -s main -n shell -c "$HOME" 'exec bash' || {
-      printf 'pi-start: cannot create the main tmux session\n' >&2; exit 1;
-    }
-  fi
-  if [[ ${PI_RESTARTING:-0} == 1 ]]; then
-    tmux set-environment -gu PI_RESTARTING 2>/dev/null || true
-  fi
+# Start the tmux server without stealing the caller terminal. When pi-restart
+# requested a fresh grid, the restart flag must be visible to tmux.conf (which
+# gates tmux-resurrect restore) before any server exists, so set it in the
+# server's global environment first.
+if [[ ${PI_RESTARTING:-0} == 1 ]]; then
+  tmux set-environment -g PI_RESTARTING 1 2>/dev/null || true
 fi
-
-personal_herdr_args=()
-(( mobile_layout )) && personal_herdr_args+=(--mobile)
-
-open_secretary_herdr_window() {
-  # Keep the current terminal for personal and open secretary in a second
-  # graphical terminal when one is available. Over SSH/headless terminals both
-  # named sessions still start; print the exact second attach command.
-  if [[ -n ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]] && command -v kitty >/dev/null 2>&1; then
-    kitty --detach --title 'Pi Secretary · Herdr' "$secretary" --herdr >/dev/null 2>&1
-    return $?
-  fi
-  if [[ -n ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]] && command -v gnome-terminal >/dev/null 2>&1; then
-    gnome-terminal --title='Pi Secretary · Herdr' -- "$secretary" --herdr >/dev/null 2>&1
-    return $?
-  fi
-  return 1
-}
-
-if (( herdr_backend )); then
-  case "$action" in
-    personal)
-      if (( no_attach )); then exec "$personal_herdr" "${personal_herdr_args[@]}" --no-attach; fi
-      exec "$personal_herdr" "${personal_herdr_args[@]}"
-      ;;
-    secretary)
-      if (( no_attach )); then exec "$secretary" --herdr --no-attach; fi
-      exec "$secretary" --herdr
-      ;;
-    host)
-      if (( no_attach )); then exec "$personal_herdr" "${personal_herdr_args[@]}" --focus-role pi-host --no-attach; fi
-      exec "$personal_herdr" "${personal_herdr_args[@]}" --focus-role pi-host
-      ;;
-    all)
-      "$personal_herdr" "${personal_herdr_args[@]}" --no-attach
-      "$secretary" --herdr --no-attach
-      if (( no_attach )); then exit 0; fi
-      if ! open_secretary_herdr_window; then
-        printf '%s\n' \
-          'pi-start: personal and secretary Herdr sessions are running.' \
-          'pi-start: this terminal will attach personal; attach secretary in another window with:' \
-          '  herdr session attach pi-secretary' >&2
-      fi
-      exec "$personal_herdr" "${personal_herdr_args[@]}"
-      ;;
-  esac
+if tmux has-session -t =main 2>/dev/null; then :; else
+  rc=$?
+  [[ $rc -eq 1 ]] || { printf 'pi-start: cannot query tmux sessions\n' >&2; exit 1; }
+  tmux new-session -d -s main -n shell -c "$HOME" 'exec bash' || {
+    printf 'pi-start: cannot create the main tmux session\n' >&2; exit 1;
+  }
+fi
+if [[ ${PI_RESTARTING:-0} == 1 ]]; then
+  tmux set-environment -gu PI_RESTARTING 2>/dev/null || true
 fi
 
 case "$action" in
   personal)
     if (( mobile_layout )); then "$personal" --ensure --mobile; else "$personal" --ensure; fi
-    ;;
-  secretary)
-    if (( no_attach )); then
-      if (( mobile_layout )); then exec "$pisec" --mobile launch; else exec "$pisec" launch; fi
-    fi
-    if (( mobile_layout )); then exec "$pisec" --mobile; else exec "$pisec"; fi
     ;;
   project)
     directory=${2:-$PWD}
@@ -409,25 +211,16 @@ case "$action" in
     cd -- "$directory"
     if (( mobile_layout )); then exec "$pidev" --mobile; else exec "$pidev"; fi
     ;;
-  host|all)
+  all)
     if (( mobile_layout )); then "$personal" --ensure --mobile; else "$personal" --ensure; fi
-    if [[ "$action" == all ]]; then
-      if (( no_attach )); then
-        if (( mobile_layout )); then exec "$pisec" --mobile launch; else exec "$pisec" launch; fi
-      fi
-      if (( mobile_layout )); then exec "$pisec" --mobile; else exec "$pisec"; fi
-    fi
+    if [[ -x "$self_dir/pisec" ]]; then "$self_dir/pisec" launch; fi
     ;;
 esac
 
-if [[ "$action" == host ]]; then
-  host_pane=$(tmux list-panes -a -t =pi-personal -F '#{pane_id}\t#{@pi_personal_role}' 2>/dev/null | awk -F '\t' '$2 == "pi-host" { print $1; exit }')
-  [[ -n "$host_pane" ]] || { printf 'pi-start: pi-host pane was not found\n' >&2; exit 1; }
-  tmux select-pane -t "$host_pane"
-fi
-
+first_window=$(tmux list-windows -t =pi-personal -F '#{window_index} #{window_name}' 2>/dev/null | awk '$2 != "shell" { print $1; exit }')
+[[ -n "$first_window" ]] || first_window=$(tmux list-windows -t =pi-personal -F '#{window_index}' 2>/dev/null | head -1)
 if [[ -n ${TMUX:-} ]]; then
-  exec tmux switch-client -t =pi-personal:personal-1
+  exec tmux switch-client -t "=pi-personal:$first_window"
 else
-  exec tmux attach-session -t =pi-personal:personal-1
+  exec tmux attach-session -t "=pi-personal:$first_window"
 fi

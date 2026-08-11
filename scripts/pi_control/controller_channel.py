@@ -13,6 +13,11 @@ from .models import canonical_json
 
 PROTOCOL_VERSION = 1
 MAX_FRAME_BYTES = 64 * 1024
+# Channel frames carry live tool payloads (file contents, command output) that
+# legitimately exceed the 4096-char controller-record text bound. The per-text
+# limit for channel JSON is the frame bound itself; the encoded total is still
+# capped by MAX_FRAME_BYTES in send_frame.
+_CHANNEL_MAX_TEXT = MAX_FRAME_BYTES
 
 
 class ControllerChannelError(RuntimeError):
@@ -20,7 +25,7 @@ class ControllerChannelError(RuntimeError):
 
 
 def send_frame(channel: socket.socket, value: Mapping[str, Any]) -> None:
-    body = canonical_json(dict(value)).encode("utf-8")
+    body = canonical_json(dict(value), max_text=_CHANNEL_MAX_TEXT).encode("utf-8")
     if len(body) > MAX_FRAME_BYTES:
         raise ControllerChannelError("controller channel frame exceeds its bound")
     try:
@@ -50,11 +55,50 @@ def receive_frame(channel: socket.socket, *, timeout: float) -> dict[str, Any]:
             break
         if len(chunks) > MAX_FRAME_BYTES:
             raise ControllerChannelError("controller channel frame exceeds its bound")
+    return _decode_frame(body)
+
+
+class ChannelReader:
+    """Buffered reader for the host Pi controller channel.
+
+    The child can pipeline several frames into one send; receive_frame treats
+    any extra bytes as corruption. This reader keeps the leftover bytes across
+    calls so each pipelined frame is delivered exactly once and in order.
+    """
+
+    def __init__(self, channel: socket.socket) -> None:
+        self._channel = channel
+        self._buffer = bytearray()
+
+    def receive(self, *, timeout: float) -> dict[str, Any]:
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline >= 0:
+                body = bytes(self._buffer[:newline])
+                del self._buffer[: newline + 1]
+                if len(self._buffer) > MAX_FRAME_BYTES:
+                    raise ControllerChannelError("controller channel buffered frame exceeds its bound")
+                return _decode_frame(body)
+            if len(self._buffer) > MAX_FRAME_BYTES:
+                raise ControllerChannelError("controller channel frame exceeds its bound")
+            readable, _, _ = select.select([self._channel], [], [], timeout)
+            if not readable:
+                raise ControllerChannelError("controller channel handshake timed out")
+            try:
+                block = self._channel.recv(min(4096, MAX_FRAME_BYTES + 2 - len(self._buffer)))
+            except (ConnectionResetError, BrokenPipeError) as error:
+                raise ControllerChannelError("controller channel closed before a complete frame") from error
+            if not block:
+                raise ControllerChannelError("controller channel closed before a complete frame")
+            self._buffer.extend(block)
+
+
+def _decode_frame(body: bytes) -> dict[str, Any]:
     try:
         value = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ControllerChannelError("controller channel frame is not UTF-8 JSON") from error
-    if not isinstance(value, dict) or canonical_json(value).encode("utf-8") != body:
+    if not isinstance(value, dict) or canonical_json(value, max_text=_CHANNEL_MAX_TEXT).encode("utf-8") != body:
         raise ControllerChannelError("controller channel frame is not canonical JSON")
     return value
 
@@ -83,6 +127,6 @@ def validate_handshake(handshake: Mapping[str, Any], expected: Mapping[str, Any]
 
 
 __all__ = [
-    "ControllerChannelError", "MAX_FRAME_BYTES", "PROTOCOL_VERSION",
+    "ChannelReader", "ControllerChannelError", "MAX_FRAME_BYTES", "PROTOCOL_VERSION",
     "receive_frame", "send_frame", "validate_handshake",
 ]

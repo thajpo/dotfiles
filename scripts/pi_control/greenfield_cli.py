@@ -171,15 +171,15 @@ def main(argv: list[str] | None = None) -> int:
                 value = client.dispatch(f"run.{args.run_command}", request)
             elif args.command == "change":
                 if args.change_command == "submit":
-                    value = client.submit_change(**request)
+                    value = client.dispatch("change.submit", request)
                 elif args.change_command == "revise":
-                    value = client.submit_change_revision(**request)
+                    value = client.dispatch("change.revise", request)
                 elif args.change_command == "list":
-                    value = client.list_changes(request.get("project_id") or request.get("projectId"))
+                    value = client.dispatch("change.list", request)
                 else:
-                    value = client.get_change(request.get("change_id") or request.get("changeId"))
+                    value = client.dispatch("change.show", request)
             elif args.command == "review":
-                value = client.request_review(**request) if args.review_command == "request" else (client.create_review_assignment(**request) if args.review_command == "create-assignment" else client.submit_review(**request))
+                value = client.dispatch(f"review.{args.review_command}", request)
             elif args.command == "dependency":
                 value = client.dispatch(f"dependency.{args.dependency_command}", request)
             elif args.command == "package-review":
@@ -187,15 +187,11 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "package":
                 value = client.dispatch(f"package.{args.package_operation_command}", request)
             elif args.command == "integration":
-                value = client.analyze_integration(**request) if args.integration_command == "analyze" else (client.authorize_integration(**request) if args.integration_command == "authorize" else client.integrate(**request))
+                value = client.dispatch(f"integration.{args.integration_command}", request)
             elif args.command == "investigation":
-                from .investigators import start_investigation
-                with client._store(mutate=True) as store:
-                    value = start_investigation(store, **request)
+                value = client.dispatch("investigation.start", request)
             elif args.command == "presentation":
-                from .presentation import ensure_presentation
-                with client._store(mutate=True) as store:
-                    value = ensure_presentation(store, **request)
+                value = client.dispatch("presentation.ensure", request)
             else:
                 raise GreenfieldClientError("unsupported CLI command")
         _print(value)

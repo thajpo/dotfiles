@@ -15,8 +15,8 @@ Pi commands
 
 Remember these three:
   pi                         Work on the repository in the current directory.
-  pi-start all               Start personal + secretary: desktop tmux (default).
-  pi-restart                 Rebuild personal + secretary as desktop tmux.
+  pi-start all               Start the personal surface: desktop tmux (default).
+  pi-restart                 Rebuild the personal surface as desktop tmux.
 
 The complete start matrix (flags are per invocation, not persisted):
   pi-start all                         desktop + tmux
@@ -24,13 +24,12 @@ The complete start matrix (flags are per invocation, not persisted):
   pi-start all -herdr                  desktop + Herdr
   pi-start all -mobile -herdr          mobile  + Herdr
 
-`all` always starts both personal and secretary. `--mobile` and `--herdr` are
+`all` always starts the personal surface. `--mobile` and `--herdr` are
 accepted aliases. If the managed grid is already in another matrix cell,
 `pi-start all` rebuilds it safely. `pi-restart` forces a clean rebuild.
 
 Choose one destination instead:
   pi-start                   Personal only, desktop tmux.
-  pi-start secretary         Secretary only, desktop tmux.
   pi-start project [DIR]     Project workspace with Neovim + Pi.
   pi-start host              Explicit unsandboxed host-maintenance conversation.
 
@@ -51,29 +50,23 @@ Full workspace reference
 Backend and layout:
   - Desktop and tmux are defaults on every invocation.
   - `-mobile` changes layout for that invocation only.
-  - `-herdr` puts both managed surfaces in Herdr for that invocation only.
+  - `-herdr` puts the managed personal surface in Herdr for that invocation only.
   - `pi-start all` safely rebuilds a proven managed grid when its backend or
     layout differs; single-surface starts never replace another live owner.
   - `pi-restart` forces a clean rebuild using the requested matrix cell.
   - Conversation identities survive either backend and layout.
 
 What the layouts contain:
-  tmux desktop               Personal and secretary use paired side-by-side panes.
+  tmux desktop               Personal roles use paired side-by-side panes.
   tmux mobile                Each conversation gets its own tmux window.
-  Herdr desktop              Named sessions `pi-personal` and `pi-secretary`;
+  Herdr desktop              Named session `pi-personal`;
                              personal roles are paired in two Spaces.
-  Herdr mobile               The same two named sessions; each personal role gets
-                             its own Space. Secretary keeps one Space per active project.
-
-Herdr clients:
-  In a graphical terminal, `pi-start all -herdr` keeps personal in the current
-  window and opens secretary in a second terminal window. Over SSH/headless,
-  both named sessions still start; this terminal attaches personal and prints:
-    herdr session attach pi-secretary
+  Herdr mobile               The same named session; each personal role gets
+                             its own Space.
 
 Start and switch examples:
-  pi-start all -mobile       Start or switch both surfaces to mobile tmux.
-  pi-start all -herdr        Start or switch both surfaces to desktop Herdr.
+  pi-start all -mobile       Start or switch the personal surface to mobile tmux.
+  pi-start all -herdr        Start or switch the personal surface to desktop Herdr.
   pi-restart -herdr          Force a clean rebuild as desktop Herdr.
   pi-restart -mobile -herdr  Switch cleanly to mobile Herdr.
   pi-restart -mobile         Switch cleanly to mobile tmux.
@@ -88,7 +81,6 @@ Other launchers:
 
 Switch and navigate:
   Ctrl-a p                   Switch to pi-personal in tmux.
-  Ctrl-a g                   Switch to pisec in tmux.
   Ctrl-a \                    Toggle the previous tmux session.
   tmux ls                    List tmux sessions.
   tmux attach -t NAME        Attach to a named tmux session.
@@ -109,22 +101,13 @@ Useful commands inside Pi:
   Ctrl-g                     Browse conversation history.
   Enter / Alt-Enter          Steer now / queue a follow-up while Pi is busy.
 
-Secretary projects:
-  pisec                      Open the active set directly in desktop tmux.
-  pisec -mobile              Open it directly in mobile tmux.
-  pisec activate ALIAS ...   Persist/replace the backend-neutral active set.
-                             If Herdr owns it, Herdr restarts safely.
-  pisec swap OLD NEW         Replace one active project without changing order.
-  pisec list                 List all registered secretary projects.
-  pisec launch               Repair idle tmux secretary panes without attaching.
-  pi-secretary --herdr       Directly open/repair the active set in Herdr.
-  pi-secretary-stats         Summarize secretary time and token usage.
+Other tools:
   pi-harness-feedback        Review the central normalized feedback feed.
   pi-harness-feedback --repository PATH
                              Filter harness feedback to one project.
 
 Recovery and maintenance:
-  pi-restart                 Rebuild personal + secretary as desktop tmux.
+  pi-restart                 Rebuild the personal surface as desktop tmux.
   pi-personal --ensure       Repair missing desktop tmux personal panes.
   pi-personal -mobile --ensure
                              Repair mobile tmux personal windows.
@@ -139,7 +122,7 @@ Recovery and maintenance:
                              Show reviewed and pending self-improvement feedback.
 
 Safety boundary:
-  root, personal, secretary  Conversation roles and authority profiles.
+  root, personal             Conversation roles and authority profiles.
   tmux, Herdr                Terminal backends, not authority profiles.
   Only one backend may own a durable managed conversation at a time.
   Ordinary `pi` owns repository trust and sandbox selection. Use `pi-host`

@@ -63,6 +63,18 @@ SPECS: Mapping[str, RequestSpec] = {
     "package-review.gate": _spec({"changeId": "change_id", "revision": "revision"}),
     "package.request": _spec({"projectId": "project_id", "conversationId": "conversation_id", "runId": "run_id", "writerGeneration": "writer_generation", "changeId": "change_id", "revision": "revision", "ecosystem": "ecosystem", "action": "action", "packageName": "package_name", "exactVersion": "exact_version"}, {"projectId", "conversationId", "runId", "writerGeneration", "changeId", "revision", "ecosystem", "action"}),
     "package.status": _spec({"projectId": "project_id", "packageRequestId": "package_request_id"}),
+    "change.submit": _spec({"projectId": "project_id", "workingCopyId": "working_copy_id", "targetRef": "target_ref", "title": "title", "summary": "summary", "captureMode": "capture_mode", "selectedPaths": "selected_paths", "excludedPaths": "excluded_paths", "expectedStatusHash": "expected_status_hash", "idempotencyKey": "idempotency_key", "createdByConversationId": "created_by_conversation_id", "actorType": "actor_type", "actorId": "actor_id", "authorizationId": "authorization_id"}, {"projectId", "workingCopyId", "targetRef", "title", "summary", "idempotencyKey"}),
+    "change.revise": _spec({"projectId": "project_id", "changeId": "change_id", "targetRef": "target_ref", "title": "title", "summary": "summary", "idempotencyKey": "idempotency_key"}, {"projectId", "changeId", "idempotencyKey"}),
+    "change.list": _spec({"projectId": "project_id"}),
+    "change.show": _spec({"changeId": "change_id"}),
+    "review.request": _spec({"changeId": "change_id", "revision": "revision", "reviewerConversationId": "reviewer_conversation_id", "reviewerRunId": "reviewer_run_id", "reviewerActorId": "reviewer_actor_id", "reviewerCapabilitySecret": "reviewer_capability_secret", "evidence": "evidence", "reviewId": "review_id", "dependencyReviewDigest": "dependency_review_digest"}, {"changeId", "revision"}),
+    "review.create-assignment": _spec({"changeId": "change_id", "revision": "revision"}, {"changeId", "revision"}),
+    "review.submit": _spec({"reviewId": "review_id", "verdict": "verdict", "summary": "summary", "findings": "findings", "evidence": "evidence", "reviewerRunId": "reviewer_run_id", "reviewerActorId": "reviewer_actor_id", "reviewerCapabilitySecret": "reviewer_capability_secret"}, {"reviewId", "verdict"}),
+    "integration.analyze": _spec({"projectId": "project_id", "changeId": "change_id", "revision": "revision", "targetWorkingCopyId": "target_working_copy_id", "targetRef": "target_ref", "integrationId": "integration_id"}, {"projectId", "changeId", "revision", "targetWorkingCopyId", "targetRef"}),
+    "integration.authorize": _spec({"integrationId": "integration_id", "actorId": "actor_id", "requestContextId": "request_context_id", "expiresAt": "expires_at", "reviewId": "review_id"}, {"integrationId", "actorId", "requestContextId", "expiresAt"}),
+    "integration.integrate": _spec({"integrationId": "integration_id", "authorizationId": "authorization_id", "expectedResourceVersion": "expected_resource_version"}, {"integrationId", "authorizationId"}),
+    "investigation.start": _spec({"projectId": "project_id", "purpose": "purpose", "workingCopyId": "working_copy_id"}, {"projectId", "purpose"}),
+    "presentation.ensure": _spec({"projectId": "project_id", "conversationId": "conversation_id", "title": "title"}, {"projectId", "conversationId"}),
 }
 
 

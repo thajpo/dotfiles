@@ -418,16 +418,14 @@ for path in agents_dir.glob("*.md"):
 PY
 install -m 600 "$SCRIPT_DIR/agent/AGENTS.md" "$STAGING_DIR/control/AGENTS.md"
 install -m 755 "$SCRIPT_DIR/scripts/pi-workspace.py" "$STAGING_DIR/control/pi-workspace.py"
+install -m 755 "$SCRIPT_DIR/scripts/pi-surface.py" "$STAGING_DIR/control/pi-surface.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-runtime.py" "$STAGING_DIR/control/pi-runtime.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-sandbox-gc.py" "$STAGING_DIR/control/pi-sandbox-gc.py"
-install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-control.py" "$STAGING_DIR/control/pi-secretary-control.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-root-session.py" "$STAGING_DIR/control/pi-root-session.py"
-install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-stats.py" "$STAGING_DIR/control/pi-secretary-stats.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-harness-feedback.py" "$STAGING_DIR/control/pi-harness-feedback.py"
-install -m 755 "$SCRIPT_DIR/scripts/pi-secretary-herdr.py" "$STAGING_DIR/control/pi-secretary-herdr.py"
 install -m 755 "$SCRIPT_DIR/scripts/pi-personal-herdr.py" "$STAGING_DIR/control/pi-personal-herdr.py"
 cp -a "$SCRIPT_DIR/skills/project-status" "$STAGING_DIR/control/project-status-skill"
-for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-personal-herdr pi-secretary pi-secretary-herdr pi-herdr-workstream pi-root-session pi-secretary-stats pi-harness-feedback pi-review-agent pi-sandbox-gc pi-restart; do
+for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-personal-herdr pi-root-session pi-harness-feedback pi-sandbox-gc pi-restart; do
     install -m 755 "$SCRIPT_DIR/bin/$launcher" "$STAGING_DIR/control/$launcher"
 done
 python3 - "$STAGING_DIR/control/pi" "$STAGING_DIR/control/pi-host" <<'PY'
@@ -541,14 +539,12 @@ for config in keybindings.json pi-goal.json pi-chrome-devtools.json pi-plan-mode
 done
 for tree in extensions agents prompts themes; do activate_path "$STAGING_DIR/control/$tree" "$PI_CONFIG_DIR/$tree"; done
 activate_path "$STAGING_DIR/control/pi-workspace.py" "$HOME/.local/share/pi/control/pi-workspace.py"
+activate_path "$STAGING_DIR/control/pi-surface.py" "$HOME/.local/share/pi/control/pi-surface.py"
 activate_path "$STAGING_DIR/control/pi-runtime.py" "$HOME/.local/share/pi/control/pi-runtime.py"
 activate_path "$STAGING_DIR/control/pi-sandbox-gc.py" "$HOME/.local/share/pi/control/pi-sandbox-gc.py"
-activate_path "$STAGING_DIR/control/pi-secretary-control.py" "$HOME/.local/share/pi/control/pi-secretary-control.py"
 activate_path "$STAGING_DIR/control/pi-root-session.py" "$HOME/.local/share/pi/control/pi-root-session.py"
-activate_path "$STAGING_DIR/control/pi-secretary-stats.py" "$HOME/.local/share/pi/control/pi-secretary-stats.py"
 activate_path "$STAGING_DIR/control/pi-harness-feedback.py" "$HOME/.local/share/pi/control/pi-harness-feedback.py"
 activate_path "$STAGING_DIR/control/pi_control" "$HOME/.local/share/pi/control/pi_control"
-activate_path "$STAGING_DIR/control/pi-secretary-herdr.py" "$HOME/.local/share/pi/control/pi-secretary-herdr.py"
 activate_path "$STAGING_DIR/control/pi-personal-herdr.py" "$HOME/.local/share/pi/control/pi-personal-herdr.py"
 if [ -n "$MACHINE_PROFILE" ]; then
     mkdir -p -m 700 "$MACHINE_CONFIG_DIR"
@@ -557,7 +553,7 @@ if [ -n "$MACHINE_PROFILE" ]; then
 fi
 skill_rollback_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pi/rollback/skills"
 activate_path "$STAGING_DIR/control/project-status-skill" "$PI_CONFIG_DIR/skills/project-status" "$skill_rollback_dir"
-for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-personal-herdr pi-secretary pi-secretary-herdr pi-herdr-workstream pi-root-session pi-secretary-stats pi-harness-feedback pi-review-agent pi-sandbox-gc pi-restart; do
+for launcher in pi pi-start pi-help-custom pi-host pidev pi-tmux-session pisec pi-personal pi-personal-herdr pi-root-session pi-harness-feedback pi-sandbox-gc pi-restart; do
     activate_path "$STAGING_DIR/control/$launcher" "$HOME/.local/bin/$launcher"
 done
 activate_path "$STAGING_DIR/control/pi-control" "$HOME/.local/bin/pi-control"
@@ -631,8 +627,8 @@ for name, source in {
         raise SystemExit(f"activated npm dependency does not match reviewed source: {dependency}")
 
 configs = {"settings.json", "keybindings.json", "pi-goal.json", "pi-chrome-devtools.json", "pi-plan-mode.json", "pi-statusline.json", "pr-review.json", "AGENTS.md"}
-helpers = {"pi-workspace.py", "pi-runtime.py", "pi-sandbox-gc.py", "pi-secretary-control.py", "pi-root-session.py", "pi-secretary-stats.py", "pi-harness-feedback.py", "pi-secretary-herdr.py", "pi-personal-herdr.py"}
-launchers = {"pi", "pi-start", "pi-help-custom", "pi-host", "pidev", "pi-tmux-session", "pisec", "pi-personal", "pi-personal-herdr", "pi-secretary", "pi-secretary-herdr", "pi-herdr-workstream", "pi-root-session", "pi-secretary-stats", "pi-harness-feedback", "pi-review-agent", "pi-sandbox-gc", "pi-restart", "pi-control"}
+helpers = {"pi-workspace.py", "pi-surface.py", "pi-runtime.py", "pi-sandbox-gc.py", "pi-root-session.py", "pi-harness-feedback.py", "pi-personal-herdr.py"}
+launchers = {"pi", "pi-start", "pi-help-custom", "pi-host", "pidev", "pi-tmux-session", "pisec", "pi-personal", "pi-personal-herdr", "pi-root-session", "pi-harness-feedback", "pi-sandbox-gc", "pi-restart", "pi-control"}
 
 def active_path(relative: str) -> Path:
     if relative.startswith("npm/"):

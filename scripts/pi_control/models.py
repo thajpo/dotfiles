@@ -94,7 +94,7 @@ def validate_pi_session_id(value: str) -> str:
     return value
 
 
-def _json_depth(value: Any, depth: int = 0) -> int:
+def _json_depth(value: Any, depth: int = 0, max_text: int = _MAX_TEXT) -> int:
     if depth > _MAX_JSON_DEPTH:
         raise InvalidRequestError("JSON nesting is too deep")
     if isinstance(value, Mapping):
@@ -104,17 +104,17 @@ def _json_depth(value: Any, depth: int = 0) -> int:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise InvalidRequestError("JSON object keys must be strings")
-            maximum = max(maximum, _json_depth(item, depth + 1))
+            maximum = max(maximum, _json_depth(item, depth + 1, max_text))
         return maximum
     if isinstance(value, (list, tuple)):
         if len(value) > _MAX_JSON_ITEMS:
             raise InvalidRequestError("JSON array has too many members")
         maximum = depth
         for item in value:
-            maximum = max(maximum, _json_depth(item, depth + 1))
+            maximum = max(maximum, _json_depth(item, depth + 1, max_text))
         return maximum
     if isinstance(value, (str, bytes, bytearray, memoryview)):
-        if isinstance(value, str) and len(value) > _MAX_TEXT:
+        if isinstance(value, str) and len(value) > max_text:
             raise InvalidRequestError("JSON string is too long")
         return depth
     if value is None or isinstance(value, bool):
@@ -144,11 +144,11 @@ def _plain_json_value(value: Any) -> Any:
     raise InvalidRequestError(f"unsupported JSON value type: {type(value).__name__}")
 
 
-def canonical_json(value: Any, *, max_bytes: int = _MAX_JSON_BYTES) -> str:
+def canonical_json(value: Any, *, max_bytes: int = _MAX_JSON_BYTES, max_text: int = _MAX_TEXT) -> str:
     """Serialize a JSON-compatible value canonically and with strict bounds."""
 
     plain = _plain_json_value(value)
-    _json_depth(plain)
+    _json_depth(plain, max_text=max_text)
     try:
         text = json.dumps(
             plain,

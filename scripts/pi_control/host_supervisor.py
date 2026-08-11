@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import signal
 import socket
@@ -17,7 +18,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
-from .controller_channel import ControllerChannelError, PROTOCOL_VERSION, receive_frame, send_frame, validate_handshake
+from .controller_channel import ChannelReader, ControllerChannelError, PROTOCOL_VERSION, receive_frame, send_frame, validate_handshake
 from .docker_runtime import (
     PINNED_ACCEPTANCE_IMAGE, DockerRuntimeError, attest_container, cleanup_run_container, create_start_container,
     execute_file_tool, execute_shell_tool, inspect_container, prepare_tool_runtime,
@@ -219,6 +220,93 @@ def _test_resource(path: str | None, resource_id: str) -> dict[str, str]:
     return {"resourceId": resource_id, "path": str(value), "digest": _sha256(value)}
 
 
+def _refresh_codex_credential(stored: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Refresh an OpenAI Codex OAuth credential through the provider endpoint.
+
+    The stored access token can be rejected by the gateway before its local
+    expiry (server-side rotation). Refreshing here means the sandboxed child
+    always receives a token the gateway currently accepts. Returns None when
+    the credential is not an OAuth codex credential or refresh is unavailable,
+    in which case the caller falls back to the stored credential.
+    """
+    if stored.get("type") != "oauth" or not isinstance(stored.get("refresh"), str) or not stored["refresh"]:
+        return None
+    refresh_endpoint = "https://auth.openai.com/oauth/token"
+    client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
+    import urllib.parse
+    import urllib.request
+    import urllib.error
+    body = urllib.parse.urlencode({
+        "grant_type": "refresh_token",
+        "refresh_token": stored["refresh"],
+        "client_id": client_id,
+    }).encode("ascii")
+    request = urllib.request.Request(
+        refresh_endpoint, data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError, urllib.error.URLError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("access_token"), str) or not payload["access_token"]:
+        return None
+    refreshed = dict(stored)
+    refreshed["access"] = payload["access_token"]
+    if isinstance(payload.get("refresh_token"), str) and payload["refresh_token"]:
+        refreshed["refresh"] = payload["refresh_token"]
+    if isinstance(payload.get("expires_in"), (int, float)) and payload["expires_in"] > 0:
+        refreshed["expires"] = int(time.time() * 1000) + int(payload["expires_in"]) * 1000
+    return refreshed
+
+
+def _provision_provider_auth(runtime: Path, model: str) -> None:
+    """Copy exactly the selected provider's stored credential into the child's
+    private agent directory.
+
+    Providers that authenticate through env keys are forwarded by
+    _PROVIDER_ENVIRONMENT. Subscription/OAuth providers such as openai-codex
+    store their credential in the host auth.json instead; the child's private
+    PI_CODING_AGENT_DIR must receive the same provider entry so the sandboxed
+    host Pi process can authenticate without inheriting any host environment.
+    Only the selected provider's entry is copied; other credentials never
+    leave the host file.
+    """
+    provider = model.split("/", 1)[0]
+    if provider in _PROVIDER_ENVIRONMENT:
+        return
+    agent_dir = Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent")
+    host_auth = agent_dir / "auth.json"
+    if not host_auth.is_file() or host_auth.is_symlink():
+        return
+    try:
+        credentials = json.loads(host_auth.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return
+    if not isinstance(credentials, dict):
+        return
+    stored = credentials.get(provider)
+    if stored is None or not isinstance(stored, dict):
+        return
+    if provider == "openai-codex":
+        refreshed = _refresh_codex_credential(stored)
+        if refreshed is not None:
+            stored = refreshed
+    destination = runtime / "agent" / "auth.json"
+    try:
+        destination.write_text(
+            json.dumps({provider: stored}, separators=(",", ":"), sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+    try:
+        destination.chmod(0o600)
+    except OSError:
+        pass
+
+
 def _environment(state_root: Path, run_id: str, fd: int, model: str, *, acceptance: bool, manifest_path: Path) -> dict[str, str]:
     runtime = state_root / "runtime" / run_id
     values = {
@@ -229,6 +317,8 @@ def _environment(state_root: Path, run_id: str, fd: int, model: str, *, acceptan
     }
     for path in values.values():
         _private_directory(path)
+    if not acceptance:
+        _provision_provider_auth(runtime, model)
     env = {key: str(value) for key, value in values.items()}
     env.update({"PATH": os.defpath, "LANG": "C", "LC_ALL": "C", "TERM": "dumb", "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0", CHANNEL_ENVIRONMENT_KEY: str(fd), "PI_RUNTIME_MANIFEST": str(manifest_path)})
     if not acceptance:
@@ -665,11 +755,13 @@ def launch_host_pi(
         attest_run(store, run_id=prepared.run["run_id"], manifest_digest=prepared.manifest["manifestDigest"], observed=observation)
         send_frame(parent_channel, {"protocolVersion": PROTOCOL_VERSION, "type": "startup-accepted", "runId": prepared.run["run_id"], "manifestDigest": prepared.manifest["manifestDigest"]})
         requests_enabled = True
+        channel_reader = ChannelReader(parent_channel)
+        pending: "queue.SimpleQueue[dict[str, Any]]" = queue.SimpleQueue()
         while process.poll() is None:
             if cancellation is not None and cancellation.is_set():
                 raise HostSupervisorError("controller child run was interrupted")
             try:
-                request = receive_frame(parent_channel, timeout=0.1)
+                request = pending.get_nowait() if not pending.empty() else channel_reader.receive(timeout=0.1)
             except ControllerChannelError as error:
                 if "timed out" in str(error):
                     continue
@@ -678,7 +770,9 @@ def launch_host_pi(
                     parent_channel = None
                     break
                 raise
-            request_id = request.get("requestId")
+            if not isinstance(request, dict) or not isinstance(request.get("requestId"), str) or not isinstance(request.get("operation"), str):
+                raise ControllerChannelError("controller request frame is malformed")
+            request_id = request["requestId"]
             if not requests_enabled:
                 raise ControllerChannelError("runtime requests are disabled")
             cancellation = threading.Event()
@@ -704,7 +798,7 @@ def launch_host_pi(
             worker.start()
             while worker.is_alive():
                 try:
-                    followup = receive_frame(parent_channel, timeout=0.1)
+                    followup = channel_reader.receive(timeout=0.1)
                 except ControllerChannelError as error:
                     if "timed out" in str(error):
                         if process.poll() is not None:
@@ -713,11 +807,19 @@ def launch_host_pi(
                     cancellation.set()
                     worker.join(timeout=5)
                     raise
-                if set(followup) != {"protocolVersion", "type", "requestId"} or followup.get("protocolVersion") != PROTOCOL_VERSION or followup.get("type") != "cancel" or followup.get("requestId") != request_id:
+                if followup.get("type") == "cancel":
+                    if set(followup) != {"protocolVersion", "type", "requestId"} or followup.get("protocolVersion") != PROTOCOL_VERSION or followup.get("requestId") != request_id:
+                        cancellation.set()
+                        worker.join(timeout=5)
+                        raise ControllerChannelError("only exact cancellation is allowed while a tool request is active")
                     cancellation.set()
-                    worker.join(timeout=5)
-                    raise ControllerChannelError("only exact cancellation is allowed while a tool request is active")
+                    continue
+                if followup.get("type") == "request" and isinstance(followup.get("requestId"), str) and isinstance(followup.get("operation"), str):
+                    pending.put(dict(followup))
+                    continue
                 cancellation.set()
+                worker.join(timeout=5)
+                raise ControllerChannelError("only cancellation or an additional request is allowed while a tool request is active")
             worker.join()
             if "error" in outcome:
                 error = outcome["error"]

@@ -131,12 +131,12 @@ class GreenfieldControllerClient:
         with self._store(mutate=True) as store:
             return analyze_integration(
                 store,
-                project_id=request["projectId"],
-                change_id=request["changeId"],
+                project_id=request["project_id"],
+                change_id=request["change_id"],
                 revision=request["revision"],
-                target_working_copy_id=request["targetWorkingCopyId"],
-                target_ref=request["targetRef"],
-                integration_id=request.get("integrationId"),
+                target_working_copy_id=request["target_working_copy_id"],
+                target_ref=request["target_ref"],
+                integration_id=request.get("integration_id"),
             ).as_dict()
 
     def authorize_integration(self, **request: Any) -> dict[str, Any]:
@@ -144,20 +144,20 @@ class GreenfieldControllerClient:
         with self._store(mutate=True) as store:
             return authorize_integration(
                 store,
-                integration_id=request["integrationId"],
-                actor_id=request["actorId"],
-                request_context_id=request["requestContextId"],
-                expires_at=request["expiresAt"],
-                review_id=request.get("reviewId"),
+                integration_id=request["integration_id"],
+                actor_id=request["actor_id"],
+                request_context_id=request["request_context_id"],
+                expires_at=request["expires_at"],
+                review_id=request.get("review_id"),
             )
 
     def integrate(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
             return integrate(
                 store,
-                integration_id=request["integrationId"],
-                authorization_id=request["authorizationId"],
-                expected_resource_version=request.get("expectedResourceVersion"),
+                integration_id=request["integration_id"],
+                authorization_id=request["authorization_id"],
+                expected_resource_version=request.get("expected_resource_version"),
                 failpoint=request.get("failpoint"),
             ).as_dict()
 
@@ -216,15 +216,15 @@ class GreenfieldControllerClient:
         with self._store(mutate=True) as store:
             return request_review(
                 store,
-                change_id=request["changeId"],
+                change_id=request["change_id"],
                 revision=request["revision"],
-                reviewer_conversation_id=request.get("reviewerConversationId"),
-                reviewer_run_id=request.get("reviewerRunId"),
-                reviewer_actor_id=request.get("reviewerActorId"),
-                reviewer_capability_secret=request.get("reviewerCapabilitySecret"),
+                reviewer_conversation_id=request.get("reviewer_conversation_id"),
+                reviewer_run_id=request.get("reviewer_run_id"),
+                reviewer_actor_id=request.get("reviewer_actor_id"),
+                reviewer_capability_secret=request.get("reviewer_capability_secret"),
                 evidence=request.get("evidence"),
-                review_id=request.get("reviewId"),
-                dependency_review_digest=request.get("dependencyReviewDigest"),
+                review_id=request.get("review_id"),
+                dependency_review_digest=request.get("dependency_review_digest"),
             ).as_dict()
 
     def create_review_assignment(self, **request: Any) -> dict[str, Any]:
@@ -238,14 +238,14 @@ class GreenfieldControllerClient:
         with self._store(mutate=True) as store:
             return submit_review(
                 store,
-                review_id=request["reviewId"],
+                review_id=request["review_id"],
                 verdict=request["verdict"],
                 summary=request.get("summary", ""),
                 findings=request.get("findings", ""),
                 evidence=request.get("evidence"),
-                reviewer_run_id=request.get("reviewerRunId"),
-                reviewer_actor_id=request.get("reviewerActorId"),
-                reviewer_capability_secret=request.get("reviewerCapabilitySecret"),
+                reviewer_run_id=request.get("reviewer_run_id"),
+                reviewer_actor_id=request.get("reviewer_actor_id"),
+                reviewer_capability_secret=request.get("reviewer_capability_secret"),
             ).as_dict()
 
     def detect_dependencies(self, **request: Any) -> list[dict[str, Any]]:
@@ -299,6 +299,8 @@ class GreenfieldControllerClient:
             "project.reconcile": self.reconcile_project,
             "change.submit": self.submit_change,
             "change.revise": self.submit_change_revision,
+            "change.list": self.list_changes,
+            "change.show": self.get_change,
             "review.request": self.request_review,
             "review.submit": self.submit_review,
             "review.create-assignment": self.create_review_assignment,

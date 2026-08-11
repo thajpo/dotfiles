@@ -64,18 +64,35 @@ def register_staged_build(store: Any, staged_root: str | Path) -> dict[str, Any]
         raise InstalledBuildError("release resource inventory is invalid") from error
     resource_digest = _file_digest(resources_path)
     operation = store.create_operation(idempotency_key="build.register:" + manifest.build_id, kind="build.register", resource_type="installed-build", resource_id=manifest.build_id, actor_type="controller", request={"buildId": manifest.build_id, "buildManifestDigest": manifest.digest, "resourceManifestDigest": resource_digest})
+    payload = manifest.payload
     existing = store.conn.execute("SELECT * FROM installed_builds WHERE build_id=?", (manifest.build_id,)).fetchone()
     identity = (str(manifest_path), manifest.digest, str(resources_path), resource_digest, verified["piVersion"])
     if existing is not None:
         actual = (existing["build_manifest_path"], existing["build_manifest_digest"], existing["resource_manifest_path"], existing["resource_manifest_digest"], existing["pi_version"])
-        if actual != identity:
+        if actual == identity:
+            if operation.state != "succeeded":
+                store.complete_operation(operation.operation_id, result={"buildId": manifest.build_id}, step="build-registered")
+            return dict(existing)
+        if (existing["build_manifest_digest"], existing["resource_manifest_digest"], existing["pi_version"]) != (manifest.digest, resource_digest, verified["piVersion"]):
             raise InstalledBuildError("registered build identity differs from staged manifests")
-        if operation.state != "succeeded":
-            store.complete_operation(operation.operation_id, result={"buildId": manifest.build_id}, step="build-registered")
-        return dict(existing)
-    payload = manifest.payload
+        # The same verified generation was re-staged to a new location (for
+        # example a surface stage moved into its stable path). Digests match;
+        # record the current verified stage as authoritative.
+        with store.transaction():
+            store.conn.execute(
+                "UPDATE installed_builds SET build_manifest_path=?,resource_manifest_path=?,source_commit=?,source_tree_hash=?,package_lock_hash=?,installed_at=?,rollback_path=?,verification_json=? WHERE build_id=?",
+                (str(manifest_path), str(resources_path), payload["sourceCommit"], payload["sourceTreeHash"] or payload["sourceDigest"], payload.get("packageLockSha256") or payload["sourceDigest"], utc_now(), None, canonical_json({"verified": True, "resourceSchemaVersion": resources["schemaVersion"]}), manifest.build_id),
+            )
+        return dict(store.conn.execute("SELECT * FROM installed_builds WHERE build_id=?", (manifest.build_id,)).fetchone())
     now = utc_now()
     with store.transaction():
+        # The release resource inventory is deterministic: re-staging the same
+        # source produces the same resource digest. Only one build may hold a
+        # given resource digest at a time, so any prior holder is replaced.
+        store.conn.execute(
+            "DELETE FROM installed_builds WHERE resource_manifest_digest=? AND build_id<>?",
+            (resource_digest, manifest.build_id),
+        )
         store.conn.execute(
             "INSERT INTO installed_builds(build_id,source_commit,source_tree_hash,build_manifest_path,build_manifest_digest,resource_manifest_path,resource_manifest_digest,pi_version,package_lock_hash,status,installed_at,activated_at,rollback_path,verification_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (manifest.build_id, payload.get("sourceCommit"), payload.get("sourceTreeHash") or payload["sourceDigest"], str(manifest_path), manifest.digest, str(resources_path), resource_digest, verified["piVersion"], payload.get("packageLockSha256") or payload["sourceDigest"], "staged", now, None, None, canonical_json({"verified": True, "resourceSchemaVersion": resources["schemaVersion"]})),
