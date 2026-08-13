@@ -19,7 +19,7 @@ import tempfile
 import termios
 import time
 
-from scripts.pi_control.docker_runtime import MANAGED_LABEL, PINNED_ACCEPTANCE_IMAGE
+from scripts.pi_control.docker_runtime import PINNED_ACCEPTANCE_IMAGE
 from tests.system.evidence import Evidence, write_evidence
 from tests.system.staged_install import StagedInstallUnavailable, install
 from tests.system.package_cache_fixture import create_package_caches

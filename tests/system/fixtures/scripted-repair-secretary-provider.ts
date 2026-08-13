@@ -2,7 +2,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 
-const EXPECTED = ["acknowledge_project_message", "analyze_integration", "check_package_review_gate", "git_read", "grep", "harness_feedback", "list_changes", "list_project_messages", "ls", "observe_change_queue", "observe_fleet", "observe_messages", "observe_tasks", "post_project_message", "project_work_index", "propose_integration", "propose_review", "propose_workstream", "approve_workstream", "read", "record_dependency_disposition", "reply_project_message", "request_review", "start_investigation", "subagent", "subagent_interrupt", "subagent_list", "subagent_resume", "subagent_start", "subagent_status", "subagent_steer", "subagent_stop", "subagent_wait"];
+const EXPECTED = ["acknowledge_project_message", "analyze_integration", "approve_workstream", "check_package_review_gate", "git_read", "grep", "harness_feedback", "list_changes", "list_project_messages", "ls", "observe_change_queue", "observe_fleet", "observe_messages", "observe_tasks", "post_project_message", "project_work_index", "propose_integration", "propose_review", "propose_workstream", "read", "record_dependency_disposition", "reply_project_message", "request_review", "start_investigation", "subagent", "subagent_interrupt", "subagent_list", "subagent_resume", "subagent_start", "subagent_status", "subagent_steer", "subagent_stop", "subagent_wait"];
 
 function promptText(context: any): string {
   const prompt = context.messages.findLast((message: any) => message.role === "user");
