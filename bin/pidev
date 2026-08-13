@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Open or attach a project-scoped tmux workspace backed by the Pi
-# harness: Neovim on the left, a controller-bound workstream writer on the
-# right. Each project gets one stable window and one durable workstream
-# conversation (resumed by relaunching the same conversation id).
+# Open or attach the project-scoped tmux workspace backed by the Pi harness.
+#
+# pidev never creates work: registering the project is explicit intent, but
+# a worktree and headful workstream are created only through the approved
+# secretary flow (or an explicit pi-workstream create). Opening a project
+# reconciles its existing headful workstream windows (pi-project-<hash>):
+# desktop windows pair Neovim in the exact worktree with the agent; mobile
+# is agent-only. When the project has no headful workstream, pidev opens an
+# editor-only `home` window on the primary checkout.
 set -euo pipefail
 
 self_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
-dotfiles_dir=$(realpath "$self_dir/..")
-helper="$dotfiles_dir/scripts/pi-surface.py"
+helper="$self_dir/../scripts/pi-surface.py"
 [[ -f "$helper" ]] || { printf 'pidev: surface helper is missing\n' >&2; exit 1; }
 
 if [[ ${PI_SUBAGENT_CHILD:-0} == 1 ]]; then
@@ -32,29 +36,46 @@ repository=$(realpath "$repository")
   printf 'pidev: not a Git repository: %s\n' "$repository" >&2
   exit 1
 }
-[[ -f "$helper" ]] || { printf 'pidev: surface helper is missing\n' >&2; exit 1; }
 
 project=$(python3 "$helper" project-register --repository "$repository")
 project_id=$(python3 -c "import sys,json;print(json.load(sys.stdin).get('project_id',''))" <<<"$project")
 [[ -n "$project_id" ]] || { printf 'pidev: could not register project with the controller\n' >&2; exit 1; }
 
-conversation=$(python3 "$helper" workstream-conversation "$project_id" | python3 -c "import sys,json;print(json.load(sys.stdin)['conversation_id'])")
-argv=$(python3 "$helper" launch-argv-shell workstream "$conversation" --interactive)
+command -v tmux >/dev/null 2>&1 || { printf 'pidev: tmux is required\n' >&2; exit 127; }
 
-if ! command -v tmux >/dev/null 2>&1; then printf 'pidev: tmux is required\n' >&2; exit 127; fi
-project_session="project-$(printf '%s' "$repository" | sha256sum | cut -c1-12)"
+# The session name follows the reconciler: one deterministic session per Git
+# common directory, stable across controller-state resets.
+common_dir=$(git -C "$repository" rev-parse --path-format=absolute --git-common-dir)
+project_session="pi-project-$(printf '%s' "$common_dir" | sha256sum | cut -c1-12)"
+
+if (( mobile_layout )); then layout_name=mobile; else layout_name=desktop; fi
+present_out=$(python3 "$helper" present-project "$project_id" --layout "$layout_name") || {
+  printf 'pidev: project presentation failed\n' >&2
+  exit 1
+}
+workstream_count=$(python3 -c "import json,sys; print(len(json.load(sys.stdin)['present']))" <<<"$present_out")
+
 if [[ -n ${TMUX:-} ]]; then
   tmux switch-client -t "=$project_session" 2>/dev/null || true
 fi
 if ! tmux has-session -t "=$project_session" 2>/dev/null; then
-  if (( mobile_layout )); then
-    tmux new-session -d -s "$project_session" -n work -c "$repository" "exec $argv"
-  else
-    tmux new-session -d -s "$project_session" -n work -c "$repository"
-    tmux send-keys -t "=$project_session:work" 'nvim' Enter
-    tmux split-window -h -t "=$project_session:work" -c "$repository" "exec $argv"
-    tmux select-pane -t "=$project_session:work" -L
+  tmux new-session -d -s "$project_session" -n shell -c "$repository" 'exec bash'
+fi
+if (( workstream_count == 0 )); then
+  # No headful workstream exists: open an editor-only home window on the
+  # primary checkout. Workstreams appear here only after approved creation.
+  if ! tmux list-windows -t "=$project_session" -F '#{window_name}' 2>/dev/null | grep -qx home; then
+    tmux new-window -d -t "=$project_session" -n home -c "$repository"
   fi
+  tmux send-keys -t "=$project_session:home" 'nvim' Enter
+fi
+if tmux list-windows -t "=$project_session" -F '#{window_name}' 2>/dev/null | grep -qx shell; then
+  remaining=$(tmux list-windows -t "=$project_session" -F '#{window_name}' | grep -v '^shell$' | wc -l) || true
+  (( remaining > 0 )) && tmux kill-window -t "=$project_session:shell" 2>/dev/null || true
+fi
+if [[ -n ${PIPEV_NO_ATTACH:-} ]]; then
+  # Test seam: build/reconcile the workspace without attaching a client.
+  exit 0
 fi
 if [[ -n ${TMUX:-} ]]; then
   exec tmux switch-client -t "=$project_session"
