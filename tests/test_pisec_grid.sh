@@ -73,6 +73,72 @@ def main(argv):
         # Fake launcher argv containing "--" tokens (like the real launcher):
         # long-running sleep keeps the pane "live" without Pi.
         print("bash -c 'sleep 300' -- --conversation-id %s --interactive" % argv[2])
+    elif argv[0] == "present":
+        # Simulate the controller reconciler against the fixture tmux server:
+        # desktop pairs into projects-N windows, mobile one per window,
+        # titles are pi-secretary <conv>, dead managed panes are respawned.
+        import subprocess as sp
+        surface = layout = None
+        ids = []
+        rest = argv[1:]
+        while rest:
+            flag = rest.pop(0)
+            if flag == "--surface":
+                surface = rest.pop(0)
+            elif flag == "--layout":
+                layout = rest.pop(0)
+            else:
+                ids.append(flag)
+        def tmux(*args):
+            return sp.run(["tmux", *args], capture_output=True, text=True)
+        def conv_title(conv):
+            return "pi-secretary %s" % conv
+        if not ids:
+            if tmux("has-session", "-t", "=%s" % surface).returncode != 0:
+                tmux("new-session", "-d", "-s", surface, "-n", "shell")
+            print(json.dumps({"excluded": []}))
+            return 0
+        if tmux("has-session", "-t", "=%s" % surface).returncode != 0:
+            tmux("new-session", "-d", "-s", surface, "-n", "shell")
+        wanted = [CONVERSATIONS[i] for i in ids]
+        rows = tmux("list-panes", "-a", "-F", "#{session_name}\t#{pane_id}\t#{pane_dead}\t#{pane_title}").stdout.splitlines()
+        for row in rows:
+            sess, pane, dead, title = row.split("\t")
+            if sess != surface or not title.startswith("pi-secretary "):
+                continue
+            conv = title.removeprefix("pi-secretary ")
+            if conv not in wanted:
+                continue
+            if dead == "1":
+                tmux("respawn-pane", "-t", pane, "-k")
+                tmux("send-keys", "-t", pane, "exec bash -c 'sleep 300' -- --conversation-id %s --interactive" % conv, "Enter")
+        windows = tmux("list-windows", "-t", "=%s" % surface, "-F", "#{window_name}").stdout.splitlines()
+        if layout == "mobile":
+            for index, conv in enumerate(wanted, start=1):
+                name = "projects-%d" % index
+                if name in windows:
+                    continue
+                tmux("new-window", "-d", "-t", "=%s" % surface, "-n", name)
+                tmux("send-keys", "-t", "=%s:%s" % (surface, name), "exec bash -c 'sleep 300' -- --conversation-id %s --interactive" % conv, "Enter")
+                tmux("select-pane", "-t", "=%s:%s" % (surface, name), "-T", conv_title(conv))
+        else:
+            for index in range(0, len(wanted), 2):
+                name = "projects-%d" % (index // 2 + 1)
+                if name not in windows:
+                    tmux("new-window", "-d", "-t", "=%s" % surface, "-n", name)
+                    tmux("send-keys", "-t", "=%s:%s" % (surface, name), "exec bash -c 'sleep 300' -- --conversation-id %s --interactive" % wanted[index], "Enter")
+                    tmux("select-pane", "-t", "=%s:%s" % (surface, name), "-T", conv_title(wanted[index]))
+                if index + 1 < len(wanted):
+                    pane_count = len(tmux("list-panes", "-t", "=%s:%s" % (surface, name), "-F", "#{pane_id}").stdout.splitlines())
+                    if pane_count < 2:
+                        tmux("split-window", "-h", "-t", "=%s:%s" % (surface, name))
+                        tmux("send-keys", "-t", "=%s:%s.{bottom-right}" % (surface, name), "exec bash -c 'sleep 300' -- --conversation-id %s --interactive" % wanted[index + 1], "Enter")
+                        tmux("select-pane", "-t", "=%s:%s.{bottom-right}" % (surface, name), "-T", conv_title(wanted[index + 1]))
+        wins = tmux("list-windows", "-t", "=%s" % surface, "-F", "#{window_name}").stdout.splitlines()
+        if "shell" in wins and len(wins) > 1:
+            tmux("kill-window", "-t", "=%s:shell" % surface)
+        print(json.dumps({"excluded": []}))
+        return 0
     else:
         raise SystemExit(2)
     return 0
@@ -98,7 +164,7 @@ pisec activate alpha gamma >/dev/null 2>&1
 pisec launch
 tmux has-session -t =pisec || { echo "FAIL: pisec session missing"; exit 1; }
 windows=$(tmux list-windows -t =pisec -F '#{window_name}' | sort | tr '\n' ' ')
-[[ "$windows" == "alpha " ]] || { echo "FAIL: expected only alpha window, got: $windows"; exit 1; }
+[[ "$windows" == "projects-1 " ]] || { echo "FAIL: expected only projects-1 window, got: $windows"; exit 1; }
 
 # Desktop grouping: the first two active projects share one window with two
 # side-by-side panes.
@@ -123,8 +189,8 @@ repaired=$(tmux list-panes -a -F '#{session_name}\t#{pane_dead}' | awk -F'\t' '$
 tmux kill-session -t =pisec
 pisec --mobile launch
 mobile_windows=$(tmux list-windows -t =pisec -F '#{window_name}' | sort | tr '\n' ' ')
-[[ "$mobile_windows" == "alpha gamma " ]] || { echo "FAIL: mobile windows $mobile_windows"; exit 1; }
-for window in alpha gamma; do
+[[ "$mobile_windows" == "projects-1 projects-2 " ]] || { echo "FAIL: mobile windows $mobile_windows"; exit 1; }
+for window in projects-1 projects-2; do
   count=$(tmux list-panes -t "=pisec:$window" | wc -l)
   (( count == 1 )) || { echo "FAIL: mobile window $window has $count panes"; exit 1; }
 done
@@ -143,7 +209,7 @@ alpha_id=$(python3 -c "import json,sys; print(json.load(sys.stdin)[0]['project_i
 pisec activate "$alpha_id" gamma >/dev/null 2>&1
 pisec launch
 window=$(tmux list-windows -t =pisec -F '#{window_name}' | grep -v '^shell$' | head -1)
-[[ "$window" == "alpha" ]] || { echo "FAIL: id activation window $window"; exit 1; }
+[[ "$window" == "projects-1" ]] || { echo "FAIL: id activation window $window"; exit 1; }
 
 # Stale preference ids must be dropped with a warning, not brick the surface.
 python3 - "$temporary/state" <<'PY'

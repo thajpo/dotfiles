@@ -38,7 +38,7 @@ class TmuxBackend:
     """Thin fail-closed tmux runner with a clean environment."""
 
     def __init__(self, *, tmux_tmpdir: str | None = None, home: str | None = None) -> None:
-        self.tmux_tmpdir = tmux_tmpdir
+        self.tmux_tmpdir = tmux_tmpdir if tmux_tmpdir is not None else os.environ.get("TMUX_TMPDIR")
         self.home = home
 
     def run(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:

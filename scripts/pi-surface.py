@@ -372,6 +372,84 @@ def recover_conversation(conversation_id: str) -> dict:
     return value
 
 
+def _recovery_gate(conversation_id: str) -> bool:
+    """True when the conversation may be presented; blocks when a live or
+    unrecoverable run is bound to it."""
+    outcome = recover_conversation(conversation_id)
+    for item in outcome.get("runs", []):
+        if item.get("decision") in {"live", "uncertain"}:
+            return False
+    return True
+
+
+def present(surface: str, layout: str, project_ids: list[str]) -> dict:
+    """Reconcile one grid surface against its ordered project set.
+
+    Builds the exact launch argv for each conversation from the activated
+    generation and delegates tmux reconciliation to the controller.
+    Conversations with a live or unrecoverable run are excluded.
+    """
+    if surface not in {"pisec", "pi-personal"}:
+        raise SurfaceError(f"unknown grid surface: {surface}")
+    if layout not in {"desktop", "mobile"}:
+        raise SurfaceError("grid layout must be desktop or mobile")
+    entries: list[dict] = []
+    excluded: list[str] = []
+    for project_id in project_ids:
+        conversation = secretary_conversation(project_id) if surface == "pisec" else personal_conversation(project_id)
+        conversation_id = conversation["conversation_id"]
+        role = "secretary" if surface == "pisec" else "personal"
+        if not _recovery_gate(conversation_id):
+            excluded.append(conversation_id)
+            continue
+        entries.append({
+            "conversationId": conversation_id,
+            "role": role,
+            "title": conversation.get("display_name") or role,
+            "argv": launch_argv(role, conversation_id, interactive=True),
+        })
+    request = {"surface": surface, "layout": layout, "conversations": entries}
+    value = _run([_controller(), "--state-root", str(STATE_ROOT), "presentation", "reconcile", "--request-json", json.dumps(request)])
+    if not isinstance(value, dict):
+        raise SurfaceError("presentation reconcile result is not an object")
+    return {**value, "excluded": excluded}
+
+
+def present_project(project_id: str, layout: str) -> dict:
+    """Reconcile one project's headful workstream session.
+
+    Each active headful workstream becomes one ws- window; desktop layout
+    pairs Neovim (in the exact controller worktree) with the agent pane.
+    """
+    if layout not in {"desktop", "mobile"}:
+        raise SurfaceError("grid layout must be desktop or mobile")
+    status = project_status(project_id)
+    worktrees = {item["working_copy_id"]: item for item in status.get("workingCopies", [])}
+    entries: list[dict] = []
+    excluded: list[str] = []
+    for conversation in status.get("conversations", []):
+        if conversation.get("role") != "workstream" or conversation.get("desired_state") != "active":
+            continue
+        conversation_id = conversation["conversation_id"]
+        if not _recovery_gate(conversation_id):
+            excluded.append(conversation_id)
+            continue
+        working = worktrees.get(conversation.get("working_copy_id")) or {}
+        entries.append({
+            "conversationId": conversation_id,
+            "role": "workstream",
+            "title": conversation.get("display_name") or "workstream",
+            "argv": launch_argv("workstream", conversation_id, interactive=True),
+            "workstreamId": conversation_id,
+            "worktreePath": working.get("path"),
+        })
+    request = {"surface": "project", "layout": layout, "conversations": entries}
+    value = _run([_controller(), "--state-root", str(STATE_ROOT), "presentation", "reconcile", "--request-json", json.dumps(request)])
+    if not isinstance(value, dict):
+        raise SurfaceError("presentation reconcile result is not an object")
+    return {**value, "excluded": excluded}
+
+
 def _surfaces_config_path(config: str | None) -> Path:
     if config:
         path = Path(config).expanduser()
@@ -636,6 +714,13 @@ def main(argv: list[str] | None = None) -> int:
     ws_conv.add_argument("--name", default="personal")
     recover = sub.add_parser("recover-conversation")
     recover.add_argument("conversation_id")
+    present_parser = sub.add_parser("present")
+    present_parser.add_argument("--surface", choices=("pisec", "pi-personal"), required=True)
+    present_parser.add_argument("--layout", choices=("desktop", "mobile"), required=True)
+    present_parser.add_argument("project_ids", nargs="*")
+    present_project_parser = sub.add_parser("present-project")
+    present_project_parser.add_argument("project_id")
+    present_project_parser.add_argument("--layout", choices=("desktop", "mobile"), default="desktop")
     bootstrap_parser = sub.add_parser("bootstrap")
     bootstrap_parser.add_argument("--config", default=None)
     bootstrap_parser.add_argument("--dry-run", action="store_true")
@@ -686,6 +771,10 @@ def main(argv: list[str] | None = None) -> int:
             value = recover_conversation(args.conversation_id)
         elif args.command == "bootstrap":
             value = bootstrap(args.config, dry_run=args.dry_run, keep_extra=args.keep_extra, allow_missing=args.allow_missing)
+        elif args.command == "present":
+            value = present(args.surface, args.layout, args.project_ids)
+        elif args.command == "present-project":
+            value = present_project(args.project_id, args.layout)
         elif args.command == "preference":
             if args.preference_command == "get":
                 value = preference_get(args.surface)

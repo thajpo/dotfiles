@@ -73,6 +73,45 @@ def main(argv):
             print("bash -c 'sleep 300' -- --conversation-id %s --interactive" % argv[2])
         else:
             raise SystemExit(2)
+    elif argv[0] == "present":
+        # Simulate the controller reconciler against the fixture tmux server.
+        import subprocess as sp
+        surface = layout = None
+        ids = []
+        rest = argv[1:]
+        while rest:
+            flag = rest.pop(0)
+            if flag == "--surface":
+                surface = rest.pop(0)
+            elif flag == "--layout":
+                layout = rest.pop(0)
+            else:
+                ids.append(flag)
+        def tmux(*args):
+            return sp.run(["tmux", *args], capture_output=True, text=True)
+        def conv_title(conv):
+            return "pi-personal %s" % conv
+        if not ids:
+            if tmux("has-session", "-t", "=%s" % surface).returncode != 0:
+                tmux("new-session", "-d", "-s", surface, "-n", "shell")
+            print(json.dumps({"excluded": []}))
+            return 0
+        if tmux("has-session", "-t", "=%s" % surface).returncode != 0:
+            tmux("new-session", "-d", "-s", surface, "-n", "shell")
+        wanted = [CONVERSATIONS[i] for i in ids]
+        windows = tmux("list-windows", "-t", "=%s" % surface, "-F", "#{window_name}").stdout.splitlines()
+        for index, conv in enumerate(wanted, start=1):
+            name = "projects-%d" % index
+            if name in windows:
+                continue
+            tmux("new-window", "-d", "-t", "=%s" % surface, "-n", name)
+            tmux("send-keys", "-t", "=%s:%s" % (surface, name), "exec bash -c 'sleep 300' -- --conversation-id %s --interactive" % conv, "Enter")
+            tmux("select-pane", "-t", "=%s:%s" % (surface, name), "-T", conv_title(conv))
+        wins = tmux("list-windows", "-t", "=%s" % surface, "-F", "#{window_name}").stdout.splitlines()
+        if "shell" in wins and len(wins) > 1:
+            tmux("kill-window", "-t", "=%s:shell" % surface)
+        print(json.dumps({"excluded": []}))
+        return 0
     else:
         raise SystemExit(2)
     return 0
@@ -100,7 +139,7 @@ personal list | grep -q "^ .*alpha" || { echo "FAIL: alpha must be inactive in p
 # The personal launch must request the real personal role argv.
 personal launch
 window=$(tmux list-windows -t =pi-personal -F '#{window_name}' | grep -v '^shell$' | head -1)
-[[ "$window" == "beta" ]] || { echo "FAIL: expected beta window, got: $window"; exit 1; }
+[[ "$window" == "projects-1" ]] || { echo "FAIL: expected projects-1 window, got: $window"; exit 1; }
 argv=$(tmux list-panes -t "=pi-personal:$window" -F '#{pane_title}')
 [[ "$argv" == "pi-personal conv_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2" ]] || { echo "FAIL: pane title mismatch: $argv"; exit 1; }
 

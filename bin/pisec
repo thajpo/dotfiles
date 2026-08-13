@@ -223,151 +223,15 @@ acquire_grid_lock() {
 acquire_grid_lock || exit 1
 
 session=pisec
-tmux_has() { tmux has-session -t "=$session" >/dev/null 2>&1; }
-
-# Resolve each active project's secretary conversation and exact launch argv.
-declare -a conv_ids=() launch_argv=()
-for pid in "${ordered_ids[@]}"; do
-  conversation=$(python3 "$helper" secretary-conversation "$pid" | python3 -c "import sys,json;print(json.load(sys.stdin)['conversation_id'])")
-  conv_ids+=("$conversation")
-  launch_argv+=("$(python3 "$helper" launch-argv-shell secretary "$conversation" --interactive)")
-done
-
-# Exact pane proof: the pane must run the secretary launcher for one exact
-# conversation id. A shell or sleep is an idle placeholder; a dead pane has no
-# identity to inspect and may be replaced.
-pane_runs_secretary() {
-  local args=$1 wanted_conv
-  wanted_conv=$2
-  [[ "$args" == *"pi-system-secretary"* && "$args" == *"--conversation-id $wanted_conv"* && "$args" == *"--interactive"* ]]
+session=pisec
+if (( mobile_layout )); then layout_name=mobile; else layout_name=desktop; fi
+present_out=$(python3 "$helper" present --surface pisec --layout "$layout_name" "${ordered_ids[@]}") || {
+  printf 'pisec: grid reconcile failed\n' >&2
+  exit 1
 }
-
-tmux_has_window() {
-  tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null | grep -qx "$1"
-}
-
-if ! tmux_has; then
-  tmux new-session -d -s "$session" -n shell -c "$HOME" 'exec bash'
-fi
-# Dead panes must persist (not close the session) so the repair loop can
-# detect and respawn them without ever killing a live conversation.
-# remain-on-exit is a window option; set it per window so panes whose
-# command exits stay visible instead of destroying the session.
-for _roe_win in $(tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null); do
-  tmux set-window-option -t "=$session:$_roe_win" remain-on-exit on 2>/dev/null || true
-done
-
-# Pane titles anchor panes to their exact conversation: every secretary pane
-# is titled "pi-secretary <conversation-id>". The title is presentation-only;
-# the conversation id is controller authority.
-pane_title_for() { printf 'pi-secretary %s' "$1"; }
-
-# tmux 3.4 silently drops window creation when the pane command contains a
-# "--" token (e.g. --conversation-id). Create the pane without a command and
-# send the exact launch argv through the terminal instead; the input is
-# buffered until the shell is ready.
-launch_pane() {
-  local target=$1 argv=$2
-  tmux send-keys -t "$target" "exec $argv" Enter
-}
-
-# Repair existing panes first: a dead pane or an idle placeholder shell for an
-# active conversation is respawned; a pane already running a live secretary is
-# left alone (single owner, never kill a thinking conversation).
-declare -A conv_for_title=()
-for i in "${!ordered_ids[@]}"; do
-  conv_for_title["$(pane_title_for "${conv_ids[$i]}")"]=$i
-done
-pane_idle_shell() {
-  local command=$1 pid=$2 children rc
-  case "$command" in bash|zsh|sh|dash|fish) ;; *) return 1 ;; esac
-  if children=$(pgrep -P "$pid" 2>/dev/null); then
-    [[ -z "$children" ]] && return 0
-    return 1
-  else
-    rc=$?
-    [[ $rc -eq 1 ]] && return 0
-    return 2
-  fi
-}
-# A dead pane may leave a stale controller run behind. Recover the
-# conversation's provably lost runs before respawning; a run that is still
-# live, or whose recovery is uncertain, must block the respawn so the
-# conversation never gets a duplicate writer or a silently broken relaunch.
-recover_before_repair() {
-  local conversation=$1 outcome
-  outcome=$(python3 "$helper" recover-conversation "$conversation" 2>/dev/null || printf '{"runs":[]}')
-  if [[ "$outcome" == *'"decision":"uncertain"'* ]]; then
-    printf 'pisec: refusing to respawn %s: recovery of its previous run is uncertain (see pi-control run reconcile)\n' "$conversation" >&2
-    return 1
-  fi
-  if [[ "$outcome" == *'"decision":"live"'* ]]; then
-    printf 'pisec: leaving %s alone: a live run is still bound to the conversation\n' "$conversation" >&2
-    return 1
-  fi
-  return 0
-}
-while IFS=$'\t' read -r pane_id pane_dead pane_command pane_pid pane_title; do
-  [[ -n "$pane_id" ]] || continue
-  [[ "$pane_dead" == 0 || "$pane_dead" == 1 ]] || continue
-  matched=${conv_for_title["$pane_title"]:-}
-  [[ -n "$matched" ]] || continue
-  if (( pane_dead == 1 )); then
-    recover_before_repair "${conv_ids[$matched]}" || continue
-    tmux respawn-pane -t "$pane_id" 2>/dev/null || true
-    launch_pane "$pane_id" "${launch_argv[$matched]}" 2>/dev/null || true
-    continue
-  fi
-  if pane_idle_shell "$pane_command" "$pane_pid"; then
-    tmux respawn-pane -t "$pane_id" -k 2>/dev/null || true
-    launch_pane "$pane_id" "${launch_argv[$matched]}" 2>/dev/null || true
-  fi
-done < <(tmux list-panes -t "=$session" -F $'#{pane_id}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{pane_title}' 2>/dev/null)
-
-# Build windows: desktop groups the active set into windows of at most two
-# side-by-side panes; mobile uses one full-width pane per window. Every pane
-# is titled with its exact conversation for repair and identity proof.
-title_pane() {
-  local target=$1 conversation=$2
-  tmux select-pane -t "$target" -T "$(pane_title_for "$conversation")" 2>/dev/null || true
-}
-window_index=0
-for i in "${!ordered_ids[@]}"; do
-  window_name=$(printf '%s' "${ordered_names[$i]}" | tr -c 'A-Za-z0-9._-' '-')
-  if (( mobile_layout )); then
-    if ! tmux_has_window "$window_name"; then
-      tmux new-window -d -t "=$session" -n "$window_name" -c "$HOME"
-      tmux set-window-option -t "=$session:$window_name" remain-on-exit on 2>/dev/null || true
-      launch_pane "=$session:$window_name" "${launch_argv[$i]}"
-      title_pane "=$session:$window_name" "${conv_ids[$i]}"
-    fi
-  else
-    if (( (i % 2) == 0 )); then
-      if ! tmux_has_window "$window_name"; then
-        tmux new-window -d -t "=$session" -n "$window_name" -c "$HOME"
-        launch_pane "=$session:$window_name" "${launch_argv[$i]}"
-        title_pane "=$session:$window_name" "${conv_ids[$i]}"
-      fi
-    else
-      # Second project of a pair joins the previous window as a side-by-side
-      # pane; the window is named after the first project of the pair.
-      first_name=$(printf '%s' "${ordered_names[$((i - 1))]}" | tr -c 'A-Za-z0-9._-' '-')
-      existing=$(tmux list-panes -t "=$session:$first_name" -F '#{pane_id}' 2>/dev/null | wc -l)
-      if (( existing < 2 )); then
-        tmux split-window -h -t "=$session:$first_name" -c "$HOME" 2>/dev/null || true
-        launch_pane "=$session:$first_name.{bottom-right}" "${launch_argv[$i]}" 2>/dev/null || true
-        title_pane "=$session:$first_name.{bottom-right}" "${conv_ids[$i]}" 2>/dev/null || true
-      fi
-    fi
-  fi
-  window_index=$((window_index + 1))
-done
-
-# The initial placeholder shell window is presentation scaffolding only;
-# remove it once real project windows exist.
-if tmux_has_window shell; then
-  remaining=$(tmux list-windows -t "=$session" -F '#{window_name}' | grep -v '^shell$' | wc -l) || true
-  (( remaining > 0 )) && tmux kill-window -t "=$session:shell" 2>/dev/null || true
+excluded=$(python3 -c "import json,sys; print(' '.join(json.load(sys.stdin).get('excluded', [])))" <<<"$present_out" 2>/dev/null || printf '')
+if [[ -n "$excluded" ]]; then
+  printf 'pisec: conversations skipped (live or unrecoverable run): %s\n' "$excluded" >&2
 fi
 
 if [[ "$action" == open ]]; then
