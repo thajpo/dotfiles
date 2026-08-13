@@ -99,8 +99,11 @@ class TmuxBackend:
         return lines[-1] if lines else ""
 
     def new_window(self, session: str, window: str, cwd: str) -> str:
-        self.run(["new-window", "-d", "-t", f"={session}", "-n", window, "-c", cwd])
-        return self.last_pane(session, window)
+        result = self.run(["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}", "-n", window, "-c", cwd])
+        pane_id = result.stdout.strip()
+        if not pane_id:
+            raise PresentationError("tmux did not return the newly created pane identity")
+        return pane_id
 
     def split_window(self, session: str, window: str, cwd: str) -> str:
         self.run(["split-window", "-h", "-t", f"={session}:{window}", "-c", cwd], check=False)
@@ -370,15 +373,17 @@ def reconcile_presentation(
             layout=layout, argv_digest=item["argvDigest"],
             workstream_id=item.get("workstreamId"), owner_pid=None,
         ) if pane_ref else None
+        if locator is None:
+            raise PresentationError(f"presentation pane identity was not established for {conv}")
         if assignment is None:
             store.conn.execute(
                 "INSERT INTO presentation_assignments(presentation_assignment_id,conversation_id,backend,desired_state,observed_state,locator_json,resource_version,observed_at,updated_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (new_id("pa"), conv, "tmux", "present", observed, canonical_json(locator) if locator else None, 1, now, now, None, None),
+                (new_id("pa"), conv, "tmux", "present", observed, canonical_json(locator), 1, now, now, None, None),
             )
         else:
             store.conn.execute(
                 "UPDATE presentation_assignments SET observed_state=?,locator_json=?,observed_at=?,updated_at=?,resource_version=resource_version+1 WHERE conversation_id=?",
-                (observed, canonical_json(locator) if locator else None, now, now, conv),
+                (observed, canonical_json(locator), now, now, conv),
             )
 
     return {
