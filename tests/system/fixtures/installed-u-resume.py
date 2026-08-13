@@ -5,7 +5,6 @@ and surfaces pending work through attention and the work index."""
 
 from __future__ import annotations
 
-import atexit
 import hashlib
 import json
 import os
@@ -23,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.pi_control.docker_runtime import PINNED_ACCEPTANCE_IMAGE
 from tests.system.container_hygiene import assert_fixture_containers_absent
 from tests.system.evidence import Evidence, write_evidence
+from tests.system.process_hygiene import terminate_process
 from tests.system.staged_install import StagedInstallUnavailable, install
 
 
@@ -51,24 +51,13 @@ def run_launcher(argv: list[str], *, cwd: Path, label: str) -> tuple[int, str, s
     environment = {**os.environ, "OPENAI_API_KEY": "must-not-leak", "GH_TOKEN": "must-not-leak", "SSH_AUTH_SOCK": "/must-not-leak", "DOCKER_HOST": "must-not-leak"}
     process = subprocess.Popen(argv, cwd=cwd, env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
 
-    def interrupt_supervisor() -> None:
-        if process.poll() is not None:
-            return
-        process.send_signal(signal.SIGINT)
-        try:
-            process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-
-    atexit.register(interrupt_supervisor)
     try:
         stdout, stderr = process.communicate(timeout=600)
     except subprocess.TimeoutExpired:
-        interrupt_supervisor()
+        terminate_process(process)
         raise AssertionError(f"{label} launcher timed out")
     finally:
-        atexit.unregister(interrupt_supervisor)
+        terminate_process(process)
     if process.returncode != 0:
         raise AssertionError(f"{label} launcher failed ({process.returncode}): {stderr[-2048:]}\n{stdout[-2048:]}")
     return process.returncode, stdout, stderr

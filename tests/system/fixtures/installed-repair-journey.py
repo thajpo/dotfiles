@@ -9,7 +9,6 @@ HA-032 (secretary semantic operations) against one staged generation.
 
 from __future__ import annotations
 
-import atexit
 import sys
 import hashlib
 import json
@@ -29,6 +28,7 @@ from scripts.pi_control.docker_runtime import PINNED_ACCEPTANCE_IMAGE
 from tests.system.container_hygiene import assert_fixture_containers_absent
 from tests.system.evidence import Evidence, write_evidence
 from tests.system.staged_install import install
+from tests.system.process_hygiene import terminate_process
 
 
 def command(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None, check: bool = True, timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -66,20 +66,10 @@ def git(repository: Path, *args: str) -> str:
 def run_launcher(argv: list[str], *, cwd: Path, env: dict[str, str], label: str, timeout: float = 600) -> tuple[int, str, str]:
     process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
 
-    def interrupt() -> None:
-        if process.poll() is not None:
-            return
-        process.send_signal(signal.SIGINT)
-        try:
-            process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-    atexit.register(interrupt)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     finally:
-        atexit.unregister(interrupt)
+        terminate_process(process)
     if process.returncode not in (0, 130):
         raise AssertionError(f"{label} launcher failed ({process.returncode}): {stderr[-2048:]}\n{stdout[-2048:]}")
     return process.returncode, stdout, stderr

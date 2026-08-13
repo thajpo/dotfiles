@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import atexit
 import fcntl
 import hashlib
 import json
@@ -22,6 +21,7 @@ import time
 from scripts.pi_control.docker_runtime import PINNED_ACCEPTANCE_IMAGE
 from tests.system.container_hygiene import assert_fixture_containers_absent
 from tests.system.evidence import Evidence, write_evidence
+from tests.system.process_hygiene import terminate_process
 from tests.system.staged_install import StagedInstallUnavailable, install
 from tests.system.package_cache_fixture import create_package_caches
 
@@ -133,48 +133,50 @@ def main() -> int:
         argv = [str(launcher), "--state-root", str(state), "--conversation-id", conversation["conversation_id"], "--build-id", registered_build["build_id"], "--prompt", prompt, "--model", "scripted/scripted-1", "--acceptance-test-profile", "scripted-v1", "--test-provider", str(provider), "--test-probe", str(probe), "--tool-image", PINNED_ACCEPTANCE_IMAGE]
         environment = {**os.environ, "OPENAI_API_KEY": "must-not-leak", "GH_TOKEN": "must-not-leak", "SSH_AUTH_SOCK": "/must-not-leak", "DOCKER_HOST": "must-not-leak"}
         process = subprocess.Popen(argv, cwd=repository, env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
-        def interrupt_supervisor() -> None:
-            if process.poll() is not None:
-                return
-            process.send_signal(signal.SIGINT)
-            try:
-                process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-        atexit.register(interrupt_supervisor)
         handled: set[str] = set()
         approval_records: list[dict] = []
         stale: dict | None = None
         deadline = time.monotonic() + 120
-        while process.poll() is None and time.monotonic() < deadline:
-            for package in rows(state, "package_requests") if (state / "control.db").exists() else []:
-                if package["state"] == "requested" and package["package_request_id"] not in handled:
-                    code, output = authorize([str(authorizer), "--state-root", str(state), package["package_request_id"], package["request_digest"]], "APPROVE")
+        try:
+            while process.poll() is None and time.monotonic() < deadline:
+                for package in rows(state, "package_requests") if (state / "control.db").exists() else []:
+                    if package["state"] == "requested" and package["package_request_id"] not in handled:
+                        code, output = authorize([str(authorizer), "--state-root", str(state), package["package_request_id"], package["request_digest"]], "APPROVE")
+                        if code != 0:
+                            raise AssertionError(f"package PTY approval failed: {output}")
+                        handled.add(package["package_request_id"])
+                        approval_records.append({"requestId": package["package_request_id"], "decision": "APPROVE", "output": output})
+                for request in rows(state, "command_requests") if (state / "control.db").exists() else []:
+                    if request["state"] != "requested" or request["command_request_id"] in handled:
+                        continue
+                    if request["purpose"] == "p6 installed stale after run":
+                        stale = request
+                        continue
+                    decision = "REJECT" if request["purpose"] == "p6 installed explicit reject" else "APPROVE"
+                    code, output = authorize([str(authorizer), "--state-root", str(state), request["command_request_id"], request["request_digest"]], decision)
                     if code != 0:
-                        raise AssertionError(f"package PTY approval failed: {output}")
-                    handled.add(package["package_request_id"])
-                    approval_records.append({"requestId": package["package_request_id"], "decision": "APPROVE", "output": output})
-            for request in rows(state, "command_requests") if (state / "control.db").exists() else []:
-                if request["state"] != "requested" or request["command_request_id"] in handled:
-                    continue
-                if request["purpose"] == "p6 installed stale after run":
-                    stale = request
-                    continue
-                decision = "REJECT" if request["purpose"] == "p6 installed explicit reject" else "APPROVE"
-                code, output = authorize([str(authorizer), "--state-root", str(state), request["command_request_id"], request["request_digest"]], decision)
-                if code != 0:
-                    raise AssertionError(f"command PTY decision failed: {output}")
-                handled.add(request["command_request_id"])
-                approval_records.append({"requestId": request["command_request_id"], "decision": decision, "output": output})
-                replay_code, replay_output = authorize([str(authorizer), "--state-root", str(state), request["command_request_id"], request["request_digest"]], decision)
-                if replay_code == 0:
-                    raise AssertionError("one-use command receipt replay unexpectedly succeeded")
-                approval_records[-1]["replayRefused"] = True
-                approval_records[-1]["replayOutput"] = replay_output
-            time.sleep(0.05)
-        stdout, stderr = process.communicate(timeout=10)
-        atexit.unregister(interrupt_supervisor)
+                        raise AssertionError(f"command PTY decision failed: {output}")
+                    handled.add(request["command_request_id"])
+                    approval_records.append({"requestId": request["command_request_id"], "decision": decision, "output": output})
+                    replay_code, replay_output = authorize([str(authorizer), "--state-root", str(state), request["command_request_id"], request["request_digest"]], decision)
+                    if replay_code == 0:
+                        raise AssertionError("one-use command receipt replay unexpectedly succeeded")
+                    approval_records[-1]["replayRefused"] = True
+                    approval_records[-1]["replayOutput"] = replay_output
+                time.sleep(0.05)
+            stdout, stderr = process.communicate(timeout=10)
+        except BaseException:
+            terminate_process(process, timeout=20)
+            try:
+                process.communicate(timeout=10)
+            except Exception:
+                pass
+            try:
+                from tests.system.container_hygiene import cleanup_fixture_containers
+                cleanup_fixture_containers(state)
+            except Exception as cleanup_error:
+                print(f"P6 teardown failed after the original error: {cleanup_error}", file=sys.stderr)
+            raise
         if process.returncode != 0:
             raise AssertionError(f"installed P6 Pi failed ({process.returncode}): {stderr[-2048:]}\n{stdout[-2048:]}")
         if "P6_FINAL" not in stdout:
