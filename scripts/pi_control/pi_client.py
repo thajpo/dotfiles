@@ -204,6 +204,16 @@ class PiControllerClient:
         with self._store(mutate=True) as store:
             return recover_conversation_runs(store, **request)
 
+    def reconcile_presentation(self, **request: Any) -> dict[str, Any]:
+        from .presentation import reconcile_presentation
+        with self._store(mutate=True) as store:
+            return reconcile_presentation(store, **request)
+
+    def focus_presentation(self, **request: Any) -> dict[str, Any]:
+        from .presentation import focus_presentation
+        with self._store() as store:
+            return focus_presentation(store, **request)
+
     def reconcile_project(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
             return reconcile_project(store, **request)

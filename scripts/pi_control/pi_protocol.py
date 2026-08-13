@@ -27,6 +27,12 @@ def _set(value: Any) -> set[str]:
     return set(value)
 
 
+def _list(value: Any) -> list[Any]:
+    if not isinstance(value, list):
+        raise ProtocolError("expected a list", code=ErrorCode.PROTOCOL_REQUEST)
+    return value
+
+
 def _spec(fields: Mapping[str, str], required: set[str] | None = None, conversions: Mapping[str, Callable[[Any], Any]] | None = None) -> RequestSpec:
     required_fields = frozenset(required if required is not None else fields)
     if any(not fields.get(field) for field in required_fields):
@@ -78,6 +84,8 @@ SPECS: Mapping[str, RequestSpec] = {
     "integration.integrate": _spec({"integrationId": "integration_id", "integration_id": "integration_id", "authorizationId": "authorization_id", "authorization_id": "authorization_id", "expectedResourceVersion": "expected_resource_version", "expected_resource_version": "expected_resource_version"}, {"integrationId", "authorizationId"}),
     "investigation.start": _spec({"projectId": "project_id", "project_id": "project_id", "purpose": "purpose", "workingCopyId": "working_copy_id", "working_copy_id": "working_copy_id"}, {"projectId", "purpose"}),
     "presentation.ensure": _spec({"projectId": "project_id", "conversationId": "conversation_id", "title": "title"}, {"projectId", "conversationId"}),
+    "presentation.reconcile": _spec({"surface": "surface", "layout": "layout", "conversations": "conversations"}, {"surface", "layout", "conversations"}, {"conversations": _list}),
+    "presentation.focus": _spec({"conversationId": "conversation_id"}),
 }
 
 

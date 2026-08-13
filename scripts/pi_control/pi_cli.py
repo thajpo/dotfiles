@@ -103,8 +103,9 @@ def _parser() -> argparse.ArgumentParser:
     investigation_start.add_argument("--request-json", required=True)
     presentation = sub.add_parser("presentation")
     presentation_sub = presentation.add_subparsers(dest="presentation_command", required=True)
-    presentation_ensure = presentation_sub.add_parser("ensure")
-    presentation_ensure.add_argument("--request-json", required=True)
+    for name in ("reconcile", "focus", "ensure"):
+        item = presentation_sub.add_parser(name)
+        item.add_argument("--request-json", required=True)
     scoped = sub.add_parser("scoped-read")
     scoped.add_argument("--request-json", required=True)
     protocol = sub.add_parser("protocol")
@@ -200,9 +201,12 @@ def main(argv: list[str] | None = None) -> int:
                 with client._store(mutate=True) as store:
                     value = start_investigation(store, **adapt_request("investigation.start", request))
             elif args.command == "presentation":
-                from .presentation import ensure_presentation
-                with client._store(mutate=True) as store:
-                    value = ensure_presentation(store, **adapt_request("presentation.ensure", request))
+                if args.presentation_command == "ensure":
+                    from .presentation import ensure_presentation
+                    with client._store(mutate=True) as store:
+                        value = ensure_presentation(store, **adapt_request("presentation.ensure", request))
+                else:
+                    value = client.dispatch(f"presentation.{args.presentation_command}", request)
             else:
                 raise PiClientError("unsupported CLI command")
         _print(value)
