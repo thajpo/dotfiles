@@ -190,6 +190,23 @@ pane_idle_shell() {
     return 2
   fi
 }
+# A dead pane may leave a stale controller run behind. Recover the
+# conversation's provably lost runs before respawning; a run that is still
+# live, or whose recovery is uncertain, must block the respawn so the
+# conversation never gets a duplicate writer or a silently broken relaunch.
+recover_before_repair() {
+  local conversation=$1 outcome
+  outcome=$(python3 "$helper" recover-conversation "$conversation" 2>/dev/null || printf '{"runs":[]}')
+  if [[ "$outcome" == *'"decision":"uncertain"'* ]]; then
+    printf 'pi-personal: refusing to respawn %s: recovery of its previous run is uncertain (see pi-control run reconcile)\n' "$conversation" >&2
+    return 1
+  fi
+  if [[ "$outcome" == *'"decision":"live"'* ]]; then
+    printf 'pi-personal: leaving %s alone: a live run is still bound to the conversation\n' "$conversation" >&2
+    return 1
+  fi
+  return 0
+}
 
 if ! tmux_has; then
   tmux new-session -d -s "$session" -n shell -c "$HOME" 'exec bash'
@@ -210,6 +227,7 @@ while IFS=$'\t' read -r pane_id pane_dead pane_command pane_pid pane_title; do
   matched=${conv_for_title["$pane_title"]:-}
   [[ -n "$matched" ]] || continue
   if (( pane_dead == 1 )); then
+    recover_before_repair "${conv_ids[$matched]}" || continue
     tmux respawn-pane -t "$pane_id" 2>/dev/null || true
     launch_pane "$pane_id" "${launch_argv[$matched]}" 2>/dev/null || true
     continue

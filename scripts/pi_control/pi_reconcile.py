@@ -60,6 +60,33 @@ def reconcile_run(store: Any, *, run_id: str) -> dict[str, Any]:
     return {"run": dict(store.conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()), "observation": result, "decision": "needs-attention"}
 
 
+def recover_conversation_runs(store: Any, *, conversation_id: str, actor_id: str) -> dict[str, Any]:
+    """Recover every provably lost run of one conversation before surface repair.
+
+    Surface repair calls this before respawning a dead pane for a
+    conversation. A run whose exact owner is still alive stays untouched; a
+    run that cannot be proved recoverable (uncertain process, held writer
+    lock, or unproved container absence) is reported and refuses relaunch.
+    """
+    validate_id(conversation_id, prefix="conv")
+    if not isinstance(actor_id, str) or not actor_id or len(actor_id) > 256:
+        raise ReconcileError("recovery actor is invalid")
+    runs = []
+    for row in store.conn.execute("SELECT * FROM runs WHERE conversation_id=? AND desired_state='running'", (conversation_id,)):
+        observed = _run_observation(row)
+        if observed["state"] == "running":
+            runs.append({"runId": row["run_id"], "decision": "live"})
+            continue
+        try:
+            with store.transaction():
+                store.conn.execute("UPDATE runs SET observed_state='needs_attention',error_code='CP_OWNER_UNCERTAIN',error_detail=?,updated_at=? WHERE run_id=? AND observed_state NOT IN ('stopped','failed')", (observed["reason"][:1024], utc_now(), row["run_id"]))
+            recovered = recover_lost_run(store, run_id=row["run_id"], actor_id=actor_id)
+            runs.append({"runId": row["run_id"], "decision": "recovered", "run": dict(recovered)})
+        except ReconcileError as error:
+            runs.append({"runId": row["run_id"], "decision": "uncertain", "error": str(error)[:1024]})
+    return {"conversationId": conversation_id, "actorId": actor_id, "runs": runs}
+
+
 def recover_lost_run(store: Any, *, run_id: str, actor_id: str) -> dict[str, Any]:
     """Release a blocked writer only after process identity and kernel-lock proofs."""
 
@@ -140,4 +167,4 @@ def reconcile_project(store: Any, *, project_id: str) -> dict[str, Any]:
     return {"project": dict(store.conn.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone()), "runs": runs, "source": "pi-system-reconciler"}
 
 
-__all__ = ["ReconcileError", "reconcile_project", "reconcile_run", "recover_lost_run"]
+__all__ = ["ReconcileError", "reconcile_project", "reconcile_run", "recover_conversation_runs", "recover_lost_run"]

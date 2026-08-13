@@ -26,7 +26,7 @@ from .projects import project_status, register_project, work_index
 from .pi_workstreams import create_workstream
 from .reviews import request_review, submit_review
 from .pi_review import create_review_assignment
-from .pi_reconcile import reconcile_project, reconcile_run, recover_lost_run
+from .pi_reconcile import reconcile_project, reconcile_run, recover_conversation_runs, recover_lost_run
 
 
 class PiClientError(ValueError):
@@ -192,6 +192,10 @@ class PiControllerClient:
         with self._store(mutate=True) as store:
             return recover_lost_run(store, **request)
 
+    def recover_conversation(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return recover_conversation_runs(store, **request)
+
     def reconcile_project(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
             return reconcile_project(store, **request)
@@ -283,6 +287,7 @@ class PiControllerClient:
             "workstream.create": self.create_workstream,
             "conversation.focus": self.focus_conversation,
             "conversation.archive": self.archive_conversation,
+            "conversation.recover": self.recover_conversation,
             "message.post": self.post_message,
             "message.list": self.list_messages,
             "message.deliver": self.deliver_message,

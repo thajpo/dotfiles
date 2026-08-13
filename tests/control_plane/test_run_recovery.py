@@ -186,5 +186,48 @@ class RunRecoveryTests(unittest.TestCase):
                 self.assertTrue(writer_lock_available(state_root, working_copy_id))
 
 
+    def test_conversation_recovery_recovers_lost_and_preserves_live(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            client = PiControllerClient(root / "state")
+            project = self._registered(root, "conv")
+            with PiStore(root / "state") as store:
+                _register_build(store, root)
+                conversation = self._writer_conversation(store, project, "conv")
+                lost = self._prepare_writer(store, project, conversation, "conv-lost")
+                self._kill_run(store, lost.run["run_id"])
+                lost.close()
+            client.reconcile_run(run_id=lost.run["run_id"])
+            recovered = client.recover_run(run_id=lost.run["run_id"], actor_id="test-conv")
+            self.assertEqual(recovered["observed_state"], "lost")
+            with PiStore(root / "state") as store:
+                live = self._prepare_writer(store, project, conversation, "conv-live")
+            outcome = client.recover_conversation(conversation_id=conversation["conversation_id"], actor_id="test-conv")
+            decisions = {item["runId"]: item["decision"] for item in outcome["runs"]}
+            self.assertEqual(decisions, {live.run["run_id"]: "live"})
+            with PiStore(root / "state") as store:
+                claim = store.conn.execute("SELECT active_writer_run_id FROM working_copies WHERE working_copy_id=?", (conversation["working_copy_id"],)).fetchone()[0]
+                self.assertEqual(claim, live.run["run_id"])
+            live.close()
+
+    def test_conversation_recovery_reports_uncertain_and_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            client = PiControllerClient(root / "state")
+            project = self._registered(root, "uncertain")
+            with PiStore(root / "state") as store:
+                _register_build(store, root)
+                conversation = self._writer_conversation(store, project, "uncertain")
+                prepared = self._prepare_writer(store, project, conversation, "uncertain-run")
+                self._kill_run(store, prepared.run["run_id"])
+                prepared.close()
+                with WriterLock.acquire(store.state_root, conversation["working_copy_id"], 1):
+                    outcome = client.recover_conversation(conversation_id=conversation["conversation_id"], actor_id="test-uncertain")
+                    decisions = {item["runId"]: item["decision"] for item in outcome["runs"]}
+                    self.assertEqual(decisions[prepared.run["run_id"]], "uncertain")
+                    run = store.conn.execute("SELECT observed_state FROM runs WHERE run_id=?", (prepared.run["run_id"],)).fetchone()
+                    self.assertEqual(run["observed_state"], "needs_attention")
+
+
 if __name__ == "__main__":
     unittest.main()

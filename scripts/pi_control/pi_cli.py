@@ -37,7 +37,7 @@ def _parser() -> argparse.ArgumentParser:
     conversation_sub = conversation.add_subparsers(dest="conversation_command", required=True)
     create = conversation_sub.add_parser("create")
     create.add_argument("--request-json", required=True)
-    for name in ("focus", "archive"):
+    for name in ("focus", "archive", "recover"):
         item = conversation_sub.add_parser(name)
         item.add_argument("--request-json", required=True)
     workstream = sub.add_parser("workstream")

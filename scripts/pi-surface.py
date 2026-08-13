@@ -358,6 +358,20 @@ def workstream_conversation(project_id: str, display_name: str = "personal") -> 
     return workstream_create(project_id, display_name, f"surface-workstream:{project_id}")
 
 
+def recover_conversation(conversation_id: str) -> dict:
+    """Recover provably lost runs of one conversation before surface repair.
+
+    Live runs are reported untouched; uncertain runs are reported and must
+    block relaunch. The surface repair loops call this before respawning a
+    dead pane so a stale writer claim can never brick the conversation.
+    """
+    request = {"conversationId": conversation_id, "actorId": "surface-repair"}
+    value = _run([_controller(), "--state-root", str(STATE_ROOT), "conversation", "recover", "--request-json", json.dumps(request)])
+    if not isinstance(value, dict):
+        raise SurfaceError("conversation recovery result is not an object")
+    return value
+
+
 def _preferences_path() -> Path:
     return STATE_ROOT / "surface" / "preferences.json"
 
@@ -488,6 +502,8 @@ def main(argv: list[str] | None = None) -> int:
     ws_conv = sub.add_parser("workstream-conversation")
     ws_conv.add_argument("project_id")
     ws_conv.add_argument("--name", default="personal")
+    recover = sub.add_parser("recover-conversation")
+    recover.add_argument("conversation_id")
     preference = sub.add_parser("preference")
     preference_sub = preference.add_subparsers(dest="preference_command", required=True)
     preference_get_parser = preference_sub.add_parser("get")
@@ -529,6 +545,8 @@ def main(argv: list[str] | None = None) -> int:
             value = workstream_create(args.project_id, args.title, args.idempotency_key)
         elif args.command == "workstream-conversation":
             value = workstream_conversation(args.project_id, args.name)
+        elif args.command == "recover-conversation":
+            value = recover_conversation(args.conversation_id)
         elif args.command == "preference":
             if args.preference_command == "get":
                 value = {"surface": args.surface, "activeProjectIds": preference_get(args.surface)}
