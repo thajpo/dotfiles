@@ -89,9 +89,12 @@ def register_staged_build(store: Any, staged_root: str | Path) -> dict[str, Any]
         # The release resource inventory is deterministic: re-staging the same
         # source produces the same resource digest. Only one build may hold a
         # given resource digest at a time, so any prior holder is replaced.
+        # The same install location may also be re-registered by a different
+        # generation after activation swapped the data root in place; a row
+        # that still names those exact artifact paths is stale by definition.
         store.conn.execute(
-            "DELETE FROM installed_builds WHERE resource_manifest_digest=? AND build_id<>?",
-            (resource_digest, manifest.build_id),
+            "DELETE FROM installed_builds WHERE (resource_manifest_digest=? OR resource_manifest_path=? OR build_manifest_path=?) AND build_id<>?",
+            (resource_digest, str(resources_path), str(manifest_path), manifest.build_id),
         )
         store.conn.execute(
             "INSERT INTO installed_builds(build_id,source_commit,source_tree_hash,build_manifest_path,build_manifest_digest,resource_manifest_path,resource_manifest_digest,pi_version,package_lock_hash,status,installed_at,activated_at,rollback_path,verification_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
