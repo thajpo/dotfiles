@@ -23,7 +23,7 @@ from .messages import acknowledge_message, list_messages, mark_delivered, post_m
 from .models import canonical_json, new_id, utc_now, validate_id
 from .package_environment import package_status, request_package_operation
 from .projects import project_status, register_project, work_index
-from .pi_workstreams import create_workstream
+from .pi_workstreams import create_workstream, retire_workstream
 from .reviews import request_review, submit_review
 from .pi_review import create_review_assignment
 from .pi_reconcile import reconcile_project, reconcile_run, recover_conversation_runs, recover_lost_run
@@ -90,6 +90,10 @@ class PiControllerClient:
     def create_workstream(self, **request: Any) -> dict[str, Any]:
         with self._store(mutate=True) as store:
             return create_workstream(store, **request)
+
+    def retire_workstream(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return retire_workstream(store, **request)
 
     def focus_conversation(self, **request: Any) -> dict[str, Any]:
         with self._store() as store:
@@ -285,6 +289,7 @@ class PiControllerClient:
             "project.work-index": lambda **kw: self.work_index(kw["project_id"]),
             "conversation.create": self.create_conversation,
             "workstream.create": self.create_workstream,
+            "workstream.retire": self.retire_workstream,
             "conversation.focus": self.focus_conversation,
             "conversation.archive": self.archive_conversation,
             "conversation.recover": self.recover_conversation,

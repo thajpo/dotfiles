@@ -44,6 +44,8 @@ def _parser() -> argparse.ArgumentParser:
     workstream_sub = workstream.add_subparsers(dest="workstream_command", required=True)
     workstream_create = workstream_sub.add_parser("create")
     workstream_create.add_argument("--request-json", required=True)
+    workstream_retire = workstream_sub.add_parser("retire")
+    workstream_retire.add_argument("--request-json", required=True)
     message = sub.add_parser("message")
     message_sub = message.add_subparsers(dest="message_command", required=True)
     for name in ("post", "list", "deliver", "acknowledge", "reply"):
@@ -162,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "conversation":
                 value = client.dispatch(f"conversation.{args.conversation_command}", request)
             elif args.command == "workstream":
-                value = client.dispatch("workstream.create", request)
+                value = client.dispatch(f"workstream.{args.workstream_command}", request)
             elif args.command == "message":
                 value = client.dispatch(f"message.{args.message_command}", request)
             elif args.command == "command":

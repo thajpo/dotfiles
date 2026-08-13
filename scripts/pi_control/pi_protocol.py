@@ -46,6 +46,7 @@ SPECS: Mapping[str, RequestSpec] = {
     "conversation.archive": _spec({"projectId": "project_id", "conversationId": "conversation_id", "expectedResourceVersion": "expected_resource_version"}, {"projectId", "conversationId"}),
     "conversation.recover": _spec({"conversationId": "conversation_id", "actorId": "actor_id"}, {"conversationId", "actorId"}),
     "workstream.create": _spec({"projectId": "project_id", "title": "title", "brief": "brief", "displayName": "display_name", "idempotencyKey": "idempotency_key"}, {"projectId", "title", "idempotencyKey"}),
+    "workstream.retire": _spec({"workstreamId": "workstream_id", "actorId": "actor_id", "expectedBranchRef": "expected_branch_ref", "expectedHeadOid": "expected_head_oid", "idempotencyKey": "idempotency_key"}, {"workstreamId", "actorId"}),
     "message.post": _spec({"projectId": "project_id", "conversationId": "conversation_id", "runId": "run_id", "kind": "kind", "payload": "payload", "idempotencyKey": "idempotency_key", "workstreamId": "workstream_id", "writerGeneration": "writer_generation", "requestId": "request_id", "replyToMessageId": "reply_to_message_id"}, {"projectId", "conversationId", "runId", "kind", "payload", "idempotencyKey"}),
     "message.list": _spec({"projectId": "project_id", "conversationId": "conversation_id", "states": "states", "limit": "limit"}, {"projectId"}, {"states": _set}),
     "message.deliver": _spec({"projectId": "project_id", "messageId": "message_id"}),

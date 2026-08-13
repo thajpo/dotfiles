@@ -21,6 +21,10 @@ class WorkstreamCreationError(RuntimeError):
     pass
 
 
+class WorkstreamRetireError(RuntimeError):
+    pass
+
+
 class Failpoint(Protocol):
     def hit(self, name: str, context: Mapping[str, str]) -> None: ...
 
@@ -216,4 +220,120 @@ def create_workstream(
     return dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (request["workstreamId"],)).fetchone())
 
 
-__all__ = ["WorkstreamCreationError", "create_workstream"]
+def retire_workstream(
+    store: Any, *,
+    workstream_id: str,
+    actor_id: str,
+    expected_branch_ref: str | None = None,
+    expected_head_oid: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Retire one exact controller-owned workstream and remove its resources.
+
+    Guards: no live or uncertain run, free writer lock, proved container
+    absence, clean freshly observed working copy, no draft or open change,
+    exact worktree/branch identity. Git worktree removal happens before
+    branch deletion; every guard failure raises without mutating the DB, and
+    every step is idempotent so a crash mid-cleanup recovers on retry.
+    """
+    validate_id(workstream_id, prefix="ws")
+    if not isinstance(actor_id, str) or not actor_id or len(actor_id) > 256:
+        raise WorkstreamRetireError("retirement actor is invalid")
+    workstream = store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone()
+    if workstream is None:
+        raise WorkstreamRetireError("workstream not found")
+    if workstream["desired_state"] == "retired":
+        return dict(workstream)
+    if workstream["desired_state"] != "active":
+        raise WorkstreamRetireError("workstream is not active")
+    if idempotency_key is not None:
+        existing = store.conn.execute("SELECT * FROM operations WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+        if existing is not None:
+            if existing["kind"] != "workstream.retire" or existing["resource_id"] != workstream_id:
+                raise WorkstreamRetireError("retirement idempotency key is bound to another request")
+            return dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone())
+
+    conversation = store.conn.execute("SELECT * FROM conversations WHERE conversation_id=?", (workstream["conversation_id"],)).fetchone()
+    working_copy = store.conn.execute("SELECT * FROM working_copies WHERE working_copy_id=?", (workstream["working_copy_id"],)).fetchone()
+    project = store.conn.execute("SELECT * FROM projects WHERE project_id=?", (workstream["project_id"],)).fetchone()
+    if conversation is None or working_copy is None or project is None:
+        raise WorkstreamRetireError("workstream resources are incomplete")
+    if conversation["desired_state"] != "active":
+        raise WorkstreamRetireError("workstream conversation is not active")
+
+    running = store.conn.execute("SELECT * FROM runs WHERE conversation_id=? AND desired_state='running'", (workstream["conversation_id"],)).fetchall()
+    if running:
+        raise WorkstreamRetireError("workstream has a live or uncertain run; reconcile and recover it first")
+
+    from .writer_lock import writer_lock_available
+    if not writer_lock_available(store.state_root, working_copy["working_copy_id"]):
+        raise WorkstreamRetireError("workstream writer lock is still held")
+
+    from .docker_runtime import cleanup_run_container
+    for run in store.conn.execute("SELECT * FROM runs WHERE conversation_id=? AND container_id IS NOT NULL", (workstream["conversation_id"],)):
+        cleanup = cleanup_run_container(store, run_id=run["run_id"])
+        if not cleanup.get("absent"):
+            raise WorkstreamRetireError("workstream container absence is not proved")
+
+    draft_open = store.conn.execute("SELECT 1 FROM changes WHERE source_working_copy_id=? AND state IN ('draft','open') LIMIT 1", (working_copy["working_copy_id"],)).fetchone()
+    if draft_open is not None:
+        raise WorkstreamRetireError("workstream has unsubmitted or unintegrated changes")
+
+    source = Path(str(project["primary_checkout"])).resolve(strict=True)
+    destination = Path(str(workstream["worktree_path"])).resolve()
+    worktree_listing = _git(source, ["worktree", "list", "--porcelain"]).stdout
+    indexed = f"worktree {destination}\n" in worktree_listing or f"worktree {destination}\r\n" in worktree_listing
+    branch_ref = expected_branch_ref or workstream["branch_ref"]
+    head_oid = expected_head_oid or workstream["starting_oid"]
+    branch_oid = _git(source, ["show-ref", "--verify", "--hash", branch_ref], check=False).stdout.strip()
+    if branch_oid and branch_oid != head_oid:
+        raise WorkstreamRetireError("workstream branch moved from the expected OID")
+    if destination.is_dir():
+        status = _git(destination, ["status", "--porcelain=v1", "--untracked-files=all"]).stdout
+        if status:
+            raise WorkstreamRetireError("workstream working copy is dirty")
+        if not indexed:
+            raise WorkstreamRetireError("workstream path and Git index disagree")
+        worktree_head = _git(destination, ["rev-parse", "--verify", "HEAD"]).stdout.strip()
+        worktree_branch = _git(destination, ["symbolic-ref", "--quiet", "HEAD"]).stdout.strip()
+        if worktree_head != head_oid or worktree_branch != branch_ref:
+            raise WorkstreamRetireError("workstream Git identity differs from durable intent")
+        try:
+            _git(source, ["worktree", "remove", str(destination)])
+        except WorkstreamCreationError as error:
+            raise WorkstreamRetireError("workstream removal failed; nothing was deleted") from error
+    elif indexed:
+        raise WorkstreamRetireError("workstream is indexed by Git but missing on disk; needs attention")
+    if branch_oid:
+        _git(source, ["update-ref", "-d", branch_ref])
+
+    request = {
+        "workstreamId": workstream_id,
+        "conversationId": workstream["conversation_id"],
+        "workingCopyId": working_copy["working_copy_id"],
+        "worktreePath": str(destination),
+        "branchRef": branch_ref,
+        "headOid": head_oid,
+        "actorId": actor_id,
+    }
+    operation = store.create_operation(idempotency_key=idempotency_key or f"workstream.retire:{workstream_id}", kind="workstream.retire", resource_type="workstream", resource_id=workstream_id, actor_type="user", actor_id=actor_id, request=request)
+    now = utc_now()
+    try:
+        with store.transaction():
+            store.conn.execute("UPDATE workstreams SET desired_state='retired',observed_state='stopped',updated_at=?,resource_version=resource_version+1 WHERE workstream_id=?", (now, workstream_id))
+            store.conn.execute("UPDATE working_copies SET desired_state='absent',observed_state='missing',updated_at=?,resource_version=resource_version+1 WHERE working_copy_id=?", (now, working_copy["working_copy_id"]))
+            store.conn.execute("UPDATE conversations SET desired_state='archived',updated_at=?,resource_version=resource_version+1 WHERE conversation_id=?", (now, workstream["conversation_id"]))
+            store.conn.execute("UPDATE presentation_assignments SET desired_state='absent',observed_state='missing',updated_at=?,resource_version=resource_version+1 WHERE conversation_id=?", (now, workstream["conversation_id"]))
+            append_event_in_transaction(store.conn, event_kind="workstream.retired", resource_type="workstream", resource_id=workstream_id, resource_version=int(workstream["resource_version"]) + 1, operation_id=operation.operation_id, payload=request)
+            update_operation_in_transaction(store.conn, operation.operation_id, state="succeeded", step="workstream-retired", result={"workstreamId": workstream_id})
+    except BaseException:
+        with store.transaction():
+            store.conn.execute(
+                "INSERT INTO attention(attention_id,project_id,conversation_id,run_id,change_id,kind,summary,detail_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (new_id("attention"), workstream["project_id"], workstream["conversation_id"], None, None, "workstream-retire", "Workstream retirement needs attention", canonical_json({**request, "error": "retirement DB commit failed after Git cleanup; retry is idempotent"}), "open", now, now),
+            )
+        raise
+    return dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone())
+
+
+__all__ = ["WorkstreamCreationError", "WorkstreamRetireError", "create_workstream", "retire_workstream"]
