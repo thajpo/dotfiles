@@ -183,12 +183,10 @@ def pane_is_proven(pane: Mapping[str, str], *, conversation_id: str, argv_digest
         return False
     if pane.get("pane_dead") == "1":
         return False
-    if pane.get("argv_digest") == argv_digest:
-        return True
     pid = pane.get("pid") or ""
     if pid.isdigit() and int(pid) > 0:
         return _descendant_argv_matches(int(pid), f"--conversation-id {conversation_id}")
-    return False
+    return pane.get("argv_digest") == argv_digest
 
 
 def reconcile_presentation(
@@ -279,6 +277,7 @@ def reconcile_presentation(
     removed: list[str] = []
 
     created_windows: set[str] = set()
+    selected_panes: dict[str, str] = {}
     if not backend.has_session(session):
         backend.new_session(session, plan[0]["window"] if plan else "shell", working_dir)
         if plan:
@@ -292,6 +291,7 @@ def reconcile_presentation(
         proven = [pane for pane in candidates if pane_is_proven(pane, conversation_id=conv, argv_digest=item["argvDigest"])]
         if proven:
             pane = proven[0]
+            selected_panes[conv] = pane["pane_id"]
             if pane["window"] != window:
                 backend.move_pane(pane["pane_id"], session, window)
                 moved.append(conv)
@@ -303,9 +303,15 @@ def reconcile_presentation(
             backend.send_keys(repair["pane_id"], item["argv"])
             backend.set_pane_options(repair["pane_id"], conversation_id=conv, role=item["role"], argv_digest=item["argvDigest"])
             backend.set_pane_title(repair["pane_id"], f"pi-{item['role']} {conv}")
+            selected_panes[conv] = repair["pane_id"]
             repaired.append(conv)
             present.append(conv)
             continue
+        if candidates:
+            # Preserve a live pane whose metadata is stale, but do not let it
+            # become the durable locator for the desired conversation.
+            if conv not in drifted:
+                drifted.append(conv)
         if item["pane_slot"] == 1:
             pane_id = backend.split_window(session, item["window"], working_dir)
             backend.send_keys(pane_id, item["argv"])
@@ -321,6 +327,7 @@ def reconcile_presentation(
             backend.send_keys(agent_pane, item["argv"])
             backend.set_pane_options(agent_pane, conversation_id=conv, role=item["role"], argv_digest=item["argvDigest"])
             backend.set_pane_title(agent_pane, f"pi-{item['role']} {conv}")
+            pane_id = agent_pane
         else:
             if item["window"] not in created_windows:
                 pane_id = backend.new_window(session, item["window"], working_dir)
@@ -330,6 +337,7 @@ def reconcile_presentation(
             backend.send_keys(pane_id, item["argv"])
             backend.set_pane_options(pane_id, conversation_id=conv, role=item["role"], argv_digest=item["argvDigest"])
             backend.set_pane_title(pane_id, f"pi-{item['role']} {conv}")
+        selected_panes[conv] = pane_id
         present.append(conv)
 
     desired_ids = {item["conversationId"] for item in plan}
@@ -349,11 +357,12 @@ def reconcile_presentation(
         conv = item["conversationId"]
         project_id = item["projectId"]
         assignment = store.conn.execute("SELECT * FROM presentation_assignments WHERE conversation_id=?", (conv,)).fetchone()
-        pane_ref = None
-        for pane in backend.inventory():
-            if pane.get("session") == session and pane.get("conversation_id") == conv and pane.get("managed") == "1":
-                pane_ref = pane["pane_id"]
-                break
+        pane_ref = selected_panes.get(conv)
+        if pane_ref is None:
+            for pane in backend.inventory():
+                if pane.get("session") == session and pane.get("conversation_id") == conv and pane.get("managed") == "1":
+                    pane_ref = pane["pane_id"]
+                    break
         observed = "present" if conv in present else ("drifted" if conv in drifted else "error")
         locator = build_locator(
             surface=surface, session=session, window=item["window"], pane=pane_ref,

@@ -7,10 +7,11 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from scripts.pi_control.pi_client import PiControllerClient
 from scripts.pi_control.pi_store import PiStore
-from scripts.pi_control.presentation import PresentationError, TmuxBackend, focus_presentation, reconcile_presentation
+from scripts.pi_control.presentation import PresentationError, TmuxBackend, focus_presentation, pane_is_proven, reconcile_presentation
 from scripts.pi_control.presentation_locator import build_locator, parse_locator
 from tests.pi_test_build import allow_test_only_registered_build_rows
 from tests.test_pi_core import _repo
@@ -156,6 +157,41 @@ class PresentationTests(unittest.TestCase):
             "workstreamId": workstream_id,
             "worktreePath": worktree_path,
         }
+
+    def test_real_pane_pid_must_prove_the_conversation_argv(self) -> None:
+        pane = {
+            "managed": "1", "conversation_id": "conv_" + "a" * 32,
+            "pane_dead": "0", "pid": "1234", "argv_digest": "sha256:expected",
+        }
+        with mock.patch("scripts.pi_control.presentation._descendant_argv_matches", return_value=False) as matches:
+            self.assertFalse(pane_is_proven(pane, conversation_id=pane["conversation_id"], argv_digest=pane["argv_digest"]))
+            matches.assert_called_once_with(1234, "--conversation-id " + pane["conversation_id"])
+
+    def test_fake_pane_without_pid_can_use_recorded_argv_digest(self) -> None:
+        pane = {
+            "managed": "1", "conversation_id": "conv_" + "b" * 32,
+            "pane_dead": "0", "pid": "0", "argv_digest": "sha256:expected",
+        }
+        self.assertTrue(pane_is_proven(pane, conversation_id=pane["conversation_id"], argv_digest=pane["argv_digest"]))
+
+    def test_stale_live_pane_does_not_remain_the_durable_locator(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            project = self._project(root, "stale-live")
+            with PiStore(root / "state") as store:
+                conversation = self._conversations(store, project, ["secretary"])[0]
+                entry = self._entry(conversation)
+                backend = FakeTmux()
+                backend.new_session("pisec", "projects-1", "/tmp")
+                stale = backend._new_pane(
+                    "pisec", "projects-1", command="python3", pid="1234",
+                    options={"managed": "1", "conversation_id": conversation["conversation_id"], "role": "secretary", "argv_digest": "sha256:stale"},
+                )
+                with mock.patch("scripts.pi_control.presentation._descendant_argv_matches", return_value=False):
+                    report = reconcile_presentation(store, surface="pisec", layout="mobile", conversations=[entry], backend=backend)
+                self.assertIn(conversation["conversation_id"], report["drifted"])
+                locator = parse_locator(store.conn.execute("SELECT locator_json FROM presentation_assignments WHERE conversation_id=?", (conversation["conversation_id"],)).fetchone()[0])
+                self.assertNotEqual(locator["pane"], stale["pane_id"])
 
     def test_locator_roundtrip_and_legacy_rejection(self) -> None:
         locator = build_locator(surface="pisec", session="pisec", window="projects-1", pane="%1", project_id="prj_" + "a" * 32, conversation_id="conv_" + "b" * 32, role="secretary", layout="desktop", argv_digest="sha256:x")
