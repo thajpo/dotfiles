@@ -61,7 +61,8 @@ def main(argv):
     elif argv[0] == "preference":
         preference = load_preference()
         if argv[1] == "get":
-            print(json.dumps({"surface": argv[2], "activeProjectIds": preference.get(argv[2], [])}))
+            configured = argv[2] in preference
+            print(json.dumps({"surface": argv[2], "activeProjectIds": preference.get(argv[2], []), "configured": configured}))
         else:
             preference[argv[2]] = argv[3:]
             save_preference(preference)
@@ -127,5 +128,35 @@ for window in alpha gamma; do
   count=$(tmux list-panes -t "=pisec:$window" | wc -l)
   (( count == 1 )) || { echo "FAIL: mobile window $window has $count panes"; exit 1; }
 done
+
+# Explicitly empty active set: activate --clear must mean an empty grid, not
+# the all-projects fallback. Only the placeholder shell window remains.
+tmux kill-session -t =pisec
+pisec activate --clear >/dev/null 2>&1
+pisec launch
+empty_windows=$(tmux list-windows -t =pisec -F '#{window_name}' | sort | tr '\n' ' ')
+[[ "$empty_windows" == "shell " ]] || { echo "FAIL: empty grid windows $empty_windows"; exit 1; }
+
+# Re-activate by exact project id: resolution must accept ids and aliases.
+projects_json=$(python3 "$temporary/scripts/pi-surface.py" project-list)
+alpha_id=$(python3 -c "import json,sys; print(json.load(sys.stdin)[0]['project_id'])" <<<"$projects_json")
+pisec activate "$alpha_id" gamma >/dev/null 2>&1
+pisec launch
+window=$(tmux list-windows -t =pisec -F '#{window_name}' | grep -v '^shell$' | head -1)
+[[ "$window" == "alpha" ]] || { echo "FAIL: id activation window $window"; exit 1; }
+
+# Stale preference ids must be dropped with a warning, not brick the surface.
+python3 - "$temporary/state" <<'PY'
+import json, os, sys
+path = os.path.join(sys.argv[1], "preferences.json")
+value = json.load(open(path, encoding="utf-8"))
+value["pisec"] = ["prj_deadbeefdeadbeefdeadbeefdeadbeef", value["pisec"][1]]
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(value))
+PY
+pisec list >/dev/null 2>"$temporary/stale.err"
+grep -q "dropping stale active project" "$temporary/stale.err" || { echo "FAIL: stale id not reported"; exit 1; }
+pisec launch >/dev/null 2>"$temporary/stale2.err"
+grep -q "dropping stale active project" "$temporary/stale2.err" || { echo "FAIL: stale id not reported on launch"; exit 1; }
 
 echo "pisec grid mechanics: ok"

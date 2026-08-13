@@ -50,10 +50,11 @@ for item in json.load(sys.stdin):
 active_json=$(python3 "$helper" preference get pi-personal)
 mapfile -t active_ids < <(python3 -c "
 import json, sys
-ids = json.load(sys.stdin)['activeProjectIds']
-if ids:
-    print('\n'.join(ids))
+value = json.load(sys.stdin)
+if value.get('configured') and value['activeProjectIds']:
+    print('\n'.join(value['activeProjectIds']))
 " <<<"$active_json")
+pref_configured=$(python3 -c "import json,sys; print('1' if json.load(sys.stdin).get('configured') else '0')" <<<"$active_json")
 
 declare -A project_display=() project_id_of=()
 for row in "${projects[@]}"; do
@@ -62,12 +63,18 @@ for row in "${projects[@]}"; do
   project_id_of[$dname]=$pid
 done
 
+# An explicitly configured set (even empty) wins; without a preference every
+# registered project is active in the controller list order. Stale ids are
+# dropped with a warning so a stale preference can never brick the surface.
 declare -a ordered_ids=() ordered_names=()
-if (( ${#active_ids[@]} > 0 )); then
+if (( pref_configured == 1 )); then
   for pid in "${active_ids[@]}"; do
-    [[ -n "${project_display[$pid]:-}" ]] || { printf 'pi-personal: active project is no longer registered: %s\n' "$pid" >&2; exit 1; }
-    ordered_ids+=("$pid")
-    ordered_names+=("${project_display[$pid]}")
+    if [[ -n "${project_display[$pid]:-}" ]]; then
+      ordered_ids+=("$pid")
+      ordered_names+=("${project_display[$pid]}")
+    else
+      printf 'pi-personal: dropping stale active project: %s\n' "$pid" >&2
+    fi
   done
 else
   for row in "${projects[@]}"; do
@@ -76,6 +83,19 @@ else
     ordered_names+=("$dname")
   done
 fi
+
+# Resolve an argument as an exact project id or a unique display-name alias.
+resolve_pid() {
+  local alias=$1 pid="" count=0 row rowpid rowdname
+  for row in "${projects[@]}"; do
+    read -r rowpid rowdname <<<"$row"
+    if [[ "$rowpid" == "$alias" ]]; then printf '%s' "$rowpid"; return 0; fi
+    if [[ "$rowdname" == "$alias" ]]; then pid=$rowpid; count=$((count + 1)); fi
+  done
+  if (( count == 1 )); then printf '%s' "$pid"; return 0; fi
+  if (( count > 1 )); then printf 'pi-personal: ambiguous alias (use the project id): %s\n' "$alias" >&2; return 1; fi
+  return 1
+}
 
 if [[ "$action" == list ]]; then
   for row in "${projects[@]}"; do
@@ -88,10 +108,15 @@ if [[ "$action" == list ]]; then
 fi
 
 if [[ "$action" == activate ]]; then
-  (( $# > 0 )) || { printf 'pi-personal: activate requires at least one alias\n' >&2; exit 1; }
+  if [[ "$1" == "--clear" ]]; then
+    python3 "$helper" preference set pi-personal >/dev/null
+    printf 'pi-personal: active set is now empty\n' >&2
+    exit 0
+  fi
+  (( $# > 0 )) || { printf 'pi-personal: activate requires at least one alias (or --clear)\n' >&2; exit 1; }
   selected=()
   for alias in "$@"; do
-    pid=${project_id_of[$alias]:-}
+    pid=$(resolve_pid "$alias") || exit 1
     [[ -n "$pid" ]] || { printf 'pi-personal: unknown project alias: %s\n' "$alias" >&2; exit 1; }
     selected+=("$pid")
   done
@@ -102,14 +127,15 @@ fi
 
 if [[ "$action" == swap ]]; then
   (( $# == 2 )) || { printf 'pi-personal: swap requires OLD and NEW aliases\n' >&2; exit 1; }
-  old_pid=${project_id_of[$1]:-}; new_pid=${project_id_of[$2]:-}
+  old_pid=$(resolve_pid "$1") || exit 1
+  new_pid=$(resolve_pid "$2") || exit 1
   [[ -n "$old_pid" && -n "$new_pid" ]] || { printf 'pi-personal: unknown project alias\n' >&2; exit 1; }
   old_index=-1; new_index=-1
   for i in "${!ordered_ids[@]}"; do
     [[ "${ordered_ids[$i]}" == "$old_pid" ]] && old_index=$i
     [[ "${ordered_ids[$i]}" == "$new_pid" ]] && new_index=$i
   done
-  (( old_index >= 0 && new_index >= 0 && old_index != new_index )) || { printf 'pi-personal: swap requires one active and one inactive project\n' >&2; exit 1; }
+  (( old_index >= 0 && new_index >= 0 && old_index != new_index )) || { printf 'pi-personal: swap reorders two projects within the active set\n' >&2; exit 1; }
   selected=()
   for i in "${!ordered_ids[@]}"; do
     if (( i == old_index )); then selected+=("$new_pid"); elif (( i == new_index )); then selected+=("$old_pid"); else selected+=("${ordered_ids[$i]}"); fi
@@ -271,7 +297,7 @@ for i in "${!ordered_ids[@]}"; do
 done
 
 if tmux_has_window shell; then
-  remaining=$(tmux list-windows -t "=$session" -F '#{window_name}' | grep -v '^shell$' | wc -l)
+  remaining=$(tmux list-windows -t "=$session" -F '#{window_name}' | grep -v '^shell$' | wc -l) || true
   (( remaining > 0 )) && tmux kill-window -t "=$session:shell" 2>/dev/null || true
 fi
 

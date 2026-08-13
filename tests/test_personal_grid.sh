@@ -59,7 +59,8 @@ def main(argv):
     elif argv[0] == "preference":
         preference = load_preference()
         if argv[1] == "get":
-            print(json.dumps({"surface": argv[2], "activeProjectIds": preference.get(argv[2], [])}))
+            configured = argv[2] in preference
+            print(json.dumps({"surface": argv[2], "activeProjectIds": preference.get(argv[2], []), "configured": configured}))
         else:
             preference[argv[2]] = argv[3:]
             save_preference(preference)

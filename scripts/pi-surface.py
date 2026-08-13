@@ -489,7 +489,7 @@ def bootstrap(config: str | None = None, *, dry_run: bool = False, keep_extra: b
     for surface, aliases in value["surfaces"].items():
         active = [project_ids[alias] for alias in aliases if alias in project_ids]
         if keep_extra:
-            existing_ids = preference_get(surface)
+            existing_ids = preference_get(surface)["activeProjectIds"]
             extra = [pid for pid in existing_ids if pid not in active and any(item["project_id"] == pid for item in current)]
             active = active + extra
         preferences[surface] = active
@@ -505,19 +505,22 @@ def _preferences_path() -> Path:
     return STATE_ROOT / "surface" / "preferences.json"
 
 
-def preference_get(surface: str) -> list[str]:
-    """Return the ordered active project set for one surface.
+def preference_get(surface: str) -> dict:
+    """Return the ordered active project set and whether it is configured.
 
-    The set is a controller-owned presentation preference stored under the
-    state root; it is a projection and never conversation identity.
+    A missing preference means the surface falls back to every registered
+    project; a present list, even when empty, is an explicitly configured
+    grid. Stale ids are reported separately so callers can drop them without
+    bricking the surface.
     """
     try:
         value = json.loads(_preferences_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
+        return {"surface": surface, "activeProjectIds": [], "configured": False}
     if not isinstance(value, dict) or not isinstance(value.get(surface), list):
-        return []
-    return [item for item in value[surface] if isinstance(item, str) and item]
+        return {"surface": surface, "activeProjectIds": [], "configured": False}
+    ids = [item for item in value[surface] if isinstance(item, str) and item]
+    return {"surface": surface, "activeProjectIds": list(dict.fromkeys(ids)), "configured": True}
 
 
 def preference_set(surface: str, project_ids: list[str]) -> dict:
@@ -685,7 +688,7 @@ def main(argv: list[str] | None = None) -> int:
             value = bootstrap(args.config, dry_run=args.dry_run, keep_extra=args.keep_extra, allow_missing=args.allow_missing)
         elif args.command == "preference":
             if args.preference_command == "get":
-                value = {"surface": args.surface, "activeProjectIds": preference_get(args.surface)}
+                value = preference_get(args.surface)
             else:
                 value = preference_set(args.surface, args.project_ids)
         elif args.command == "launch-argv-shell":
