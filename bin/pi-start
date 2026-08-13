@@ -17,9 +17,9 @@ restart="$HOME/.local/bin/pi-restart"
 
 usage() {
   printf '%s\n' \
-    'usage: pi-start [personal|project [DIR]|all|help] [-mobile|--mobile]' \
+    'usage: pi-start [personal|project [DIR]|secretary|all|help] [-mobile|--mobile]' \
     '       defaults: desktop layout and tmux backend' \
-    '       all always starts personal' >&2
+    '       all starts personal and secretary grids' >&2
 }
 
 mobile_layout=0
@@ -133,12 +133,13 @@ try:
     parsed = [(name, int(count)) for name, count in rows]
 except (TypeError, ValueError):
     raise SystemExit(2)
-if parsed == [("personal-1", 2), ("personal-2", 2)]:
-    print("desktop")
-elif parsed == [(f"personal-{index}", 1) for index in range(1, 5)]:
+managed = [row for row in parsed if row[0].startswith("projects-") or row[0] == "shell"]
+if not managed:
+    raise SystemExit(1)
+if all(count == 1 for _, count in managed):
     print("mobile")
 else:
-    raise SystemExit(1)
+    print("desktop")
 ' <<<"$payload"
 }
 
@@ -231,8 +232,14 @@ case "$action" in
     if (( mobile_layout )); then exec "$pidev" --mobile; else exec "$pidev"; fi
     ;;
   all)
+    helper="$self_dir/../scripts/pi-surface.py"
+    if [[ -f "$helper" ]]; then
+      python3 "$helper" bootstrap >/dev/null 2>&1 || printf 'pi-start: surface bootstrap failed; grids reflect current registration\n' >&2
+    fi
     if (( mobile_layout )); then "$personal" --ensure --mobile; else "$personal" --ensure; fi
-    if [[ -x "$self_dir/pisec" ]]; then "$self_dir/pisec" launch; fi
+    if [[ -x "$self_dir/pisec" ]]; then
+      if (( mobile_layout )); then "$self_dir/pisec" --mobile launch; else "$self_dir/pisec" launch; fi
+    fi
     ;;
 esac
 
