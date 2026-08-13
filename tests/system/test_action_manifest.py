@@ -47,7 +47,7 @@ def copy_validation_fixture(destination: Path) -> None:
 
 
 class ActionManifestTests(unittest.TestCase):
-    def test_repository_greenfield_catalog_is_valid(self):
+    def test_repository_pi_catalog_is_valid(self):
         self.assertEqual(validate_plan_docs.validate(ROOT), [])
 
     def test_invalid_action_manifest_is_rejected(self):
@@ -58,7 +58,7 @@ class ActionManifestTests(unittest.TestCase):
 
             errors = validate_plan_docs.validate(root)
 
-        self.assertTrue(any(error.startswith("greenfield catalog is invalid JSON (tests/system/action-manifest.v1.json):") for error in errors), errors)
+        self.assertTrue(any(error.startswith("catalog is invalid JSON (tests/system/action-manifest.v1.json):") for error in errors), errors)
 
     def test_planned_action_does_not_require_future_entrypoint(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -80,8 +80,8 @@ class ActionManifestTests(unittest.TestCase):
 
             errors = validate_plan_docs.validate(root)
 
-        self.assertIn("retired product mode appears in greenfield catalog: tests/system/action-manifest.v1.json", errors)
-        self.assertIn("action manifest row 1 must use only greenfield mode", errors)
+        self.assertIn("retired product mode appears in catalog: tests/system/action-manifest.v1.json", errors)
+        self.assertIn("action manifest row 1 must use only controller mode", errors)
 
     def test_invalid_action_status_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -145,7 +145,7 @@ class ActionManifestTests(unittest.TestCase):
 
             errors = validate_plan_docs.validate(root)
 
-        self.assertIn("greenfield extension catalog has an invalid shape", errors)
+        self.assertIn("extension catalog has an invalid shape", errors)
 
     def test_fabricated_surface_and_package_version_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -163,7 +163,7 @@ class ActionManifestTests(unittest.TestCase):
             errors = validate_plan_docs.validate(root)
 
         self.assertIn("action manifest row 1 has an invalid surface", errors)
-        self.assertIn("greenfield package catalog row 2 does not match package metadata", errors)
+        self.assertIn("package catalog row 2 does not match package metadata", errors)
 
 
 if __name__ == "__main__":

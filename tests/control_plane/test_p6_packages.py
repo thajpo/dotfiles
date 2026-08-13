@@ -11,15 +11,15 @@ import unittest
 
 from scripts.pi_control.package_diff import PackageInputError, diff_observations, observe_package_tree
 from scripts.pi_control.dependencies import DependencyError, inventory_dependencies, package_review_gate, record_package_security_review, set_dependency_disposition
-from scripts.pi_control.greenfield_client import GreenfieldControllerClient
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_client import PiControllerClient
+from scripts.pi_control.pi_store import PiStore
 from scripts.pi_control.investigators import bind_investigation_run, start_investigation
 from scripts.pi_control.launch import prepare_run
 from scripts.pi_control.models import new_id
 from scripts.pi_control.package_environment import approve_package_request, execute_approved_package_request, request_package_operation
 from tests.control_plane.test_p2_contract import tool_runtime
-from tests.greenfield_test_build import allow_test_only_registered_build_rows
-from tests.test_greenfield_core import _BUILD_ID, _host, _register_build, _repo
+from tests.pi_test_build import allow_test_only_registered_build_rows
+from tests.test_pi_core import _BUILD_ID, _host, _register_build, _repo
 
 
 def _git(root: Path, *args: str) -> str:
@@ -93,14 +93,14 @@ class P6PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             repository = _repo(root, "integrated")
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(repository), "integrated")
             (repository / "package.json").write_text(json.dumps({"name": "fixture", "version": "1.0.0", "packageManager": "npm@10.8.2", "dependencies": {"left-pad": "1.3.0"}}))
             (repository / "package-lock.json").write_text(json.dumps({"name": "fixture", "version": "1.0.0", "lockfileVersion": 3, "packages": {"": {"dependencies": {"left-pad": "1.3.0"}}, "node_modules/left-pad": {"version": "1.3.0", "resolved": "https://registry.invalid/left-pad.tgz", "integrity": "sha512-fixture"}}}))
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 working = dict(store.conn.execute("SELECT * FROM working_copies WHERE project_id=?", (project["project_id"],)).fetchone())
             change = client.submit_change(project_id=project["project_id"], working_copy_id=working["working_copy_id"], target_ref=working["branch_ref"], title="package", summary="locked package", capture_mode="dirty", selected_paths=["package.json", "package-lock.json"], idempotency_key="p6-package-candidate")
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 _register_build(store, root)
                 inventory = inventory_dependencies(store, project_id=project["project_id"], change_id=change["changeId"], revision=change["revision"])
                 self.assertEqual([(item["changeKind"], item["packageName"], item["exactVersion"]) for item in inventory["differences"]], [("add", "left-pad", "1.3.0")])

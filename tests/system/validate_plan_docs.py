@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate greenfield contracts and bounded P6 program/catalog progress."""
+"""Validate Pi harness contracts and bounded P6 program/catalog progress."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from jsonschema.exceptions import SchemaError
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PLAN = ROOT / "PI_GREENFIELD_IMPLEMENTATION_PLAN.md"
+PLAN = ROOT / "PI_IMPLEMENTATION_PLAN.md"
 CONTRACTS = (
     ROOT / "pi/control-plane/README.md",
     ROOT / "pi/control-plane/PRODUCT_CONTRACT.md",
@@ -22,7 +22,7 @@ CONTRACTS = (
     ROOT / "pi/control-plane/OBSERVABILITY_CONTINUITY_CONTRACT.md",
     ROOT / "pi/control-plane/SYSTEM_INTEGRATION_TEST_PLAN.md",
     ROOT / "pi/control-plane/ACCEPTANCE_PLAN.md",
-    ROOT / "pi/control-plane/GREENFIELD_CUTOVER_AND_ROLLBACK.md",
+    ROOT / "pi/control-plane/CUTOVER_AND_ROLLBACK.md",
     ROOT / "pi/control-plane/PRE_ACTIVATION_ACCEPTANCE_RUNBOOK.md",
 )
 ACTIVE_DOCS = list(CONTRACTS[1:])
@@ -44,7 +44,7 @@ CATALOG_FILES = (
     "tests/system/launcher-surface.v1.json",
     "tests/system/loaded-extensions.v1.json",
     "tests/system/configured-packages.v1.json",
-    "pi/greenfield-resources.v1.json",
+    "pi/pi-resources.v1.json",
 )
 MECHANICAL_STATUSES = {
     "not-started", "source-passed", "installed-passed",
@@ -66,7 +66,7 @@ OWNERSHIP_LINES = {
     "pi/control-plane/OBSERVABILITY_CONTINUITY_CONTRACT.md": "Owns: evidence envelopes, user attention, and restart continuity.",
     "pi/control-plane/SYSTEM_INTEGRATION_TEST_PLAN.md": "Owns: release scenario inventory and evidence-tier coverage.",
     "pi/control-plane/ACCEPTANCE_PLAN.md": "Owns: gate evaluation and release-verifier behavior.",
-    "pi/control-plane/GREENFIELD_CUTOVER_AND_ROLLBACK.md": "Owns: atomic cutover and rollback transaction.",
+    "pi/control-plane/CUTOVER_AND_ROLLBACK.md": "Owns: atomic cutover and rollback transaction.",
     "pi/control-plane/PRE_ACTIVATION_ACCEPTANCE_RUNBOOK.md": "Owns: human pre-activation procedure.",
 }
 REQUIRED_PLAN_SECTIONS = (
@@ -78,11 +78,11 @@ REQUIRED_PLAN_SECTIONS = (
 )
 ALLOWED_PI_TASK_LINES = {
     "Every run has one identity document exported as `PI_RUNTIME_MANIFEST`. No",
-    "`PI_TASK_*` greenfield compatibility behavior is permitted.",
+    "`PI_TASK_*` compatibility behavior is permitted.",
     "controller-scoped host adapters. Personal, workstream, and integration writer",
     "authority, working copy, build, and writer generation, then creates one run",
-    "identity exported as `PI_RUNTIME_MANIFEST`. No `PI_TASK_*` greenfield",
-    "compatibility behavior exists.",
+    "identity exported as `PI_RUNTIME_MANIFEST`. No `PI_TASK_*` compatibility",
+    "behavior exists.",
 }
 EXCLUDED_RELEASE_ENTRYPOINTS = {
     "scripts/pi-runtime.py", "scripts/pi-workspace.py",
@@ -107,6 +107,10 @@ ACTION_OWNERS = {
     "HA-009": "P9", "HA-010": "P1", "HA-011": "P6", "HA-012": "P12",
     "HA-013": "P12", "HA-014": "P6", "HA-015": "P2", "HA-016": "P3",
     "HA-017": "P4", "HA-018": "P7",
+    "HA-019": "P7", "HA-020": "P7", "HA-021": "P5", "HA-022": "P4",
+    "HA-023": "P7", "HA-024": "P7", "HA-025": "P7", "HA-026": "P7",
+    "HA-027": "P7", "HA-028": "P7", "HA-029": "P8",
+    "HA-031": "P8", "HA-032": "P7",
 }
 
 
@@ -130,16 +134,16 @@ def _validate_documents(root: Path, errors: list[str]) -> None:
         path = _relative(root, template)
         relative = str(path.relative_to(root))
         if not path.is_file() or path.is_symlink():
-            errors.append(f"missing canonical greenfield document: {relative}")
+            errors.append(f"missing canonical document: {relative}")
             continue
         documents[relative] = path.read_text(encoding="utf-8")
 
     for template in RETIRED_DOCS:
         path = _relative(root, template)
         if path.exists() or path.is_symlink():
-            errors.append(f"retired non-greenfield document returned: {path.relative_to(root)}")
+            errors.append(f"retired document returned: {path.relative_to(root)}")
 
-    plan = documents.get("PI_GREENFIELD_IMPLEMENTATION_PLAN.md", "")
+    plan = documents.get("PI_IMPLEMENTATION_PLAN.md", "")
     for heading in REQUIRED_PLAN_SECTIONS:
         if heading not in plan:
             errors.append(f"canonical plan is missing section: {heading}")
@@ -239,10 +243,10 @@ def _validate_documents(root: Path, errors: list[str]) -> None:
             errors.append(f"canonical contract has missing or changed ownership declaration: {relative}")
 
     contract_requirements = {
-        "pi/control-plane/STATE_CONTRACT.md": ("never reads, imports, maps, resumes, reconciles, or adopts historical Pi", "canonical store and CLI are the greenfield families"),
+        "pi/control-plane/STATE_CONTRACT.md": ("never reads, imports, maps, resumes, reconciles, or adopts historical Pi", "canonical store and CLI are the Pi controller families"),
         "pi/control-plane/EXECUTION_CONTRACT.md": ("Release 1 supports Linux only.", "Every conversational Pi, model, session, and", "scripts/pi_control/docker_runtime.py` is the intended sole Docker lifecycle", "npm projects with a committed `package-lock.json`", "Python projects with a committed `uv.lock`", "TTY-bound host CLI"),
         "pi/control-plane/CHANGE_INTEGRATION_CONTRACT.md": ("host controller alone creates commits", "no writable Git metadata", "No operation pushes"),
-        "pi/control-plane/GREENFIELD_CUTOVER_AND_ROLLBACK.md": ("OpenCode and its configuration remain unchanged",),
+        "pi/control-plane/CUTOVER_AND_ROLLBACK.md": ("OpenCode and its configuration remain unchanged",),
     }
     for relative, snippets in contract_requirements.items():
         text = documents.get(relative, "")
@@ -267,7 +271,7 @@ def _validate_action_manifest(root: Path, value: object, errors: list[str]) -> N
         errors.append("action manifest has an invalid object shape")
     if value.get("$schema") != "action-manifest.schema.json":
         errors.append("action manifest does not link the canonical schema")
-    if value.get("version") != 1 or value.get("sourcePlan") != "PI_GREENFIELD_IMPLEMENTATION_PLAN.md":
+    if value.get("version") != 1 or value.get("sourcePlan") != "PI_IMPLEMENTATION_PLAN.md":
         errors.append("action manifest identity is invalid")
     actions = value.get("actions")
     if not isinstance(actions, list) or not actions:
@@ -298,8 +302,8 @@ def _validate_action_manifest(root: Path, value: object, errors: list[str]) -> N
             errors.append(f"{label} has an invalid authorizationClass")
         if action.get("risk") not in ACTION_RISKS:
             errors.append(f"{label} has an invalid risk")
-        if action.get("modes") != ["greenfield"]:
-            errors.append(f"{label} must use only greenfield mode")
+        if action.get("modes") != ["controller"]:
+            errors.append(f"{label} must use only controller mode")
         if action.get("status") not in ACTION_STATUSES:
             errors.append(f"{label} has an invalid status")
         if action.get("owningPhase") not in PHASES:
@@ -318,49 +322,49 @@ def _validate_support_catalogs(root: Path, catalogs: dict[str, object], errors: 
     launcher = catalogs.get("tests/system/launcher-surface.v1.json")
     if isinstance(launcher, dict):
         implemented = launcher.get("releaseCanary")
-        planned = launcher.get("plannedGreenfield")
+        planned = launcher.get("plannedLaunchers")
         excluded = launcher.get("excludedLaunchers")
-        if set(launcher) != {"version", "releaseCanary", "plannedGreenfield", "excludedLaunchers", "acceptanceRule"} or launcher.get("version") != 1 or not _nonempty_strings(implemented) or not _nonempty_strings(planned) or not _nonempty_strings(excluded) or not isinstance(launcher.get("acceptanceRule"), str) or not launcher["acceptanceRule"]:
-            errors.append("greenfield launcher catalog has an invalid shape")
+        if set(launcher) != {"version", "releaseCanary", "plannedLaunchers", "excludedLaunchers", "acceptanceRule"} or launcher.get("version") != 1 or not _nonempty_strings(implemented) or not _nonempty_strings(excluded) or not isinstance(planned, list) or any(not isinstance(item, str) or not item for item in planned) or not isinstance(launcher.get("acceptanceRule"), str) or not launcher["acceptanceRule"]:
+            errors.append("launcher catalog has an invalid shape")
         elif set(implemented) & (set(planned) | set(excluded)) or set(planned) & set(excluded):
-            errors.append("greenfield launcher catalog overlaps release, planned, and excluded paths")
+            errors.append("launcher catalog overlaps release, planned, and excluded paths")
         else:
             for relative in implemented:
                 if not (root / relative).is_file():
-                    errors.append(f"greenfield launcher catalog references a missing implemented path: {relative}")
+                    errors.append(f"launcher catalog references a missing implemented path: {relative}")
     extensions = catalogs.get("tests/system/loaded-extensions.v1.json")
     if isinstance(extensions, dict):
         rows = extensions.get("extensions")
         if set(extensions) != {"version", "extensions"} or extensions.get("version") != 1 or not isinstance(rows, list) or not rows:
-            errors.append("greenfield extension catalog has an invalid shape")
+            errors.append("extension catalog has an invalid shape")
         else:
             paths: set[str] = set()
             for index, row in enumerate(rows):
-                if not isinstance(row, dict) or set(row) != {"path", "roles", "greenfieldArtifactStatus", "installedProcessEvidence"} or row.get("greenfieldArtifactStatus") != "packaged" or not isinstance(row.get("installedProcessEvidence"), bool) or not _nonempty_strings(row.get("roles")):
-                    errors.append(f"greenfield extension catalog row {index + 1} is invalid")
+                if not isinstance(row, dict) or set(row) != {"path", "roles", "artifactStatus", "installedProcessEvidence"} or row.get("artifactStatus") != "packaged" or not isinstance(row.get("installedProcessEvidence"), bool) or not _nonempty_strings(row.get("roles")):
+                    errors.append(f"extension catalog row {index + 1} is invalid")
                     continue
                 path = row.get("path")
                 if not isinstance(path, str) or path in paths:
-                    errors.append(f"greenfield extension catalog row {index + 1} has an invalid path")
+                    errors.append(f"extension catalog row {index + 1} has an invalid path")
                     continue
                 paths.add(path)
-                if row["greenfieldArtifactStatus"] == "packaged" and not (root / path).is_file():
-                    errors.append(f"greenfield extension catalog row {index + 1} references a missing implemented path")
+                if row["artifactStatus"] == "packaged" and not (root / path).is_file():
+                    errors.append(f"extension catalog row {index + 1} references a missing implemented path")
     packages = catalogs.get("tests/system/configured-packages.v1.json")
     if isinstance(packages, dict):
         rows = packages.get("packages")
         if set(packages) != {"version", "packages"} or packages.get("version") != 1 or not isinstance(rows, list) or not rows:
-            errors.append("greenfield package catalog has an invalid shape")
+            errors.append("package catalog has an invalid shape")
         else:
             names: set[str] = set()
             for index, row in enumerate(rows):
-                if not isinstance(row, dict) or set(row) != {"name", "version", "source", "greenfieldArtifactStatus", "reason"} or row.get("greenfieldArtifactStatus") not in {"packaged", "planned", "out-of-scope"} or any(not isinstance(row.get(field), str) or not row[field] for field in ("name", "version", "source", "reason")) or row["name"] in names:
-                    errors.append(f"greenfield package catalog row {index + 1} is invalid")
+                if not isinstance(row, dict) or set(row) != {"name", "version", "source", "artifactStatus", "reason"} or row.get("artifactStatus") not in {"packaged", "planned", "out-of-scope"} or any(not isinstance(row.get(field), str) or not row[field] for field in ("name", "version", "source", "reason")) or row["name"] in names:
+                    errors.append(f"package catalog row {index + 1} is invalid")
                     continue
                 names.add(row["name"])
                 source_path = root / row["source"]
-                if row["greenfieldArtifactStatus"] == "packaged" and not source_path.exists():
-                    errors.append(f"greenfield package catalog row {index + 1} references a missing implemented source")
+                if row["artifactStatus"] == "packaged" and not source_path.exists():
+                    errors.append(f"package catalog row {index + 1} references a missing implemented source")
                     continue
                 if not source_path.exists():
                     continue
@@ -368,13 +372,13 @@ def _validate_support_catalogs(root: Path, catalogs: dict[str, object], errors: 
                     try:
                         metadata = json.loads((source_path / "package.json").read_text(encoding="utf-8"))
                     except (OSError, json.JSONDecodeError):
-                        errors.append(f"greenfield package catalog row {index + 1} has unreadable package metadata")
+                        errors.append(f"package catalog row {index + 1} has unreadable package metadata")
                     else:
                         if metadata.get("name") != row["name"] or metadata.get("version") != row["version"]:
-                            errors.append(f"greenfield package catalog row {index + 1} does not match package metadata")
+                            errors.append(f"package catalog row {index + 1} does not match package metadata")
                 elif source_path.name == "PI_VERSION" and source_path.read_text(encoding="utf-8").strip() != row["version"]:
-                    errors.append(f"greenfield package catalog row {index + 1} does not match PI_VERSION")
-    resource_catalog = catalogs.get("pi/greenfield-resources.v1.json")
+                    errors.append(f"package catalog row {index + 1} does not match PI_VERSION")
+    resource_catalog = catalogs.get("pi/pi-resources.v1.json")
     if isinstance(resource_catalog, dict) and isinstance(launcher, dict) and isinstance(extensions, dict) and isinstance(packages, dict):
         extension_rows = extensions.get("extensions", [])
         configured_rows = packages.get("packages", [])
@@ -394,18 +398,18 @@ def _validate_catalogs(root: Path, errors: list[str]) -> None:
     for relative in CATALOG_FILES:
         path = root / relative
         if not path.is_file() or path.is_symlink():
-            errors.append(f"missing greenfield catalog: {relative}")
+            errors.append(f"missing catalog: {relative}")
             continue
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as error:
-            errors.append(f"greenfield catalog is invalid JSON ({relative}): {error}")
+            errors.append(f"catalog is invalid JSON ({relative}): {error}")
             continue
         if not isinstance(value, dict):
-            errors.append(f"greenfield catalog must be an object: {relative}")
+            errors.append(f"catalog must be an object: {relative}")
             continue
         if relative != "tests/system/action-manifest.schema.json" and RETIRED_CATALOG_WORDS.search(json.dumps(value, sort_keys=True)):
-            errors.append(f"retired product mode appears in greenfield catalog: {relative}")
+            errors.append(f"retired product mode appears in catalog: {relative}")
         catalogs[relative] = value
 
     schema = catalogs.get("tests/system/action-manifest.schema.json")

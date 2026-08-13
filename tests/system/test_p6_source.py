@@ -12,16 +12,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class P6SourceTests(unittest.TestCase):
     def test_model_resources_have_no_approval_execution_or_host_shell_path(self) -> None:
-        catalog = json.loads((ROOT / "pi/greenfield-resources.v1.json").read_text(encoding="utf-8"))
+        catalog = json.loads((ROOT / "pi/pi-resources.v1.json").read_text(encoding="utf-8"))
         self.assertIn("bin/pi-authorize", catalog["launchers"])
         for role in catalog["roles"]:
             self.assertNotIn("bin/pi-authorize", role["resources"])
         for profile in catalog["hostLaunchProfiles"]:
             self.assertNotIn("host_command", profile["tools"])
             self.assertNotIn("shell", profile["tools"])
-        cli = (ROOT / "scripts/pi_control/greenfield_cli.py").read_text(encoding="utf-8")
+        cli = (ROOT / "scripts/pi_control/pi_cli.py").read_text(encoding="utf-8")
         self.assertNotIn('(\"request\", \"authorize\"', cli)
-        self.assertNotIn('"command.authorize"', (ROOT / "scripts/pi_control/greenfield_protocol.py").read_text(encoding="utf-8"))
+        self.assertNotIn('"command.authorize"', (ROOT / "scripts/pi_control/pi_protocol.py").read_text(encoding="utf-8"))
 
     def test_sensitive_extensions_are_channel_only_and_identity_free(self) -> None:
         for relative in ("project-messages", "project-commands", "dependency-review"):

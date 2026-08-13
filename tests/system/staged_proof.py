@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from scripts.pi_control.greenfield_install import verify_stage
+from scripts.pi_control.pi_install import verify_stage
 
 
 def prove_loaded_root(root: Path, loaded_build_id: str | None) -> dict[str, Any]:

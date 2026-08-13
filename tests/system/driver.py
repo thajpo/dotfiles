@@ -1,4 +1,4 @@
-"""Bounded command runner for disposable greenfield system tests."""
+"""Bounded command runner for disposable Pi harness system tests."""
 from __future__ import annotations
 
 from dataclasses import dataclass

@@ -52,14 +52,20 @@ def bind_investigation_run(store: Any, *, conversation_id: str, run_id: str) -> 
     validate_id(conversation_id, prefix="conv")
     validate_id(run_id, prefix="run")
     with store.transaction():
-        row = store.conn.execute("SELECT * FROM investigations WHERE conversation_id=? AND state='running'", (conversation_id,)).fetchone()
-        if row is None or (row["run_id"] is not None and row["run_id"] != run_id):
+        row = store.conn.execute("SELECT * FROM investigations WHERE conversation_id=? AND state IN ('running','interrupted')", (conversation_id,)).fetchone()
+        if row is None:
+            raise InvestigatorError("investigator conversation has no active assignment")
+        if row["state"] == "interrupted":
+            # Resume: reopen the interrupted investigation for a new controller run.
+            store.conn.execute("UPDATE investigations SET state='running',run_id=?,result_json=NULL,completed_at=NULL,updated_at=? WHERE investigation_id=?", (run_id, utc_now(), row["investigation_id"]))
+            return dict(store.conn.execute("SELECT * FROM investigations WHERE investigation_id=?", (row["investigation_id"],)).fetchone())
+        if row["run_id"] is not None and row["run_id"] != run_id:
             raise InvestigatorError("investigator conversation has no unbound active assignment")
         store.conn.execute("UPDATE investigations SET run_id=?,updated_at=? WHERE investigation_id=?", (run_id, utc_now(), row["investigation_id"]))
         return dict(store.conn.execute("SELECT * FROM investigations WHERE investigation_id=?", (row["investigation_id"],)).fetchone())
 
 
-def complete_investigation(store: Any, investigation_id: str, *, state: str, result: Mapping[str, Any]) -> dict[str, Any]:
+def complete_investigation(store: Any, investigation_id: str, *, state: str, result: Mapping[str, Any], archive: bool = True) -> dict[str, Any]:
     validate_id(investigation_id, prefix="inv")
     if state not in {"result", "failed", "needs-user", "interrupted"}:
         raise InvestigatorError("investigation terminal state is invalid")
@@ -75,16 +81,17 @@ def complete_investigation(store: Any, investigation_id: str, *, state: str, res
             raise InvestigatorError("investigation has no controller-supervised run")
         now = utc_now()
         store.conn.execute("UPDATE investigations SET state=?,result_json=?,updated_at=?,completed_at=? WHERE investigation_id=?", (state, canonical_json(dict(result)), now, now, investigation_id))
-        store.conn.execute("UPDATE conversations SET desired_state='archived',updated_at=?,resource_version=resource_version+1 WHERE conversation_id=? AND desired_state='active'", (now, row["conversation_id"]))
+        if archive:
+            store.conn.execute("UPDATE conversations SET desired_state='archived',updated_at=?,resource_version=resource_version+1 WHERE conversation_id=? AND desired_state='active'", (now, row["conversation_id"]))
         completed = dict(store.conn.execute("SELECT * FROM investigations WHERE investigation_id=?", (investigation_id,)).fetchone())
     return completed
 
 
-def complete_conversation_investigation(store: Any, *, conversation_id: str, state: str, result: Mapping[str, Any]) -> dict[str, Any]:
+def complete_conversation_investigation(store: Any, *, conversation_id: str, state: str, result: Mapping[str, Any], archive: bool = True) -> dict[str, Any]:
     row = store.conn.execute("SELECT investigation_id FROM investigations WHERE conversation_id=?", (conversation_id,)).fetchone()
     if row is None:
         raise InvestigatorError("investigator assignment was not found")
-    return complete_investigation(store, row["investigation_id"], state=state, result=result)
+    return complete_investigation(store, row["investigation_id"], state=state, result=result, archive=archive)
 
 
 def interrupt_running(store: Any, *, project_id: str) -> list[dict[str, Any]]:

@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         for item in sorted(root.rglob("*.json")):
             if not item.is_file() or item.is_symlink():
                 continue
-            if "opencode" in item.parts:
+            if item.relative_to(root).parts[:1] == ("opencode",):
                 continue
             files.append(item)
     if not files:

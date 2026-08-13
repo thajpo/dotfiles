@@ -1,4 +1,4 @@
-# Pi Greenfield Change And Integration Contract
+# Pi Harness Change And Integration Contract
 
 Owns: Git mutation authority, submission, review, and local integration.
 

@@ -1,4 +1,4 @@
-"""Regression tests for the greenfield surface resolver and build registration.
+"""Regression tests for the Pi harness surface resolver and build registration.
 
 Covers: surface stage freshness/reuse, launcher argv construction, project and
 conversation ensure helpers, and the deterministic build re-registration path
@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_store import PiStore
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,7 +38,7 @@ class BuildRegistrationTests(unittest.TestCase):
         # the same digest cannot coexist.
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 base = (
                     "INSERT INTO installed_builds(build_id,source_commit,source_tree_hash,build_manifest_path,build_manifest_digest,resource_manifest_path,resource_manifest_digest,pi_version,package_lock_hash,status,installed_at,verification_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     ("build_old", "c" * 40, "d" * 64, "/old/manifest.json", "sha256:" + "1" * 64, "/old/resources.json", "sha256:" + "2" * 64, "0.83.0", "sha256:" + "3" * 64, "staged", "2026-01-01T00:00:00Z", json.dumps({"verified": True})),
@@ -78,13 +78,42 @@ class SurfaceResolverTests(unittest.TestCase):
 
     def test_launch_argv_writer_roles_require_tool_image(self) -> None:
         surface = _load_surface()
-        with mock.patch.object(surface, "ensure_surface_stage", return_value={"stageRoot": "/tmp/stage", "buildId": "build_x"}):
+        env = {
+            "dataRoot": "/tmp/pi-data",
+            "buildId": "build_x",
+            "controller": "/tmp/pi-data/bin/pi-control",
+            "launchers": {name: f"/tmp/pi-data/bin/{binary}" for name, binary in surface._LAUNCHER_NAMES.items()},
+        }
+        with mock.patch.object(surface, "env", return_value=env):
             argv = surface.launch_argv("workstream", "conv_x", "prompt")
             self.assertIn("--tool-image", argv)
             self.assertIn(surface.TOOL_IMAGE, argv)
             self.assertIn("pi-system-workstream-run", argv[0])
             secretary_argv = surface.launch_argv("secretary", "conv_y", "prompt")
             self.assertNotIn("--tool-image", secretary_argv)
+
+    def test_launch_argv_uses_explicit_development_stage(self) -> None:
+        surface = _load_surface()
+        with tempfile.TemporaryDirectory() as raw:
+            stage = Path(raw)
+            (stage / "bin").mkdir()
+            (stage / "build-manifest.json").write_text(json.dumps({"buildId": "build_dev"}), encoding="utf-8")
+            argv = surface.launch_argv("secretary", "conv_z", "prompt", stage_root=str(stage))
+            self.assertIn(str(stage / "bin" / "pi-system-secretary"), argv)
+            self.assertIn("--build-id", argv)
+            self.assertIn("build_dev", argv)
+
+    def test_env_requires_an_activated_generation(self) -> None:
+        surface = _load_surface()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            with mock.patch.object(surface, "DATA_ROOT", root):
+                with self.assertRaises(surface.SurfaceError):
+                    surface.env()
+                activation = root / "activation.json"
+                activation.write_text(json.dumps({"buildId": "build_x"}), encoding="utf-8")
+                with self.assertRaises(surface.SurfaceError):
+                    surface.env()
 
 
 if __name__ == "__main__":

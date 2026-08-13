@@ -219,25 +219,46 @@ def prepare_tool_runtime(
     _assert_no_nested_git(source)
     root_git = source / ".git"
     git_info = root_git.lstat()
-    if stat.S_ISLNK(git_info.st_mode) or not stat.S_ISREG(git_info.st_mode):
-        raise DockerRuntimeError("primary checkout Git directories cannot be exposed; assign a working copy with file-form root metadata")
-    if git_info.st_size > 4096:
-        raise DockerRuntimeError("working-copy root Git metadata is unavailable or unsafe")
+    if stat.S_ISLNK(git_info.st_mode):
+        raise DockerRuntimeError("working-copy Git metadata must not be a symlink")
     expected_git = Path(str(working_copy["git_dir"] or project["git_common_dir"])).resolve(strict=True)
-    try:
-        marker = root_git.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError) as error:
-        raise DockerRuntimeError("working-copy Git marker is unreadable") from error
-    if not marker.startswith("gitdir: ") or Path(marker.removeprefix("gitdir: ")).expanduser().resolve(strict=True) != expected_git:
-        raise DockerRuntimeError("working-copy Git marker differs from controller state")
+    if stat.S_ISREG(git_info.st_mode):
+        if git_info.st_size > 4096:
+            raise DockerRuntimeError("working-copy root Git metadata is unavailable or unsafe")
+        try:
+            marker = root_git.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError) as error:
+            raise DockerRuntimeError("working-copy Git marker is unreadable") from error
+        if not marker.startswith("gitdir: ") or Path(marker.removeprefix("gitdir: ")).expanduser().resolve(strict=True) != expected_git:
+            raise DockerRuntimeError("working-copy Git marker differs from controller state")
+    elif stat.S_ISDIR(git_info.st_mode):
+        # Directory-form root metadata is the registered primary checkout. It
+        # is hidden from the container by the same controller-owned empty
+        # regular read-only file mount at /workspace/.git. Only the registered
+        # primary may be exposed this way, and only when its metadata is
+        # exactly the controller-recorded Git common directory.
+        if str(working_copy["kind"]) != "primary":
+            raise DockerRuntimeError("directory-form Git metadata is allowed only for the registered primary checkout")
+        git_device, git_inode = _inode(root_git)
+        expected_device, expected_inode = _inode(expected_git)
+        if (git_device, git_inode) != (expected_device, expected_inode):
+            raise DockerRuntimeError("primary checkout Git metadata differs from controller state")
+    else:
+        raise DockerRuntimeError("working-copy root Git metadata is unavailable or unsafe")
 
     runtime_root = Path(state_root).expanduser().absolute() / "runtime" / run_id
     runtime_root.mkdir(parents=True, mode=0o700, exist_ok=False)
     os.chmod(runtime_root, 0o700)
     mask = runtime_root / "git-mask"
-    fd = os.open(mask, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o400)
-    os.close(fd)
-    mask = _canonical_owned_path(mask, directory=False)
+    if stat.S_ISDIR(git_info.st_mode):
+        # Directory-form primary checkout: the mask must be a directory so the
+        # bind mount covers the container's /workspace/.git directory.
+        os.mkdir(mask, 0o500)
+        mask = _canonical_owned_path(mask, directory=True)
+    else:
+        fd = os.open(mask, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o400)
+        os.close(fd)
+        mask = _canonical_owned_path(mask, directory=False)
     source_device, source_inode = _inode(source)
     mask_device, mask_inode = _inode(mask)
     environment_root = Path(state_root).expanduser().absolute() / "environments" / str(working_copy["working_copy_id"])
@@ -322,7 +343,14 @@ def _attest_mounts(tool: Mapping[str, Any], observation: Mapping[str, Any]) -> N
     if set(actual_binds) != set(expected):
         raise DockerRuntimeError("container bind mounts differ from the complete runtime specification")
     for target, mount in expected.items():
-        source = _canonical_owned_path(str(mount["source"]), directory=mount["kind"] in {"working-copy", "package-environment"})
+        if mount["kind"] == "git-mask":
+            info = Path(str(mount["source"])).expanduser().absolute().lstat()
+            is_directory = stat.S_ISDIR(info.st_mode)
+            if not is_directory and not stat.S_ISREG(info.st_mode):
+                raise DockerRuntimeError("Git mask mount source is neither a regular file nor a directory")
+        else:
+            is_directory = mount["kind"] in {"working-copy", "package-environment"}
+        source = _canonical_owned_path(str(mount["source"]), directory=is_directory)
         if _inode(source) != (int(mount["sourceDevice"]), int(mount["sourceInode"])):
             raise DockerRuntimeError("container mount source inode changed")
         actual = actual_binds[target]
@@ -366,9 +394,9 @@ def create_start_container(store: Any, *, run_id: str, manifest: Mapping[str, An
         attest_container(tool, created, name=name, running=False)
         _run(["container", "start", container_id])
         started = attest_container(tool, inspect_container(container_id), name=name, running=True)
-        mask_check = execute_argv(container_id, ["python3", "-c", "import os,stat; s=os.lstat('/workspace/.git'); raise SystemExit(0 if stat.S_ISREG(s.st_mode) and s.st_size==0 else 9)"], timeout=5, output_limit=1024)
+        mask_check = execute_argv(container_id, ["python3", "-c", "import os,stat; s=os.lstat('/workspace/.git'); ok = (stat.S_ISREG(s.st_mode) and s.st_size==0) or (stat.S_ISDIR(s.st_mode) and not os.listdir('/workspace/.git')); raise SystemExit(0 if ok else 9)"], timeout=5, output_limit=1024)
         if mask_check["exitCode"] != 0:
-            raise DockerRuntimeError("container Git metadata mask is not an empty regular file")
+            raise DockerRuntimeError("container Git metadata mask is not empty")
         exact = {"schemaVersion": 1, "state": "running", "name": name, "observation": started, "observedAt": utc_now()}
         with store.transaction():
             store.conn.execute("UPDATE runs SET container_observation_json=?,updated_at=? WHERE run_id=? AND container_id=?", (canonical_json(exact), utc_now(), run_id, container_id))

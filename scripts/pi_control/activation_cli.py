@@ -10,7 +10,7 @@ import stat
 import sys
 from typing import Any, TextIO
 
-from .greenfield_install import InstallError, activate, ensure_fresh_state, verify_stage
+from .pi_install import InstallError, activate, ensure_fresh_state, verify_stage
 
 
 class ActivationCliError(RuntimeError):

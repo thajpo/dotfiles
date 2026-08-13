@@ -1,14 +1,7 @@
 {
   "acceptanceRule": "A launcher is supported only after its final installed path runs the required real Pi journey.",
   "excludedLaunchers": [
-    "bin/pi",
-    "bin/pi-secretary",
-    "bin/pisec",
-    "bin/pi-start",
-    "bin/pi-restart"
-  ],
-  "plannedGreenfield": [
-    "bin/pi-personal"
+    "bin/pi"
   ],
   "releaseCanary": [
     "bin/pi-control",
@@ -22,7 +15,14 @@
     "bin/pi-system-workstream-run",
     "bin/pi-workstream",
     "bin/pi-integration",
-    "bin/pi-activate"
+    "bin/pi-activate",
+    "bin/pisec",
+    "bin/pi-personal",
+    "bin/pi-start",
+    "bin/pi-restart",
+    "bin/pidev",
+    "bin/pi-help-custom"
   ],
-  "version": 1
+  "version": 1,
+  "plannedLaunchers": []
 }

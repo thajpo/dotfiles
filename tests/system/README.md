@@ -68,7 +68,7 @@ file. Missing Docker or the exact local image is STOP/77.
   whether installed-process evidence exists.
 - `configured-packages.v1.json` records the exact package sources and versions
   packaged by the production builder.
-- `pi/greenfield-resources.v1.json` is the production role/resource catalog;
+- `pi/pi-resources.v1.json` is the production role/resource catalog;
   the builder emits its installed relative-path inventory as
   `release-resources.json` before calculating the build ID.
 - `evidence.schema.json` defines the common evidence envelope. The release

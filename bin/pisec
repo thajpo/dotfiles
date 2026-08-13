@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
-# Greenfield secretary surface: one durable secretary conversation per
-# registered controller project, presented as a tmux grid.
+# Pi secretary surface: one durable, read-only secretary conversation per
+# project in the controller-owned active set, presented as a tmux grid.
+#
+# The grid is presentation only. Conversation identity comes from the
+# controller; the pane process argv is proof that the pane runs the exact
+# secretary launcher for one conversation. Desktop layout groups active
+# projects into windows of at most two side-by-side panes; --mobile uses one
+# full-width pane per window.
 set -euo pipefail
 
 if (( EUID == 0 )); then printf 'pisec: refusing to run as root\n' >&2; exit 1; fi
-self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-dotfiles_dir=$(realpath "$self_dir/..")
-helper="$dotfiles_dir/scripts/pi-surface.py"
-if [[ ! -f "$helper" ]]; then
-  helper="$HOME/.local/share/pi/control/pi-surface.py"
-fi
+self_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+helper="$self_dir/../scripts/pi-surface.py"
 [[ -f "$helper" ]] || { printf 'pisec: surface helper is missing\n' >&2; exit 1; }
 
 usage() {
   printf '%s\n' \
-    'usage: pisec [--mobile|-mobile] [list | open | launch]' \
-    '       pisec                     (open the secretary grid for registered projects)' \
-    '       pisec list                (list registered controller projects)' \
-    '       pisec launch              (repair idle secretary panes without attaching)' \
-    '       desktop: at most two side-by-side panes; --mobile: one conversation per window'
+    'usage: pisec [--mobile|-mobile] [list | register [ALIAS] [REPOSITORY] | launch-info [PROJECT_ID] | open | launch | activate ALIAS [ALIAS ...] | swap OLD NEW]' \
+    '       pisec                     (open the secretary grid for the active set)' \
+    '       pisec list                (list registered projects and the active set)' \
+    '       pisec register [ALIAS] [REPOSITORY]' \
+    '       pisec activate ALIAS...   (set the ordered active set)' \
+    '       pisec swap OLD NEW        (reorder the active set)' \
+    '       pisec launch-info [ID]    (show conversation and launch argv)' \
+    '       pisec launch              (repair idle or dead secretary panes without attaching)' \
+    '       desktop: at most two side-by-side panes per window; --mobile: one conversation per window'
 }
 
 mobile_layout=0
@@ -26,49 +32,295 @@ action=open
 while (( $# )); do
   case "$1" in
     --mobile|-mobile) mobile_layout=1 ;;
-    list|open|launch) action=$1 ;;
+    list|open|launch|register|activate|swap|launch-info) action=$1 ;;
     help|-h|--help) usage; exit 0 ;;
-    *) usage; exit 2 ;;
+    *) break ;;
   esac
   shift
 done
 
+env_json=$(python3 "$helper" env)
+state_root=$(python3 -c "import json,sys; print(json.load(sys.stdin)['stateRoot'])" <<<"$env_json")
+
+if [[ "$action" == register ]]; then
+  alias_name=${1:-}
+  repository=${2:-$PWD}
+  if [[ -n "$alias_name" && -f "$alias_name" && -z "$2" ]]; then
+    repository=$(realpath "$alias_name")
+    alias_name=""
+  fi
+  repository=$(realpath "$repository")
+  [[ -d "$repository/.git" || -f "$repository/.git" ]] || { printf 'pisec: not a Git repository: %s\n' "$repository" >&2; exit 1; }
+  if [[ -z "$alias_name" ]]; then
+    alias_name=$(basename "$repository")
+  fi
+  python3 "$helper" project-register --repository "$repository" --name "$alias_name"
+  printf 'pisec: registered %s\n' "$alias_name" >&2
+  exit 0
+fi
+
 projects_json=$(python3 "$helper" project-list)
-[[ -n "$projects_json" && "$projects_json" != "[]" ]] || { printf 'pisec: no registered controller projects (pi-start project DIR to register one)\n' >&2; exit 1; }
+[[ -n "$projects_json" && "$projects_json" != "[]" ]] || { printf 'pisec: no registered controller projects (pisec register DIR to add one)\n' >&2; exit 1; }
 mapfile -t projects < <(python3 -c "
 import json, sys
 for item in json.load(sys.stdin):
     print(item['project_id'], item.get('display_name', '') or item['project_id'])
 " <<<"$projects_json")
+active_json=$(python3 "$helper" preference get pisec)
+mapfile -t active_ids < <(python3 -c "
+import json, sys
+ids = json.load(sys.stdin)['activeProjectIds']
+if ids:
+    print('\n'.join(ids))
+" <<<"$active_json")
+
+declare -A project_display=() project_id_of=()
+for row in "${projects[@]}"; do
+  read -r pid dname <<<"$row"
+  project_display[$pid]=$dname
+  project_id_of[$dname]=$pid
+done
+
+# Resolve the ordered active set: an explicit active set filters and orders
+# the registered projects; otherwise every registered project is active in
+# registration order.
+declare -a ordered_ids=() ordered_names=()
+if (( ${#active_ids[@]} > 0 )); then
+  for pid in "${active_ids[@]}"; do
+    [[ -n "${project_display[$pid]:-}" ]] || { printf 'pisec: active project is no longer registered: %s\n' "$pid" >&2; exit 1; }
+    ordered_ids+=("$pid")
+    ordered_names+=("${project_display[$pid]}")
+  done
+else
+  for row in "${projects[@]}"; do
+    read -r pid dname <<<"$row"
+    ordered_ids+=("$pid")
+    ordered_names+=("$dname")
+  done
+fi
 
 if [[ "$action" == list ]]; then
-  for row in "${projects[@]}"; do printf '%s\n' "$row"; done
+  for row in "${projects[@]}"; do
+    read -r pid dname <<<"$row"
+    marker=" "
+    for active in "${ordered_ids[@]}"; do [[ "$active" == "$pid" ]] && marker="*"; done
+    printf '%s %s %s\n' "$marker" "$pid" "$dname"
+  done
   exit 0
 fi
 
-if ! command -v tmux >/dev/null 2>&1; then printf 'pisec: tmux is required\n' >&2; exit 127; fi
-session=pisec
-
-# One window per project in desktop (two panes) or mobile (one full-width pane).
-if [[ "$action" == open || "$action" == launch ]]; then
-  if ! tmux has-session -t "=$session" 2>/dev/null; then
-    tmux new-session -d -s "$session" -n shell -c "$HOME" 'exec bash'
-  fi
-  window_index=1
-  for row in "${projects[@]}"; do
-    read -r project_id display_name <<<"$row"
-    window_name=$(printf '%s' "${display_name:-$project_id}" | tr -c 'A-Za-z0-9._-' '-')
-    if tmux has-window -t "=$session:$window_name" 2>/dev/null; then
-      window_index=$((window_index + 1))
-      continue
-    fi
-    printf 'pisec: ensuring %s secretary (may build the surface stage once)\n' "$display_name" >&2
-    conversation=$(python3 "$helper" secretary-conversation "$project_id" | python3 -c "import sys,json;print(json.load(sys.stdin)['conversation_id'])")
-    argv=$(python3 "$helper" launch-argv-shell secretary "$conversation" --interactive)
-    tmux new-window -d -t "=$session" -n "$window_name" -c "$HOME" "exec $argv"
-    window_index=$((window_index + 1))
+if [[ "$action" == activate ]]; then
+  (( $# > 0 )) || { printf 'pisec: activate requires at least one alias\n' >&2; exit 1; }
+  selected=()
+  for alias in "$@"; do
+    pid=${project_id_of[$alias]:-}
+    [[ -n "$pid" ]] || { printf 'pisec: unknown project alias: %s\n' "$alias" >&2; exit 1; }
+    selected+=("$pid")
   done
-  if [[ "$action" == open ]]; then
-    exec tmux attach-session -t "=$session"
+  python3 "$helper" preference set pisec "${selected[@]}" >/dev/null
+  printf 'pisec: active set is now: %s\n' "${selected[*]}" >&2
+  exit 0
+fi
+
+if [[ "$action" == swap ]]; then
+  (( $# == 2 )) || { printf 'pisec: swap requires OLD and NEW aliases\n' >&2; exit 1; }
+  old_pid=${project_id_of[$1]:-}; new_pid=${project_id_of[$2]:-}
+  [[ -n "$old_pid" && -n "$new_pid" ]] || { printf 'pisec: unknown project alias\n' >&2; exit 1; }
+  old_index=-1; new_index=-1
+  for i in "${!ordered_ids[@]}"; do
+    [[ "${ordered_ids[$i]}" == "$old_pid" ]] && old_index=$i
+    [[ "${ordered_ids[$i]}" == "$new_pid" ]] && new_index=$i
+  done
+  (( old_index >= 0 && new_index >= 0 && old_index != new_index )) || { printf 'pisec: swap requires one active and one inactive project\n' >&2; exit 1; }
+  selected=()
+  for i in "${!ordered_ids[@]}"; do
+    if (( i == old_index )); then selected+=("$new_pid"); elif (( i == new_index )); then selected+=("$old_pid"); else selected+=("${ordered_ids[$i]}"); fi
+  done
+  python3 "$helper" preference set pisec "${selected[@]}" >/dev/null
+  printf 'pisec: swapped %s and %s\n' "$1" "$2" >&2
+  exit 0
+fi
+
+if [[ "$action" == launch-info ]]; then
+  if (( $# >= 1 )); then
+    pid=${project_id_of[$1]:-}
+    [[ -n "$pid" ]] || { printf 'pisec: unknown project alias: %s\n' "$1" >&2; exit 1; }
+    conversation=$(python3 "$helper" secretary-conversation "$pid" | python3 -c "import sys,json;print(json.load(sys.stdin)['conversation_id'])")
+    argv=$(python3 "$helper" launch-argv-shell secretary "$conversation" --interactive)
+    printf 'project %s (%s)\nconversation %s\nargv: %s\n' "$pid" "${project_display[$pid]}" "$conversation" "$argv"
+  else
+    for i in "${!ordered_ids[@]}"; do
+      pid=${ordered_ids[$i]}
+      conversation=$(python3 "$helper" secretary-conversation "$pid" | python3 -c "import sys,json;print(json.load(sys.stdin)['conversation_id'])")
+      printf '%s %s %s\n' "$pid" "${ordered_names[$i]}" "$conversation"
+    done
   fi
+  exit 0
+fi
+
+[[ "$action" == open || "$action" == launch ]] || { usage; exit 2; }
+command -v tmux >/dev/null 2>&1 || { printf 'pisec: tmux is required\n' >&2; exit 127; }
+
+# Grid lock: serialize grid mutations. The lock is presentation-only.
+lock_dir="$state_root/pisec-grid.lock.d"
+mkdir -p "$(dirname "$lock_dir")" 2>/dev/null || :
+acquire_grid_lock() {
+  local deadline=$((SECONDS + 15))
+  while true; do
+    if mkdir "$lock_dir" 2>/dev/null; then
+      printf '%s\n' "$$" > "$lock_dir/owner"
+      trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+      return 0
+    fi
+    # Crash-safe recovery: an owner PID that no longer exists means the holder
+    # died (trap cannot run); remove the stale lock and retry.
+    if [[ -f "$lock_dir/owner" ]]; then
+      local owner
+      owner=$(cat "$lock_dir/owner" 2>/dev/null || printf '')
+      if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+        rm -rf "$lock_dir" 2>/dev/null || true
+        continue
+      fi
+    fi
+    if (( SECONDS >= deadline )); then
+      printf 'pisec: another grid operation holds the secretary grid lock\n' >&2
+      return 1
+    fi
+    sleep 0.05
+  done
+}
+acquire_grid_lock || exit 1
+
+session=pisec
+tmux_has() { tmux has-session -t "=$session" >/dev/null 2>&1; }
+
+# Resolve each active project's secretary conversation and exact launch argv.
+declare -a conv_ids=() launch_argv=()
+for pid in "${ordered_ids[@]}"; do
+  conversation=$(python3 "$helper" secretary-conversation "$pid" | python3 -c "import sys,json;print(json.load(sys.stdin)['conversation_id'])")
+  conv_ids+=("$conversation")
+  launch_argv+=("$(python3 "$helper" launch-argv-shell secretary "$conversation" --interactive)")
+done
+
+# Exact pane proof: the pane must run the secretary launcher for one exact
+# conversation id. A shell or sleep is an idle placeholder; a dead pane has no
+# identity to inspect and may be replaced.
+pane_runs_secretary() {
+  local args=$1 wanted_conv
+  wanted_conv=$2
+  [[ "$args" == *"pi-system-secretary"* && "$args" == *"--conversation-id $wanted_conv"* && "$args" == *"--interactive"* ]]
+}
+
+tmux_has_window() {
+  tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null | grep -qx "$1"
+}
+
+if ! tmux_has; then
+  tmux new-session -d -s "$session" -n shell -c "$HOME" 'exec bash'
+fi
+# Dead panes must persist (not close the session) so the repair loop can
+# detect and respawn them without ever killing a live conversation.
+# remain-on-exit is a window option; set it per window so panes whose
+# command exits stay visible instead of destroying the session.
+for _roe_win in $(tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null); do
+  tmux set-window-option -t "=$session:$_roe_win" remain-on-exit on 2>/dev/null || true
+done
+
+# Pane titles anchor panes to their exact conversation: every secretary pane
+# is titled "pi-secretary <conversation-id>". The title is presentation-only;
+# the conversation id is controller authority.
+pane_title_for() { printf 'pi-secretary %s' "$1"; }
+
+# tmux 3.4 silently drops window creation when the pane command contains a
+# "--" token (e.g. --conversation-id). Create the pane without a command and
+# send the exact launch argv through the terminal instead; the input is
+# buffered until the shell is ready.
+launch_pane() {
+  local target=$1 argv=$2
+  tmux send-keys -t "$target" "exec $argv" Enter
+}
+
+# Repair existing panes first: a dead pane or an idle placeholder shell for an
+# active conversation is respawned; a pane already running a live secretary is
+# left alone (single owner, never kill a thinking conversation).
+declare -A conv_for_title=()
+for i in "${!ordered_ids[@]}"; do
+  conv_for_title["$(pane_title_for "${conv_ids[$i]}")"]=$i
+done
+pane_idle_shell() {
+  local command=$1 pid=$2 children rc
+  case "$command" in bash|zsh|sh|dash|fish) ;; *) return 1 ;; esac
+  if children=$(pgrep -P "$pid" 2>/dev/null); then
+    [[ -z "$children" ]] && return 0
+    return 1
+  else
+    rc=$?
+    [[ $rc -eq 1 ]] && return 0
+    return 2
+  fi
+}
+while IFS=$'\t' read -r pane_id pane_dead pane_command pane_pid pane_title; do
+  [[ -n "$pane_id" ]] || continue
+  [[ "$pane_dead" == 0 || "$pane_dead" == 1 ]] || continue
+  matched=${conv_for_title["$pane_title"]:-}
+  [[ -n "$matched" ]] || continue
+  if (( pane_dead == 1 )); then
+    tmux respawn-pane -t "$pane_id" 2>/dev/null || true
+    launch_pane "$pane_id" "${launch_argv[$matched]}" 2>/dev/null || true
+    continue
+  fi
+  if pane_idle_shell "$pane_command" "$pane_pid"; then
+    tmux respawn-pane -t "$pane_id" -k 2>/dev/null || true
+    launch_pane "$pane_id" "${launch_argv[$matched]}" 2>/dev/null || true
+  fi
+done < <(tmux list-panes -t "=$session" -F $'#{pane_id}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{pane_title}' 2>/dev/null)
+
+# Build windows: desktop groups the active set into windows of at most two
+# side-by-side panes; mobile uses one full-width pane per window. Every pane
+# is titled with its exact conversation for repair and identity proof.
+title_pane() {
+  local target=$1 conversation=$2
+  tmux select-pane -t "$target" -T "$(pane_title_for "$conversation")" 2>/dev/null || true
+}
+window_index=0
+for i in "${!ordered_ids[@]}"; do
+  window_name=$(printf '%s' "${ordered_names[$i]}" | tr -c 'A-Za-z0-9._-' '-')
+  if (( mobile_layout )); then
+    if ! tmux_has_window "$window_name"; then
+      tmux new-window -d -t "=$session" -n "$window_name" -c "$HOME"
+      tmux set-window-option -t "=$session:$window_name" remain-on-exit on 2>/dev/null || true
+      launch_pane "=$session:$window_name" "${launch_argv[$i]}"
+      title_pane "=$session:$window_name" "${conv_ids[$i]}"
+    fi
+  else
+    if (( (i % 2) == 0 )); then
+      if ! tmux_has_window "$window_name"; then
+        tmux new-window -d -t "=$session" -n "$window_name" -c "$HOME"
+        launch_pane "=$session:$window_name" "${launch_argv[$i]}"
+        title_pane "=$session:$window_name" "${conv_ids[$i]}"
+      fi
+    else
+      # Second project of a pair joins the previous window as a side-by-side
+      # pane; the window is named after the first project of the pair.
+      first_name=$(printf '%s' "${ordered_names[$((i - 1))]}" | tr -c 'A-Za-z0-9._-' '-')
+      existing=$(tmux list-panes -t "=$session:$first_name" -F '#{pane_id}' 2>/dev/null | wc -l)
+      if (( existing < 2 )); then
+        tmux split-window -h -t "=$session:$first_name" -c "$HOME" 2>/dev/null || true
+        launch_pane "=$session:$first_name.{bottom-right}" "${launch_argv[$i]}" 2>/dev/null || true
+        title_pane "=$session:$first_name.{bottom-right}" "${conv_ids[$i]}" 2>/dev/null || true
+      fi
+    fi
+  fi
+  window_index=$((window_index + 1))
+done
+
+# The initial placeholder shell window is presentation scaffolding only;
+# remove it once real project windows exist.
+if tmux_has_window shell; then
+  remaining=$(tmux list-windows -t "=$session" -F '#{window_name}' | grep -v '^shell$' | wc -l)
+  (( remaining > 0 )) && tmux kill-window -t "=$session:shell" 2>/dev/null || true
+fi
+
+if [[ "$action" == open ]]; then
+  exec tmux attach-session -t "=$session"
 fi

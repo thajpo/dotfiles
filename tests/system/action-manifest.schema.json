@@ -1,50 +1,145 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pi-system.invalid/schemas/action-manifest.v1.json",
-  "title": "Pi greenfield action manifest v1",
+  "title": "Pi harness action manifest v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["$schema", "version", "sourcePlan", "actions"],
+  "required": [
+    "$schema",
+    "version",
+    "sourcePlan",
+    "actions"
+  ],
   "properties": {
-    "$schema": {"const": "action-manifest.schema.json"},
-    "version": {"const": 1},
-    "sourcePlan": {"const": "PI_GREENFIELD_IMPLEMENTATION_PLAN.md"},
+    "$schema": {
+      "const": "action-manifest.schema.json"
+    },
+    "version": {
+      "const": 1
+    },
+    "sourcePlan": {
+      "const": "PI_IMPLEMENTATION_PLAN.md"
+    },
     "actions": {
       "type": "array",
       "minItems": 1,
-      "items": {"$ref": "#/$defs/action"}
+      "items": {
+        "$ref": "#/$defs/action"
+      }
     }
   },
   "$defs": {
     "strings": {
       "type": "array",
       "minItems": 1,
-      "items": {"type": "string", "minLength": 1},
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
       "uniqueItems": true
     },
     "action": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "actionId", "name", "surface", "entrypoints", "authority",
-        "mutationClass", "authorizationClass", "modes", "scenarios",
-        "tiers", "assertions", "risk", "status", "owningPhase"
+        "actionId",
+        "name",
+        "surface",
+        "entrypoints",
+        "authority",
+        "mutationClass",
+        "authorizationClass",
+        "modes",
+        "scenarios",
+        "tiers",
+        "assertions",
+        "risk",
+        "status",
+        "owningPhase"
       ],
       "properties": {
-        "actionId": {"type": "string", "pattern": "^HA-[0-9]{3}$"},
-        "name": {"type": "string", "minLength": 1},
-        "surface": {"type": "string", "enum": ["launcher", "cli", "extension", "controller", "installer"]},
-        "entrypoints": {"$ref": "#/$defs/strings"},
-        "authority": {"type": "string", "minLength": 1},
-        "mutationClass": {"type": "string", "enum": ["read", "controller", "git", "runtime", "presentation", "host"]},
-        "authorizationClass": {"type": "string", "enum": ["none", "exact-create", "exact-command", "exact-review", "exact-integrate", "tty-approval", "final-activation"]},
-        "modes": {"type": "array", "const": ["greenfield"]},
-        "scenarios": {"$ref": "#/$defs/strings"},
-        "tiers": {"$ref": "#/$defs/strings"},
-        "assertions": {"$ref": "#/$defs/strings"},
-        "risk": {"type": "string", "enum": ["normal", "high"]},
-        "status": {"type": "string", "enum": ["implemented-source", "planned", "out-of-scope"]},
-        "owningPhase": {"type": "string", "pattern": "^P(?:[0-9]|1[0-2])$"}
+        "actionId": {
+          "type": "string",
+          "pattern": "^HA-[0-9]{3}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "surface": {
+          "type": "string",
+          "enum": [
+            "launcher",
+            "cli",
+            "extension",
+            "controller",
+            "installer"
+          ]
+        },
+        "entrypoints": {
+          "$ref": "#/$defs/strings"
+        },
+        "authority": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mutationClass": {
+          "type": "string",
+          "enum": [
+            "read",
+            "controller",
+            "git",
+            "runtime",
+            "presentation",
+            "host"
+          ]
+        },
+        "authorizationClass": {
+          "type": "string",
+          "enum": [
+            "none",
+            "exact-create",
+            "exact-command",
+            "exact-review",
+            "exact-integrate",
+            "tty-approval",
+            "final-activation"
+          ]
+        },
+        "modes": {
+          "type": "array",
+          "const": [
+            "controller"
+          ]
+        },
+        "scenarios": {
+          "$ref": "#/$defs/strings"
+        },
+        "tiers": {
+          "$ref": "#/$defs/strings"
+        },
+        "assertions": {
+          "$ref": "#/$defs/strings"
+        },
+        "risk": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "high"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "implemented-source",
+            "planned",
+            "out-of-scope"
+          ]
+        },
+        "owningPhase": {
+          "type": "string",
+          "pattern": "^P(?:[0-9]|1[0-2])$"
+        }
       }
     }
   }

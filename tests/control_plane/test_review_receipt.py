@@ -10,8 +10,8 @@ import unittest
 
 from scripts.pi_control.changes import submit_change, submit_change_revision
 from scripts.pi_control.errors import ConstraintError, IdempotencyConflictError
-from scripts.pi_control.greenfield_review import create_review_assignment
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_review import create_review_assignment
+from scripts.pi_control.pi_store import PiStore
 from scripts.pi_control.models import new_id, utc_now
 from scripts.pi_control.projects import register_project
 from scripts.pi_control.reviews import ReviewError, request_review, submit_review
@@ -32,7 +32,7 @@ def git(path: Path, *args: str) -> str:
 
 
 def _reviewer_run(
-    store: GreenfieldStore,
+    store: PiStore,
     *,
     conversation_id: str,
     project_id: str,
@@ -118,7 +118,7 @@ class GreenfieldReviewReceiptTests(unittest.TestCase):
         (self.repository / "README").write_text("revision two\n", encoding="utf-8")
         git(self.repository, "add", "README")
         git(self.repository, "commit", "-qm", "two")
-        self.store = GreenfieldStore(self.root / "state").open()
+        self.store = PiStore(self.root / "state").open()
         self.project = register_project(self.store, self.repository)
         self.working = self.store.conn.execute(
             "SELECT * FROM working_copies WHERE project_id=?",

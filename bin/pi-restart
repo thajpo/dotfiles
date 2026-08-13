@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Stop every managed Pi surface, then rebuild personal via pi-start.
+# Rebuild the managed Pi grid (pi-personal + pisec) via pi-start.
+#
+# Only the managed sessions are killed, never the tmux server: killing the
+# server would reap the caller's own client, and a fresh server would restore
+# stale windows through tmux-resurrect. Keeping the server alive means the
+# caller stays attached and no restore fires.
 set -euo pipefail
 
 if (( EUID == 0 )); then
@@ -8,7 +13,7 @@ if (( EUID == 0 )); then
 fi
 command -v tmux >/dev/null 2>&1 || { printf 'pi-restart: tmux is required\n' >&2; exit 127; }
 
-self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+self_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 pi_start="$HOME/.local/bin/pi-start"
 [[ -x "$pi_start" ]] || pi_start="$self_dir/pi-start"
 [[ -x "$pi_start" ]] || { printf 'pi-restart: pi-start is missing\n' >&2; exit 1; }
@@ -25,7 +30,7 @@ while (( $# )); do
       no_attach=1
       ;;
     --herdr|-herdr)
-      printf 'pi-restart: the greenfield surface is tmux-only; -herdr is no longer supported\n' >&2
+      printf 'pi-restart: the Pi surface is tmux-only; -herdr is no longer supported\n' >&2
       exit 2
       ;;
     *)
@@ -40,34 +45,27 @@ done
 }
 
 # Controller assignments belong to one prepared run. Never let an ambient
-# assignment become the scope of a newly rebuilt personal pane.
-while IFS= read -r name; do unset "$name"; done < <(compgen -A variable PI_SYSTEM_)
+# assignment become the scope of a newly rebuilt personal pane. The
+# data/state/config roots are configuration, not assignments, and pass
+# through so an explicitly configured surface keeps resolving one generation.
+while IFS= read -r name; do
+  case "$name" in
+    PI_SYSTEM_DATA_ROOT|PI_SYSTEM_STATE_ROOT|PI_SYSTEM_SURFACE_STAGE|PI_SYSTEM_MODEL|PI_TOOL_IMAGE) ;;
+    *) unset "$name" ;;
+  esac
+done < <(compgen -A variable PI_SYSTEM_)
 unset PI_RUNTIME_MANIFEST PI_RUNTIME_CAPABILITY
 
-client_tty=""
-if [[ -n ${TMUX:-} && $no_attach == 0 ]]; then
-  client_tty=$(tmux display-message -p '#{client_tty}' 2>/dev/null || true)
-  [[ "$client_tty" == /dev/* && -c "$client_tty" ]] || {
-    printf 'pi-restart: cannot identify attached terminal; use --no-attach\n' >&2
-    exit 1
-  }
-  trap '' HUP
-fi
+printf 'pi-restart: rebuilding the managed grid (layout=%s)\n' "$([[ $mobile_layout == 1 ]] && printf mobile || printf desktop)" >&2
 
-printf 'pi-restart: rebuilding personal (layout=%s)\n' "$([[ $mobile_layout == 1 ]] && printf mobile || printf desktop)" >&2
-
-# Skip tmux-resurrect while building a fresh tmux backend. Stable Pi IDs own
-# conversation recovery; resurrecting old process panes would duplicate them.
-export PI_RESTARTING=1
-tmux kill-server >/dev/null 2>&1 || true
-unset TMUX
-trap - HUP
-unset PI_RESTART_NO_ATTACH PI_RESTART_HANDOFF
-if (( no_attach )); then export PI_START_NO_ATTACH=1; fi
+# Kill only the managed sessions. The caller's own session (and any other
+# unrelated session) survives, and tmux-resurrect does not fire because the
+# server is never restarted.
+for session in pi-personal pisec; do
+  tmux kill-session -t "=$session" 2>/dev/null || true
+done
 
 start_args=(all)
 (( mobile_layout )) && start_args+=(-mobile)
-if [[ -n "$client_tty" ]]; then
-  exec "$pi_start" "${start_args[@]}" <"$client_tty" >"$client_tty" 2>&1
-fi
+if (( no_attach )); then export PI_START_NO_ATTACH=1; fi
 exec "$pi_start" "${start_args[@]}"

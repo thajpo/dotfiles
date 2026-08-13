@@ -11,7 +11,7 @@ import sys
 from typing import Any, TextIO
 
 from .command_requests import approval_display, approve_command, execute_approved_command, reject_command
-from .greenfield_store import GreenfieldStore
+from .pi_store import PiStore
 from .package_environment import approve_package_request, execute_approved_package_request, package_approval_display, reject_package_request
 
 
@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     root = Path(args.state_root).expanduser().absolute()
     try:
-        with GreenfieldStore(root) as store:
+        with PiStore(root) as store:
             package = args.request_id.startswith("pkreq_")
             if not package and not args.request_id.startswith("cmd_"):
                 raise AuthorizationCliError("request ID is not an authorizable release-1 request")

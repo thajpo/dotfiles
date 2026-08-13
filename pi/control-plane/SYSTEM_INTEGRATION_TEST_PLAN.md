@@ -1,4 +1,4 @@
-# Pi Greenfield System Integration Test Plan
+# Pi Harness System Integration Test Plan
 
 Owns: release scenario inventory and evidence-tier coverage.
 

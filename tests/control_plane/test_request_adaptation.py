@@ -14,8 +14,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.pi_control.greenfield_protocol import ProtocolError, adapt_request
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_protocol import ProtocolError, adapt_request
+from scripts.pi_control.pi_store import PiStore
 
 
 class RequestAdaptationTests(unittest.TestCase):
@@ -127,10 +127,10 @@ class RequestAdaptationTests(unittest.TestCase):
         # the same request path the CLI uses without needing live state rows.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with GreenfieldStore(root / "state"):
+            with PiStore(root / "state"):
                 pass
-            from scripts.pi_control.greenfield_client import GreenfieldControllerClient
-            client = GreenfieldControllerClient(root / "state")
+            from scripts.pi_control.pi_client import PiControllerClient
+            client = PiControllerClient(root / "state")
             for operation, request, message in (
                 ("change.submit", {
                     "projectId": "prj_" + "a" * 32,

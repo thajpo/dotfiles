@@ -14,13 +14,13 @@ import time
 import unittest
 
 from scripts.pi_control.command_requests import CommandRequestError, approve_command, execute_approved_command, normalize_operation, request_command
-from scripts.pi_control.greenfield_client import GreenfieldControllerClient
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_client import PiControllerClient
+from scripts.pi_control.pi_store import PiStore
 from scripts.pi_control.launch import prepare_run
 from scripts.pi_control.models import new_id
 from tests.control_plane.test_p2_contract import tool_runtime
-from tests.greenfield_test_build import allow_test_only_registered_build_rows
-from tests.test_greenfield_core import _BUILD_ID, _host, _register_build, _repo
+from tests.pi_test_build import allow_test_only_registered_build_rows
+from tests.test_pi_core import _BUILD_ID, _host, _register_build, _repo
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,11 +60,11 @@ class P6CommandTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def _fixture(self, root: Path) -> tuple[GreenfieldStore, object, dict, dict]:
+    def _fixture(self, root: Path) -> tuple[PiStore, object, dict, dict]:
         repository = _repo(root, "commands")
-        client = GreenfieldControllerClient(root / "state")
+        client = PiControllerClient(root / "state")
         project = client.register_project(str(repository), "commands")
-        store = GreenfieldStore(root / "state").open()
+        store = PiStore(root / "state").open()
         _register_build(store, root)
         working = dict(store.conn.execute("SELECT * FROM working_copies WHERE project_id=?", (project["project_id"],)).fetchone())
         conversation = client.create_conversation(project_id=project["project_id"], role="personal", display_name="P6", working_copy_id=working["working_copy_id"])
@@ -72,7 +72,7 @@ class P6CommandTests(unittest.TestCase):
         prepared = prepare_run(store, conversation_id=conversation["conversation_id"], build_id=_BUILD_ID, host_process=_host("personal"), tool_runtime=tool_runtime(run_id, project, working), run_id=run_id)
         return store, prepared, project, conversation
 
-    def _request(self, store: GreenfieldStore, prepared: object, project: dict, conversation: dict, operation: str) -> dict:
+    def _request(self, store: PiStore, prepared: object, project: dict, conversation: dict, operation: str) -> dict:
         run = prepared.run  # type: ignore[attr-defined]
         return request_command(store, project_id=project["project_id"], conversation_id=conversation["conversation_id"], run_id=run["run_id"], writer_generation=run["writer_epoch"], operation=operation, purpose="P6 deterministic fixture")
 

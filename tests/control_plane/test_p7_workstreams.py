@@ -10,17 +10,17 @@ import tempfile
 import unittest
 
 from scripts.pi_control.conversations import create_conversation
-from scripts.pi_control.greenfield_client import GreenfieldControllerClient
-from scripts.pi_control.greenfield_store import GreenfieldStore
-from scripts.pi_control.greenfield_workstreams import create_workstream
+from scripts.pi_control.pi_client import PiControllerClient
+from scripts.pi_control.pi_store import PiStore
+from scripts.pi_control.pi_workstreams import create_workstream
 from scripts.pi_control.investigators import bind_investigation_run
 from scripts.pi_control.launch import attest_run, prepare_run, stop_run
 from scripts.pi_control.models import canonical_json, new_id
 from scripts.pi_control.subagents import bind_child_run, create_child_assignment, record_child_terminal
 from tests.control_plane.helpers import ConfiguredFailpointController, FailpointRaised
 from tests.control_plane.test_p2_contract import tool_runtime
-from tests.greenfield_test_build import allow_test_only_registered_build_rows
-from tests.test_greenfield_core import _BUILD_ID, _host, _register_build, _repo
+from tests.pi_test_build import allow_test_only_registered_build_rows
+from tests.test_pi_core import _BUILD_ID, _host, _register_build, _repo
 
 
 def _git(repository: Path, *args: str) -> str:
@@ -37,9 +37,9 @@ class P7WorkstreamTests(unittest.TestCase):
     def test_personal_is_idempotent_and_controller_derived_from_primary(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7-personal-") as raw:
             root = Path(raw)
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(_repo(root, "repository")))
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 primary = dict(store.conn.execute("SELECT * FROM working_copies WHERE project_id=? AND kind='primary'", (project["project_id"],)).fetchone())
                 first = create_conversation(store, project_id=project["project_id"], role="personal", display_name="personal", idempotency_key="p7-personal")
                 replay = create_conversation(store, project_id=project["project_id"], role="personal", display_name="personal", working_copy_id=primary["working_copy_id"], idempotency_key="p7-personal")
@@ -55,10 +55,10 @@ class P7WorkstreamTests(unittest.TestCase):
             with self.subTest(boundary=boundary), tempfile.TemporaryDirectory(prefix="p7-saga-") as raw:
                 root = Path(raw)
                 repository = _repo(root, "repository")
-                client = GreenfieldControllerClient(root / "state")
+                client = PiControllerClient(root / "state")
                 project = client.register_project(str(repository))
                 failpoint = ConfiguredFailpointController(boundary, raise_exception=FailpointRaised)
-                with GreenfieldStore(root / "state") as store:
+                with PiStore(root / "state") as store:
                     target_before = _git(repository, "rev-parse", "HEAD")
                     with self.assertRaises(FailpointRaised):
                         create_workstream(store, project_id=project["project_id"], title="fault", idempotency_key="p7-fault", failpoint=failpoint)
@@ -78,9 +78,9 @@ class P7WorkstreamTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="p7-workstreams-") as raw:
             root = Path(raw)
             repository = _repo(root, "repository")
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(repository))
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 first = create_workstream(store, project_id=project["project_id"], title="one", idempotency_key="p7-one")
                 second = create_workstream(store, project_id=project["project_id"], title="two", idempotency_key="p7-two")
                 rows = [dict(row) for row in store.conn.execute("SELECT w.*,c.pi_session_id,c.session_file FROM workstreams w JOIN conversations c ON c.conversation_id=w.conversation_id ORDER BY w.title")]
@@ -96,9 +96,9 @@ class P7WorkstreamTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="p7-child-") as raw:
             root = Path(raw)
             repository = _repo(root, "repository")
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(repository))
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 _register_build(store, root)
                 primary = dict(store.conn.execute("SELECT * FROM working_copies WHERE project_id=? AND kind='primary'", (project["project_id"],)).fetchone())
                 writer = create_conversation(store, project_id=project["project_id"], role="personal", display_name="parent", idempotency_key="p7-parent")
@@ -134,9 +134,9 @@ class P7WorkstreamTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="p7-replay-") as raw:
             root = Path(raw)
             repository = _repo(root, "repository")
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(repository))
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 _register_build(store, root)
                 primary = dict(store.conn.execute("SELECT * FROM working_copies WHERE project_id=? AND kind='primary'", (project["project_id"],)).fetchone())
                 writer = create_conversation(store, project_id=project["project_id"], role="personal", display_name="parent", idempotency_key="p7-replay-parent")
@@ -165,9 +165,9 @@ class P7WorkstreamTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="p7-noidentity-") as raw:
             root = Path(raw)
             repository = _repo(root, "repository")
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(repository))
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 _register_build(store, root)
                 primary = dict(store.conn.execute("SELECT * FROM working_copies WHERE project_id=? AND kind='primary'", (project["project_id"],)).fetchone())
                 writer = create_conversation(store, project_id=project["project_id"], role="personal", display_name="parent", idempotency_key="p7-noid-parent")

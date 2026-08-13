@@ -31,6 +31,10 @@ bash tests/system/run-p9-installed.sh || exit $?
 bash tests/system/run-p10-installed.sh || exit $?
 bash tests/system/run-u-scenarios.sh || exit $?
 bash tests/system/run-p12-activation.sh || exit $?
+# Repair and surface journeys on the same staged build. The surface journey
+# activates (consuming) the stage, so it runs after every other journey.
+bash tests/system/run-repair-installed.sh || exit $?
+bash tests/system/run-repair-surface.sh || exit $?
 unset PI_SYSTEM_EVIDENCE_DIR
 
 # Guard after: OpenCode must be unchanged and launchable.

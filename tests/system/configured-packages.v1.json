@@ -5,22 +5,22 @@
       "name": "@earendil-works/pi-coding-agent",
       "version": "0.83.0",
       "source": "pi/PI_VERSION",
-      "greenfieldArtifactStatus": "packaged",
-      "reason": "The production builder materializes this exact pin offline into runtime/node_modules and binds its tarball and package-lock integrity."
+      "reason": "The production builder materializes this exact pin offline into runtime/node_modules and binds its tarball and package-lock integrity.",
+      "artifactStatus": "packaged"
     },
     {
       "name": "pi-sandbox-control",
       "version": "0.3.0-control.1",
       "source": "pi/packages/pi-sandbox-control",
-      "greenfieldArtifactStatus": "packaged",
-      "reason": "The production builder packs the broker-only source with scripts ignored and installs its exact inherited-channel extension into the immutable generation."
+      "reason": "The production builder packs the broker-only source with scripts ignored and installs its exact inherited-channel extension into the immutable generation.",
+      "artifactStatus": "packaged"
     },
     {
       "name": "pi-subagents",
       "version": "0.35.1",
       "source": "pi/packages/pi-subagents-control",
-      "greenfieldArtifactStatus": "packaged",
-      "reason": "The production builder packs only the controller-channel broker allowlist; direct child-process, worktree, persistence, environment-spread, and intercom sources are excluded from the immutable generation."
+      "reason": "The production builder packs only the controller-channel broker allowlist; direct child-process, worktree, persistence, environment-spread, and intercom sources are excluded from the immutable generation.",
+      "artifactStatus": "packaged"
     }
   ]
 }

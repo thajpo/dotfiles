@@ -1805,8 +1805,10 @@ def _run_child_target(
     )
     with _child_sandbox_environment(environ) as (child_environment, sandbox_root):
         existing_pythonpath = child_environment.get("PYTHONPATH")
+        # Include the package parent so child targets importable under either
+        # the tests.control_plane.* or the control_plane.* spelling resolve.
         child_environment["PYTHONPATH"] = os.pathsep.join(
-            part for part in (str(source_root), str(module_root), existing_pythonpath) if part
+            part for part in (str(source_root), str(module_root.parent), str(module_root), existing_pythonpath) if part
         )
         if authorized_root is not None:
             metadata = authorized_root.stat()

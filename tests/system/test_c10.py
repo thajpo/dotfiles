@@ -6,8 +6,8 @@ import subprocess
 import tempfile
 import unittest
 
-from scripts.pi_control.greenfield_install import stage
-from tests.test_greenfield_install import pack_test_pi_core
+from scripts.pi_control.pi_install import stage
+from tests.test_pi_install import pack_test_pi_core
 
 try:
     from .staged_install import StagedInstallUnavailable, _raise_offline_install_error, build_generation, install

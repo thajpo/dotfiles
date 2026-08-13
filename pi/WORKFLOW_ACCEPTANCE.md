@@ -1,4 +1,4 @@
-# Greenfield Workflow Acceptance
+# Pi Harness Workflow Acceptance
 
 This document covers the agent-engineering behavior layered on top of the fresh
 Pi runtime. System release acceptance remains defined by
@@ -6,7 +6,7 @@ Pi runtime. System release acceptance remains defined by
 
 ## Preconditions
 
-Run these scenarios only through an installed greenfield conversation with an
+Run these scenarios only through an installed Pi harness conversation with an
 exact controller project, conversation, working copy, run, and session file.
 Repository-source imports, old Pi launchers, help output, and direct database
 seeding are not live workflow evidence.

@@ -1,6 +1,6 @@
 # Pi Harness Observability Contract
 
-Status: the base greenfield installed-process driver is accepted; Inspector
+Status: the base installed-process driver is accepted; Inspector
 loading and the metrics and trace planes remain incomplete.
 
 ## Implemented Inspector Contract
@@ -12,7 +12,7 @@ failures, and parent-child messages. It does not expose hidden reasoning.
 
 The view supports bounded selection and transcript drill-down, tolerates
 missing or malformed artifacts, and does not write project files. Source-level
-tests cover projection and rendering, but greenfield acceptance still requires
+tests cover projection and rendering, but installed acceptance still requires
 loading the Inspector in a real installed controller-bound Pi process.
 
 This document defines the observability boundary for a custom Pi build. The
@@ -411,7 +411,7 @@ Upstream Pi already supplies the hooks and session data needed for this design:
 - context-usage access;
 - provider response metadata hooks.
 
-The greenfield target additionally has:
+The Pi harness target additionally has:
 
 - controller project, conversation, working-copy, and run identities;
 - controller-selected Pi session JSONL;

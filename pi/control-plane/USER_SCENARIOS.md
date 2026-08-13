@@ -33,11 +33,11 @@ User runs `pi-start secretary`. Expect: secretary only, no writer container.
 User runs `pi-start project [DIR]`. Expect: Neovim + Pi workspace for that
 directory; project is registered; work index reflects the repo.
 
-### U-06 Open a repo with `pi`
-User runs `pi` inside a repository. Expect: existing project/session resumed
-if present, fresh registration if not; the session continues its durable
-history. Decisive observable: resumed session entries are contiguous with the
-prior session; project identity reused.
+### U-06 Open a repo with `pidev` / `pi-start project`
+User runs `pidev` or `pi-start project [DIR]` inside a repository. Expect:
+existing project/session resumed if present, fresh registration if not; the
+session continues its durable history. Decisive observable: resumed session
+entries are contiguous with the prior session; project identity reused.
 
 ### U-07 Day-open summary
 User starts the grid and asks "what's pending?" Expect: secretary reports
@@ -240,6 +240,84 @@ project-wide (shared inbox), reply threading.
 A resolved item leaves the attention set; new items appear on the next day
 open.
 
+## 7.5 Grids, personal defaults, headless subagents, and observability
+
+### U-51 Configure the secretary grid
+User runs `pisec register ALIAS`, `pisec list`, `pisec activate A B`,
+`pisec swap OLD NEW`. Expect: the secretary grid shows the ordered active
+set; registration and ordering are durable controller preferences. Decisive
+observable: exactly the active set renders, one live secretary per project,
+ordering follows the configured list.
+
+### U-52 Configure the personal grid
+User runs the same grid commands against the personal surface. Expect: the
+personal grid's ordered active set is independent from the secretary grid.
+Decisive observable: personal shows a different set/order than `pisec`
+without affecting secretary panes.
+
+### U-53 Personal edits the primary checkout by default
+User asks `pi-personal` to fix a bug with pre-existing uncommitted work in
+the registered checkout. Expect: personal works in the primary checkout, the
+controller records the exact baseline before mutation, task changes are
+submitted as a task-delta revision, and pre-existing files stay untouched.
+Decisive observable: baseline recorded, submitted revision contains only task
+files, pre-existing work byte-identical afterward.
+
+### U-54 Personal asks when attribution is ambiguous
+User edits an overlapping file by hand mid-task. Expect: submission stays a
+draft, the user is asked to select files; nothing is combined silently.
+
+### U-55 Async headless investigation
+Secretary starts a headless investigator and continues answering. Expect:
+control returns immediately, the child runs under the controller, a
+completion notification and run status arrive later. Decisive observable:
+parent turn does not block on the child; child terminal record exists.
+
+### U-56 Parallel headless fanout
+User asks for two independent review angles. Expect: two read-only children
+run concurrently with distinct briefs and snapshots; the parent synthesizes.
+Decisive observable: two child runs, distinct sessions, both terminal.
+
+### U-57 Headless worker isolation and one writer
+A headless worker implements in its own working copy while a headful writer
+owns another. Expect: each working copy has exactly one writer; a second
+writer on the same copy is refused. Decisive observable: worker working copy
+and container distinct; second-writer refusal.
+
+### U-58 Child escalation and steering
+A child hits an unapproved boundary and requests a decision; the user replies
+through the parent; the child resumes. Expect: bounded supervisor messages,
+no scope change without approval. Decisive observable: message records
+parent↔child, child continues after the reply.
+
+### U-59 Interrupt, stop, and resume a child
+User soft-interrupts a child, later resumes it, and finally stops it.
+Expect: interrupt pauses durably, resume continues the same session, stop is
+terminal and non-resumable. Decisive observable: session contiguity across
+interrupt/resume; stop record is terminal.
+
+### U-60 Child restart continuity
+The machine restarts while a headless child is running. Expect: child
+terminal/attention state survives; no double-launch of a live bound run.
+
+### U-61 Role and model routing for children
+Each headless role uses its configured model/reasoning policy. Decisive
+observable: child runs bind the configured provider/model, not the parent's
+default by accident.
+
+### U-62 Inspector and compaction card
+User opens `/observe` and compacts a long conversation. Expect: Task/Fleet/
+Messages views show bounded real state without hidden reasoning; the
+compaction card lists goal, decisions, submitted work, and unresolved items.
+Decisive observable: inspector rows match controller records; the card's
+user-visible summary derives from the same compacted result as the
+model-visible summary.
+
+### U-63 Harness feedback
+A worker records one bounded non-blocking harness observation; the user
+reviews it with `pi-harness-feedback`. Expect: record appears in the central
+feed with provenance; no project state changed.
+
 ## 8. Maintenance and upgrade
 
 ### U-44 Stage and activate a new build
@@ -288,7 +366,7 @@ user-scenario journey work:
   the target advances. Covers U-29. **Found and fixed a product gap**:
   `create_review_assignment` could not snapshot controller-created integration
   results (`source_working_copy_id IS NULL`); now snapshots from the primary
-  repository (greenfield_review.py).
+  repository (pi_review.py).
 - `run-u-multiproject.sh` (`installed-u-multiproject.py`) — two registered
   projects with distinct secretaries/sessions/work indexes and no row leakage.
   Covers U-39/40.
@@ -317,3 +395,9 @@ triggered from an installed subprocess without test-only hooks.
 suite run in container is covered by the P5 writer isolation bash test),
 U-33 (cancel one tool request — source-only), U-37 (docker daemon restart
 mid-writer), U-50 (replay refusal consolidated — covered per-surface).
+
+**Repair-program target scenarios (declared in the action catalog, pending
+installed evidence):** U-04 (secretary-only start), U-51/U-52 (grid active
+sets), U-53/U-54 (personal-primary default and ambiguous attribution),
+U-55–U-61 (headless subagent async/fanout/worker/escalation/restart/model
+routing), U-62/U-63 (inspector, compaction card, harness feedback).

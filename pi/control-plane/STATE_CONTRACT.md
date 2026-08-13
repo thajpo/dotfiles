@@ -1,10 +1,10 @@
-# Pi Greenfield State Contract
+# Pi Harness State Contract
 
 Owns: state identity, authority, freshness, and transitions.
 
-Greenfield uses a new schema epoch under a new state root. It creates project,
+Pi uses a new schema epoch under a new state root. It creates project,
 working-copy, conversation, run, message, request, change, review, integration,
-attention, and evidence identities only from explicit greenfield operations.
+attention, and evidence identities only from explicit Pi operations.
 It never reads, imports, maps, resumes, reconciles, or adopts historical Pi
 state or chats. Historical bytes remain untouched external data.
 
@@ -12,13 +12,13 @@ State authorities are disjoint:
 
 | Data | Authority |
 |---|---|
-| Lifecycle records and resource versions | Greenfield controller SQLite store |
+| Lifecycle records and resource versions | Pi controller SQLite store |
 | Source content | Assigned working-copy files and controller-observed Git objects |
 | Conversation history | Controller-selected Pi session JSONL |
 | Active writer ownership | Database unique live-writer constraint, current claim/epoch, run identity, and kernel lifecycle lock together |
 | Presentation | No state authority |
 
-The canonical store and CLI are the greenfield families. Earlier store, schema,
+The canonical store and CLI are the Pi controller families. Earlier store, schema,
 client, CLI, runtime, workspace, registry, route-file, and chat-discovery
 families are absent from release reachability.
 

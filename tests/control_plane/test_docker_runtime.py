@@ -18,8 +18,8 @@ from scripts.pi_control.docker_runtime import (
     PINNED_ACCEPTANCE_IMAGE, DockerRuntimeError, cleanup_run_container, create_start_container,
     execute_file_tool, execute_shell_tool, inspect_container, prepare_tool_runtime,
 )
-from scripts.pi_control.greenfield_client import GreenfieldControllerClient
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_client import PiControllerClient
+from scripts.pi_control.pi_store import PiStore
 from scripts.pi_control.launch import attest_run, fail_run, prepare_run, stop_run
 from scripts.pi_control.models import new_id, utc_now
 from scripts.pi_control.run_manifest import executable_sha256
@@ -42,9 +42,9 @@ class DockerRuntimeTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(source), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base"], check=True)
         repository = root / "repo"
         subprocess.run(["git", "-C", str(source), "worktree", "add", "-q", "-b", "tool-fixture", str(repository)], check=True)
-        client = GreenfieldControllerClient(root / "state")
+        client = PiControllerClient(root / "state")
         project = client.register_project(str(repository))
-        store = GreenfieldStore(root / "state").open()
+        store = PiStore(root / "state").open()
         working = store.conn.execute("SELECT * FROM working_copies WHERE project_id=? AND kind='primary'", (project["project_id"],)).fetchone()
         conversation = create_conversation(store, project_id=project["project_id"], role="personal", display_name="personal", working_copy_id=working["working_copy_id"])
         store.conn.execute("UPDATE conversations SET observed_state='ready' WHERE conversation_id=?", (conversation["conversation_id"],))
@@ -106,7 +106,7 @@ class DockerRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             store, project, working, conversation, build_id, _repository = self.fixture(Path(raw))
             prepared = self.prepare(store, project, working, conversation, build_id)
-            second_store = GreenfieldStore(store.state_root).open()
+            second_store = PiStore(store.state_root).open()
             try:
                 current = second_store.conn.execute("SELECT * FROM working_copies WHERE working_copy_id=?", (working["working_copy_id"],)).fetchone()
                 with self.assertRaises(Exception):

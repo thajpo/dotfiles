@@ -97,6 +97,9 @@ def _decode_frame(body: bytes) -> dict[str, Any]:
     try:
         value = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        if os.environ.get("PI_DEBUG_FRAME_DUMP"):
+            with open(os.environ["PI_DEBUG_FRAME_DUMP"], "ab") as debug_handle:
+                debug_handle.write(body[:4096] + b"\n")
         raise ControllerChannelError("controller channel frame is not UTF-8 JSON") from error
     if not isinstance(value, dict) or canonical_json(value, max_text=_CHANNEL_MAX_TEXT).encode("utf-8") != body:
         raise ControllerChannelError("controller channel frame is not canonical JSON")
@@ -118,7 +121,11 @@ def validate_handshake(handshake: Mapping[str, Any], expected: Mapping[str, Any]
             raise ControllerChannelError(f"startup handshake mismatch: {key}")
     tools = handshake["activeTools"]
     if tools != expected["activeTools"]:
-        raise ControllerChannelError("startup handshake active tools differ from the role profile")
+        actual_set, expected_set = set(tools), set(expected["activeTools"])
+        missing = sorted(expected_set - actual_set)
+        extra = sorted(actual_set - expected_set)
+        detail = f"missing={missing} extra={extra}"
+        raise ControllerChannelError(f"startup handshake active tools differ from the role profile ({detail})")
     if handshake["toolSources"] != expected["toolSources"]:
         raise ControllerChannelError("startup handshake tool sources differ from staged resources")
     if handshake["loadedResources"] != expected["loadedResources"]:

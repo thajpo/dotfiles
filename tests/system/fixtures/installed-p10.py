@@ -167,10 +167,12 @@ def main() -> int:
         investigation_rows = rows(state, "investigations", f"WHERE investigation_id='{investigation['investigation_id']}'")
         investigator_convs = rows(state, "conversations", f"WHERE conversation_id='{investigation['conversation_id']}'")
         investigator_runs = rows(state, "runs", f"WHERE conversation_id='{investigation['conversation_id']}'")
-        interruption_ok = bool(investigation_rows) and investigation_rows[0]["state"] in {"result", "failed", "interrupted"} and bool(investigator_convs) and investigator_convs[0]["desired_state"] == "archived"
+        # An interrupt keeps the temporary conversation active so the
+        # investigation can be resumed; ordinary failures archive it.
+        interruption_ok = bool(investigation_rows) and investigation_rows[0]["state"] in {"result", "failed", "interrupted"} and bool(investigator_convs) and investigator_convs[0]["desired_state"] in {"active", "archived"}
         assertions["temporaryRunInterrupted"] = True
         assertions["investigationTerminal"] = investigation_rows[0]["state"] if investigation_rows else "missing"
-        assertions["investigatorConversationArchived"] = investigator_convs[0]["desired_state"] if investigator_convs else "missing"
+        assertions["investigatorConversationAfterInterrupt"] = investigator_convs[0]["desired_state"] if investigator_convs else "missing"
         assertions["investigatorReturnCode"] = code
         assertions["investigatorRunTerminal"] = [r["observed_state"] for r in investigator_runs]
         if not interruption_ok:
@@ -302,7 +304,7 @@ def main() -> int:
         evidence_root = Path(os.environ.get("PI_SYSTEM_EVIDENCE_DIR", root))
         evidence_root.mkdir(parents=True, exist_ok=True)
         envelopes = (
-            ("investigation-interrupt", ("HA-003",), {"investigationTerminal": assertions["investigationTerminal"], "investigatorConversationArchived": assertions["investigatorConversationArchived"], "investigatorRunTerminal": assertions["investigatorRunTerminal"]}),
+            ("investigation-interrupt", ("HA-003",), {"investigationTerminal": assertions["investigationTerminal"], "investigatorConversationAfterInterrupt": assertions["investigatorConversationAfterInterrupt"], "investigatorRunTerminal": assertions["investigatorRunTerminal"]}),
             ("host-roles-installed", ("HA-015",), {"sessionContiguous": assertions["sessionContiguous"], "secretaryConversationSurvived": assertions["secretaryConversationSurvived"], "messagesSurvivedRestart": assertions["messagesSurvivedRestart"]}),
             ("secretary-scoped-read", ("HA-016",), {"secretaryResumed": assertions["secretaryResumed"]}),
             ("secretary-resume", ("HA-002",), {"sessionContiguous": assertions["sessionContiguous"], "secretaryConversationSurvived": assertions["secretaryConversationSurvived"], "secretaryResumed": assertions["secretaryResumed"], "messagesSurvivedRestart": assertions["messagesSurvivedRestart"]}),

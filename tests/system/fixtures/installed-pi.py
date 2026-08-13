@@ -17,9 +17,9 @@ from typing import Any
 
 PROMPT = "inspect the assigned project"
 FINAL_TEXT = "SCRIPTED_FINAL"
-SECRETARY_TOOLS = ["acknowledge_project_message", "check_package_review_gate", "git_read", "grep", "list_project_messages", "ls", "post_project_message", "read", "record_dependency_disposition", "reply_project_message", "subagent"]
-INVESTIGATOR_TOOLS = ["git_read", "grep", "ls", "read", "record_package_security_review"]
-REVIEWER_TOOLS = ["check_package_review_gate", "git_read", "grep", "ls", "read"]
+SECRETARY_TOOLS = ["acknowledge_project_message", "analyze_integration", "check_package_review_gate", "git_read", "grep", "harness_feedback", "list_changes", "list_project_messages", "ls", "observe_change_queue", "observe_fleet", "observe_messages", "observe_tasks", "post_project_message", "propose_integration", "propose_review", "propose_workstream", "project_work_index", "read", "record_dependency_disposition", "reply_project_message", "request_review", "start_investigation", "subagent", "subagent_interrupt", "subagent_list", "subagent_resume", "subagent_start", "subagent_status", "subagent_steer", "subagent_stop", "subagent_wait"]
+INVESTIGATOR_TOOLS = ["acknowledge_project_message", "git_read", "grep", "harness_feedback", "list_project_messages", "ls", "post_project_message", "read", "record_package_security_review", "reply_project_message"]
+REVIEWER_TOOLS = ["acknowledge_project_message", "check_package_review_gate", "git_read", "grep", "harness_feedback", "list_project_messages", "ls", "post_project_message", "read", "reply_project_message"]
 
 
 def digest_bytes(value: bytes) -> str:
@@ -199,8 +199,11 @@ def main(argv: list[str] | None = None) -> int:
     if custom is None or not isinstance(custom.get("data"), dict):
         raise AssertionError("loaded-resource probe entry is missing")
     probe_data = custom["data"]
-    if sorted(probe_data.get("activeTools", [])) != SECRETARY_TOOLS:
-        raise AssertionError("host role exposed an unexpected active tool set")
+    actual_tools = sorted(probe_data.get("activeTools", []))
+    if actual_tools != sorted(SECRETARY_TOOLS):
+        missing = sorted(set(SECRETARY_TOOLS) - set(actual_tools))
+        extra = sorted(set(actual_tools) - set(SECRETARY_TOOLS))
+        raise AssertionError(f"host role exposed an unexpected active tool set: missing={missing} extra={extra}")
     if probe_data.get("session") != {"id": args.pi_session_id, "file": str(session_file)}:
         raise AssertionError("Pi loaded a session outside the controller binding")
     if probe_data.get("cwd") != str(repository) or probe_data.get("model") != {"provider": "scripted", "id": "scripted-1", "api": "scripted"}:
@@ -212,13 +215,17 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(observed_environment, dict) or any(any(marker in key.upper() for marker in sensitive_markers) for key in observed_environment):
         raise AssertionError("process evidence is missing or exposes a sensitive environment field")
     tools = probe_data.get("tools")
-    if not isinstance(tools, list) or sorted(item.get("name") for item in tools if isinstance(item, dict)) != SECRETARY_TOOLS:
+    if not isinstance(tools, list) or sorted(item.get("name") for item in tools if isinstance(item, dict)) != sorted(SECRETARY_TOOLS):
         raise AssertionError("Pi tool registry differs from the active host-role tools")
     tool_resources = {
-        "git_read": "scoped-project-read/index.ts", "grep": "scoped-project-read/index.ts", "ls": "scoped-project-read/index.ts", "read": "scoped-project-read/index.ts",
+        "git_read": "scoped-project-read/index.ts", "grep": "scoped-project-read/index.ts", "harness_feedback": "harness-feedback/index.ts", "ls": "scoped-project-read/index.ts", "read": "scoped-project-read/index.ts",
         "post_project_message": "controller-channel/index.ts", "list_project_messages": "controller-channel/index.ts", "acknowledge_project_message": "controller-channel/index.ts", "reply_project_message": "controller-channel/index.ts",
         "check_package_review_gate": "controller-channel/index.ts", "record_dependency_disposition": "controller-channel/index.ts",
-        "subagent": "pi-subagents/index.ts",
+        "subagent": "pi-subagents/index.ts", "subagent_start": "pi-subagents/index.ts", "subagent_status": "pi-subagents/index.ts", "subagent_wait": "pi-subagents/index.ts", "subagent_list": "pi-subagents/index.ts", "subagent_interrupt": "pi-subagents/index.ts", "subagent_stop": "pi-subagents/index.ts", "subagent_resume": "pi-subagents/index.ts", "subagent_steer": "pi-subagents/index.ts",
+        "project_work_index": "controller-channel/index.ts", "start_investigation": "controller-channel/index.ts",
+        "propose_workstream": "controller-channel/index.ts", "propose_review": "controller-channel/index.ts", "propose_integration": "controller-channel/index.ts",
+        "list_changes": "controller-channel/index.ts", "request_review": "controller-channel/index.ts", "analyze_integration": "controller-channel/index.ts",
+        "observe_tasks": "controller-channel/index.ts", "observe_fleet": "controller-channel/index.ts", "observe_messages": "controller-channel/index.ts", "observe_change_queue": "controller-channel/index.ts",
     }
     for tool in tools:
         source = tool.get("sourceInfo") if isinstance(tool, dict) else None
@@ -231,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     read_end = next((event for event in tool_ends if event.get("toolCallId") == "scripted-read-1" and event.get("toolName") == "read"), None)
     write_end = next((event for event in tool_ends if event.get("toolCallId") == "scripted-write-1" and event.get("toolName") == "write"), None)
     if read_end is None or read_end.get("isError") is not False:
-        raise AssertionError("real scoped read did not complete successfully")
+        raise AssertionError(f"real scoped read did not complete successfully: {json.dumps(read_end)[:800] if read_end else 'no read event; tool events=' + json.dumps([e for e in events if 'tool' in str(e.get('type')) or 'scripted' in str(e)][:10])}")
     read_text = text_content(read_end.get("result") if isinstance(read_end.get("result"), dict) else {})
     read_value = json.loads(read_text)
     if read_value.get("path") != "README" or read_value.get("lines") != ["installed process"] or read_value.get("projectId") != args.project_id or read_value.get("workingCopyId") != args.working_copy_id:
@@ -277,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
     observation = json.loads(run["host_process_observation_json"])
     if observation.get("childPid") != probe_data.get("process", {}).get("pid") or observation.get("childStartIdentity") != run.get("child_start_identity"):
         raise AssertionError("controller process observation does not bind the actual Pi child")
-    if sorted(observation.get("environment", {})) != host_process.get("environmentKeys") or sorted(observation.get("handshake", {}).get("activeTools", [])) != SECRETARY_TOOLS:
+    if sorted(observation.get("environment", {})) != host_process.get("environmentKeys") or sorted(observation.get("handshake", {}).get("activeTools", [])) != sorted(SECRETARY_TOOLS):
         raise AssertionError("controller did not retain the attested child environment and tools")
     acceptance_observation = observation.get("acceptance", {})
     if acceptance_observation.get("testOnly") is not True or acceptance_observation.get("profile") != "scripted-v1":
@@ -339,7 +346,7 @@ def main(argv: list[str] | None = None) -> int:
     review_edit = next((event for event in reviewer_events if event.get("type") == "tool_execution_end" and event.get("toolCallId") == "scripted-review-edit"), None)
     review_value = json.loads(text_content(review_read.get("result", {}))) if review_read and review_read.get("isError") is False else {}
     if review_value.get("revision") != assignment["tipOid"] or review_value.get("output") != "installed process\n":
-        raise AssertionError("reviewer did not inspect the assigned immutable revision")
+        raise AssertionError(f"reviewer did not inspect the assigned immutable revision: value={review_value!r} tipOid={assignment['tipOid']!r}")
     if review_edit is None or review_edit.get("isError") is not True or "Tool edit not found" not in text_content(review_edit.get("result", {})):
         raise AssertionError("reviewer received edit authority")
     reviewer_source_after = tree_snapshot(repository)
@@ -447,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
         "assertions": {
             "realPiProcess": True,
             "provider": "scripted/scripted-1",
-            "activeTools": SECRETARY_TOOLS,
+            "activeTools": sorted(SECRETARY_TOOLS),
             "invokedRead": True,
             "rejectedUnavailableWrite": True,
             "sessionFile": str(session_file),

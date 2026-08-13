@@ -1,7 +1,7 @@
-# Pi Greenfield Configuration
+# Pi Harness Configuration
 
 This directory contains the reproducible, non-secret source for the fresh Pi
-system described by [`PI_GREENFIELD_IMPLEMENTATION_PLAN.md`](../PI_GREENFIELD_IMPLEMENTATION_PLAN.md).
+system described by [`PI_IMPLEMENTATION_PLAN.md`](../PI_IMPLEMENTATION_PLAN.md).
 
 Status: **component source exists; the complete installed product is not yet
 accepted**.
@@ -18,7 +18,7 @@ accepted**.
 - Host and network commands require exact one-use approval.
 - Tmux is presentation only and cannot create project or conversation identity.
 - First-release operation does not depend on Herdr or remote publication.
-- Pre-greenfield Pi registries, routes, sessions, and worktrees are not imported
+- Pre-controller Pi registries, routes, sessions, and worktrees are not imported
   or consulted.
 
 ## Source Layout
@@ -53,7 +53,7 @@ activation prerequisite.
 
 ## Installation Status
 
-`bin/pi-install` and `scripts/pi_control/greenfield_install.py` implement the
+`bin/pi-install` and `scripts/pi_control/pi_install.py` implement the
 staging shape, but installation is not accepted until the staged artifact is
 self-contained and the final installed paths launch real Pi processes. Do not
 treat a successful stage, direct `pi-control` invocation, or help command as a

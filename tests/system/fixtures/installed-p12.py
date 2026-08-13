@@ -17,7 +17,7 @@ import time
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from scripts.pi_control.greenfield_install import rollback
+from scripts.pi_control.pi_install import rollback
 from tests.system.evidence import Evidence, write_evidence
 from tests.system.staged_install import StagedInstallUnavailable, install
 

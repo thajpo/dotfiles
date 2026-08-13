@@ -1,7 +1,7 @@
 # pi-sandbox-control provenance
 
 This first-party package began as the Phase 5 adapter extraction and is now the
-small greenfield manifest/channel broker. Installed `node_modules` is never
+small Pi manifest/channel broker. Installed `node_modules` is never
 edited in place.
 
 ## Source

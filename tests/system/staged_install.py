@@ -1,4 +1,4 @@
-"""Compatibility CLI for the production greenfield generation builder."""
+"""Compatibility CLI for the production Pi harness generation builder."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
-from scripts.pi_control.greenfield_install import InstallUnavailable, stage as build_generation
+from scripts.pi_control.pi_install import InstallUnavailable, stage as build_generation
 
 
 ROOT = Path(__file__).resolve().parents[2]

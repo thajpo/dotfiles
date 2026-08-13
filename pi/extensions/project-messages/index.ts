@@ -23,7 +23,12 @@ export default function projectMessages(_pi: ExtensionAPI): void {
   controller.registerTool("message.list", {
     name: "list_project_messages", label: "List project messages", description: "List messages in the controller-authenticated project.",
     parameters: Type.Object({ states: Type.Optional(Type.Array(Type.Union([Type.Literal("pending"), Type.Literal("delivered"), Type.Literal("acknowledged"), Type.Literal("resolved")]), { maxItems: 4 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 256 })) }, { additionalProperties: false }),
-    async execute(_id, params, signal) { return result(await controller.request("message.list", params, signal)); },
+    async execute(_id, params, signal) {
+      const payload: Record<string, unknown> = {};
+      if (params.states !== undefined) payload.states = params.states;
+      if (params.limit !== undefined) payload.limit = params.limit;
+      return result(await controller.request("message.list", payload, signal));
+    },
   });
   controller.registerTool("message.acknowledge", {
     name: "acknowledge_project_message", label: "Acknowledge project message", description: "Acknowledge or resolve one message in the controller-authenticated project.",

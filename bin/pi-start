@@ -7,7 +7,7 @@ if (( EUID == 0 )); then
   exit 1
 fi
 
-self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+self_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 personal="$HOME/.local/bin/pi-personal"
 pidev="$HOME/.local/bin/pidev"
 restart="$HOME/.local/bin/pi-restart"
@@ -32,7 +32,7 @@ while (( $# )); do
       shift
       ;;
     --herdr|-herdr)
-      printf 'pi-start: the greenfield surface is tmux-only; -herdr is no longer supported\n' >&2
+      printf 'pi-start: the Pi surface is tmux-only; -herdr is no longer supported\n' >&2
       exit 2
       ;;
     --)
@@ -53,10 +53,7 @@ case "$action" in
   personal|all) [[ $# -eq 1 ]] || { usage; exit 2; } ;;
   help) [[ $# -le 2 && ${2:-all} == all ]] || { usage; exit 2; } ;;
   project) [[ $# -le 2 ]] || { usage; exit 2; } ;;
-  secretary)
-    printf 'pi-start: the legacy secretary surface was decommissioned; use the greenfield system when it ships\n' >&2
-    exit 2
-    ;;
+  secretary) [[ $# -eq 1 ]] || { usage; exit 2; } ;;
   *) usage; exit 2 ;;
 esac
 
@@ -78,7 +75,14 @@ unset PI_SECRETARY_BACKEND PI_SECRETARY_HERDR_BIN PI_SECRETARY_HERDR_WORKER PI_S
 
 # These launchers reconstruct their own task routes. Controller assignments are
 # immutable per-run capabilities and must never be inherited from the caller.
-while IFS= read -r name; do unset "$name"; done < <(compgen -A variable PI_SYSTEM_)
+# The data/state/config roots are configuration, not assignments, and pass
+# through so an explicitly configured surface keeps resolving one generation.
+while IFS= read -r name; do
+  case "$name" in
+    PI_SYSTEM_DATA_ROOT|PI_SYSTEM_STATE_ROOT|PI_SYSTEM_SURFACE_STAGE|PI_SYSTEM_MODEL|PI_TOOL_IMAGE) ;;
+    *) unset "$name" ;;
+  esac
+done < <(compgen -A variable PI_SYSTEM_)
 unset PI_RUNTIME_MANIFEST PI_RUNTIME_CAPABILITY
 
 if (( mobile_layout )); then export PI_TMUX_LAYOUT=mobile; else unset PI_TMUX_LAYOUT; fi
@@ -204,6 +208,21 @@ fi
 case "$action" in
   personal)
     if (( mobile_layout )); then "$personal" --ensure --mobile; else "$personal" --ensure; fi
+    ;;
+  secretary)
+    # Secretary-only start: build and open the secretary grid, no writer.
+    if [[ -x "$self_dir/pisec" ]]; then
+      if (( mobile_layout )); then
+        "$self_dir/pisec" --mobile launch
+        exec "$self_dir/pisec" --mobile open
+      else
+        "$self_dir/pisec" launch
+        exec "$self_dir/pisec" open
+      fi
+    else
+      printf 'pi-start: pisec is missing\n' >&2
+      exit 1
+    fi
     ;;
   project)
     directory=${2:-$PWD}

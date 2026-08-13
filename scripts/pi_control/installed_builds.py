@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from .greenfield_install import RESOURCE_INVENTORY, verify_stage
+from .pi_install import RESOURCE_INVENTORY, verify_stage
 from .models import canonical_json, utc_now
 from .operations import update_operation_in_transaction
 from .staged_build import load_build_manifest

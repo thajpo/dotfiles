@@ -1,9 +1,9 @@
-# Pi Greenfield Control Plane Documents
+# Pi Control Plane Documents
 
 Owns: document catalog and conflict routing only.
 
 The canonical program is
-[`../../PI_GREENFIELD_IMPLEMENTATION_PLAN.md`](../../PI_GREENFIELD_IMPLEMENTATION_PLAN.md).
+[`../../PI_IMPLEMENTATION_PLAN.md`](../../PI_IMPLEMENTATION_PLAN.md).
 It alone records program phase state.
 
 | Document | Normative surface |
@@ -15,7 +15,7 @@ It alone records program phase state.
 | [`OBSERVABILITY_CONTINUITY_CONTRACT.md`](OBSERVABILITY_CONTINUITY_CONTRACT.md) | Evidence, attention, and continuity |
 | [`SYSTEM_INTEGRATION_TEST_PLAN.md`](SYSTEM_INTEGRATION_TEST_PLAN.md) | Scenario and tier coverage |
 | [`ACCEPTANCE_PLAN.md`](ACCEPTANCE_PLAN.md) | Gate evaluation and release-verifier rules |
-| [`GREENFIELD_CUTOVER_AND_ROLLBACK.md`](GREENFIELD_CUTOVER_AND_ROLLBACK.md) | Cutover and rollback transaction |
+| [`CUTOVER_AND_ROLLBACK.md`](CUTOVER_AND_ROLLBACK.md) | Cutover and rollback transaction |
 | [`PRE_ACTIVATION_ACCEPTANCE_RUNBOOK.md`](PRE_ACTIVATION_ACCEPTANCE_RUNBOOK.md) | Human pre-activation procedure |
 
 Each contract is authoritative only for its listed surface. A cross-document

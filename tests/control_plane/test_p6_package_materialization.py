@@ -10,15 +10,15 @@ import tempfile
 import unittest
 
 from scripts.pi_control.dependencies import inventory_dependencies
-from scripts.pi_control.greenfield_client import GreenfieldControllerClient
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_client import PiControllerClient
+from scripts.pi_control.pi_store import PiStore
 from scripts.pi_control.launch import prepare_run
 from scripts.pi_control.models import new_id
 from scripts.pi_control.package_environment import PackageEnvironmentError, _load_cache_policy, approve_package_request, execute_approved_package_request, request_package_operation
 from tests.control_plane.test_p2_contract import tool_runtime
-from tests.greenfield_test_build import allow_test_only_registered_build_rows
+from tests.pi_test_build import allow_test_only_registered_build_rows
 from tests.system.package_cache_fixture import NODE_IMAGE_CONFIG, PYTHON_IMAGE_CONFIG, create_package_caches
-from tests.test_greenfield_core import _BUILD_ID, _host, _register_build, _repo
+from tests.test_pi_core import _BUILD_ID, _host, _register_build, _repo
 
 
 class P6PackageMaterializationTests(unittest.TestCase):
@@ -37,17 +37,17 @@ class P6PackageMaterializationTests(unittest.TestCase):
 
     def _materialize(self, root: Path) -> dict[str, object]:
         repository = _repo(root, "packages")
-        client = GreenfieldControllerClient(root / "state")
+        client = PiControllerClient(root / "state")
         project = client.register_project(str(repository), "packages")
         cache = create_package_caches(root, root / "state")
         npm_spec = "file:/cache/npm/p6-tiny-npm-1.0.0.tgz"
         (repository / "package.json").write_text(json.dumps({"name": "fixture", "version": "1.0.0", "packageManager": "npm@10.9.8", "dependencies": {"p6-tiny-npm": npm_spec}}), encoding="utf-8")
         (repository / "package-lock.json").write_text(json.dumps({"name": "fixture", "version": "1.0.0", "lockfileVersion": 3, "packages": {"": {"name": "fixture", "version": "1.0.0", "dependencies": {"p6-tiny-npm": npm_spec}}, "node_modules/p6-tiny-npm": {"version": "1.0.0", "resolved": npm_spec, "integrity": cache["npmIntegrity"]}}}), encoding="utf-8")
         (repository / "requirements.txt").write_text(f"p6-tiny-python==1.0.0 --hash=sha256:{cache['pythonSha256']}\n", encoding="utf-8")
-        with GreenfieldStore(root / "state") as store:
+        with PiStore(root / "state") as store:
             working = dict(store.conn.execute("SELECT * FROM working_copies WHERE project_id=?", (project["project_id"],)).fetchone())
         change = client.submit_change(project_id=project["project_id"], working_copy_id=working["working_copy_id"], target_ref=working["branch_ref"], title="offline packages", summary="npm and Python exact local artifacts", capture_mode="dirty", selected_paths=["package.json", "package-lock.json", "requirements.txt"], idempotency_key="p6-offline-packages")
-        with GreenfieldStore(root / "state") as store:
+        with PiStore(root / "state") as store:
             _register_build(store, root)
             inventory = inventory_dependencies(store, project_id=project["project_id"], change_id=change["changeId"], revision=change["revision"])
             self.assertEqual({item["ecosystem"] for item in inventory["differences"]}, {"npm", "python"})
@@ -84,7 +84,7 @@ class P6PackageMaterializationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/tmp") as raw:
             root = Path(raw)
             state = root / "state"
-            with GreenfieldStore(state) as store:
+            with PiStore(state) as store:
                 create_package_caches(root, state)
                 marker = state / ".pi-package-cache-test-fixture"
                 marker.unlink()
@@ -103,16 +103,16 @@ class P6PackageMaterializationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/tmp") as raw:
             root = Path(raw)
             repository = _repo(root, "packages")
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(repository), "packages")
             cache = create_package_caches(root, root / "state")
             npm_spec = "file:/cache/npm/p6-tiny-npm-1.0.0.tgz"
             (repository / "package.json").write_text(json.dumps({"name": "fixture", "version": "1.0.0", "packageManager": "npm@10.9.8", "dependencies": {"p6-tiny-npm": npm_spec}}), encoding="utf-8")
             (repository / "package-lock.json").write_text(json.dumps({"name": "fixture", "version": "1.0.0", "lockfileVersion": 3, "packages": {"": {"name": "fixture", "version": "1.0.0", "dependencies": {"p6-tiny-npm": npm_spec}}, "node_modules/p6-tiny-npm": {"version": "1.0.0", "resolved": npm_spec, "integrity": cache["npmIntegrity"]}}}), encoding="utf-8")
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 working = dict(store.conn.execute("SELECT * FROM working_copies WHERE project_id=?", (project["project_id"],)).fetchone())
             change = client.submit_change(project_id=project["project_id"], working_copy_id=working["working_copy_id"], target_ref=working["branch_ref"], title="tamper fixture", summary="input tree disappears after approval", capture_mode="dirty", selected_paths=["package.json", "package-lock.json"], idempotency_key="p6-tamper-tree")
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 _register_build(store, root)
                 inventory_dependencies(store, project_id=project["project_id"], change_id=change["changeId"], revision=change["revision"])
                 conversation = client.create_conversation(project_id=project["project_id"], role="personal", display_name="tamper", working_copy_id=working["working_copy_id"])

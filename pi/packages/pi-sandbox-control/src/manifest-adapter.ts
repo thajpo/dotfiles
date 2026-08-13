@@ -1,4 +1,4 @@
-/** Side-effect-free validator for the canonical greenfield run manifest. */
+/** Side-effect-free validator for the canonical Pi run manifest. */
 
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";

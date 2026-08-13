@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_store import PiStore
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +30,7 @@ class CLIProtocolV2Tests(unittest.TestCase):
     def test_cli_negotiates_v2_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with GreenfieldStore(root / "state"):
+            with PiStore(root / "state"):
                 pass
             result = self._run(root, {"protocolVersion": 2, "operation": "negotiate", "request": {}})
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -39,7 +39,7 @@ class CLIProtocolV2Tests(unittest.TestCase):
     def test_cli_host_only_and_malformed_requests_are_projected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with GreenfieldStore(root / "state"):
+            with PiStore(root / "state"):
                 pass
             result = self._run(root, {"protocolVersion": 2, "operation": "activation.apply", "request": {}})
             self.assertEqual(result.returncode, 2)

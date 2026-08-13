@@ -151,8 +151,8 @@ class BuildManifestTests(unittest.TestCase):
             shutil.copy2(Path("bin/pi-control"), launcher)
             launcher.chmod(0o755)
             state = root / "state"
-            from scripts.pi_control.greenfield_store import GreenfieldStore
-            with GreenfieldStore(state):
+            from scripts.pi_control.pi_store import PiStore
+            with PiStore(state):
                 pass
             env = {**os.environ, "HOME": str(root / "home"), "PI_SYSTEM_CONTROL_ROOT": str(install_root)}
             result = subprocess.run(

@@ -1,4 +1,4 @@
-"""Canonical cross-language run manifest for the greenfield controller."""
+"""Canonical cross-language run manifest for the Pi controller."""
 
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
-# Greenfield Secretary And Worker Workflow
+# Pi Harness Secretary And Worker Workflow
 
 This document describes the intended first-release workflow. It is accepted
-only when exercised through the installed greenfield launchers and controller.
+only when exercised through the installed Pi harness launchers and controller.
 
 ## Roles
 
@@ -64,10 +64,10 @@ only exact managed Pi processes and must preserve unrelated tmux sessions.
 
 ## Fresh Conversation Rule
 
-The greenfield system creates new session JSONL under its own state boundary.
-It does not inspect or adopt pre-greenfield root registries, secretary records,
+The Pi harness creates new session JSONL under its own state boundary.
+It does not inspect or adopt pre-controller root registries, secretary records,
 routes, worktrees, or chat files. Existing old chats may be retained or manually
-deleted, but neither choice affects greenfield correctness.
+deleted, but neither choice affects Pi harness correctness.
 
 ## Acceptance
 

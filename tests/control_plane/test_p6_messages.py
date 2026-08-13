@@ -7,15 +7,15 @@ import tempfile
 import unittest
 
 from scripts.pi_control.controller_channel import ControllerChannelError, PROTOCOL_VERSION
-from scripts.pi_control.greenfield_client import GreenfieldControllerClient
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_client import PiControllerClient
+from scripts.pi_control.pi_store import PiStore
 from scripts.pi_control.host_supervisor import _ROLE_OPERATIONS, _rpc
 from scripts.pi_control.launch import prepare_run
 from scripts.pi_control.messages import ProjectMessageError, acknowledge_message, list_messages, post_message, reply_message
 from scripts.pi_control.models import new_id
 from tests.control_plane.test_p2_contract import tool_runtime
-from tests.greenfield_test_build import allow_test_only_registered_build_rows
-from tests.test_greenfield_core import _BUILD_ID, _host, _register_build, _repo
+from tests.pi_test_build import allow_test_only_registered_build_rows
+from tests.test_pi_core import _BUILD_ID, _host, _register_build, _repo
 
 
 class P6MessageTests(unittest.TestCase):
@@ -27,9 +27,9 @@ class P6MessageTests(unittest.TestCase):
     def test_writer_post_list_ack_reply_and_epoch_fence(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(_repo(root, "messages")), "messages")
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 _register_build(store, root)
                 working = dict(store.conn.execute("SELECT * FROM working_copies WHERE project_id=?", (project["project_id"],)).fetchone())
                 conversation = client.create_conversation(project_id=project["project_id"], role="personal", display_name="writer", working_copy_id=working["working_copy_id"])
@@ -54,7 +54,7 @@ class P6MessageTests(unittest.TestCase):
 
     def test_channel_rejects_identity_override_and_has_no_authority_operations(self) -> None:
         request = {"protocolVersion": PROTOCOL_VERSION, "type": "request", "requestId": "request-1", "operation": "message.post", "payload": {"projectId": "forged"}}
-        with tempfile.TemporaryDirectory() as raw, GreenfieldStore(Path(raw) / "state") as store, self.assertRaisesRegex(ControllerChannelError, "override"):
+        with tempfile.TemporaryDirectory() as raw, PiStore(Path(raw) / "state") as store, self.assertRaisesRegex(ControllerChannelError, "override"):
             _rpc(store, "run_" + "1" * 32, "sha256:" + "2" * 64, request)
         all_operations = set().union(*_ROLE_OPERATIONS.values())
         for forbidden in ("command.authorize", "command.execute", "command.consume", "integration.authorize", "integration.integrate", "host_command", "shell"):

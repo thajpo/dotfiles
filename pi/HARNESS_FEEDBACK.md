@@ -1,7 +1,7 @@
 # Harness feedback
 
 Status: source feature retained as a separate user-scoped improvement feed;
-its own greenfield installed-process delivery remains to be accepted.
+its own installed-process delivery remains to be accepted.
 
 Harness feedback is an encouraged self-improvement channel for every Pi
 subagent: workers, reviewers, scouts, researchers, planners, delegates,
@@ -55,7 +55,7 @@ proposal and never grants authority or silently changes memory, product scope,
 or repository policy. The direct tool and native channel use the same central
 record format; use one path per observation rather than duplicating it.
 
-In the greenfield product, headful workers send the same bounded observation
+In the Pi harness, headful workers send the same bounded observation
 through the controller-bound project-message path. This is feedback delivery,
 not lifecycle authority or permission to change project state.
 

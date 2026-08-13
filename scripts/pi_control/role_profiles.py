@@ -1,4 +1,4 @@
-"""Immutable conversation role policy for the greenfield controller."""
+"""Immutable conversation role policy for the Pi controller."""
 
 from __future__ import annotations
 

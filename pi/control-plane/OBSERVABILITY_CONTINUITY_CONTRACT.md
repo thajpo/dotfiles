@@ -1,4 +1,4 @@
-# Pi Greenfield Observability And Continuity Contract
+# Pi Harness Observability And Continuity Contract
 
 Owns: evidence envelopes, user attention, and restart continuity.
 

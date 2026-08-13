@@ -10,7 +10,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 root = Path(sys.argv[1])
 sys.path.insert(0, str(root))
-from scripts.pi_control.greenfield_install import InstallUnavailable, activate, ensure_fresh_state, rollback, stage, verify_stage
+from scripts.pi_control.pi_install import InstallUnavailable, activate, ensure_fresh_state, rollback, stage, verify_stage
 
 parser = argparse.ArgumentParser(prog="pi-install")
 sub = parser.add_subparsers(dest="command", required=True)

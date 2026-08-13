@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_store import PiStore
 from scripts.pi_control.projects import register_project
 from scripts.pi_control.scoped_read import MAX_FILE_BYTES, ScopedProjectReader, ScopedReadError
 
@@ -40,7 +40,7 @@ class ScopedProjectReaderTests(unittest.TestCase):
         (self.repository / "src/code.py").write_text("needle = True\n", encoding="utf-8")
         git(self.repository, "add", "README", "src/code.py")
         git(self.repository, "commit", "-qm", "second")
-        self.store = GreenfieldStore(self.root / "state").open()
+        self.store = PiStore(self.root / "state").open()
         self.project = register_project(self.store, self.repository)
         self.working = self.store.conn.execute("SELECT * FROM working_copies WHERE project_id=?", (self.project["project_id"],)).fetchone()
 

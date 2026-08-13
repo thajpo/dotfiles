@@ -58,7 +58,7 @@ def register_project(store: Any, repository: str | Path, display_name: str | Non
             "INSERT INTO conversations(conversation_id,project_id,working_copy_id,role,authority_profile,display_name,pi_session_id,session_file,desired_state,observed_state,resource_version,created_at,updated_at,last_reconciled_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (conversation_id, project_id, None, "secretary", "host-read-only", f"{name} secretary", pi_session_id, session_file, "active", "ready", 1, now, now, now, None, None),
         )
-        append_event_in_transaction(store.conn, event_kind="project.registered", resource_type="project", resource_id=project_id, resource_version=1, payload={"projectId": project_id, "repository": str(primary), "gitCommonDir": str(common), "authority": "greenfield-controller"})
+        append_event_in_transaction(store.conn, event_kind="project.registered", resource_type="project", resource_id=project_id, resource_version=1, payload={"projectId": project_id, "repository": str(primary), "gitCommonDir": str(common), "authority": "pi-controller"})
         update_operation_in_transaction(store.conn, operation.operation_id, state="succeeded", step="project-registered", result={"projectId": project_id})
     return dict(store.conn.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone())
 

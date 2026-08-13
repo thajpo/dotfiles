@@ -1,23 +1,23 @@
 # dotfiles
 
-## Pi Greenfield System
+## Pi Harness System
 
 The fresh Pi system in
-[PI_GREENFIELD_IMPLEMENTATION_PLAN.md](PI_GREENFIELD_IMPLEMENTATION_PLAN.md)
+[PI_IMPLEMENTATION_PLAN.md](PI_IMPLEMENTATION_PLAN.md)
 is the working Pi product. It is installed and activated on this machine
 (`release-passed` on 2026-08-11 against
 `build_2faecfee6b4280149422721827640bb4`), and the daily surface commands
 (`pi-restart`, `pisec`, `pi-personal`, `pi-start`, `pidev`) drive the
-greenfield controller and its controller-bound conversations.
+Pi controller and its controller-bound conversations.
 
-Greenfield state uses `~/.local/state/pi-system/`, installed artifacts use
+Controller state uses `~/.local/state/pi-system/`, installed artifacts use
 `~/.local/share/pi-system/`, and controller-owned working copies use
-`~/.local/share/pi-system-work/`. Pre-greenfield chats and lifecycle files are
+`~/.local/share/pi-system-work/`. Pre-controller chats and lifecycle files are
 not imported or consulted.
 
 My terminal setup: tmux + neovim (LazyVim).
 
-## Greenfield Development
+## Pi Harness Development
 
 ```bash
 git clone https://github.com/thajpo/dotfiles.git
@@ -36,7 +36,7 @@ Pi chat product is ready. Acceptance must launch real controller-bound
 secretary and coding conversations through the final installed paths.
 
 Machine-specific non-secret settings live in `machines/`. Repository trust for
-the greenfield system is bound to controller-registered projects by host policy,
+the Pi harness is bound to controller-registered projects by host policy,
 not inferred from old chat or presentation state.
 
 ## Shared CLI Skills + Dotfiles Auto-Sync
@@ -195,8 +195,8 @@ Core loop:
 - Let host policy and the registered project select the allowed execution mode.
 - Bind each coding run to one controller-assigned working copy and runtime.
 - Use Sol for unresolved architecture, difficult debugging, and high-risk review.
-- Use `pi-host` explicitly for unsandboxed machine maintenance and reviewed Pi
-  control-plane activation.
+- Unsandboxed machine maintenance is an explicit host-only decision outside the
+  Pi harness; reviewed Pi control-plane activation runs through `bin/pi-activate`.
 
 ## What's Included
 
@@ -233,7 +233,7 @@ threshold is `-55 dBFS`. Override calibration with
 - Controller-scoped host readers and exact one-use command approvals
 - One assigned working copy, writer generation, and isolated runtime per coding run
 - Exact submitted revisions, independent review receipts, and guarded integration
-- Fresh session continuity without importing pre-greenfield Pi chats
+- Fresh session continuity without importing pre-controller Pi chats
 - Tmux presentation derived from controller state rather than pane identity
 - Reproducible installation and rollback gates before replacing OpenCode
 

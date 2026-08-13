@@ -14,16 +14,16 @@ import unittest
 from scripts.pi_control.conversations import create_conversation
 from scripts.pi_control.command_requests import CommandRequestError
 from scripts.pi_control.errors import DatabaseCorruptError, ErrorCode
-from scripts.pi_control.greenfield_client import GreenfieldControllerClient
-from scripts.pi_control.greenfield_protocol import ProtocolError, protocol_request
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_client import PiControllerClient
+from scripts.pi_control.pi_protocol import ProtocolError, protocol_request
+from scripts.pi_control.pi_store import PiStore
 from scripts.pi_control.launch import LaunchError, prepare_run
 from scripts.pi_control.installed_builds import register_staged_build
 from scripts.pi_control.models import canonical_json, new_id, utc_now
 from scripts.pi_control.run_manifest import executable_sha256
-from scripts.pi_control.greenfield_install import stage
-from tests.greenfield_test_build import allow_test_only_registered_build_rows
-from tests.test_greenfield_install import ROOT, pack_test_pi_core
+from scripts.pi_control.pi_install import stage
+from tests.pi_test_build import allow_test_only_registered_build_rows
+from tests.test_pi_install import ROOT, pack_test_pi_core
 
 
 DIGEST = "sha256:" + "a" * 64
@@ -40,7 +40,7 @@ def repository(root: Path, name: str = "repo") -> Path:
     return path
 
 
-def register_test_build(store: GreenfieldStore, root: Path) -> None:
+def register_test_build(store: PiStore, root: Path) -> None:
     build_manifest = root / "build-manifest.json"
     resources = root / "release-resources.json"
     build_manifest.write_text("test", encoding="utf-8")
@@ -98,16 +98,16 @@ class P2ContractTests(unittest.TestCase):
             os.chmod(root / "control.db", 0o600)
             database_before = (root / "control.db").read_bytes()
             with self.assertRaises(DatabaseCorruptError):
-                GreenfieldStore(root).open()
+                PiStore(root).open()
             self.assertEqual((root / "control.db").read_bytes(), database_before)
             self.assertEqual(sentinel.read_bytes(), b"old-state-sentinel\x00unchanged")
 
     def test_roles_and_session_identity_are_controller_derived(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(repository(root)))
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 primary = store.conn.execute("SELECT * FROM working_copies WHERE project_id=?", (project["project_id"],)).fetchone()
                 personal = create_conversation(store, project_id=project["project_id"], role="personal", display_name="personal", working_copy_id=primary["working_copy_id"])
                 self.assertEqual(personal["authority_profile"], "writer-container")
@@ -127,9 +127,9 @@ class P2ContractTests(unittest.TestCase):
     def test_prepare_derives_scope_authority_and_operation_and_replays(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(repository(root)))
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 register_test_build(store, root)
                 conversation = store.conn.execute("SELECT * FROM conversations WHERE project_id=? AND role='secretary'", (project["project_id"],)).fetchone()
                 first = prepare_run(store, conversation_id=conversation["conversation_id"], build_id=BUILD_ID, host_process=host_process(), idempotency_key="prepare-one")
@@ -148,9 +148,9 @@ class P2ContractTests(unittest.TestCase):
     def test_unregistered_build_and_writer_without_tool_runtime_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(repository(root)))
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 secretary = store.conn.execute("SELECT * FROM conversations WHERE role='secretary'").fetchone()
                 with self.assertRaises(LaunchError):
                     prepare_run(store, conversation_id=secretary["conversation_id"], build_id=BUILD_ID, host_process=host_process())
@@ -163,10 +163,10 @@ class P2ContractTests(unittest.TestCase):
     def test_database_rejects_cross_project_run_and_second_live_writer(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             first = client.register_project(str(repository(root, "one")))
             second = client.register_project(str(repository(root, "two")))
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 register_test_build(store, root)
                 primary = store.conn.execute("SELECT * FROM working_copies WHERE project_id=?", (first["project_id"],)).fetchone()
                 one = create_conversation(store, project_id=first["project_id"], role="personal", display_name="one", working_copy_id=primary["working_copy_id"])
@@ -185,7 +185,7 @@ class P2ContractTests(unittest.TestCase):
     def test_protocol_is_exact_versioned_and_adapts_extension_requests(self) -> None:
         class FakeClient:
             def dispatch(self, operation, request):
-                from scripts.pi_control.greenfield_protocol import adapt_request
+                from scripts.pi_control.pi_protocol import adapt_request
                 return adapt_request(operation, request)
 
         envelope = {"protocolVersion": 2, "operation": "message.post", "request": {"projectId": "p", "conversationId": "c", "runId": "r", "kind": "progress", "payload": {}, "idempotencyKey": "one"}}
@@ -208,9 +208,9 @@ class P2ContractTests(unittest.TestCase):
     def test_stale_protocol_writer_generation_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(repository(root)))
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 register_test_build(store, root)
                 primary = store.conn.execute("SELECT * FROM working_copies WHERE project_id=?", (project["project_id"],)).fetchone()
                 conversation = create_conversation(store, project_id=project["project_id"], role="personal", display_name="writer", working_copy_id=primary["working_copy_id"])
@@ -231,9 +231,9 @@ class P2ContractTests(unittest.TestCase):
             core = pack_test_pi_core(root)
             stage_root = root / "stage"
             staged = stage(ROOT, stage_root, pi_core_tarball=core)
-            client = GreenfieldControllerClient(root / "state")
+            client = PiControllerClient(root / "state")
             project = client.register_project(str(repository(root)))
-            with GreenfieldStore(root / "state") as store:
+            with PiStore(root / "state") as store:
                 register_staged_build(store, stage_root)
                 primary = store.conn.execute("SELECT * FROM working_copies WHERE project_id=?", (project["project_id"],)).fetchone()
                 conversation = create_conversation(store, project_id=project["project_id"], role="personal", display_name="writer", working_copy_id=primary["working_copy_id"])

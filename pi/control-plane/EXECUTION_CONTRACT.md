@@ -1,4 +1,4 @@
-# Pi Greenfield Execution Contract
+# Pi Harness Execution Contract
 
 Owns: process topology, tool execution, run identity, Docker lifecycle,
 dependency execution, and sensitive approvals.
@@ -13,7 +13,7 @@ container.
 The host Pi process inherits one authenticated controller channel. It cannot
 replace the channel or choose its role. The controller derives project, role,
 authority, working copy, build, and writer generation, then creates one run
-identity exported as `PI_RUNTIME_MANIFEST`. No `PI_TASK_*` greenfield
+identity exported as `PI_RUNTIME_MANIFEST`. No `PI_TASK_*` compatibility
 compatibility behavior exists.
 
 `scripts/pi_control/docker_runtime.py` is the intended sole Docker lifecycle
@@ -35,13 +35,17 @@ stops and removes the exact container, proves it absent, then terminalizes the
 run and compare-and-swap clears the writer claim. Unknown cleanup becomes
 `needs_attention` and retains the database writer claim.
 
-The writer container receives one assigned working tree at `/workspace`. A
-file-form root `.git` marker is hidden by a controller-owned empty regular
-read-only file; primary checkouts with directory-form metadata, nested `.git`,
-submodules, unsafe parents, changed source inodes, and unexpected mounts fail
-closed. It receives no host credentials, channel authority, SSH agent, browser
-state, Docker socket, controller socket/database/CLI, unrelated path, writable
-Git metadata, push transport, published port, or external shell network.
+The writer container receives one assigned working tree at `/workspace`. Its
+root `.git` metadata, whether a file-form worktree marker or the directory-form
+metadata of a registered primary checkout, is hidden by a controller-owned
+empty regular read-only file mounted at `/workspace/.git`. The controller
+verifies the assigned working tree's exact Git identity (common-directory
+device/inode and marker target) before assignment. Nested `.git`, submodules,
+unsafe parents, changed source inodes, unexpected mounts, and directory-form
+metadata of any checkout other than the registered primary fail closed. It
+receives no host credentials, channel authority, SSH agent, browser state,
+Docker socket, controller socket/database/CLI, unrelated path, writable Git
+metadata, push transport, published port, or external shell network.
 
 Every read, write, edit, or shell call re-reads run, conversation, project,
 working copy, manifest, current writer epoch, exact container, mounts, and

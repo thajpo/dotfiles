@@ -8,15 +8,15 @@ import unittest
 
 from scripts.pi_control.activation_approval import ActivationApprovalError, consume_activation_approval, request_activation_approval
 from scripts.pi_control.errors import IdempotencyConflictError, NotFoundError
-from scripts.pi_control.greenfield_install import InstallError, activate
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_install import InstallError, activate
+from scripts.pi_control.pi_store import PiStore
 
 
 class ActivationApprovalTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(dir="/tmp", prefix="p12-approval-")
         self.root = Path(self.temporary.name)
-        self.store = GreenfieldStore(self.root / "state").open()
+        self.store = PiStore(self.root / "state").open()
 
     def tearDown(self) -> None:
         self.store.close()
@@ -102,7 +102,7 @@ class ActivationSmokeTests(unittest.TestCase):
             built = install(stage_root)
             # Remove the controller after verify passes but before smoke: smoke
             # runs the activated controller, so removing it makes smoke fail.
-            from scripts.pi_control.greenfield_install import _bounded_smoke
+            from scripts.pi_control.pi_install import _bounded_smoke
             data_root = root / "data"
             import shutil
             shutil.copytree(stage_root, data_root, symlinks=True)

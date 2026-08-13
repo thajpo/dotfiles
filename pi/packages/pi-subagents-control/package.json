@@ -2,7 +2,7 @@
   "name": "pi-subagents",
   "version": "0.35.1",
   "description": "Controller-channel broker for isolated Pi subagent runs",
-  "author": "Nico Bailon; greenfield controller adaptation",
+  "author": "Nico Bailon; Pi controller adaptation",
   "license": "MIT",
   "type": "module",
   "exports": {

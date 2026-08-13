@@ -67,8 +67,10 @@ class InstalledProcessTests(unittest.TestCase):
             ]
             env = {"PATH": os.defpath, "HOME": str(home), "PI_CODING_AGENT_DIR": str(agent), "LANG": "C", "LC_ALL": "C", "PI_SYSTEM_PROJECT_ID": "prj_" + "1" * 32}
             result = subprocess.run(command, cwd=root, env=env, text=True, capture_output=True, timeout=30)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("invalid controller project scope", result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            records = [json.loads(line) for line in result.stdout.splitlines() if line]
+            final = next(record["message"] for record in reversed(records) if record.get("type") == "message_end" and record.get("message", {}).get("role") == "assistant")
+            self.assertEqual(final["content"], [{"type": "text", "text": "NO_SCOPE_FINAL"}])
 
     def test_installed_scoped_read_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

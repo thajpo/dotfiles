@@ -64,7 +64,8 @@ The model must not choose or broaden repository trust.
 
 - Trusted repositories use the configured trusted-live workspace.
 - External or unknown repositories use the configured isolated workspace.
-- `pi-host` is an explicit unsandboxed host-maintenance mode.
+- Unsandboxed host maintenance is an explicit host-only decision outside the
+  Pi harness; `bin/pi-activate` is the reviewed control-plane activation path.
 
 Within an assigned workspace, agents may use ordinary engineering tools:
 

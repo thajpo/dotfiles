@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-self_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+self_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 feedback_script="$self_dir/pi-harness-feedback.py"
 if [[ ! -r "$feedback_script" ]]; then feedback_script="$self_dir/../share/pi/control/pi-harness-feedback.py"; fi
 if [[ ! -r "$feedback_script" ]]; then feedback_script="$self_dir/../scripts/pi-harness-feedback.py"; fi

@@ -1,4 +1,4 @@
-# Pi Greenfield Pre-Activation Runbook
+# Pi Harness Pre-Activation Runbook
 
 Owns: human pre-activation procedure.
 

@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Shared resolver for the greenfield-backed Pi surface commands.
+"""Shared resolver for the Pi surface commands.
 
-Resolves the active greenfield install, controller, and launchers; registers
-the active build with the controller state; and ensures projects and role
-conversations exist. Surface wrappers (pi-start, pi-restart, pisec,
-pi-personal, pidev) call this helper and launch the pi-system-* binaries.
+Resolves the one active generation (controller, launchers, resources, runtime
+all from the same activated build), registers the active build with the
+controller state, and ensures projects and role conversations exist. Surface
+wrappers (pi-start, pi-restart, pisec, pi-personal, pidev) call this helper
+and launch the pi-system-* binaries.
 
 The daily launch model is one-shot and controller-bound: each prompt is one
 run; conversation continuity comes from the durable session file, so a
 follow-up turn is a relaunch of the same conversation id with a new prompt.
+
+There is no implicit rebuild from repository source. Development staging is
+the explicit `ensure-stage` command; development launches pass `--stage-root`
+explicitly. The daily surface binds the activated generation end to end.
 """
 
 from __future__ import annotations
@@ -31,7 +36,6 @@ TOOL_IMAGE = os.environ.get(
     "PI_TOOL_IMAGE",
     "python:3.11-slim@sha256:a3ab0b966bc4e91546a033e22093cb840908979487a9fc0e6e38295747e49ac0",
 )
-CONTROL_HELPER = Path(os.environ.get("PI_SYSTEM_CONTROL_ROOT", str(DATA_ROOT))).expanduser()
 SURFACE_STAGE = Path(os.environ.get("PI_SYSTEM_SURFACE_STAGE", "~/.local/share/pi-system/surface-stage")).expanduser()
 SURFACE_MARKER = SURFACE_STAGE.with_name(SURFACE_STAGE.name + ".marker")
 # The surface stage is built from the dotfiles repository. When run from the
@@ -43,6 +47,17 @@ if not (repo_candidate / "bin" / "pi-install").is_file():
             repo_candidate = candidate
             break
 REPO_ROOT = Path(os.environ.get("PI_SURFACE_REPO", str(repo_candidate))).expanduser()
+
+
+def _stage_build_id(stage_root: str) -> str:
+    try:
+        manifest = json.loads((Path(stage_root) / "build-manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SurfaceError(f"development stage is unreadable: {stage_root}") from error
+    build_id = manifest.get("buildId")
+    if not isinstance(build_id, str) or not build_id:
+        raise SurfaceError(f"development stage has no build id: {stage_root}")
+    return build_id
 
 
 class SurfaceError(RuntimeError):
@@ -113,12 +128,12 @@ def _registered_build(stage_root: str) -> str | None:
     installed = Path(__file__).resolve().parent / "pi_control"
     if installed.is_dir():
         sys.path.insert(0, str(installed.parent))
-        from pi_control.greenfield_store import GreenfieldStore
+        from pi_control.pi_store import PiStore
     else:
         sys.path.insert(0, str(REPO_ROOT))
-        from scripts.pi_control.greenfield_store import GreenfieldStore
+        from scripts.pi_control.pi_store import PiStore
     try:
-        with GreenfieldStore(STATE_ROOT) as store:
+        with PiStore(STATE_ROOT) as store:
             row = store.conn.execute(
                 "SELECT build_id FROM installed_builds WHERE status='staged' AND build_id=?",
                 (build_id,),
@@ -129,11 +144,16 @@ def _registered_build(stage_root: str) -> str | None:
 
 
 def ensure_surface_stage() -> dict:
-    """Build and register one persistent surface stage from the current repo.
+    """Build and register one development surface stage from the current repo.
 
-    Staging is deterministic: the same source produces the same build. The
-    stage is refreshed only when the repo source moved, and registered with the
-    controller so launches bind a verified generation.
+    This is the explicit development staging command (`pi-surface
+    ensure-stage`); the daily surface never calls it. Development launches
+    then pass the resulting `--stage-root` explicitly. The stage is refreshed
+    only when the repo source moved, and registered with the controller so
+    development launches bind a verified generation.
+
+    The build is serialized with an exclusive lock: parallel invocations
+    would race on the stage rename.
     """
     marker_path = SURFACE_MARKER
     if SURFACE_STAGE.exists() and marker_path.is_file():
@@ -149,74 +169,93 @@ def ensure_surface_stage() -> dict:
             return {"stageRoot": str(SURFACE_STAGE), "buildId": registered.get("build_id"), "reused": True}
     parent = SURFACE_STAGE.parent
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if SURFACE_STAGE.exists():
-        import shutil
-        shutil.rmtree(SURFACE_STAGE, ignore_errors=True)
-    temporary = Path(tempfile.mkdtemp(prefix=".surface-stage-", dir=str(parent)))
-    temporary.rmdir()
+    lock_path = parent / (SURFACE_STAGE.name + ".lock")
     try:
-        result = subprocess.run(
-            [str(REPO_ROOT / "bin/pi-install"), "stage", "--source-root", str(REPO_ROOT), "--staging-root", str(temporary)],
-            check=False, capture_output=True, text=True, encoding="utf-8",
-        )
-        if result.returncode != 0:
-            raise SurfaceError(f"surface staging failed: {result.stderr.strip()[-1024:]}")
-        staged = json.loads(result.stdout)
-        manifest = json.loads((temporary / "build-manifest.json").read_text(encoding="utf-8"))
-        build_id = manifest.get("buildId")
-        if not isinstance(build_id, str):
-            raise SurfaceError("surface stage produced no build id")
-        temporary.rename(SURFACE_STAGE)
-        build_register(str(SURFACE_STAGE))
-        marker_path = SURFACE_MARKER
-        marker_path.write_text(_staged_repo_digest(), encoding="utf-8")
-        return {"stageRoot": str(SURFACE_STAGE), "buildId": build_id, "reused": False}
-    except BaseException:
-        import shutil
-        shutil.rmtree(temporary, ignore_errors=True)
-        raise
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as error:
+        raise SurfaceError(f"cannot open the surface stage lock: {error}") from error
+    try:
+        import fcntl
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # Another process may have built the stage while we waited for the
+        # lock; re-check before rebuilding.
+        if SURFACE_STAGE.exists() and marker_path.is_file():
+            try:
+                marker = marker_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                marker = ""
+            if marker == _staged_repo_digest():
+                build_id = _registered_build(str(SURFACE_STAGE))
+                if build_id is not None:
+                    return {"stageRoot": str(SURFACE_STAGE), "buildId": build_id, "reused": True}
+                registered = build_register(str(SURFACE_STAGE))
+                return {"stageRoot": str(SURFACE_STAGE), "buildId": registered.get("build_id"), "reused": True}
+        if SURFACE_STAGE.exists():
+            import shutil
+            shutil.rmtree(SURFACE_STAGE, ignore_errors=True)
+        temporary = Path(tempfile.mkdtemp(prefix=".surface-stage-", dir=str(parent)))
+        temporary.rmdir()
+        try:
+            result = subprocess.run(
+                [str(REPO_ROOT / "bin/pi-install"), "stage", "--source-root", str(REPO_ROOT), "--staging-root", str(temporary)],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            if result.returncode != 0:
+                raise SurfaceError(f"surface staging failed: {result.stderr.strip()[-1024:]}")
+            staged = json.loads(result.stdout)
+            manifest = json.loads((temporary / "build-manifest.json").read_text(encoding="utf-8"))
+            build_id = manifest.get("buildId")
+            if not isinstance(build_id, str):
+                raise SurfaceError("surface stage produced no build id")
+            temporary.rename(SURFACE_STAGE)
+            build_register(str(SURFACE_STAGE))
+            marker_path = SURFACE_MARKER
+            marker_path.write_text(_staged_repo_digest(), encoding="utf-8")
+            return {"stageRoot": str(SURFACE_STAGE), "buildId": build_id, "reused": False}
+        except BaseException:
+            import shutil
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
+    finally:
+        import fcntl
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(lock_fd)
 
 
 def _launcher_root() -> str:
     return str(ensure_surface_stage()["stageRoot"])
 
 
+def _activated_generation() -> tuple[str, Path]:
+    """Resolve the one active generation for the daily surface.
+
+    The daily surface binds a single activated build end to end: controller,
+    launchers, resources, and runtime all come from the same generation
+    recorded in activation.json. There is no implicit rebuild from repository
+    source; development staging is an explicit command.
+    """
+    activation = DATA_ROOT / "activation.json"
+    if not activation.is_file():
+        raise SurfaceError(f"the Pi install is not activated: {activation}")
+    try:
+        marker = json.loads(activation.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SurfaceError(f"activation marker is unreadable: {activation}") from error
+    candidate = marker.get("buildId")
+    if not isinstance(candidate, str) or not candidate:
+        raise SurfaceError("activation marker has no buildId")
+    launcher_dir = DATA_ROOT / "bin"
+    if not (launcher_dir / "pi-control").is_file():
+        raise SurfaceError(f"the activated generation is missing its controller: {launcher_dir / 'pi-control'}")
+    return candidate, launcher_dir
+
+
 def env() -> dict:
-    build_id: str | None = None
-    launcher_dir: Path
-    marker_path = SURFACE_MARKER
-    if SURFACE_STAGE.is_dir() and marker_path.is_file():
-        try:
-            marker = marker_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            marker = ""
-        if marker == _staged_repo_digest():
-            try:
-                manifest = json.loads((SURFACE_STAGE / "build-manifest.json").read_text(encoding="utf-8"))
-                build_id = manifest.get("buildId")
-                launcher_dir = SURFACE_STAGE / "bin"
-            except (OSError, json.JSONDecodeError):
-                pass
-    if build_id is None:
-        # Fall back to the activated install; launchers may be stale but the
-        # controller and session layout remain the authoritative daily state.
-        activation = DATA_ROOT / "activation.json"
-        if not activation.is_file():
-            raise SurfaceError(f"the greenfield install is not activated: {activation}")
-        try:
-            marker = json.loads(activation.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise SurfaceError(f"activation marker is unreadable: {activation}") from error
-        candidate = marker.get("buildId")
-        if not isinstance(candidate, str) or not candidate:
-            raise SurfaceError("activation marker has no buildId")
-        build_id = candidate
-        launcher_dir = DATA_ROOT / "bin"
+    build_id, launcher_dir = _activated_generation()
     controller = launcher_dir / "pi-control"
-    if not controller.is_file():
-        controller = CONTROL_HELPER / "bin" / "pi-control"
-    if not controller.is_file():
-        raise SurfaceError(f"controller is missing: {controller}")
     launchers = {
         "secretary": launcher_dir / "pi-system-secretary",
         "personal": launcher_dir / "pi-system-container-run",
@@ -319,6 +358,67 @@ def workstream_conversation(project_id: str, display_name: str = "personal") -> 
     return workstream_create(project_id, display_name, f"surface-workstream:{project_id}")
 
 
+def _preferences_path() -> Path:
+    return STATE_ROOT / "surface" / "preferences.json"
+
+
+def preference_get(surface: str) -> list[str]:
+    """Return the ordered active project set for one surface.
+
+    The set is a controller-owned presentation preference stored under the
+    state root; it is a projection and never conversation identity.
+    """
+    try:
+        value = json.loads(_preferences_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(value, dict) or not isinstance(value.get(surface), list):
+        return []
+    return [item for item in value[surface] if isinstance(item, str) and item]
+
+
+def preference_set(surface: str, project_ids: list[str]) -> dict:
+    """Replace the ordered active project set for one surface atomically."""
+    if surface not in {"pisec", "pi-personal"}:
+        raise SurfaceError(f"unknown surface: {surface}")
+    if any(not isinstance(item, str) or not item for item in project_ids):
+        raise SurfaceError("active project set must contain project ids")
+    path = _preferences_path()
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = parent / "preferences.lock"
+    try:
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as error:
+        raise SurfaceError(f"cannot open the surface preference lock: {error}") from error
+    try:
+        import fcntl
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            value = {}
+        if not isinstance(value, dict):
+            raise SurfaceError("surface preferences are malformed")
+        value[surface] = list(dict.fromkeys(project_ids))
+        fd, temporary = tempfile.mkstemp(prefix=".preferences-", dir=str(parent))
+        try:
+            os.write(fd, json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        import fcntl
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(lock_fd)
+    return {"surface": surface, "activeProjectIds": value[surface]}
+
+
 _LAUNCHER_NAMES = {
     "secretary": "pi-system-secretary",
     "personal": "pi-system-container-run",
@@ -329,11 +429,24 @@ _LAUNCHER_NAMES = {
 
 
 def launch_argv(role: str, conversation_id: str, prompt: str = "", **extra: str) -> list[str]:
-    stage = ensure_surface_stage()
+    """Build one launcher argv for a conversation.
+
+    The daily surface resolves the single activated generation. Development
+    launches pass an explicit `--stage-root` (via `stage_root`) built by the
+    explicit `ensure-stage` command; nothing here rebuilds from repository
+    source implicitly.
+    """
     launcher_name = _LAUNCHER_NAMES.get(role)
     if launcher_name is None:
         raise SurfaceError(f"unknown surface role: {role}")
-    launcher = Path(stage["stageRoot"]) / "bin" / launcher_name
+    stage_root = extra.get("stage_root")
+    if stage_root:
+        stage = {"stageRoot": stage_root, "buildId": _stage_build_id(stage_root)}
+        launcher_dir = Path(stage_root) / "bin"
+    else:
+        stage = env()
+        launcher_dir = Path(stage["dataRoot"]) / "bin"
+    launcher = launcher_dir / launcher_name
     argv = [
         str(launcher),
         "--state-root", str(STATE_ROOT),
@@ -375,16 +488,25 @@ def main(argv: list[str] | None = None) -> int:
     ws_conv = sub.add_parser("workstream-conversation")
     ws_conv.add_argument("project_id")
     ws_conv.add_argument("--name", default="personal")
+    preference = sub.add_parser("preference")
+    preference_sub = preference.add_subparsers(dest="preference_command", required=True)
+    preference_get_parser = preference_sub.add_parser("get")
+    preference_get_parser.add_argument("surface", choices=("pisec", "pi-personal"))
+    preference_set_parser = preference_sub.add_parser("set")
+    preference_set_parser.add_argument("surface", choices=("pisec", "pi-personal"))
+    preference_set_parser.add_argument("project_ids", nargs="*")
     launch = sub.add_parser("launch-argv")
     launch.add_argument("role", choices=("secretary", "personal", "workstream", "reviewer", "investigator"))
     launch.add_argument("conversation_id")
     launch.add_argument("prompt", nargs="?", default="")
     launch.add_argument("--interactive", action="store_true")
+    launch.add_argument("--stage-root", default=None, help="explicit development stage; default is the activated generation")
     launch_shell = sub.add_parser("launch-argv-shell")
     launch_shell.add_argument("role", choices=("secretary", "personal", "workstream", "reviewer", "investigator"))
     launch_shell.add_argument("conversation_id")
     launch_shell.add_argument("prompt", nargs="?", default="")
     launch_shell.add_argument("--interactive", action="store_true")
+    launch_shell.add_argument("--stage-root", default=None, help="explicit development stage; default is the activated generation")
     args = parser.parse_args(argv)
     try:
         if args.command == "env":
@@ -407,10 +529,15 @@ def main(argv: list[str] | None = None) -> int:
             value = workstream_create(args.project_id, args.title, args.idempotency_key)
         elif args.command == "workstream-conversation":
             value = workstream_conversation(args.project_id, args.name)
+        elif args.command == "preference":
+            if args.preference_command == "get":
+                value = {"surface": args.surface, "activeProjectIds": preference_get(args.surface)}
+            else:
+                value = preference_set(args.surface, args.project_ids)
         elif args.command == "launch-argv-shell":
-            value = " ".join(shlex.quote(part) for part in launch_argv(args.role, args.conversation_id, args.prompt, interactive=args.interactive))
+            value = " ".join(shlex.quote(part) for part in launch_argv(args.role, args.conversation_id, args.prompt, interactive=args.interactive, stage_root=args.stage_root))
         else:
-            value = launch_argv(args.role, args.conversation_id, args.prompt, interactive=args.interactive)
+            value = launch_argv(args.role, args.conversation_id, args.prompt, interactive=args.interactive, stage_root=args.stage_root)
         if args.command == "launch-argv-shell":
             print(value)
         else:

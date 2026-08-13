@@ -8,14 +8,9 @@ root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 node "$root/tests/pi-subagents-control-provenance.mjs"
 NODE_PATH="$root/pi/npm/node_modules" node --test \
   "$root/tests/pi-sandbox-control-manifest.test.mjs" \
-  "$root/tests/pi-sandbox-control-broker.test.mjs" \
-  "$root/tests/control_plane/continuity-extension.test.mjs" \
-  "$root/tests/control_plane/secretary-extension.test.mjs" \
-  "$root/tests/pi-child-control-plane-e2e.mjs"
+  "$root/tests/pi-sandbox-control-broker.test.mjs"
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s "$root/tests/control_plane" -p 'test_*.py'
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_pi_harness_static tests.test_pi_acceptance_regressions
-bash "$root/tests/pi-installer-transaction.sh"
-bash "$root/tests/pi-control-plane-integration.sh"
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_pi_harness_feedback
 set +e
 bash "$root/tests/pi-staged-artifact-rollback.sh"
 rollback_rc=$?

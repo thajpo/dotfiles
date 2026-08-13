@@ -1,4 +1,4 @@
-# Pi Greenfield Acceptance Contract
+# Pi Harness Acceptance Contract
 
 Owns: gate evaluation and release-verifier behavior. Program phase values and
 the current phase table are owned only by the root program document.

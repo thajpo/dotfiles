@@ -6,10 +6,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from typing import Any, Mapping
 
 from .conversations import conversation_session_binding
@@ -20,6 +22,24 @@ from .operations import update_operation_in_transaction
 
 class SubagentError(RuntimeError):
     pass
+
+
+# Read-only semantic roles map to the investigator runtime role (snapshot,
+# scoped reads, no mutation); reviewer stays the exact-revision reviewer.
+# Worker is the mutable role: a controller-created working copy and writer
+# container under the same one-writer rule as headful writers.
+READ_ONLY_ROLES = frozenset({"scout", "investigator", "researcher", "planner", "oracle", "delegate", "reviewer"})
+SEMANTIC_ROLES = frozenset({*READ_ONLY_ROLES, "worker"})
+ROLE_PROMPTS = {
+    "scout": "You are a fast read-only scout. Map the assigned surface, report concise findings, and stop when the brief is answered.",
+    "investigator": "You are a bounded read-only investigator. Use scoped reads on the assigned snapshot; produce a durable result and stop when the brief is answered.",
+    "researcher": "You are a read-only researcher. Investigate the assigned question against the scoped evidence and report findings with provenance.",
+    "planner": "You are a read-only planner. Produce a concrete implementation plan from the accepted context; do not implement.",
+    "oracle": "You are a read-only decision-consistency advisor. Check the proposed direction against the accepted context and report risks.",
+    "delegate": "You are a lightweight read-only delegate. Extract or verify the exact requested evidence and return it without deciding.",
+    "reviewer": "You are a read-only reviewer. Inspect the exact assigned revision and report findings; you have no mutation authority.",
+    "worker": "You are a mutable implementation worker in your own controller-owned working copy. Edit, test, and submit through controller operations only; never touch another working copy.",
+}
 
 
 def _git_env() -> dict[str, str]:
@@ -68,8 +88,8 @@ def _request_ids(store: Any, parent: Mapping[str, Any], semantic_role: str, task
 
 def create_child_assignment(store: Any, *, parent_run_id: str, semantic_role: str, task: str, idempotency_key: str) -> dict[str, Any]:
     validate_id(parent_run_id, prefix="run")
-    if semantic_role not in {"investigator", "reviewer", "scout"}:
-        raise SubagentError("subagent role must be investigator, reviewer, or scout")
+    if semantic_role not in SEMANTIC_ROLES:
+        raise SubagentError("subagent role is not supported")
     task = bounded_text(task, name="subagent task", limit=4096)
     parent = store.conn.execute("SELECT * FROM runs WHERE run_id=? AND desired_state='running' AND observed_state='running'", (parent_run_id,)).fetchone()
     if parent is None or parent["working_copy_id"] is None:
@@ -221,4 +241,298 @@ def run_controller_child(
     return {"childRequest": dict(settled), "terminal": terminal}
 
 
-__all__ = ["SubagentError", "bind_child_run", "create_child_assignment", "record_child_terminal", "run_controller_child"]
+def _generation_launcher(store: Any, build_id: str, launcher_name: str) -> Path:
+    """Resolve one launcher inside the registered generation for the build."""
+    if not isinstance(build_id, str) or not build_id:
+        raise SubagentError("child launch requires an exact build id")
+    row = store.conn.execute("SELECT * FROM installed_builds WHERE build_id=? AND status IN ('staged','active')", (build_id,)).fetchone()
+    if row is None or not isinstance(row["build_manifest_path"], str) or not row["build_manifest_path"]:
+        raise SubagentError("child launch build is not a registered generation")
+    root = Path(row["build_manifest_path"]).expanduser().absolute().parent
+    if root.is_symlink() or not root.is_dir():
+        raise SubagentError("child launch generation root is unsafe")
+    launcher = root / "bin" / launcher_name
+    if launcher.is_symlink() or not launcher.is_file():
+        raise SubagentError(f"generation launcher is unavailable: {launcher}")
+    return launcher
+
+
+def _child_log_path(store: Any, child_request_id: str) -> Path:
+    log_root = Path(store.state_root).expanduser().absolute() / "child-logs"
+    log_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    return log_root / f"{child_request_id}.log"
+
+
+def _spawn_detached(argv: list[str], log_path: Path) -> int:
+    """Spawn one controller-owned child launcher detached from the parent.
+
+    The child runs as its own process group so its supervision outlives the
+    parent Pi process; its durable run and terminal records are written by
+    the launcher itself against the controller state root.
+    """
+    try:
+        log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError:
+        try:
+            log_fd = os.open(str(log_path), os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError as error:
+            raise SubagentError(f"cannot open child log: {error}") from error
+    try:
+        process = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=log_fd, stderr=log_fd,
+            start_new_session=True, close_fds=True, shell=False,
+        )
+    except OSError as error:
+        os.close(log_fd)
+        raise SubagentError(f"cannot launch the detached child: {error}") from error
+    os.close(log_fd)
+    return int(process.pid)
+
+
+def start_child_assignment(
+    store: Any, *, parent_run_id: str, semantic_role: str, task: str, idempotency_key: str,
+    build_id: str, model: str, acceptance_test_profile: str | None = None,
+    test_provider: str | None = None, test_probe: str | None = None,
+) -> dict[str, Any]:
+    """Create a read-only child assignment and launch it detached (async)."""
+    if semantic_role not in READ_ONLY_ROLES:
+        raise SubagentError("async child role must be read-only")
+    assignment = create_child_assignment(store, parent_run_id=parent_run_id, semantic_role=semantic_role, task=task, idempotency_key=idempotency_key)
+    bound = store.conn.execute("SELECT * FROM child_requests WHERE child_request_id=?", (assignment["child_request_id"],)).fetchone()
+    if bound is not None and bound["child_run_id"] is not None:
+        return {"childRequest": dict(bound), "launched": False}
+    launcher = _generation_launcher(store, build_id, "pi-system-run")
+    prompt = f"{ROLE_PROMPTS[semantic_role]}\n\n{task}"
+    argv = [
+        str(launcher), "--state-root", str(store.state_root),
+        "--conversation-id", assignment["child_conversation_id"],
+        "--build-id", build_id, "--model", model, "--prompt", prompt,
+        "--expected-role", assignment["runtime_role"],
+        "--child-request-id", assignment["child_request_id"],
+    ]
+    if acceptance_test_profile is not None:
+        argv += ["--acceptance-test-profile", acceptance_test_profile]
+    if test_provider is not None:
+        argv += ["--test-provider", test_provider]
+    if test_probe is not None:
+        argv += ["--test-probe", test_probe]
+    log_path = _child_log_path(store, assignment["child_request_id"])
+    pid = _spawn_detached(argv, log_path)
+    with store.transaction():
+        store.conn.execute("UPDATE child_requests SET error_detail=?,updated_at=? WHERE child_request_id=? AND child_run_id IS NULL", (f"launcher-pid={pid}", utc_now(), assignment["child_request_id"]))
+    return {"childRequest": dict(store.conn.execute("SELECT * FROM child_requests WHERE child_request_id=?", (assignment["child_request_id"],)).fetchone()), "launched": True}
+
+
+def start_worker_assignment(
+    store: Any, *, parent_run_id: str, task: str, title: str, idempotency_key: str,
+    build_id: str, model: str, tool_image: str,
+    acceptance_test_profile: str | None = None,
+    test_provider: str | None = None, test_probe: str | None = None,
+) -> dict[str, Any]:
+    """Create one mutable headless worker in its own controller-owned working copy."""
+    validate_id(parent_run_id, prefix="run")
+    parent = store.conn.execute("SELECT * FROM runs WHERE run_id=? AND desired_state='running' AND observed_state='running'", (parent_run_id,)).fetchone()
+    if parent is None or parent["working_copy_id"] is None:
+        raise SubagentError("worker parent run is not active or scoped")
+    conversation = store.conn.execute("SELECT role FROM conversations WHERE conversation_id=?", (parent["conversation_id"],)).fetchone()
+    if conversation is None or conversation["role"] not in {"personal", "workstream", "integration"}:
+        raise SubagentError("only writer conversations can launch headless workers")
+    from .pi_workstreams import create_workstream
+    workstream = create_workstream(
+        store, project_id=parent["project_id"], title=bounded_text(title or "worker", name="worker title", limit=200),
+        brief={"kind": "headless-worker", "task": bounded_text(task, name="worker task", limit=4096)},
+        idempotency_key=f"worker:{idempotency_key}",
+    )
+    child_request_id = new_id("child")
+    now = utc_now()
+    with store.transaction():
+        store.conn.execute(
+            "INSERT INTO child_requests(child_request_id,operation_id,parent_run_id,project_id,parent_working_copy_id,semantic_role,runtime_role,task,snapshot_id,snapshot_ref,snapshot_commit_oid,snapshot_tree_oid,snapshot_path,child_working_copy_id,child_conversation_id,child_run_id,state,result_json,created_at,updated_at,completed_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (child_request_id, workstream["creation_operation_id"], parent_run_id, parent["project_id"], parent["working_copy_id"], "worker", "workstream", task, None, None, None, None, None, workstream["working_copy_id"], workstream["conversation_id"], None, "ready", None, now, now, None, None, None),
+        )
+    launcher = _generation_launcher(store, build_id, "pi-system-workstream-run")
+    prompt = f"{ROLE_PROMPTS['worker']}\n\n{task}"
+    argv = [
+        str(launcher), "--state-root", str(store.state_root),
+        "--conversation-id", workstream["conversation_id"],
+        "--build-id", build_id, "--model", model, "--prompt", prompt,
+        "--tool-image", tool_image,
+        "--child-request-id", child_request_id,
+    ]
+    if acceptance_test_profile is not None:
+        argv += ["--acceptance-test-profile", acceptance_test_profile]
+    if test_provider is not None:
+        argv += ["--test-provider", test_provider]
+    if test_probe is not None:
+        argv += ["--test-probe", test_probe]
+    log_path = _child_log_path(store, child_request_id)
+    pid = _spawn_detached(argv, log_path)
+    with store.transaction():
+        store.conn.execute("UPDATE child_requests SET error_detail=?,updated_at=? WHERE child_request_id=?", (f"launcher-pid={pid}", utc_now(), child_request_id))
+    return {"childRequest": dict(store.conn.execute("SELECT * FROM child_requests WHERE child_request_id=?", (child_request_id,)).fetchone()), "workstream": dict(workstream), "launched": True}
+
+
+def launch_reviewer_detached(store: Any, *, conversation_id: str, build_id: str, model: str, prompt: str, acceptance_test_profile: str | None = None, test_provider: str | None = None, test_probe: str | None = None) -> int:
+    """Launch one exact-revision reviewer conversation detached.
+
+    The reviewer conversation is created by the review assignment; this
+    launches its read-only host Pi process and returns immediately. The run
+    and conversation terminalize through the normal launcher lifecycle.
+    """
+    validate_id(conversation_id, prefix="conv")
+    launcher = _generation_launcher(store, build_id, "pi-system-run")
+    argv = [
+        str(launcher), "--state-root", str(store.state_root),
+        "--conversation-id", conversation_id,
+        "--build-id", build_id, "--model", model, "--prompt", prompt,
+        "--expected-role", "reviewer",
+    ]
+    if acceptance_test_profile is not None:
+        argv += ["--acceptance-test-profile", acceptance_test_profile]
+    if test_provider is not None:
+        argv += ["--test-provider", test_provider]
+    if test_probe is not None:
+        argv += ["--test-probe", test_probe]
+    log_path = _child_log_path(store, "reviewer-" + conversation_id.removeprefix("conv_"))
+    return _spawn_detached(argv, log_path)
+
+
+def child_status(store: Any, *, parent_run_id: str, child_request_id: str) -> dict[str, Any]:
+    validate_id(child_request_id, prefix="child")
+    row = store.conn.execute("SELECT * FROM child_requests WHERE child_request_id=? AND parent_run_id=?", (child_request_id, parent_run_id)).fetchone()
+    if row is None:
+        raise SubagentError("child request does not belong to the authenticated parent")
+    terminal = None
+    if row["child_run_id"] is not None:
+        terminal_row = store.conn.execute("SELECT * FROM child_terminal_records WHERE child_run_id=?", (row["child_run_id"],)).fetchone()
+        terminal = dict(terminal_row) if terminal_row is not None else None
+    return {"childRequest": dict(row), "terminal": terminal}
+
+
+def wait_child_terminal(store: Any, *, parent_run_id: str, child_request_id: str, timeout: float = 300.0) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0.0, min(float(timeout), 3600.0))
+    while True:
+        status = child_status(store, parent_run_id=parent_run_id, child_request_id=child_request_id)
+        if status["terminal"] is not None:
+            return {**status, "waited": True}
+        if time.monotonic() >= deadline:
+            return {**status, "waited": False}
+        time.sleep(1.0)
+
+
+def list_child_requests(store: Any, *, parent_run_id: str, limit: int = 32) -> list[dict[str, Any]]:
+    validate_id(parent_run_id, prefix="run")
+    bound = max(1, min(int(limit), 256))
+    rows = store.conn.execute(
+        "SELECT child_request_id,semantic_role,runtime_role,state,child_conversation_id,child_run_id,created_at,updated_at,completed_at FROM child_requests WHERE parent_run_id=? ORDER BY created_at DESC LIMIT ?",
+        (parent_run_id, bound),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _launcher_pid(row: Mapping[str, Any]) -> int | None:
+    detail = row["error_detail"]
+    if not isinstance(detail, str) or not detail.startswith("launcher-pid="):
+        return None
+    try:
+        pid = int(detail.removeprefix("launcher-pid="))
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def _wait_for_bound_run(store: Any, *, child_request_id: str, parent_run_id: str, timeout: float = 15.0) -> dict[str, Any]:
+    """Wait (bounded) for the detached child launcher to bind its controller run."""
+    deadline = time.monotonic() + max(0.0, min(float(timeout), 60.0))
+    while True:
+        row = store.conn.execute("SELECT * FROM child_requests WHERE child_request_id=? AND parent_run_id=?", (child_request_id, parent_run_id)).fetchone()
+        if row is None:
+            raise SubagentError("child request does not belong to the authenticated parent")
+        if row["child_run_id"] is not None:
+            return dict(row)
+        if row["state"] not in {"ready", "running"}:
+            raise SubagentError("child is not running and cannot be interrupted")
+        if time.monotonic() >= deadline:
+            raise SubagentError("child did not bind a controller run in time")
+        time.sleep(0.1)
+
+
+def interrupt_child(store: Any, *, parent_run_id: str, child_request_id: str) -> dict[str, Any]:
+    """Soft-interrupt one detached child: SIGINT to its launcher.
+
+    The child's session and work are preserved; the run terminalizes as
+    interrupted and may be resumed. Waits (bounded) for the child to bind its
+    controller run before signaling, so an interrupt cannot race child startup.
+    """
+    row = _wait_for_bound_run(store, child_request_id=child_request_id, parent_run_id=parent_run_id)
+    if row["state"] not in {"running", "ready"}:
+        raise SubagentError("child is not running and cannot be interrupted")
+    pid = _launcher_pid(row)
+    if pid is None:
+        raise SubagentError("child launcher identity is unavailable")
+    try:
+        os.kill(pid, signal.SIGINT)
+    except ProcessLookupError:
+        pass
+    return {"childRequestId": child_request_id, "action": "interrupt", "signaled": True}
+
+
+def stop_child(store: Any, *, parent_run_id: str, child_request_id: str) -> dict[str, Any]:
+    """Stop one detached child terminally: SIGTERM to its launcher."""
+    row = _wait_for_bound_run(store, child_request_id=child_request_id, parent_run_id=parent_run_id)
+    if row["state"] not in {"running", "ready"}:
+        raise SubagentError("child is not running and cannot be stopped")
+    pid = _launcher_pid(row)
+    if pid is None:
+        raise SubagentError("child launcher identity is unavailable")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    return {"childRequestId": child_request_id, "action": "stop", "signaled": True}
+
+
+def resume_child(
+    store: Any, *, parent_run_id: str, child_request_id: str,
+    build_id: str, model: str, acceptance_test_profile: str | None = None,
+    test_provider: str | None = None, test_probe: str | None = None,
+) -> dict[str, Any]:
+    """Resume one interrupted detached child with the same conversation and task."""
+    row = store.conn.execute("SELECT * FROM child_requests WHERE child_request_id=? AND parent_run_id=?", (child_request_id, parent_run_id)).fetchone()
+    if row is None:
+        raise SubagentError("child request does not belong to the authenticated parent")
+    terminal = store.conn.execute("SELECT terminal_class FROM child_terminal_records WHERE child_run_id=?", (row["child_run_id"],)).fetchone() if row["child_run_id"] else None
+    if terminal is None or terminal["terminal_class"] != "interrupted":
+        raise SubagentError("only an interrupted child can be resumed")
+    semantic_role = row["semantic_role"]
+    if semantic_role not in READ_ONLY_ROLES:
+        raise SubagentError("only read-only children can be resumed")
+    now = utc_now()
+    with store.transaction():
+        store.conn.execute(
+            "UPDATE child_requests SET child_run_id=NULL,state='ready',result_json=NULL,completed_at=NULL,error_detail=NULL,updated_at=? WHERE child_request_id=?",
+            (now, child_request_id),
+        )
+    launcher = _generation_launcher(store, build_id, "pi-system-run")
+    prompt = f"{ROLE_PROMPTS[semantic_role]}\n\n{row['task']}"
+    argv = [
+        str(launcher), "--state-root", str(store.state_root),
+        "--conversation-id", row["child_conversation_id"],
+        "--build-id", build_id, "--model", model, "--prompt", prompt,
+        "--expected-role", row["runtime_role"],
+        "--child-request-id", child_request_id,
+    ]
+    if acceptance_test_profile is not None:
+        argv += ["--acceptance-test-profile", acceptance_test_profile]
+    if test_provider is not None:
+        argv += ["--test-provider", test_provider]
+    if test_probe is not None:
+        argv += ["--test-probe", test_probe]
+    log_path = _child_log_path(store, child_request_id)
+    pid = _spawn_detached(argv, log_path)
+    with store.transaction():
+        store.conn.execute("UPDATE child_requests SET error_detail=?,updated_at=? WHERE child_request_id=?", (f"launcher-pid={pid}", utc_now(), child_request_id))
+    return {"childRequestId": child_request_id, "action": "resume", "launched": True, "launcherPid": pid}
+
+
+__all__ = ["SubagentError", "SEMANTIC_ROLES", "bind_child_run", "child_status", "create_child_assignment", "interrupt_child", "list_child_requests", "record_child_terminal", "resume_child", "run_controller_child", "start_child_assignment", "start_worker_assignment", "stop_child", "wait_child_terminal"]

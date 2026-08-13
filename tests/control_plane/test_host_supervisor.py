@@ -14,8 +14,8 @@ import unittest
 from unittest import mock
 
 from scripts.pi_control.controller_channel import ChannelReader, ControllerChannelError, MAX_FRAME_BYTES, receive_frame, send_frame, validate_handshake
-from scripts.pi_control.greenfield_client import GreenfieldControllerClient
-from scripts.pi_control.greenfield_store import GreenfieldStore
+from scripts.pi_control.pi_client import PiControllerClient
+from scripts.pi_control.pi_store import PiStore
 from scripts.pi_control.host_supervisor import HostSupervisorError, _rpc, ensure_session, launch_host_pi
 from scripts.pi_control.launch import attest_run, prepare_run, stop_run
 from scripts.pi_control.models import canonical_json, utc_now
@@ -207,16 +207,16 @@ class SessionTests(unittest.TestCase):
 
 
 class SupervisorProcessTests(unittest.TestCase):
-    def _fixture(self, root: Path, *, child_body: str) -> tuple[GreenfieldStore, dict, str]:
+    def _fixture(self, root: Path, *, child_body: str) -> tuple[PiStore, dict, str]:
         repository = root / "repo"
         repository.mkdir()
         subprocess.run(["git", "init", "-q", str(repository)], check=True)
         (repository / "README").write_text("fixture\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(repository), "add", "README"], check=True)
         subprocess.run(["git", "-C", str(repository), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"], check=True)
-        client = GreenfieldControllerClient(root / "state")
+        client = PiControllerClient(root / "state")
         project = client.register_project(str(repository))
-        store = GreenfieldStore(root / "state").open()
+        store = PiStore(root / "state").open()
         conversation = store.conn.execute("SELECT * FROM conversations WHERE project_id=? AND role='secretary'", (project["project_id"],)).fetchone()
         build_id = "build_" + "b" * 32
         manifest = root / "build-manifest.json"
