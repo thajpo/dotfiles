@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from .events import append_event_in_transaction
+from .docker_runtime import container_name, inspect_container
 from .git_adapter import GitObservationError, observe_repository
 from .models import utc_now, validate_id
 from .process_adapter import observe_process
+from .run_manifest import read_manifest
 
 
 class ReconcileError(RuntimeError):
@@ -43,6 +45,29 @@ def _run_observation(row: Any) -> dict[str, Any]:
     return {"state": "unknown", "reason": "no-running-owner", "owner": owner, "child": child}
 
 
+def _writer_container_observation(row: Any) -> dict[str, Any]:
+    """Observe the exact durable writer container without mutating it."""
+    container_id = row["container_id"]
+    if not container_id:
+        return {"state": "missing", "reason": "durable-container-id-missing"}
+    try:
+        manifest = read_manifest(row["manifest_path"]).manifest
+        expected_labels = manifest["toolRuntime"]["labels"]
+        observed = inspect_container(container_id)
+    except Exception as error:
+        return {"state": "unknown", "reason": f"container-observation-failed:{type(error).__name__}"}
+    expected_name = container_name(row["run_id"])
+    if observed.get("id") != container_id:
+        return {"state": "mismatch", "reason": "container-id-differs-from-durable-intent", "observed": observed}
+    if observed.get("name") != expected_name:
+        return {"state": "mismatch", "reason": "container-name-differs-from-durable-intent", "observed": observed}
+    if observed.get("labels") != expected_labels:
+        return {"state": "mismatch", "reason": "container-labels-differ-from-durable-intent", "observed": observed}
+    if observed.get("running") is not True:
+        return {"state": "stopped", "reason": "writer-container-is-not-running", "observed": observed}
+    return {"state": "running", "reason": "container-identity-matches", "observed": observed}
+
+
 def reconcile_run(store: Any, *, run_id: str) -> dict[str, Any]:
     validate_id(run_id, prefix="run")
     row = store.conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
@@ -51,6 +76,16 @@ def reconcile_run(store: Any, *, run_id: str) -> dict[str, Any]:
     result = _run_observation(row)
     if row["desired_state"] == "stopped":
         return {"run": dict(row), "observation": result, "decision": "already-stopped"}
+    if result["state"] == "running" and row["authority"] == "writer-container":
+        container = _writer_container_observation(row)
+        result = {**result, "container": container}
+        if container["state"] != "running":
+            now = utc_now()
+            reason = str(container["reason"])[:1024]
+            with store.transaction():
+                store.conn.execute("UPDATE runs SET observed_state='needs_attention',error_code='CP_CONTAINER_UNCERTAIN',error_detail=?,updated_at=? WHERE run_id=? AND observed_state NOT IN ('stopped','failed')", (reason, now, run_id))
+                append_event_in_transaction(store.conn, event_kind="run.needs_attention", resource_type="run", resource_id=run_id, resource_version=int(row["resource_version"]), payload={"runId": run_id, "reason": reason, "container": container})
+            return {"run": dict(store.conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()), "observation": result, "decision": "needs-attention"}
     if result["state"] == "running":
         return {"run": dict(row), "observation": result, "decision": "continue"}
     now = utc_now()

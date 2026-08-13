@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from scripts.pi_control.conversations import create_conversation
 from scripts.pi_control.launch import prepare_run
@@ -128,7 +129,47 @@ class RunRecoveryTests(unittest.TestCase):
                 store.conn.execute("UPDATE runs SET owner_pid=?,owner_start_identity=?,child_pid=?,child_start_identity=?,observed_state='running' WHERE run_id=?", (os.getpid(), process_start_identity(os.getpid()), _DEAD_PID + 2, _DEAD_IDENTITY, run_id))
                 attention = client.reconcile_run(run_id=run_id)
                 self.assertEqual(attention["decision"], "needs-attention")
-                self.assertIn("child", attention["observation"].get("reason", ""))
+            self.assertIn("child", attention["observation"].get("reason", ""))
+
+    def test_live_writer_requires_exact_live_container(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            client = PiControllerClient(root / "state")
+            project = self._registered(root, "container-live")
+            with PiStore(root / "state") as store:
+                _register_build(store, root)
+                conversation = self._writer_conversation(store, project, "container-live")
+                prepared = self._prepare_writer(store, project, conversation, "container-live")
+                run_id = prepared.run["run_id"]
+                container_id = "a" * 64
+                store.conn.execute("UPDATE runs SET container_id=?,observed_state='running' WHERE run_id=?", (container_id, run_id))
+                labels = dict(prepared.manifest["toolRuntime"]["labels"])
+                prepared.close()
+            observed = {"state": "running", "reason": "owner-identity-matches", "owner": {}, "child": {}}
+            container = {"id": container_id, "name": "pi-tool-" + run_id.removeprefix("run_"), "labels": labels, "running": True}
+            with mock.patch("scripts.pi_control.pi_reconcile._run_observation", return_value=observed), mock.patch("scripts.pi_control.pi_reconcile.inspect_container", return_value=container):
+                result = client.reconcile_run(run_id=run_id)
+            self.assertEqual(result["decision"], "continue")
+            self.assertEqual(result["observation"]["container"]["state"], "running")
+
+    def test_live_writer_with_missing_container_needs_attention_without_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            client = PiControllerClient(root / "state")
+            project = self._registered(root, "container-missing")
+            with PiStore(root / "state") as store:
+                _register_build(store, root)
+                conversation = self._writer_conversation(store, project, "container-missing")
+                prepared = self._prepare_writer(store, project, conversation, "container-missing")
+                run_id = prepared.run["run_id"]
+                store.conn.execute("UPDATE runs SET container_id=?,observed_state='running' WHERE run_id=?", ("b" * 64, run_id))
+                prepared.close()
+            observed = {"state": "running", "reason": "owner-identity-matches", "owner": {}, "child": {}}
+            with mock.patch("scripts.pi_control.pi_reconcile._run_observation", return_value=observed), mock.patch("scripts.pi_control.pi_reconcile.inspect_container", side_effect=RuntimeError("missing")) as inspect:
+                result = client.reconcile_run(run_id=run_id)
+            self.assertEqual(result["decision"], "needs-attention")
+            self.assertEqual(result["run"]["error_code"], "CP_CONTAINER_UNCERTAIN")
+            inspect.assert_called_once()
 
     def test_recovery_is_idempotent_after_lost(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
