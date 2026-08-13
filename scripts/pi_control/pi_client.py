@@ -323,6 +323,8 @@ class PiControllerClient:
             "conversation.focus": self.focus_conversation,
             "conversation.archive": self.archive_conversation,
             "conversation.recover": self.recover_conversation,
+            "presentation.reconcile": self.reconcile_presentation,
+            "presentation.focus": self.focus_presentation,
             "message.post": self.post_message,
             "message.list": self.list_messages,
             "message.deliver": self.deliver_message,

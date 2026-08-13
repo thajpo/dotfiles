@@ -188,18 +188,18 @@ def _run_journey(root: Path, tmux_tmp: Path) -> int:
     # ---- grid launch: windows and panes ------------------------------
     command([str(pisec), "launch"], env=surface_env)
     pisec_windows = tmux(["list-windows", "-t", "=pisec", "-F", "#{window_name}"], surface_env).stdout.split()
-    # Desktop grouping: the two active projects share one window with two
-    # side-by-side panes.
-    if pisec_windows != ["alpha"]:
+    # The reconciler names grid windows projects-N: the two active projects
+    # share one window with two side-by-side panes.
+    if pisec_windows != ["projects-1"]:
         raise AssertionError(f"pisec windows are wrong: {pisec_windows}")
-    pisec_panes = len(tmux(["list-panes", "-t", "=pisec:alpha", "-F", "#{pane_id}"], surface_env).stdout.split())
+    pisec_panes = len(tmux(["list-panes", "-t", "=pisec:projects-1", "-F", "#{pane_id}"], surface_env).stdout.split())
     if pisec_panes != 2:
         raise AssertionError(f"pisec desktop grouping is wrong: {pisec_panes} panes")
     command([str(pisec), "launch"], env=surface_env)
     after_relaunch = tmux(["list-windows", "-t", "=pisec", "-F", "#{window_name}"], surface_env).stdout.split()
     if after_relaunch != pisec_windows:
         raise AssertionError(f"pisec relaunch duplicated or dropped windows: {after_relaunch}")
-    after_panes = len(tmux(["list-panes", "-t", "=pisec:alpha", "-F", "#{pane_id}"], surface_env).stdout.split())
+    after_panes = len(tmux(["list-panes", "-t", "=pisec:projects-1", "-F", "#{pane_id}"], surface_env).stdout.split())
     if after_panes != 2:
         raise AssertionError(f"pisec relaunch duplicated or dropped panes: {after_panes}")
 
@@ -219,7 +219,8 @@ def _run_journey(root: Path, tmux_tmp: Path) -> int:
     # ---- personal grid windows ---------------------------------------
     command([str(personal), "--ensure"], env=surface_env)
     personal_windows = tmux(["list-windows", "-t", "=pi-personal", "-F", "#{window_name}"], surface_env).stdout.split()
-    if "alpha" not in personal_windows or "beta" in personal_windows:
+    # One active project (alpha) means exactly one reconciler window.
+    if personal_windows != ["projects-1"]:
         raise AssertionError(f"pi-personal windows do not follow its active set: {personal_windows}")
 
     # ---- cleanup -------------------------------------------------------
