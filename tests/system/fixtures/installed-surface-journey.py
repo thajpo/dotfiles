@@ -85,6 +85,25 @@ def tmux(argv: list[str], env: dict[str, str], *, check: bool = True) -> subproc
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="pi-surface-"))
     print("fixture:", root)
+    tmux_tmp = root / "tmux"
+    tmux_tmp.mkdir(mode=0o700)
+    try:
+        return _run_journey(root, tmux_tmp)
+    finally:
+        # Fixture-scoped cleanup that must run even when the journey fails:
+        # kill only the fixture tmux server (never the caller's), then prove
+        # no managed containers leaked. Evidence and logs stay in the
+        # fixture root for inspection.
+        isolated = {"PATH": os.defpath, "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "TMUX_TMPDIR": str(tmux_tmp)}
+        subprocess.run(["tmux", "kill-server"], env=isolated, capture_output=True, timeout=30)
+        managed = subprocess.run(["docker", "ps", "-aq", "--filter", f"label={MANAGED_LABEL}=true"], capture_output=True, text=True, timeout=30).stdout.split()
+        if managed:
+            print(f"SURFACE JOURNEY: managed containers remain after cleanup: {managed}", file=sys.stderr)
+        print("fixture cleaned; evidence retained at", root, file=sys.stderr)
+
+
+def _run_journey(root: Path, tmux_tmp: Path) -> int:
+    print("fixture:", root)
     staged_root = Path(os.environ.get("PI_SYSTEM_STAGED_ROOT", "")).resolve() if os.environ.get("PI_SYSTEM_STAGED_ROOT") else root / "stage"
     if not os.environ.get("PI_SYSTEM_STAGED_ROOT"):
         install(staged_root)
@@ -111,8 +130,6 @@ def main() -> int:
     json_command([str(data_root / "bin/pi-control"), "--state-root", str(state), "schema", "status"])
     json_command([str(data_root / "bin/pi-control"), "--state-root", str(state), "build", "register", "--staged-root", str(data_root)])
 
-    tmux_tmp = root / "tmux"
-    tmux_tmp.mkdir(mode=0o700)
     # Isolate the fixture from the host tmux configuration: a fixture HOME
     # with an empty tmux.conf means the managed server has no auto-ensure,
     # resurrect, or continuum behavior of its own.
