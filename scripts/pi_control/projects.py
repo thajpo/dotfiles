@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -75,10 +76,18 @@ def project_status(store: Any, project_id: str) -> dict[str, Any]:
 
 def work_index(store: Any, project_id: str) -> dict[str, list[dict[str, Any]]]:
     _project(store, project_id)
-    rows: dict[str, list[dict[str, Any]]] = {key: [] for key in ("Working now", "Investigations", "Changes ready for review", "Changes ready to merge", "Needs attention", "Integrated recently", "Unmanaged Git work")}
+    rows: dict[str, list[dict[str, Any]]] = {key: [] for key in ("Working now", "Headless workers", "Investigations", "Changes ready for review", "Changes ready to merge", "Needs attention", "Integrated recently", "Unmanaged Git work")}
     for row in store.conn.execute("SELECT * FROM conversations WHERE project_id=? AND desired_state='active' ORDER BY updated_at DESC", (project_id,)):
         item = {"id": row["conversation_id"], "title": row["display_name"], "agentType": row["role"], "state": row["observed_state"], "lastUsefulUpdate": row["updated_at"], "focus": row["conversation_id"], "userActionRequired": False}
         if row["role"] in {"personal", "workstream", "integration"}:
+            if row["role"] == "workstream":
+                workstream = store.conn.execute("SELECT brief_json FROM workstreams WHERE conversation_id=?", (row["conversation_id"],)).fetchone()
+                headless = bool(workstream) and json.loads(workstream["brief_json"] or "{}").get("kind") == "headless-worker"
+                if headless:
+                    item = {**item, "headful": False}
+                    rows["Headless workers"].append(item)
+                    continue
+                item = {**item, "headful": True}
             rows["Working now"].append(item)
         elif row["role"] == "secretary":
             rows["Working now"].append(item)

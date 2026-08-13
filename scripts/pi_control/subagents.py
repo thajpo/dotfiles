@@ -342,6 +342,7 @@ def start_worker_assignment(
         store, project_id=parent["project_id"], title=bounded_text(title or "worker", name="worker title", limit=200),
         brief={"kind": "headless-worker", "task": bounded_text(task, name="worker task", limit=4096)},
         idempotency_key=f"worker:{idempotency_key}",
+        headful=False,
     )
     child_request_id = new_id("child")
     now = utc_now()

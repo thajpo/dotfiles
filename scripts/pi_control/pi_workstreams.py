@@ -71,13 +71,13 @@ def _work_root(store: Any, project_id: str) -> Path:
 
 
 def _intent(store: Any, *, project: Mapping[str, Any], primary: Mapping[str, Any], title: str,
-            brief: Mapping[str, Any], display_name: str | None, idempotency_key: str) -> tuple[Any, dict[str, Any]]:
+            brief: Mapping[str, Any], display_name: str | None, idempotency_key: str, headful: bool) -> tuple[Any, dict[str, Any]]:
     existing = store.conn.execute("SELECT * FROM operations WHERE idempotency_key=?", (idempotency_key,)).fetchone()
     title = bounded_text(title, name="title", limit=512)
     display = bounded_text(display_name or title, name="display_name", limit=512)
     if existing is not None:
         request = json.loads(existing["request_json"])
-        expected = {"projectId": project["project_id"], "title": title, "brief": dict(brief), "displayName": display}
+        expected = {"projectId": project["project_id"], "title": title, "brief": dict(brief), "displayName": display, "headful": headful}
         comparable = {key: request[key] for key in expected} if all(key in request for key in expected) else {}
         if existing["kind"] != "workstream.create" or comparable != expected:
             raise WorkstreamCreationError("workstream idempotency key is bound to another request")
@@ -88,7 +88,7 @@ def _intent(store: Any, *, project: Mapping[str, Any], primary: Mapping[str, Any
     destination = _work_root(store, project["project_id"]) / workstream_id
     request = {
         "projectId": project["project_id"], "title": title, "brief": dict(brief), "displayName": display,
-        "workstreamId": workstream_id, "workingCopyId": working_copy_id, "conversationId": conversation_id,
+        "headful": headful, "workstreamId": workstream_id, "workingCopyId": working_copy_id, "conversationId": conversation_id,
         "primaryWorkingCopyId": primary["working_copy_id"], "sourcePath": str(Path(primary["path"]).resolve(strict=True)),
         "gitCommonDir": str(Path(project["git_common_dir"]).resolve(strict=True)),
         "targetRef": primary["branch_ref"], "baseOid": primary["expected_head_oid"], "baseTreeOid": primary["expected_tree_oid"],
@@ -136,15 +136,20 @@ def _mark_attention(store: Any, operation: Mapping[str, Any], request: Mapping[s
 def create_workstream(
     store: Any, *, project_id: str, title: str, brief: Mapping[str, Any] | None = None,
     display_name: str | None = None, idempotency_key: str, failpoint: Failpoint | None = None,
+    headful: bool | None = None,
 ) -> dict[str, Any]:
     validate_id(project_id, prefix="prj")
+    if headful is None:
+        headful = dict(brief or {}).get("kind") != "headless-worker"
+    if not isinstance(headful, bool):
+        raise WorkstreamCreationError("headful intent must be boolean")
     project = store.conn.execute("SELECT * FROM projects WHERE project_id=? AND desired_state='active'", (project_id,)).fetchone()
     primary = store.conn.execute("SELECT * FROM working_copies WHERE project_id=? AND kind='primary' AND desired_state='present'", (project_id,)).fetchone()
     if project is None or primary is None:
         raise WorkstreamCreationError("project primary working copy is missing")
     if not primary["expected_head_oid"] or not primary["expected_tree_oid"] or not primary["branch_ref"]:
         raise WorkstreamCreationError("workstream requires a committed branch-bound primary HEAD")
-    operation, request = _intent(store, project=project, primary=primary, title=title, brief=dict(brief or {}), display_name=display_name, idempotency_key=idempotency_key)
+    operation, request = _intent(store, project=project, primary=primary, title=title, brief=dict(brief or {}), display_name=display_name, idempotency_key=idempotency_key, headful=headful)
     context = {"operationId": operation["operation_id"], "workstreamId": request["workstreamId"], "worktreePath": request["worktreePath"]}
     _hit(failpoint, "operation.intent.after", context)
     if operation["state"] == "succeeded":
@@ -209,10 +214,11 @@ def create_workstream(
                 "INSERT INTO workstreams(workstream_id,project_id,working_copy_id,conversation_id,title,brief_json,target_ref,starting_oid,primary_working_copy_id,branch_ref,worktree_path,package_environment_root,creation_operation_id,desired_state,observed_state,controller_owned,resource_version,created_at,updated_at,last_reconciled_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (request["workstreamId"], project_id, request["workingCopyId"], conversation_id, request["title"], canonical_json(request["brief"]), request["targetRef"], request["baseOid"], request["primaryWorkingCopyId"], request["branchRef"], str(destination), str(package_root), operation["operation_id"], "active", "creating", 1, 1, now, now, now, None, None),
             )
-            store.conn.execute(
-                "INSERT INTO presentation_assignments(presentation_assignment_id,conversation_id,backend,desired_state,observed_state,locator_json,resource_version,observed_at,updated_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (new_id("pa"), conversation_id, "tmux", "present", "unknown", canonical_json({"conversationId": conversation_id, "workstreamId": request["workstreamId"]}), 1, None, now, None, None),
-            )
+            if request["headful"]:
+                store.conn.execute(
+                    "INSERT INTO presentation_assignments(presentation_assignment_id,conversation_id,backend,desired_state,observed_state,locator_json,resource_version,observed_at,updated_at,error_code,error_detail) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (new_id("pa"), conversation_id, "tmux", "present", "unknown", canonical_json({"conversationId": conversation_id, "workstreamId": request["workstreamId"]}), 1, None, now, None, None),
+                )
             store.conn.execute("UPDATE workstreams SET observed_state='ready',resource_version=2,last_reconciled_at=?,updated_at=? WHERE workstream_id=?", (now, now, request["workstreamId"]))
             append_event_in_transaction(store.conn, event_kind="workstream.created", resource_type="workstream", resource_id=request["workstreamId"], resource_version=2, operation_id=operation["operation_id"], payload={"projectId": project_id, "workingCopyId": request["workingCopyId"], "conversationId": conversation_id, "targetRef": request["targetRef"], "branchRef": request["branchRef"], "startingOid": request["baseOid"], "worktreePath": str(destination)})
         update_operation_in_transaction(store.conn, operation["operation_id"], state="succeeded", step="workstream-ready", result={"workstreamId": request["workstreamId"], "workingCopyId": request["workingCopyId"], "conversationId": conversation_id})

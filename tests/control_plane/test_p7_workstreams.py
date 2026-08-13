@@ -13,6 +13,7 @@ from scripts.pi_control.conversations import create_conversation
 from scripts.pi_control.pi_client import PiControllerClient
 from scripts.pi_control.pi_store import PiStore
 from scripts.pi_control.pi_workstreams import create_workstream
+from scripts.pi_control.projects import work_index
 from scripts.pi_control.investigators import bind_investigation_run
 from scripts.pi_control.launch import attest_run, prepare_run, stop_run
 from scripts.pi_control.models import canonical_json, new_id
@@ -91,6 +92,28 @@ class P7WorkstreamTests(unittest.TestCase):
                 self.assertNotEqual(first["branch_ref"], first["target_ref"])
                 self.assertTrue(all(Path(row["package_environment_root"]).is_dir() for row in rows))
                 self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM presentation_assignments WHERE observed_state='unknown'").fetchone()[0], 2)
+
+    def test_headless_workstream_has_no_presentation_and_work_index_bucket(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7-headless-") as raw:
+            root = Path(raw)
+            repository = _repo(root, "repository")
+            client = PiControllerClient(root / "state")
+            project = client.register_project(str(repository))
+            with PiStore(root / "state") as store:
+                headful = create_workstream(store, project_id=project["project_id"], title="headful", idempotency_key="p7-headful")
+                headless = create_workstream(store, project_id=project["project_id"], title="headless", brief={"kind": "headless-worker", "task": "work"}, idempotency_key="p7-headless", headful=False)
+                headful_assignment = store.conn.execute("SELECT desired_state FROM presentation_assignments WHERE conversation_id=?", (headful["conversation_id"],)).fetchone()
+                headless_assignment = store.conn.execute("SELECT 1 FROM presentation_assignments WHERE conversation_id=?", (headless["conversation_id"],)).fetchone()
+                self.assertEqual(headful_assignment["desired_state"], "present")
+                self.assertIsNone(headless_assignment)
+                index = work_index(store, project["project_id"])
+                working_ids = [item["id"] for item in index["Working now"]]
+                headless_ids = [item["id"] for item in index["Headless workers"]]
+                self.assertIn(headful["conversation_id"], working_ids)
+                self.assertNotIn(headless["conversation_id"], working_ids)
+                self.assertEqual(headless_ids, [headless["conversation_id"]])
+                self.assertTrue(all(item["headful"] for item in index["Working now"] if item["agentType"] == "workstream"))
+                self.assertFalse(index["Headless workers"][0]["headful"])
 
     def test_child_snapshots_and_terminal_records_are_independent_and_immutable(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7-child-") as raw:
