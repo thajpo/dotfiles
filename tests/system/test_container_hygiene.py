@@ -44,12 +44,17 @@ class ContainerHygieneTests(unittest.TestCase):
     def test_foreign_managed_container_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state = _state(Path(raw))
+            fixture_ref = container_hygiene.fixture_container_refs(state)[0]
+            foreign = {"id": "9" * 64, "name": "pi-tool-" + "9" * 32, "labels": {"pi.control.managed": "true", "pi.control.run-id": "run_" + "9" * 32}, "running": True}
             def inspect(identifier: str):
                 if identifier == "e" * 64:
-                    return {"id": identifier, "name": "pi-tool-" + "a" * 32, "labels": dict(container_hygiene.fixture_container_refs(state)[0].labels), "running": False}
+                    return {"id": identifier, "name": fixture_ref.name, "labels": dict(fixture_ref.labels), "running": False}
                 return None
             with mock.patch.object(container_hygiene, "_inspect", side_effect=inspect):
-                self.assertIsNone(container_hygiene.inspect_fixture_containers(state)[1].container_id)
+                observations = container_hygiene.inspect_fixture_containers(state)
+                self.assertTrue(observations[0].identity_matches)
+                self.assertTrue(observations[1].absent)
+                self.assertNotIn(foreign, [item.as_dict() for item in observations])
 
     def test_mismatched_identity_is_refused_without_docker_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
