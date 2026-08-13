@@ -17,7 +17,7 @@ from typing import Any
 
 PROMPT = "inspect the assigned project"
 FINAL_TEXT = "SCRIPTED_FINAL"
-SECRETARY_TOOLS = ["acknowledge_project_message", "analyze_integration", "check_package_review_gate", "git_read", "grep", "harness_feedback", "list_changes", "list_project_messages", "ls", "observe_change_queue", "observe_fleet", "observe_messages", "observe_tasks", "post_project_message", "propose_integration", "propose_review", "propose_workstream", "project_work_index", "read", "record_dependency_disposition", "reply_project_message", "request_review", "start_investigation", "subagent", "subagent_interrupt", "subagent_list", "subagent_resume", "subagent_start", "subagent_status", "subagent_steer", "subagent_stop", "subagent_wait"]
+SECRETARY_TOOLS = ["acknowledge_project_message", "analyze_integration", "approve_workstream", "check_package_review_gate", "git_read", "grep", "harness_feedback", "list_changes", "list_project_messages", "ls", "observe_change_queue", "observe_fleet", "observe_messages", "observe_tasks", "post_project_message", "propose_integration", "propose_review", "propose_workstream", "project_work_index", "read", "record_dependency_disposition", "reply_project_message", "request_review", "start_investigation", "subagent", "subagent_interrupt", "subagent_list", "subagent_resume", "subagent_start", "subagent_status", "subagent_steer", "subagent_stop", "subagent_wait"]
 INVESTIGATOR_TOOLS = ["acknowledge_project_message", "git_read", "grep", "harness_feedback", "list_project_messages", "ls", "post_project_message", "read", "record_package_security_review", "reply_project_message"]
 REVIEWER_TOOLS = ["acknowledge_project_message", "check_package_review_gate", "git_read", "grep", "harness_feedback", "list_project_messages", "ls", "post_project_message", "read", "reply_project_message"]
 
@@ -223,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
         "check_package_review_gate": "controller-channel/index.ts", "record_dependency_disposition": "controller-channel/index.ts",
         "subagent": "pi-subagents/index.ts", "subagent_start": "pi-subagents/index.ts", "subagent_status": "pi-subagents/index.ts", "subagent_wait": "pi-subagents/index.ts", "subagent_list": "pi-subagents/index.ts", "subagent_interrupt": "pi-subagents/index.ts", "subagent_stop": "pi-subagents/index.ts", "subagent_resume": "pi-subagents/index.ts", "subagent_steer": "pi-subagents/index.ts",
         "project_work_index": "controller-channel/index.ts", "start_investigation": "controller-channel/index.ts",
-        "propose_workstream": "controller-channel/index.ts", "propose_review": "controller-channel/index.ts", "propose_integration": "controller-channel/index.ts",
+        "propose_workstream": "controller-channel/index.ts", "approve_workstream": "controller-channel/index.ts", "propose_review": "controller-channel/index.ts", "propose_integration": "controller-channel/index.ts",
         "list_changes": "controller-channel/index.ts", "request_review": "controller-channel/index.ts", "analyze_integration": "controller-channel/index.ts",
         "observe_tasks": "controller-channel/index.ts", "observe_fleet": "controller-channel/index.ts", "observe_messages": "controller-channel/index.ts", "observe_change_queue": "controller-channel/index.ts",
     }

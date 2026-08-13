@@ -14,9 +14,10 @@ test("secretary-work declares only semantic secretary operations", async () => {
   };
   module.default({});
   assert.deepEqual([...declarations].map(([operation]) => operation).sort(), [
-    "integration.propose", "investigation.start", "project.work-index", "review.propose", "workstream.propose",
+    "integration.propose", "investigation.start", "project.work-index", "review.propose", "workstream.approve", "workstream.propose",
   ]);
-  assert.equal([...declarations.values()].some((tool) => /approve|authorize|integrate|execute/i.test(tool.name)), false);
+  assert.equal([...declarations.values()].some((tool) => /authorize|integrate|execute/i.test(tool.name)), false);
+  assert.equal([...declarations.values()].some((tool) => /approve/i.test(tool.name)), true);
   assert.equal([...declarations.values()].some((tool) => /propose/i.test(tool.name)), true);
 
   await declarations.get("project.work-index").execute("id", {}, new AbortController().signal);
@@ -25,14 +26,16 @@ test("secretary-work declares only semantic secretary operations", async () => {
   await declarations.get("investigation.start").execute("id", { purpose: "map the failure", idempotencyKey: "k1" }, new AbortController().signal);
   assert.deepEqual(requests[1], { operation: "subagent.spawn", payload: { role: "investigator", task: "map the failure", idempotencyKey: "k1" } });
 
-  await declarations.get("workstream.propose").execute("id", { title: "fix cancel", purpose: "diagnose and fix", idempotencyKey: "k2" }, new AbortController().signal);
-  assert.equal(requests[2].operation, "message.post");
-  assert.equal(requests[2].payload.kind, "needs-user");
-  assert.equal(requests[2].payload.payload.proposal, "workstream");
+  await declarations.get("workstream.propose").execute("id", { title: "fix cancel", purpose: "diagnose and fix", targetRef: "main", knownOverlap: "none", idempotencyKey: "k2" }, new AbortController().signal);
+  assert.equal(requests[2].operation, "workstream.propose");
+  assert.equal(requests[2].payload.title, "fix cancel");
+  assert.equal(requests[2].payload.idempotencyKey, "k2");
+  assert.deepEqual(requests[2].payload.targetRef, "main");
 
   await declarations.get("review.propose").execute("id", { changeId: "chg_x", revision: 2, idempotencyKey: "k3" }, new AbortController().signal);
   assert.equal(requests[3].operation, "message.post");
   assert.equal(requests[3].payload.payload.proposal, "review");
+  assert.equal(requests[3].payload.idempotencyKey, "k3");
 
   await declarations.get("integration.propose").execute("id", { changeId: "chg_x", revision: 2, idempotencyKey: "k4" }, new AbortController().signal);
   assert.equal(requests[4].operation, "message.post");

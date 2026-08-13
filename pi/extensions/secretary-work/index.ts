@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const CHANNEL_SYMBOL = Symbol.for("pi.controllerChannel.v1");
@@ -12,7 +12,7 @@ function channel(): Channel {
 
 function result(value: unknown) { return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: {} }; }
 
-export default function secretaryWork(_pi: ExtensionAPI): void {
+export default function secretaryWork(_pi: ExtensionAPI, ctx: ExtensionContext): void {
   const controller = channel();
 
   controller.registerTool("project.work-index", {
@@ -34,14 +34,43 @@ export default function secretaryWork(_pi: ExtensionAPI): void {
   controller.registerTool("workstream.propose", {
     name: "propose_workstream",
     label: "Propose workstream",
-    description: "Propose a named, durable implementation workstream for the project. This posts a durable needs-user proposal; it does not create the workstream. The user approves on the surface, and only then does the controller create the worktree, conversation, run, and runtime.",
+    description: "Propose a named, durable implementation workstream for the project. This records the exact creation intent and posts a needs-user proposal; no worktree exists until the user approves the exact request interactively.",
     parameters: Type.Object({ title: Type.String({ minLength: 1, maxLength: 200 }), purpose: Type.String({ minLength: 1, maxLength: 4096 }), targetRef: Type.Optional(Type.String({ maxLength: 256 })), knownOverlap: Type.Optional(Type.String({ maxLength: 1024 })), idempotencyKey: Type.String({ minLength: 1, maxLength: 256 }) }, { additionalProperties: false }),
     async execute(_id, params, signal) {
-      return result(await controller.request("message.post", {
-        kind: "needs-user",
-        payload: { proposal: "workstream", title: params.title, purpose: params.purpose, targetRef: params.targetRef ?? "", knownOverlap: params.knownOverlap ?? "" },
+      return result(await controller.request("workstream.propose", {
+        title: params.title, purpose: params.purpose,
+        targetRef: params.targetRef ?? "", knownOverlap: params.knownOverlap ?? "",
         idempotencyKey: params.idempotencyKey,
       }, signal));
+    },
+  });
+
+  controller.registerTool("workstream.approve", {
+    name: "approve_workstream",
+    label: "Approve workstream",
+    description: "Approve one pending workstream proposal after the interactive confirmation card. The user must approve the exact proposal in the interactive UI; a generic yes or message acknowledgement is never approval. Approval issues a one-use authorization; the workstream is created only after approval.",
+    parameters: Type.Object({ messageId: Type.String({ minLength: 1, maxLength: 200 }) }, { additionalProperties: false }),
+    async execute(_id, params, signal) {
+      if (!ctx.hasUI) throw new Error("Workstream approval requires an interactive secretary session.");
+      const listing = await controller.request("message.list", { states: ["pending", "delivered"], limit: 64 }, signal) as { messages?: Array<{ message_id: string; kind: string; payload_json: string }> };
+      const proposal = (listing.messages ?? []).find((item) => item.message_id === params.messageId && item.kind === "needs-user");
+      if (!proposal) throw new Error("Workstream proposal message was not found.");
+      const payload = JSON.parse(proposal.payload_json ?? "{}") as Record<string, string>;
+      const approved = await ctx.ui.confirm(
+        "Approve workstream creation?",
+        [
+          `Title: ${payload.title ?? ""}`,
+          `Purpose: ${payload.purpose ?? ""}`,
+          `Target: ${payload.targetRef ?? "current branch"}`,
+          `Base commit: ${payload.baseOid ?? ""}`,
+          payload.knownOverlap ? `Known overlap: ${payload.knownOverlap}` : "",
+          "A separate controller-owned worktree and headful conversation will be created. Creation does not integrate anything.",
+        ].filter(Boolean).join("\n"),
+      );
+      if (!approved) throw new Error("The user rejected the workstream proposal.");
+      const authorized = await controller.request("workstream.approve", { messageId: params.messageId }, signal) as { authorizationId: string };
+      const applied = await controller.request("workstream.apply", { messageId: params.messageId, authorizationId: authorized.authorizationId }, signal);
+      return result(applied);
     },
   });
 

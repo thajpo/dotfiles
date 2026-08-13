@@ -25,6 +25,194 @@ class WorkstreamRetireError(RuntimeError):
     pass
 
 
+class WorkstreamProposalError(RuntimeError):
+    pass
+
+
+def _expired(value: str | None) -> bool:
+    if not value:
+        return True
+    try:
+        from datetime import datetime, timezone
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed < datetime.now(timezone.utc)
+    except ValueError:
+        return True
+
+
+def _expiry(now: str, minutes: int = 15) -> str:
+    from datetime import datetime, timedelta
+    return (datetime.fromisoformat(now.replace("Z", "+00:00")) + timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+
+def propose_workstream(
+    store: Any, *,
+    project_id: str,
+    secretary_conversation_id: str,
+    secretary_run_id: str,
+    title: str,
+    purpose: str,
+    target_ref: str | None = None,
+    known_overlap: str | None = None,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """Record the durable intent of a headful workstream and ask the user.
+
+    Only the intent is recorded: the idempotent workstream.create operation
+    is planned but no branch or worktree exists until the exact interactive
+    approval is applied.
+    """
+    validate_id(project_id, prefix="prj")
+    validate_id(secretary_conversation_id, prefix="conv")
+    validate_id(secretary_run_id, prefix="run")
+    title = bounded_text(title, name="title", limit=512)
+    purpose = bounded_text(purpose, name="purpose", limit=4096)
+    project = store.conn.execute("SELECT * FROM projects WHERE project_id=? AND desired_state='active'", (project_id,)).fetchone()
+    primary = store.conn.execute("SELECT * FROM working_copies WHERE project_id=? AND kind='primary' AND desired_state='present'", (project_id,)).fetchone()
+    if project is None or primary is None:
+        raise WorkstreamProposalError("project primary working copy is missing")
+    if not primary["expected_head_oid"] or not primary["branch_ref"]:
+        raise WorkstreamProposalError("workstream proposal requires a committed branch-bound primary HEAD")
+    operation, request = _intent(
+        store, project=project, primary=primary, title=title,
+        brief={"kind": "headful-workstream", "purpose": purpose, "knownOverlap": known_overlap or ""},
+        display_name=title, idempotency_key=idempotency_key, headful=True,
+    )
+    if operation["state"] == "succeeded":
+        raise WorkstreamProposalError("workstream already exists for this proposal")
+    scope = {
+        "projectId": project_id, "workstreamId": request["workstreamId"], "title": title,
+        "targetRef": request["targetRef"], "baseOid": request["baseOid"], "headful": True,
+    }
+    scope_digest = json_digest(scope)
+    from .messages import post_message
+    message = post_message(
+        store, project_id=project_id, conversation_id=secretary_conversation_id, run_id=secretary_run_id,
+        kind="needs-user",
+        payload={
+            "proposal": "workstream", "title": title, "purpose": purpose,
+            "targetRef": request["targetRef"], "knownOverlap": known_overlap or "",
+            "operationId": operation["operation_id"], "workstreamId": request["workstreamId"],
+            "baseOid": request["baseOid"], "scopeDigest": scope_digest,
+            "idempotencyKey": idempotency_key,
+        },
+        idempotency_key=f"workstream.propose:{idempotency_key}",
+    )
+    return {"message": dict(message), "operation": dict(operation), "scope": scope, "scopeDigest": scope_digest}
+
+
+def approve_workstream_proposal(store: Any, *, message_id: str, actor_id: str, expires_at: str | None = None) -> dict[str, Any]:
+    """Issue the one-use create-workstream authorization for one proposal.
+
+    The authorization binds the exact proposal scope: project, workstream id,
+    title, target ref, base OID, and headful intent. Replay returns the same
+    authorization; a second distinct proposal message is refused.
+    """
+    validate_id(message_id, prefix="msg")
+    if not isinstance(actor_id, str) or not actor_id or len(actor_id) > 256:
+        raise WorkstreamProposalError("approval actor is invalid")
+    message = store.conn.execute("SELECT * FROM project_messages WHERE message_id=?", (message_id,)).fetchone()
+    if message is None or message["kind"] != "needs-user":
+        raise WorkstreamProposalError("proposal message is missing")
+    try:
+        payload = json.loads(message["payload_json"])
+    except json.JSONDecodeError:
+        raise WorkstreamProposalError("proposal message is malformed") from None
+    if payload.get("proposal") != "workstream":
+        raise WorkstreamProposalError("message is not a workstream proposal")
+    scope = {
+        "projectId": message["project_id"],
+        "workstreamId": payload.get("workstreamId"),
+        "title": payload.get("title"),
+        "targetRef": payload.get("targetRef"),
+        "baseOid": payload.get("baseOid"),
+        "headful": True,
+    }
+    if any(scope[key] is None for key in scope):
+        raise WorkstreamProposalError("workstream proposal scope is incomplete")
+    request_context = store.conn.execute("SELECT * FROM authorizations WHERE request_context_id=? AND kind='create-workstream'", (message_id,)).fetchone()
+    if request_context is not None:
+        return {"authorizationId": request_context["authorization_id"], "scope": scope, "scopeDigest": request_context["scope_digest"], "state": request_context["state"]}
+    authorization_id = new_id("auth")
+    now = utc_now()
+    expiry = expires_at or _expiry(now)
+    with store.transaction():
+        store.conn.execute(
+            "INSERT INTO authorizations(authorization_id,kind,actor_type,actor_id,project_id,resource_type,resource_id,request_context_id,scope_json,scope_digest,issued_at,expires_at,consumed_at,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (authorization_id, "create-workstream", "user", actor_id, message["project_id"], "workstream", scope["workstreamId"], message_id, canonical_json(scope), json_digest(scope), now, expiry, None, "active"),
+        )
+        append_event_in_transaction(store.conn, event_kind="workstream.authorized", resource_type="workstream", resource_id=scope["workstreamId"], payload={"authorizationId": authorization_id, "messageId": message_id, "scopeDigest": json_digest(scope)})
+    return {"authorizationId": authorization_id, "scope": scope, "scopeDigest": json_digest(scope), "state": "active"}
+
+
+def apply_workstream_proposal(store: Any, *, message_id: str, authorization_id: str, actor_id: str) -> dict[str, Any]:
+    """Consume the approval and create the exact approved workstream.
+
+    The primary HEAD must still match the approved base OID; the saga then
+    runs with the consumed authorization and resolves the proposal message.
+    """
+    validate_id(message_id, prefix="msg")
+    validate_id(authorization_id, prefix="auth")
+    if not isinstance(actor_id, str) or not actor_id or len(actor_id) > 256:
+        raise WorkstreamProposalError("apply actor is invalid")
+    authorization = store.conn.execute("SELECT * FROM authorizations WHERE authorization_id=?", (authorization_id,)).fetchone()
+    if authorization is None or authorization["kind"] != "create-workstream" or authorization["request_context_id"] != message_id:
+        raise WorkstreamProposalError("authorization is not bound to this proposal")
+    message = store.conn.execute("SELECT * FROM project_messages WHERE message_id=?", (message_id,)).fetchone()
+    if message is None:
+        raise WorkstreamProposalError("proposal message is missing")
+    try:
+        payload = json.loads(message["payload_json"])
+    except json.JSONDecodeError:
+        raise WorkstreamProposalError("proposal message is malformed") from None
+    # Idempotent completion: a replayed apply after a successful creation
+    # returns the existing workstream without touching the consumed
+    # authorization.
+    operation_id = payload.get("operationId")
+    if isinstance(operation_id, str):
+        completed = store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
+        if completed is not None and completed["state"] == "succeeded":
+            workstream = store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (completed["resource_id"],)).fetchone()
+            if workstream is not None:
+                from .messages import acknowledge_message
+                acknowledge_message(store, project_id=message["project_id"], message_id=message_id, resolve=True)
+                return {"workstream": dict(workstream), "messageId": message_id, "authorizationId": authorization_id}
+    if authorization["state"] != "active":
+        raise WorkstreamProposalError("workstream authorization is not active")
+    if _expired(authorization["expires_at"]):
+        with store.transaction():
+            store.conn.execute("UPDATE authorizations SET state='expired' WHERE authorization_id=?", (authorization_id,))
+        raise WorkstreamProposalError("workstream authorization has expired")
+    scope = json.loads(authorization["scope_json"])
+    if payload.get("workstreamId") != scope.get("workstreamId") or message["project_id"] != scope.get("projectId"):
+        raise WorkstreamProposalError("proposal changed after approval")
+    primary = store.conn.execute("SELECT * FROM working_copies WHERE project_id=? AND kind='primary' AND desired_state='present'", (message["project_id"],)).fetchone()
+    if primary is None:
+        raise WorkstreamProposalError("project primary working copy is missing")
+    try:
+        from .git_adapter import observe_repository
+        observation = observe_repository(primary["path"])
+    except Exception as error:
+        raise WorkstreamProposalError("project primary checkout cannot be observed") from error
+    if observation.head_oid != scope.get("baseOid"):
+        raise WorkstreamProposalError("project HEAD moved since approval; propose again")
+    idempotency_key = payload.get("idempotencyKey")
+    if not isinstance(idempotency_key, str) or not idempotency_key:
+        raise WorkstreamProposalError("proposal idempotency key is missing")
+    try:
+        workstream = create_workstream(
+            store, project_id=message["project_id"], title=scope["title"],
+            brief={"kind": "headful-workstream", "purpose": payload.get("purpose", ""), "knownOverlap": payload.get("knownOverlap", "")},
+            display_name=scope["title"], idempotency_key=idempotency_key,
+            authorization_id=authorization_id, actor_id=actor_id, headful=True,
+        )
+    except (WorkstreamCreationError, WorkstreamRetireError) as error:
+        raise WorkstreamProposalError(str(error)) from error
+    from .messages import acknowledge_message
+    acknowledge_message(store, project_id=message["project_id"], message_id=message_id, resolve=True)
+    return {"workstream": dict(workstream), "messageId": message_id, "authorizationId": authorization_id}
+
+
 class Failpoint(Protocol):
     def hit(self, name: str, context: Mapping[str, str]) -> None: ...
 
@@ -133,10 +321,48 @@ def _mark_attention(store: Any, operation: Mapping[str, Any], request: Mapping[s
         )
 
 
+def _consume_workstream_authorization(store: Any, *, authorization_id: str, operation: Mapping[str, Any], request: Mapping[str, Any], actor_id: str) -> None:
+    """Consume the exact one-use authorization atomically with operation planning.
+
+    The authorization binds project, workstream id, title, target ref, base
+    OID, and headful intent; any mismatch refuses the apply before Git runs.
+    """
+    authorization = store.conn.execute("SELECT * FROM authorizations WHERE authorization_id=?", (authorization_id,)).fetchone()
+    if authorization is None or authorization["kind"] != "create-workstream":
+        raise WorkstreamCreationError("workstream authorization is not bound to this request")
+    if authorization["state"] != "active":
+        raise WorkstreamCreationError("workstream authorization is not active")
+    if authorization["resource_id"] != request["workstreamId"] or authorization["project_id"] != request["projectId"]:
+        raise WorkstreamCreationError("workstream authorization is not bound to this request")
+    if _expired(authorization["expires_at"]):
+        with store.transaction():
+            store.conn.execute("UPDATE authorizations SET state='expired' WHERE authorization_id=?", (authorization_id,))
+        raise WorkstreamCreationError("workstream authorization has expired")
+    try:
+        scope = json.loads(authorization["scope_json"])
+    except json.JSONDecodeError:
+        raise WorkstreamCreationError("workstream authorization scope is malformed") from None
+    expected = {
+        "projectId": request["projectId"], "workstreamId": request["workstreamId"], "title": request["title"],
+        "targetRef": request["targetRef"], "baseOid": request["baseOid"], "headful": bool(request["headful"]),
+    }
+    if scope != expected:
+        raise WorkstreamCreationError("workstream authorization scope differs from the request")
+    now = utc_now()
+    with store.transaction():
+        cursor = store.conn.execute("UPDATE authorizations SET state='consumed',consumed_at=? WHERE authorization_id=? AND state='active'", (now, authorization_id))
+        if cursor.rowcount != 1:
+            raise WorkstreamCreationError("workstream authorization was already consumed")
+        store.conn.execute(
+            "UPDATE operations SET actor_type='user',actor_id=?,authorization_id=?,updated_at=? WHERE operation_id=? AND state='planned'",
+            (actor_id or authorization["actor_id"], authorization_id, now, operation["operation_id"]),
+        )
+
+
 def create_workstream(
     store: Any, *, project_id: str, title: str, brief: Mapping[str, Any] | None = None,
     display_name: str | None = None, idempotency_key: str, failpoint: Failpoint | None = None,
-    headful: bool | None = None,
+    headful: bool | None = None, authorization_id: str | None = None, actor_id: str | None = None,
 ) -> dict[str, Any]:
     validate_id(project_id, prefix="prj")
     if headful is None:
@@ -159,6 +385,8 @@ def create_workstream(
         return dict(row)
     if operation["state"] == "needs_attention":
         raise WorkstreamCreationError(operation["error_detail"] or "workstream creation needs attention")
+    if authorization_id is not None:
+        _consume_workstream_authorization(store, authorization_id=authorization_id, operation=operation, request=request, actor_id=actor_id)
     if operation["state"] == "planned":
         with store.transaction():
             update_operation_in_transaction(store.conn, operation["operation_id"], state="applying", step="git-worktree-pending")

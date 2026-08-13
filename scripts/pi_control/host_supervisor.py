@@ -42,7 +42,7 @@ _PROVIDER_ENVIRONMENT = {
     "google": ("GEMINI_API_KEY",),
 }
 _ROLE_OPERATIONS = {
-    "secretary": {"scoped-read", "message.post", "message.list", "message.acknowledge", "message.reply", "dependency.disposition", "package-review.gate", "subagent.spawn", "subagent.start", "subagent.status", "subagent.wait", "subagent.list", "subagent.interrupt", "subagent.stop", "subagent.resume", "subagent.steer", "project.work-index", "change.list", "review.request", "integration.analyze", "observe.tasks", "observe.fleet", "observe.messages", "observe.queue", "investigation.start", "workstream.propose", "review.propose", "integration.propose"},
+    "secretary": {"scoped-read", "message.post", "message.list", "message.acknowledge", "message.reply", "dependency.disposition", "package-review.gate", "subagent.spawn", "subagent.start", "subagent.status", "subagent.wait", "subagent.list", "subagent.interrupt", "subagent.stop", "subagent.resume", "subagent.steer", "project.work-index", "change.list", "review.request", "integration.analyze", "observe.tasks", "observe.fleet", "observe.messages", "observe.queue", "investigation.start", "workstream.propose", "workstream.approve", "workstream.apply", "review.propose", "integration.propose"},
     "investigator": {"scoped-read", "package-review.record", "message.post", "message.list", "message.acknowledge", "message.reply"},
     "reviewer": {"scoped-read", "package-review.gate", "message.post", "message.list", "message.acknowledge", "message.reply"},
     "personal": {"writer-tool", "message.post", "message.list", "message.acknowledge", "message.reply", "command.request", "command.status", "dependency.inventory", "package.request", "package.status", "subagent.spawn", "subagent.start", "subagent.status", "subagent.wait", "subagent.list", "subagent.interrupt", "subagent.stop", "subagent.resume", "subagent.steer", "worker.start", "change.submit", "project.work-index", "observe.tasks", "observe.fleet", "observe.messages", "observe.queue"},
@@ -70,8 +70,8 @@ _TOOL_RESOURCE = {
     "observe_messages": "extension:controller-channel", "observe_change_queue": "extension:controller-channel",
     "harness_feedback": "extension:harness-feedback",
     "project_work_index": "extension:controller-channel", "start_investigation": "extension:controller-channel",
-    "propose_workstream": "extension:controller-channel", "propose_review": "extension:controller-channel",
-    "propose_integration": "extension:controller-channel",
+    "propose_workstream": "extension:controller-channel", "approve_workstream": "extension:controller-channel",
+    "propose_review": "extension:controller-channel", "propose_integration": "extension:controller-channel",
 }
 
 
@@ -567,6 +567,31 @@ def _rpc(store: Any, run_id: str, manifest_digest: str, request: Mapping[str, An
             raise ControllerChannelError("work index request fields are invalid")
         from .projects import work_index
         return work_index(store, project_id)
+
+    if channel_operation == "workstream.propose":
+        from .pi_workstreams import propose_workstream
+        if set(payload) - {"title", "purpose", "targetRef", "knownOverlap", "idempotencyKey"}:
+            raise ControllerChannelError("workstream proposal fields are invalid")
+        if set(payload) & {"title", "purpose", "idempotencyKey"} != {"title", "purpose", "idempotencyKey"}:
+            raise ControllerChannelError("workstream proposal is incomplete")
+        return propose_workstream(
+            store, project_id=project_id, secretary_conversation_id=conversation_id, secretary_run_id=run_id,
+            title=payload["title"], purpose=payload["purpose"],
+            target_ref=payload.get("targetRef"), known_overlap=payload.get("knownOverlap"),
+            idempotency_key=payload["idempotencyKey"],
+        )
+
+    if channel_operation == "workstream.approve":
+        from .pi_workstreams import approve_workstream_proposal
+        if set(payload) != {"messageId"}:
+            raise ControllerChannelError("workstream approval fields are invalid")
+        return approve_workstream_proposal(store, message_id=payload["messageId"], actor_id=run_id)
+
+    if channel_operation == "workstream.apply":
+        from .pi_workstreams import apply_workstream_proposal
+        if set(payload) != {"messageId", "authorizationId"}:
+            raise ControllerChannelError("workstream apply fields are invalid")
+        return apply_workstream_proposal(store, message_id=payload["messageId"], authorization_id=payload["authorizationId"], actor_id=run_id)
 
     if channel_operation == "subagent.spawn":
         if set(payload) != {"role", "task", "idempotencyKey"} or payload.get("role") not in READ_ONLY_ROLES or not isinstance(payload.get("task"), str) or not isinstance(payload.get("idempotencyKey"), str):

@@ -48,6 +48,9 @@ def _parser() -> argparse.ArgumentParser:
     workstream_create.add_argument("--request-json", required=True)
     workstream_retire = workstream_sub.add_parser("retire")
     workstream_retire.add_argument("--request-json", required=True)
+    for name in ("propose", "approve", "apply"):
+        item = workstream_sub.add_parser(name)
+        item.add_argument("--request-json", required=True)
     message = sub.add_parser("message")
     message_sub = message.add_subparsers(dest="message_command", required=True)
     for name in ("post", "list", "deliver", "acknowledge", "reply"):
