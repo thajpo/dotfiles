@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "alias": "dotfiles",
+      "repository": "/home/j/dotfiles"
+    },
+    {
+      "alias": "mlre-transition",
+      "repository": "/home/j/Projects/mlre-transition"
+    },
+    {
+      "alias": "finances",
+      "repository": "/home/j/Projects/investing"
+    },
+    {
+      "alias": "sleepydreamyv3",
+      "repository": "/home/j/Projects/SleepyDreamyV3"
+    },
+    {
+      "alias": "csvagent",
+      "repository": "/home/j/Projects/csv-agent"
+    },
+    {
+      "alias": "vla-lens",
+      "repository": "/home/j/Projects/vla-lens"
+    }
+  ],
+  "surfaces": {
+    "pi-personal": [
+      "dotfiles",
+      "mlre-transition",
+      "finances"
+    ],
+    "pisec": [
+      "sleepydreamyv3",
+      "csvagent",
+      "vla-lens"
+    ]
+  }
+}

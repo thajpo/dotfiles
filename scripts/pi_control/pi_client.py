@@ -22,7 +22,7 @@ from .launch import attest_run, prepare_run, start_run, stop_run
 from .messages import acknowledge_message, list_messages, mark_delivered, post_message, reply_message
 from .models import canonical_json, new_id, utc_now, validate_id
 from .package_environment import package_status, request_package_operation
-from .projects import project_status, register_project, work_index
+from .projects import project_status, register_project, rename_project, work_index
 from .pi_workstreams import create_workstream, retire_workstream
 from .reviews import request_review, submit_review
 from .pi_review import create_review_assignment
@@ -74,6 +74,10 @@ class PiControllerClient:
     def status(self, project_id: str) -> dict[str, Any]:
         with self._store() as store:
             return project_status(store, project_id)
+
+    def rename_project(self, **request: Any) -> dict[str, Any]:
+        with self._store(mutate=True) as store:
+            return rename_project(store, **request)
 
     def work_index(self, project_id: str) -> dict[str, list[dict[str, Any]]]:
         with self._store() as store:
@@ -285,6 +289,7 @@ class PiControllerClient:
         routes = {
             "build.register": self.register_build,
             "project.register": self.register_project,
+            "project.rename": self.rename_project,
             "project.status": lambda **kw: self.status(kw["project_id"]),
             "project.work-index": lambda **kw: self.work_index(kw["project_id"]),
             "conversation.create": self.create_conversation,

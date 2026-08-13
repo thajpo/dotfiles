@@ -372,6 +372,135 @@ def recover_conversation(conversation_id: str) -> dict:
     return value
 
 
+def _surfaces_config_path(config: str | None) -> Path:
+    if config:
+        path = Path(config).expanduser()
+    elif os.environ.get("PI_SURFACES_CONFIG"):
+        path = Path(os.environ["PI_SURFACES_CONFIG"]).expanduser()
+    else:
+        installed = Path.home() / ".config" / "pi" / "surfaces.json"
+        if installed.is_file():
+            path = installed
+        else:
+            machine_id = os.environ.get("DOTFILES_MACHINE_ID")
+            candidates = sorted(REPO_ROOT.glob(f"machines/{machine_id}.pi-surfaces.json")) if machine_id else []
+            if not candidates:
+                candidates = sorted(REPO_ROOT.glob("machines/*.pi-surfaces.json"))
+            if not candidates:
+                raise SurfaceError("no surface configuration found; pass --config or install ~/.config/pi/surfaces.json")
+            path = candidates[0]
+    if not path.is_file():
+        raise SurfaceError(f"surface configuration is missing: {path}")
+    return path
+
+
+def _load_surfaces_config(config: str | None) -> tuple[dict, Path]:
+    path = _surfaces_config_path(config)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SurfaceError(f"surface configuration is unreadable: {path}") from error
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise SurfaceError("surface configuration must declare version 1")
+    projects = value.get("projects")
+    if not isinstance(projects, list) or not projects:
+        raise SurfaceError("surface configuration must declare at least one project")
+    aliases: list[str] = []
+    for item in projects:
+        if not isinstance(item, dict) or not isinstance(item.get("alias"), str) or not item["alias"] or not isinstance(item.get("repository"), str) or not item["repository"]:
+            raise SurfaceError("surface project entries require alias and repository")
+        aliases.append(item["alias"])
+    if len(set(aliases)) != len(aliases):
+        raise SurfaceError("surface project aliases must be unique")
+    surfaces = value.get("surfaces")
+    if not isinstance(surfaces, dict) or not surfaces:
+        raise SurfaceError("surface configuration must declare surfaces")
+    for surface, ids in surfaces.items():
+        if surface not in {"pisec", "pi-personal"}:
+            raise SurfaceError(f"unknown surface: {surface}")
+        if not isinstance(ids, list) or any(not isinstance(item, str) or not item for item in ids):
+            raise SurfaceError(f"surface {surface} active set must be a list of aliases")
+        for item in ids:
+            if item not in aliases:
+                raise SurfaceError(f"surface {surface} references an unknown alias: {item}")
+    return value, path
+
+
+def _repository_identity(repository: str, *, allow_missing: bool) -> tuple[Path, str] | None:
+    import subprocess
+    source = Path(repository).expanduser().resolve()
+    result = subprocess.run(["git", "-C", str(source), "rev-parse", "--show-toplevel"], capture_output=True, text=True, env={"PATH": os.defpath, "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C"})
+    if result.returncode != 0:
+        if allow_missing:
+            return None
+        raise SurfaceError(f"configured repository is not a Git checkout: {source}")
+    toplevel = Path(result.stdout.strip()).resolve(strict=True)
+    common = subprocess.run(["git", "-C", str(toplevel), "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True, env={"PATH": os.defpath, "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C"})
+    if common.returncode != 0:
+        raise SurfaceError(f"cannot resolve Git identity for {toplevel}")
+    return toplevel, Path(common.stdout.strip()).resolve().as_posix()
+
+
+def bootstrap(config: str | None = None, *, dry_run: bool = False, keep_extra: bool = False, allow_missing: bool = False) -> dict:
+    """Reconcile the declared surface configuration with controller state.
+
+    Registers missing projects under their alias, renames projects whose
+    display name differs from the alias, and atomically writes both ordered
+    surface preferences. Idempotent; --dry-run performs no writes.
+    """
+    value, path = _load_surfaces_config(config)
+    identities: dict[str, dict] = {}
+    common_to_alias: dict[str, str] = {}
+    for item in value["projects"]:
+        identity = _repository_identity(item["repository"], allow_missing=allow_missing)
+        if identity is None:
+            continue
+        toplevel, common = identity
+        if common in common_to_alias and common_to_alias[common] != item["alias"]:
+            raise SurfaceError(f"two configured aliases resolve to the same Git common directory: {common_to_alias[common]} and {item['alias']}")
+        common_to_alias[common] = item["alias"]
+        identities[item["alias"]] = {"repository": str(toplevel), "gitCommonDir": common}
+
+    current = project_list()
+    by_common = {str(item["git_common_dir"]): item for item in current}
+    by_display = {item["display_name"]: item for item in current}
+
+    plan: dict[str, list] = {"register": [], "rename": []}
+    project_ids: dict[str, str] = {}
+    for alias, identity in identities.items():
+        existing = by_common.get(identity["gitCommonDir"])
+        if existing is None:
+            if by_display.get(alias) is not None:
+                raise SurfaceError(f"display name {alias} is taken by another registered project")
+            plan["register"].append(alias)
+            if dry_run:
+                continue
+            registered = project_register(identity["repository"], alias)
+            project_ids[alias] = registered["project_id"]
+            continue
+        if existing["display_name"] != alias:
+            plan["rename"].append({"alias": alias, "from": existing["display_name"]})
+            if not dry_run:
+                request = {"projectId": existing["project_id"], "displayName": alias}
+                _run([_controller(), "--state-root", str(STATE_ROOT), "project", "rename", "--request-json", json.dumps(request)])
+        project_ids[alias] = existing["project_id"]
+
+    preferences: dict[str, list[str]] = {}
+    for surface, aliases in value["surfaces"].items():
+        active = [project_ids[alias] for alias in aliases if alias in project_ids]
+        if keep_extra:
+            existing_ids = preference_get(surface)
+            extra = [pid for pid in existing_ids if pid not in active and any(item["project_id"] == pid for item in current)]
+            active = active + extra
+        preferences[surface] = active
+
+    if dry_run:
+        return {"dryRun": True, "config": str(path), "plan": plan, "preferences": preferences}
+    for surface, active in preferences.items():
+        preference_set(surface, active)
+    return {"dryRun": False, "config": str(path), "plan": plan, "preferences": preferences, "projectIds": project_ids}
+
+
 def _preferences_path() -> Path:
     return STATE_ROOT / "surface" / "preferences.json"
 
@@ -504,6 +633,11 @@ def main(argv: list[str] | None = None) -> int:
     ws_conv.add_argument("--name", default="personal")
     recover = sub.add_parser("recover-conversation")
     recover.add_argument("conversation_id")
+    bootstrap_parser = sub.add_parser("bootstrap")
+    bootstrap_parser.add_argument("--config", default=None)
+    bootstrap_parser.add_argument("--dry-run", action="store_true")
+    bootstrap_parser.add_argument("--keep-extra", action="store_true")
+    bootstrap_parser.add_argument("--allow-missing", action="store_true")
     preference = sub.add_parser("preference")
     preference_sub = preference.add_subparsers(dest="preference_command", required=True)
     preference_get_parser = preference_sub.add_parser("get")
@@ -547,6 +681,8 @@ def main(argv: list[str] | None = None) -> int:
             value = workstream_conversation(args.project_id, args.name)
         elif args.command == "recover-conversation":
             value = recover_conversation(args.conversation_id)
+        elif args.command == "bootstrap":
+            value = bootstrap(args.config, dry_run=args.dry_run, keep_extra=args.keep_extra, allow_missing=args.allow_missing)
         elif args.command == "preference":
             if args.preference_command == "get":
                 value = {"surface": args.surface, "activeProjectIds": preference_get(args.surface)}

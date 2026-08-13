@@ -33,6 +33,8 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("status", "work-index", "reconcile"):
         item = project_sub.add_parser(name)
         item.add_argument("project_id")
+    rename = project_sub.add_parser("rename")
+    rename.add_argument("--request-json", required=True)
     conversation = sub.add_parser("conversation")
     conversation_sub = conversation.add_subparsers(dest="conversation_command", required=True)
     create = conversation_sub.add_parser("create")
@@ -136,6 +138,9 @@ def main(argv: list[str] | None = None) -> int:
             elif args.project_command == "list":
                 with client._store() as store:
                     value = [dict(row) for row in store.conn.execute("SELECT * FROM projects ORDER BY display_name,project_id")]
+            elif args.project_command == "rename":
+                request = _request(args.request_json)
+                value = client.dispatch("project.rename", request)
             elif args.project_command == "status":
                 value = client.status(args.project_id)
             elif args.project_command == "reconcile":

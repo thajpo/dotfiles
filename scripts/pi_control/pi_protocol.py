@@ -38,6 +38,7 @@ SPECS: Mapping[str, RequestSpec] = {
     "negotiate": _spec({}, set()),
     "build.register": _spec({"stagedRoot": "staged_root"}),
     "project.register": _spec({"repository": "repository", "displayName": "display_name"}, {"repository"}),
+    "project.rename": _spec({"projectId": "project_id", "displayName": "display_name"}, {"projectId", "displayName"}),
     "project.status": _spec({"projectId": "project_id"}),
     "project.work-index": _spec({"projectId": "project_id"}),
     "project.reconcile": _spec({"projectId": "project_id"}),

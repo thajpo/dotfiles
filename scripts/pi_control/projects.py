@@ -64,6 +64,32 @@ def register_project(store: Any, repository: str | Path, display_name: str | Non
     return dict(store.conn.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone())
 
 
+def rename_project(store: Any, *, project_id: str, display_name: str) -> dict[str, Any]:
+    """Rename one project's display name while preserving its identity.
+
+    Renaming preserves the project id, Git identity, working copies, and
+    conversations. It never rewrites user-chosen conversation names; the
+    auto-generated \"<name> secretary\" conversation is renamed only when it
+    still matches the old generated form.
+    """
+    project = _project(store, project_id)
+    name = bounded_text(display_name, name="display_name", limit=512)
+    if name == project["display_name"]:
+        return dict(project)
+    duplicate = store.conn.execute("SELECT 1 FROM projects WHERE display_name=? AND project_id<>?", (name, project_id)).fetchone()
+    if duplicate is not None:
+        raise ValueError(f"another project already uses the display name: {name}")
+    now = utc_now()
+    old_name = project["display_name"]
+    with store.transaction():
+        store.conn.execute("UPDATE projects SET display_name=?,updated_at=?,resource_version=resource_version+1 WHERE project_id=?", (name, now, project_id))
+        auto = store.conn.execute("SELECT * FROM conversations WHERE project_id=? AND role='secretary' AND display_name=?", (project_id, f"{old_name} secretary")).fetchone()
+        if auto is not None:
+            store.conn.execute("UPDATE conversations SET display_name=?,updated_at=?,resource_version=resource_version+1 WHERE conversation_id=?", (f"{name} secretary", now, auto["conversation_id"]))
+        append_event_in_transaction(store.conn, event_kind="project.renamed", resource_type="project", resource_id=project_id, resource_version=int(project["resource_version"]) + 1, payload={"projectId": project_id, "previousDisplayName": old_name, "displayName": name})
+    return dict(store.conn.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone())
+
+
 def project_status(store: Any, project_id: str) -> dict[str, Any]:
     project = _project(store, project_id)
     worktrees = [dict(row) for row in store.conn.execute("SELECT * FROM working_copies WHERE project_id=? ORDER BY created_at", (project_id,))]
@@ -106,4 +132,4 @@ def work_index(store: Any, project_id: str) -> dict[str, list[dict[str, Any]]]:
     return rows
 
 
-__all__ = ["project_status", "register_project", "work_index"]
+__all__ = ["project_status", "register_project", "rename_project", "work_index"]
