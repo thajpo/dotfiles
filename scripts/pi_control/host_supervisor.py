@@ -79,6 +79,26 @@ class HostSupervisorError(LaunchError):
     pass
 
 
+def _install_cleanup_signal_handlers() -> None:
+    """Convert SIGHUP/SIGTERM into a controlled supervisor unwind.
+
+    tmux pane death and `pi-restart` deliver SIGHUP to the supervisor; without
+    a handler the process dies and the `finally` cleanup never runs. Raising
+    SystemExit from the handler enters the existing `except BaseException`
+    path, which kills the child, cleans the exact container, and fails the run
+    in durable state before the process exits.
+    """
+
+    def _raise_system_exit(signum: int, _frame: Any) -> None:
+        raise SystemExit(f"host supervisor received signal {signum}")
+
+    for signum in (signal.SIGHUP, signal.SIGTERM):
+        try:
+            signal.signal(signum, _raise_system_exit)
+        except (OSError, ValueError):
+            pass
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -906,6 +926,7 @@ def launch_host_pi(
             before_spawn()
         if executable_sha256(selected["node"]) != prepared.manifest["hostProcess"]["executableSha256"]:
             raise HostSupervisorError("Node executable changed between prepare and spawn")
+        _install_cleanup_signal_handlers()
         process = subprocess.Popen(argv, cwd=str(cwd), env=environment, stdin=None, stdout=None, stderr=None, shell=False, close_fds=True, pass_fds=(child_channel.fileno(),))
         child_channel.close()
         child_channel = None
