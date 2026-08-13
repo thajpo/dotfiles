@@ -20,7 +20,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from scripts.pi_control.docker_runtime import MANAGED_LABEL, PINNED_ACCEPTANCE_IMAGE
+from scripts.pi_control.docker_runtime import PINNED_ACCEPTANCE_IMAGE
+from tests.system.container_hygiene import assert_fixture_containers_absent
 from tests.system.evidence import Evidence, write_evidence
 from tests.system.staged_install import StagedInstallUnavailable, install
 
@@ -145,9 +146,7 @@ def main() -> int:
         project_conversations = rows(state, "conversations", f"WHERE project_id='{project['project_id']}' AND role='personal'")
         day_two_tip = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], stdout=subprocess.PIPE, text=True).stdout.strip()
 
-        managed = command(["docker", "ps", "-aq", "--filter", f"label={MANAGED_LABEL}=true"]).stdout.split()
-        if managed:
-            raise AssertionError(f"managed containers remain after resume journey: {managed}")
+        assert_fixture_containers_absent(state)
 
         assertions = {
             "dayOneWriterRuns": len(writer_runs),

@@ -26,7 +26,6 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from scripts.pi_control.docker_runtime import MANAGED_LABEL
 from tests.system.evidence import Evidence, write_evidence
 from tests.system.staged_install import install
 
@@ -96,9 +95,6 @@ def main() -> int:
         # fixture root for inspection.
         isolated = {"PATH": os.defpath, "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "TMUX_TMPDIR": str(tmux_tmp)}
         subprocess.run(["tmux", "kill-server"], env=isolated, capture_output=True, timeout=30)
-        managed = subprocess.run(["docker", "ps", "-aq", "--filter", f"label={MANAGED_LABEL}=true"], capture_output=True, text=True, timeout=30).stdout.split()
-        if managed:
-            print(f"SURFACE JOURNEY: managed containers remain after cleanup: {managed}", file=sys.stderr)
         print("fixture cleaned; evidence retained at", root, file=sys.stderr)
 
 
@@ -227,9 +223,7 @@ def _run_journey(root: Path, tmux_tmp: Path) -> int:
     # ---- cleanup -------------------------------------------------------
     for session in ("pisec", "pi-personal"):
         tmux(["kill-session", "-t", f"={session}"], surface_env, check=False)
-    managed = command(["docker", "ps", "-aq", "--filter", f"label={MANAGED_LABEL}=true"]).stdout.split()
-    if managed:
-        raise AssertionError(f"managed containers remain after surface journey: {managed}")
+    assert_fixture_containers_absent(state)
     combined = listing + launch_info + " ".join(pisec_windows) + " ".join(personal_windows)
     if "must-not-leak" in combined:
         raise AssertionError("surface journey leaked a credential or environment value")

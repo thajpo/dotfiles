@@ -16,7 +16,8 @@ import subprocess
 import sys
 import tempfile
 
-from scripts.pi_control.docker_runtime import MANAGED_LABEL, PINNED_ACCEPTANCE_IMAGE
+from scripts.pi_control.docker_runtime import PINNED_ACCEPTANCE_IMAGE
+from tests.system.container_hygiene import assert_fixture_containers_absent
 from tests.system.evidence import Evidence, write_evidence
 from tests.system.staged_install import StagedInstallUnavailable, install
 
@@ -268,9 +269,7 @@ def main() -> int:
         if not any(row["workstream_id"] == workstream_b["workstream_id"] for row in messages):
             raise AssertionError("workstream message is not bound to its workstream")
 
-        managed = command(["docker", "ps", "-aq", "--filter", f"label={MANAGED_LABEL}=true"]).stdout.split()
-        if managed:
-            raise AssertionError(f"managed containers remain after installed P7 journey: {managed}")
+        assert_fixture_containers_absent(state)
 
         combined = personal_stdout + personal_stderr + workstream_stdout + workstream_stderr + json.dumps(child_requests) + json.dumps(workstream_rows) + json.dumps(messages)
         if _LEAK in combined:

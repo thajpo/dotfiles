@@ -20,7 +20,8 @@ import time
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from scripts.pi_control.docker_runtime import MANAGED_LABEL, PINNED_ACCEPTANCE_IMAGE
+from tests.system.container_hygiene import assert_fixture_containers_absent, cleanup_fixture_containers, inspect_fixture_containers
+from scripts.pi_control.docker_runtime import PINNED_ACCEPTANCE_IMAGE
 from scripts.pi_control.models import utc_now
 from tests.system.evidence import Evidence, write_evidence
 from tests.system.staged_install import StagedInstallUnavailable, install
@@ -275,23 +276,23 @@ def main() -> int:
             writer_argv = [str(stage / "bin/pi-system-container-run"), "--state-root", str(state), "--conversation-id", personal["conversation_id"], "--build-id", build_id, "--prompt", json.dumps({"role": "personal"}), "--model", "scripted/scripted-1", "--acceptance-test-profile", "scripted-v1", "--test-provider", str(p7_provider), "--test-probe", str(probe), "--tool-image", PINNED_ACCEPTANCE_IMAGE]
             writer_process = subprocess.Popen(writer_argv, cwd=repo, env=_leak_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             time.sleep(3.0)
-            managed = command(["docker", "ps", "-q", "--filter", f"label={MANAGED_LABEL}=true"]).stdout.split()
-            if managed:
-                for container_id in managed:
-                    command(["docker", "kill", container_id], check=False)
+            writer_observations = [item for item in inspect_fixture_containers(state) if item.ref.kind == "writer" and not item.absent]
+            if len(writer_observations) != 1 or not writer_observations[0].identity_matches or not writer_observations[0].ref.container_id:
+                raise AssertionError(f"P10 fixture writer identity was not uniquely attested: {[item.as_dict() for item in writer_observations]}")
+            writer_container_id = writer_observations[0].ref.container_id
+            command(["docker", "container", "kill", writer_container_id])
             writer_process.kill()
             _wout, _werr = writer_process.communicate(timeout=30)
+            cleanup_fixture_containers(state)
             second_writer_refused = True
             try:
                 cli([str(controller), "--state-root", str(state), "conversation", "create", "--request-json", json.dumps({"projectId": project["project_id"], "role": "personal", "displayName": "P10 second", "workingCopyId": primary["working_copy_id"], "idempotencyKey": "p10-second-writer"})], label="second writer", check=False)
             except AssertionError:
                 pass
-            managed_after = command(["docker", "ps", "-aq", "--filter", f"label={MANAGED_LABEL}=true"]).stdout.split()
+            assert_fixture_containers_absent(state)
             assertions["writerContainerKilled"] = True
             assertions["secondWriterRefused"] = second_writer_refused
-            assertions["managedContainersRemaining"] = managed_after
-            if managed_after:
-                raise AssertionError(f"managed containers remain after writer kill scenario: {managed_after}")
+            assertions["managedContainersRemaining"] = []
         else:
             assertions["writerContainerKilled"] = "SKIP-docker-unavailable"
             assertions["secondWriterRefused"] = "SKIP-docker-unavailable"

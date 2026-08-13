@@ -25,7 +25,8 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from scripts.pi_control.docker_runtime import MANAGED_LABEL, PINNED_ACCEPTANCE_IMAGE
+from scripts.pi_control.docker_runtime import PINNED_ACCEPTANCE_IMAGE
+from tests.system.container_hygiene import assert_fixture_containers_absent
 from tests.system.evidence import Evidence, write_evidence
 from tests.system.staged_install import install
 
@@ -311,9 +312,7 @@ def main() -> int:
     work_index = rows(state, "conversations")
     ha029 = {"fleetChildren": len(fleet), "activeConversations": sum(1 for row in work_index if row["desired_state"] == "active"), "messages": len(messages), "changes": len(changes)}
 
-    managed = command(["docker", "ps", "-aq", "--filter", f"label={MANAGED_LABEL}=true"]).stdout.split()
-    if managed:
-        raise AssertionError(f"managed containers remain after repair journey: {managed}")
+    assert_fixture_containers_absent(state)
 
     build_id = registered_build["build_id"]
     combined = writer_stdout + writer_stderr + secretary_stdout + secretary_stderr
