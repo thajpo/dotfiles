@@ -142,6 +142,7 @@ def _run_journey(root: Path, tmux_tmp: Path) -> int:
     surface_env.update({
         "HOME": str(fixture_home), "PI_SYSTEM_DATA_ROOT": str(data_root), "PI_SYSTEM_STATE_ROOT": str(state),
         "TMUX_TMPDIR": str(tmux_tmp), "PI_SYSTEM_MODEL": "scripted/scripted-1",
+        "TERM": "xterm-256color",
         "OPENAI_API_KEY": "must-not-leak", "GH_TOKEN": "must-not-leak",
     })
 

@@ -135,6 +135,7 @@ RELEASE_FILES = (
     "scripts/pi_control/investigators.py",
     "scripts/pi_control/subagents.py",
     "scripts/pi_control/presentation.py",
+    "scripts/pi_control/presentation_locator.py",
     "scripts/pi_control/reconcile.py",
     "scripts/pi_control/run_manifest.py",
     "scripts/pi_control/staged_build.py",

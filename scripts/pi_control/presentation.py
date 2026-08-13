@@ -45,7 +45,7 @@ class TmuxBackend:
         path = shutil.which("tmux", path=os.defpath)
         if path is None:
             raise PresentationError("tmux is unavailable")
-        env: dict[str, str] = {"PATH": os.defpath, "HOME": self.home or "/nonexistent", "LANG": "C", "LC_ALL": "C"}
+        env: dict[str, str] = {"PATH": os.defpath, "HOME": self.home or "/nonexistent", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
         if self.tmux_tmpdir:
             env["TMUX_TMPDIR"] = self.tmux_tmpdir
         result = subprocess.run(
