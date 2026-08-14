@@ -104,4 +104,13 @@ def register_staged_build(store: Any, staged_root: str | Path) -> dict[str, Any]
     return dict(store.conn.execute("SELECT * FROM installed_builds WHERE build_id=?", (manifest.build_id,)).fetchone())
 
 
-__all__ = ["InstalledBuildError", "register_staged_build", "verify_registered_build"]
+def activate_registered_build(store: Any, build_id: str) -> dict[str, Any]:
+    row = verify_registered_build(store, build_id)
+    now = utc_now()
+    with store.transaction():
+        store.conn.execute("UPDATE installed_builds SET status='superseded' WHERE status='active' AND build_id<>?", (build_id,))
+        store.conn.execute("UPDATE installed_builds SET status='active',activated_at=?,rollback_path=NULL WHERE build_id=?", (now, build_id))
+    return dict(store.conn.execute("SELECT * FROM installed_builds WHERE build_id=?", (row["build_id"],)).fetchone())
+
+
+__all__ = ["InstalledBuildError", "activate_registered_build", "register_staged_build", "verify_registered_build"]

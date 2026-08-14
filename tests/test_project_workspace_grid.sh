@@ -10,7 +10,7 @@ set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 temporary=$(mktemp -d /tmp/project-workspace-test.XXXXXX)
 cleanup() {
-  TMUX_TMPDIR="$temporary/tmux" env -u TMUX tmux kill-server >/dev/null 2>&1 || true
+  env -u TMUX tmux -S "$temporary/pi.sock" kill-server >/dev/null 2>&1 || true
   rm -rf "$temporary"
 }
 trap cleanup EXIT
@@ -18,7 +18,9 @@ trap cleanup EXIT
 mkdir -p "$temporary/bin" "$temporary/scripts" "$temporary/state" "$temporary/tmux" "$temporary/repo"
 chmod 700 "$temporary/state"
 cp "$root/bin/pidev" "$temporary/bin/pidev"
+cp "$root/bin/pi-tmux" "$temporary/bin/pi-tmux"
 chmod +x "$temporary/bin/pidev"
+chmod +x "$temporary/bin/pi-tmux"
 
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid
 git -C "$temporary/repo" init -q
@@ -39,7 +41,7 @@ PROJECT_ID = "prj_" + "a" * 32
 
 
 def tmux(*args):
-    return sp.run(["tmux", *args], capture_output=True, text=True)
+    return sp.run(["tmux", "-S", os.environ["PI_TMUX_SOCKET"], *args], capture_output=True, text=True)
 
 
 def workstreams_for(project_id):
@@ -98,25 +100,26 @@ if __name__ == "__main__":
 PY
 chmod +x "$temporary/scripts/pi-surface.py"
 
-export TMUX_TMPDIR="$temporary/tmux"
+export PI_TMUX_SOCKET="$temporary/pi.sock"
 unset TMUX
 export PROJECT_WORKSPACE_STATE="$temporary/state"
-tmux new-session -d -s scratch >/dev/null 2>&1
+ptmux() { tmux -S "$PI_TMUX_SOCKET" "$@"; }
+ptmux new-session -d -s scratch >/dev/null 2>&1
 
 pidev() { PIPEV_NO_ATTACH=1 "$temporary/bin/pidev" "$@"; }
 
 # No workstream: pidev opens an editor-only home window and never creates
 # a worktree or workstream.
 pidev "$temporary/repo" >/dev/null 2>&1
-session=$(tmux list-sessions -F '#{session_name}' | grep '^pi-project-' | head -1)
+session=$(ptmux list-sessions -F '#{session_name}' | grep '^pi-project-' | head -1)
 [[ -n "$session" ]] || { echo "FAIL: project session missing"; exit 1; }
-tmux list-windows -t "=$session" -F '#{window_name}' | grep -qx home || { echo "FAIL: home window missing"; exit 1; }
+ptmux list-windows -t "=$session" -F '#{window_name}' | grep -qx home || { echo "FAIL: home window missing"; exit 1; }
 
 # Reopen must not duplicate the session or the home window.
 pidev "$temporary/repo" >/dev/null 2>&1
-count=$(tmux list-sessions -F '#{session_name}' | grep -c '^pi-project-')
+count=$(ptmux list-sessions -F '#{session_name}' | grep -c '^pi-project-')
 (( count == 1 )) || { echo "FAIL: duplicate project sessions ($count)"; exit 1; }
-home_count=$(tmux list-windows -t "=$session" -F '#{window_name}' | grep -c '^home$')
+home_count=$(ptmux list-windows -t "=$session" -F '#{window_name}' | grep -c '^home$')
 (( home_count == 1 )) || { echo "FAIL: duplicate home windows ($home_count)"; exit 1; }
 
 # With a headful workstream, pidev reconciles the ws- window instead and
@@ -124,9 +127,9 @@ home_count=$(tmux list-windows -t "=$session" -F '#{window_name}' | grep -c '^ho
 echo '{"prj_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [{"title": "feature work", "id": "ws_deadbeefdeadbeef", "conversation": "conv_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1", "path": "'"$temporary"'/repo"}]}' > "$temporary/state/workstreams.json"
 # Close the editor window as a user would; reopening with a workstream must
 # reconcile the ws- window and must not recreate the home window.
-tmux kill-window -t "=$session:home"
+ptmux kill-window -t "=$session:home"
 pidev "$temporary/repo" >/dev/null 2>&1
-tmux list-windows -t "=$session" -F '#{window_name}' | grep -q '^ws-' || { echo "FAIL: workstream window missing"; exit 1; }
-tmux list-windows -t "=$session" -F '#{window_name}' | grep -qx home && { echo "FAIL: home window recreated despite workstream"; exit 1; }
+ptmux list-windows -t "=$session" -F '#{window_name}' | grep -q '^ws-' || { echo "FAIL: workstream window missing"; exit 1; }
+ptmux list-windows -t "=$session" -F '#{window_name}' | grep -qx home && { echo "FAIL: home window recreated despite workstream"; exit 1; }
 
 echo "project workspace grid mechanics: ok"

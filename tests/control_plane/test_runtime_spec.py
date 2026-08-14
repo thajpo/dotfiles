@@ -39,6 +39,7 @@ class RuntimeSpecTests(unittest.TestCase):
             "mounts": [
                 {"kind": "working-copy", "source": manifest["scope"]["rootPath"], "target": "/workspace", "readOnly": False, "sourceDevice": 1, "sourceInode": 2},
                 {"kind": "git-mask", "source": "/state/git-mask", "target": "/workspace/.git", "readOnly": True, "sourceDevice": 1, "sourceInode": 3},
+                {"kind": "package-environment", "source": f"/state/environments/{manifest['scope']['workingCopyId']}", "target": "/environments", "readOnly": False, "sourceDevice": 1, "sourceInode": 4},
             ],
             "tmpfs": {"/tmp": "rw,noexec,nosuid,nodev,size=64m,mode=1777"}, "networkMode": "none", "capDrop": ["ALL"],
             "securityOpt": ["no-new-privileges:true"], "environment": {"HOME": "/tmp"},

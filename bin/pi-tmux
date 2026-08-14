@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Run tmux against the Pi-owned socket, never the ambient default server.
+set -euo pipefail
+self_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+
+if [[ ${1:-} == --print-socket ]]; then
+  (( $# == 1 )) || { printf 'pi-tmux: --print-socket takes no arguments\n' >&2; exit 2; }
+  if [[ -n ${PI_TMUX_SOCKET:-} ]]; then
+    printf '%s\n' "$PI_TMUX_SOCKET"
+  elif [[ -n ${PI_SYSTEM_STATE_ROOT:-} ]]; then
+    printf '%s/tmux/pi.sock\n' "${PI_SYSTEM_STATE_ROOT%/}"
+  else
+    printf '%s\n' "${HOME:-/nonexistent}/.local/state/pi-system/tmux/pi.sock"
+  fi
+  exit 0
+fi
+
+command -v tmux >/dev/null 2>&1 || { printf 'pi-tmux: tmux is required\n' >&2; exit 127; }
+socket=$(PI_TMUX_SOCKET="${PI_TMUX_SOCKET:-}" PI_SYSTEM_STATE_ROOT="${PI_SYSTEM_STATE_ROOT:-}" HOME="${HOME:-}" "$0" --print-socket)
+mkdir -p "$(dirname -- "$socket")"
+if [[ -z ${PI_SYSTEM_STATE_ROOT:-} ]]; then
+  PI_SYSTEM_STATE_ROOT="${HOME:-/nonexistent}/.local/state/pi-system"
+fi
+export PI_SYSTEM_STATE_ROOT
+export PI_TMUX_BIN_DIR="$self_dir"
+export PI_TMUX_SOCKET="$socket"
+
+# The Pi server loads the dotfiles tmux.conf so keybinds, theme, plugins, and
+# status behave like the user's own server. Config helpers (TPM, status
+# scripts, tmux-copy) expand ~, so the server must boot with the real HOME.
+# The environment stays otherwise minimal: no secrets ever enter the server,
+# and pi-start explicitly sanitizes the global environment for new panes.
+tmux_conf="$self_dir/../tmux.conf"
+[[ -f "$tmux_conf" ]] || tmux_conf="$HOME/.tmux.conf"
+real_home="${HOME:-/nonexistent}"
+
+# tmux auto-starts its server only for commands flagged CMD_STARTSERVER
+# (new-session, attach, ...). Commands such as set-environment, has-session,
+# kill-session, and list-windows run against an existing server. A tmux 3.4
+# server also exits when it has no sessions, so a bare `start-server` boots
+# and immediately dies. Boot the server with the durable `main` anchor
+# session instead (the same session pi-start maintains).
+boot_server() {
+  env -i \
+    PATH=/bin:/usr/bin \
+    HOME="$real_home" \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PI_SYSTEM_STATE_ROOT="$PI_SYSTEM_STATE_ROOT" \
+    PI_TMUX_BIN_DIR="$PI_TMUX_BIN_DIR" \
+    PI_TMUX_SOCKET="$PI_TMUX_SOCKET" \
+    tmux -f "$tmux_conf" -S "$socket" "$@"
+}
+
+if ! env -i PATH=/bin:/usr/bin HOME="$real_home" LANG=C.UTF-8 LC_ALL=C.UTF-8 tmux -S "$socket" list-sessions >/dev/null 2>&1; then
+  # No server (or a stale socket): boot one. Concurrent boots may race; the
+  # loser's new-session fails against the winner's server, which is fine.
+  boot_server new-session -d -s main -n shell -c / 'exec bash' >/dev/null 2>&1 || true
+fi
+if [[ -S "$socket" ]]; then
+  exec tmux -S "$socket" "$@"
+fi
+exec boot_server "$@"

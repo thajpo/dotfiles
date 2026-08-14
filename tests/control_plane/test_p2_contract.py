@@ -13,7 +13,7 @@ import unittest
 
 from scripts.pi_control.conversations import create_conversation
 from scripts.pi_control.command_requests import CommandRequestError
-from scripts.pi_control.errors import DatabaseCorruptError, ErrorCode
+from scripts.pi_control.errors import DatabaseCorruptError, ErrorCode, SchemaResetRequiredError
 from scripts.pi_control.pi_client import PiControllerClient
 from scripts.pi_control.pi_protocol import ProtocolError, protocol_request
 from scripts.pi_control.pi_store import PiStore
@@ -101,6 +101,18 @@ class P2ContractTests(unittest.TestCase):
                 PiStore(root).open()
             self.assertEqual((root / "control.db").read_bytes(), database_before)
             self.assertEqual(sentinel.read_bytes(), b"old-state-sentinel\x00unchanged")
+
+    def test_schema_mismatch_requires_explicit_reset_without_mutating_db(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "state"
+            with PiStore(root) as store:
+                before = store.conn.execute("SELECT source_sha256 FROM schema_migrations WHERE version=3").fetchone()[0]
+                store.conn.execute("UPDATE schema_migrations SET source_sha256='sha256:' || printf('%064d', 0) WHERE version=3")
+            with self.assertRaises(SchemaResetRequiredError) as caught:
+                PiStore(root, read_only=True).open()
+            self.assertEqual(caught.exception.code, ErrorCode.SCHEMA_RESET_REQUIRED)
+            with sqlite3.connect(root / "control.db") as connection:
+                self.assertNotEqual(connection.execute("SELECT source_sha256 FROM schema_migrations WHERE version=3").fetchone()[0], before)
 
     def test_roles_and_session_identity_are_controller_derived(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

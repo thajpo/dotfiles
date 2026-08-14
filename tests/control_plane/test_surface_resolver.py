@@ -69,6 +69,20 @@ class SurfaceResolverTests(unittest.TestCase):
         with self.assertRaises(surface.SurfaceError):
             surface.launch_argv("bogus", "conv_x", "prompt")
 
+    def test_personal_conversation_ignores_archived_conversation(self) -> None:
+        surface = _load_surface()
+        with mock.patch.object(
+            surface,
+            "project_status",
+            return_value={
+                "conversations": [
+                    {"role": "personal", "desired_state": "archived", "conversation_id": "conv_old"},
+                    {"role": "personal", "desired_state": "active", "conversation_id": "conv_new"},
+                ]
+            },
+        ):
+            self.assertEqual(surface.personal_conversation("prj_x")["conversation_id"], "conv_new")
+
     def test_stage_freshness_marker_is_outside_stage(self) -> None:
         # The surface stage must exactly match its build manifest, so the
         # freshness marker cannot live inside the staged tree.

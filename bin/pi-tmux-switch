@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Jump to a Pi session, including from a different tmux server.
+set -euo pipefail
+
+session=${1:-}
+[[ -n "$session" && $# -eq 1 ]] || { printf 'usage: pi-tmux-switch SESSION\n' >&2; exit 2; }
+self_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+pi_tmux="$self_dir/pi-tmux"
+[[ -x "$pi_tmux" ]] || { printf 'pi-tmux-switch: pi-tmux is missing\n' >&2; exit 1; }
+
+if ! "$pi_tmux" has-session -t "=$session" 2>/dev/null; then
+  printf 'Pi session is not running: %s\n' "$session" >&2
+  exit 1
+fi
+
+socket=$($pi_tmux --print-socket)
+if [[ ${TMUX:-} == "$socket,"* ]]; then
+  exec "$pi_tmux" switch-client -t "=$session"
+elif [[ -n ${TMUX:-} ]]; then
+  exec env -u TMUX "$pi_tmux" attach-session -d -t "=$session"
+fi
+exec "$pi_tmux" attach-session -t "=$session"

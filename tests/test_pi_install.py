@@ -10,7 +10,7 @@ import tarfile
 import tempfile
 import unittest
 
-from scripts.pi_control.pi_install import InstallError, PI_PACKAGE, ensure_fresh_state, stage, verify_stage
+from scripts.pi_control.pi_install import InstallError, PI_PACKAGE, _materialize_source, ensure_fresh_state, stage, verify_stage
 from scripts.pi_control.staged_build import create_build_manifest, load_build_manifest, write_build_manifest
 from tests.system import staged_install
 
@@ -87,6 +87,31 @@ def special_file_test_pi_core(root: Path) -> Path:
 
 
 class GreenfieldInstallTests(unittest.TestCase):
+    def test_dirty_release_source_requires_explicit_override(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with self.assertRaisesRegex(InstallError, "uncommitted changes"):
+                stage(ROOT, Path(raw) / "stage", allow_dirty=False)
+
+    def test_git_ref_materialization_applies_only_allowed_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw) / "repo"
+            repository.mkdir()
+            (repository / "pi").mkdir()
+            (repository / "pi/PI_VERSION").write_text("0.83.0\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            subprocess.run(["git", "-C", str(repository), "add", "pi/PI_VERSION"], check=True)
+            subprocess.run(["git", "-C", str(repository), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base"], check=True)
+            (repository / "pi/PI_VERSION").write_text("0.83.0-overlay\n", encoding="utf-8")
+            materialized, commit, tree, mode, cleanup = _materialize_source(repository, "HEAD", ["pi/PI_VERSION"])
+            try:
+                self.assertEqual(mode, "git-ref")
+                self.assertEqual((materialized / "pi/PI_VERSION").read_text(encoding="utf-8"), "0.83.0-overlay\n")
+                self.assertEqual(len(commit), 40)
+                self.assertEqual(len(tree), 40)
+                self.assertEqual(cleanup, materialized)
+            finally:
+                shutil.rmtree(materialized, ignore_errors=True)
+
     def test_staged_controller_runs_without_activation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

@@ -11,8 +11,11 @@
 set -euo pipefail
 
 self_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+pi_tmux="$self_dir/pi-tmux"
+[[ -x "$pi_tmux" ]] || { printf 'pidev: pi-tmux is missing\n' >&2; exit 1; }
 helper="$self_dir/../scripts/pi-surface.py"
 [[ -f "$helper" ]] || { printf 'pidev: surface helper is missing\n' >&2; exit 1; }
+export PI_TMUX_SOCKET="${PI_TMUX_SOCKET:-$($pi_tmux --print-socket)}"
 
 if [[ ${PI_SUBAGENT_CHILD:-0} == 1 ]]; then
   printf 'pidev: refusing ordinary invocation from a Pi subagent\n' >&2
@@ -55,29 +58,29 @@ present_out=$(python3 "$helper" present-project "$project_id" --layout "$layout_
 }
 workstream_count=$(python3 -c "import json,sys; print(len(json.load(sys.stdin)['present']))" <<<"$present_out")
 
-if [[ -n ${TMUX:-} ]]; then
-  tmux switch-client -t "=$project_session" 2>/dev/null || true
-fi
-if ! tmux has-session -t "=$project_session" 2>/dev/null; then
-  tmux new-session -d -s "$project_session" -n shell -c "$repository" 'exec bash'
+if ! "$pi_tmux" has-session -t "=$project_session" 2>/dev/null; then
+  "$pi_tmux" new-session -d -s "$project_session" -n shell -c "$repository" 'exec bash'
 fi
 if (( workstream_count == 0 )); then
   # No headful workstream exists: open an editor-only home window on the
   # primary checkout. Workstreams appear here only after approved creation.
-  if ! tmux list-windows -t "=$project_session" -F '#{window_name}' 2>/dev/null | grep -qx home; then
-    tmux new-window -d -t "=$project_session" -n home -c "$repository"
+  if ! "$pi_tmux" list-windows -t "=$project_session" -F '#{window_name}' 2>/dev/null | grep -qx home; then
+    "$pi_tmux" new-window -d -t "=$project_session" -n home -c "$repository"
   fi
-  tmux send-keys -t "=$project_session:home" 'nvim' Enter
+  "$pi_tmux" send-keys -t "=$project_session:home" 'nvim' Enter
 fi
-if tmux list-windows -t "=$project_session" -F '#{window_name}' 2>/dev/null | grep -qx shell; then
-  remaining=$(tmux list-windows -t "=$project_session" -F '#{window_name}' | grep -v '^shell$' | wc -l) || true
-  (( remaining > 0 )) && tmux kill-window -t "=$project_session:shell" 2>/dev/null || true
+if "$pi_tmux" list-windows -t "=$project_session" -F '#{window_name}' 2>/dev/null | grep -qx shell; then
+  remaining=$("$pi_tmux" list-windows -t "=$project_session" -F '#{window_name}' | grep -v '^shell$' | wc -l) || true
+  (( remaining > 0 )) && "$pi_tmux" kill-window -t "=$project_session:shell" 2>/dev/null || true
 fi
 if [[ -n ${PIPEV_NO_ATTACH:-} ]]; then
   # Test seam: build/reconcile the workspace without attaching a client.
   exit 0
 fi
-if [[ -n ${TMUX:-} ]]; then
-  exec tmux switch-client -t "=$project_session"
+pi_socket=$($pi_tmux --print-socket)
+if [[ ${TMUX:-} == "$pi_socket,"* ]]; then
+  exec "$pi_tmux" switch-client -t "=$project_session"
+elif [[ -n ${TMUX:-} ]]; then
+  exec env -u TMUX "$pi_tmux" attach-session -d -t "=$project_session"
 fi
-exec tmux attach-session -t "=$project_session"
+exec "$pi_tmux" attach-session -t "=$project_session"

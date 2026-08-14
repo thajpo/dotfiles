@@ -11,14 +11,17 @@ set -euo pipefail
 
 if (( EUID == 0 )); then printf 'pisec: refusing to run as root\n' >&2; exit 1; fi
 self_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+pi_tmux="$self_dir/pi-tmux"
+[[ -x "$pi_tmux" ]] || { printf 'pisec: pi-tmux is missing\n' >&2; exit 1; }
 helper="$self_dir/../scripts/pi-surface.py"
 [[ -f "$helper" ]] || { printf 'pisec: surface helper is missing\n' >&2; exit 1; }
 
 usage() {
   printf '%s\n' \
-    'usage: pisec [--mobile|-mobile] [list | register [ALIAS] [REPOSITORY] | launch-info [PROJECT_ID] | open | launch | activate ALIAS [ALIAS ...] | swap OLD NEW]' \
+    'usage: pisec [--mobile|-mobile] [--ensure] [list | register [ALIAS] [REPOSITORY] | launch-info [PROJECT_ID] | open | launch | activate ALIAS [ALIAS ...] | swap OLD NEW]' \
     '       pisec                     (open the secretary grid for the active set)' \
     '       pisec list                (list registered projects and the active set)' \
+    '       pisec --ensure            (repair the secretary grid without attaching)' \
     '       pisec register [ALIAS] [REPOSITORY]' \
     '       pisec activate ALIAS...   (set the ordered active set)' \
     '       pisec swap OLD NEW        (reorder the active set)' \
@@ -28,10 +31,12 @@ usage() {
 }
 
 mobile_layout=0
+ensure_only=0
 action=open
 while (( $# )); do
   case "$1" in
     --mobile|-mobile) mobile_layout=1 ;;
+    --ensure) ensure_only=1 ;;
     list|open|launch|register|activate|swap|launch-info) action=$1 ;;
     help|-h|--help) usage; exit 0 ;;
     *) break ;;
@@ -39,8 +44,33 @@ while (( $# )); do
   shift
 done
 
+case "$action" in
+  open|launch|list)
+    (( $# == 0 )) || { printf 'pisec: unexpected argument: %s\n' "$1" >&2; usage; exit 2; }
+    ;;
+  register)
+    (( $# <= 2 )) || { printf 'pisec: register accepts ALIAS and REPOSITORY only\n' >&2; usage; exit 2; }
+    ;;
+  launch-info)
+    (( $# <= 1 )) || { printf 'pisec: launch-info accepts at most one project\n' >&2; usage; exit 2; }
+    ;;
+  swap)
+    (( $# == 2 )) || { printf 'pisec: swap requires OLD and NEW aliases\n' >&2; usage; exit 2; }
+    ;;
+  activate)
+    (( $# > 0 )) || { printf 'pisec: activate requires at least one alias (or --clear)\n' >&2; exit 1; }
+    ;;
+esac
+if (( ensure_only )) && [[ "$action" != open && "$action" != launch ]]; then
+  printf 'pisec: --ensure is only valid for grid open/repair\n' >&2
+  usage
+  exit 2
+fi
+
 env_json=$(python3 "$helper" env)
 state_root=$(python3 -c "import json,sys; print(json.load(sys.stdin)['stateRoot'])" <<<"$env_json")
+export PI_SYSTEM_STATE_ROOT="${PI_SYSTEM_STATE_ROOT:-$state_root}"
+export PI_TMUX_SOCKET="${PI_TMUX_SOCKET:-$($pi_tmux --print-socket)}"
 
 if [[ "$action" == register ]]; then
   alias_name=${1:-}
@@ -136,6 +166,7 @@ fi
 
 if [[ "$action" == activate ]]; then
   if [[ "$1" == "--clear" ]]; then
+    (( $# == 1 )) || { printf 'pisec: activate --clear accepts no additional aliases\n' >&2; exit 2; }
     python3 "$helper" preference set pisec >/dev/null
     printf 'pisec: active set is now empty\n' >&2
     exit 0
@@ -234,6 +265,13 @@ if [[ -n "$excluded" ]]; then
   printf 'pisec: conversations skipped (live or unrecoverable run): %s\n' "$excluded" >&2
 fi
 
+if (( ensure_only )) || [[ "$action" == launch ]]; then exit 0; fi
 if [[ "$action" == open ]]; then
-  exec tmux attach-session -t "=$session"
+  pi_socket=$($pi_tmux --print-socket)
+  if [[ ${TMUX:-} == "$pi_socket,"* ]]; then
+    exec "$pi_tmux" switch-client -t "=$session"
+  elif [[ -n ${TMUX:-} ]]; then
+    exec env -u TMUX "$pi_tmux" attach-session -d -t "=$session"
+  fi
+  exec "$pi_tmux" attach-session -t "=$session"
 fi

@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 from scripts.pi_control.conversations import create_conversation
-from scripts.pi_control.launch import prepare_run
+from scripts.pi_control.launch import LaunchError, fail_run, prepare_run
 from scripts.pi_control.pi_client import PiControllerClient
 from scripts.pi_control.pi_reconcile import ReconcileError
 from scripts.pi_control.pi_store import PiStore
@@ -34,6 +34,9 @@ class RunRecoveryTests(unittest.TestCase):
         patcher = allow_test_only_registered_build_rows()
         patcher.start()
         self.addCleanup(patcher.stop)
+        cleanup_patcher = mock.patch("scripts.pi_control.docker_runtime.cleanup_run_container", return_value={"absent": True, "errors": []})
+        self.cleanup_container = cleanup_patcher.start()
+        self.addCleanup(cleanup_patcher.stop)
 
     def _registered(self, root: Path, name: str) -> dict:
         client = PiControllerClient(root / "state")
@@ -69,6 +72,7 @@ class RunRecoveryTests(unittest.TestCase):
             self.assertEqual(attention["decision"], "needs-attention")
             recovered = client.recover_run(run_id=run_id, actor_id="test-writer-recovery")
             self.assertEqual(recovered["observed_state"], "lost")
+            self.cleanup_container.assert_called_once_with(mock.ANY, run_id=run_id)
             with PiStore(root / "state") as store:
                 claim = store.conn.execute("SELECT active_writer_run_id FROM working_copies WHERE working_copy_id=?", (conversation["working_copy_id"],)).fetchone()[0]
                 self.assertIsNone(claim)
@@ -76,6 +80,47 @@ class RunRecoveryTests(unittest.TestCase):
                 fresh.close()
                 self.assertIsNotNone(fresh.run["run_id"])
                 self.assertNotEqual(fresh.run["run_id"], run_id)
+
+    def test_writer_recovery_before_manifest_needs_no_container_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            client = PiControllerClient(root / "state")
+            project = self._registered(root, "pre-manifest")
+            with PiStore(root / "state") as store:
+                _register_build(store, root)
+                conversation = self._writer_conversation(store, project, "pre-manifest")
+                prepared = self._prepare_writer(store, project, conversation, "pre-manifest-run")
+                run_id = prepared.run["run_id"]
+                self._kill_run(store, run_id)
+                store.conn.execute("UPDATE runs SET manifest_path=NULL,container_id=NULL,container_observation_json=NULL WHERE run_id=?", (run_id,))
+                prepared.close()
+            attention = client.reconcile_run(run_id=run_id)
+            self.assertEqual(attention["decision"], "needs-attention")
+            recovered = client.recover_run(run_id=run_id, actor_id="test-pre-manifest")
+            self.assertEqual(recovered["observed_state"], "lost")
+            self.cleanup_container.assert_not_called()
+            with PiStore(root / "state") as store:
+                claim = store.conn.execute("SELECT active_writer_run_id FROM working_copies WHERE working_copy_id=?", (conversation["working_copy_id"],)).fetchone()[0]
+                self.assertIsNone(claim)
+
+    def test_recovery_of_stopping_writer_proves_cleanup_and_releases_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            client = PiControllerClient(root / "state")
+            project = self._registered(root, "stopping")
+            with PiStore(root / "state") as store:
+                _register_build(store, root)
+                conversation = self._writer_conversation(store, project, "stopping")
+                prepared = self._prepare_writer(store, project, conversation, "stopping-run")
+                run_id = prepared.run["run_id"]
+                self._kill_run(store, run_id)
+                store.conn.execute("UPDATE runs SET observed_state='stopping' WHERE run_id=?", (run_id,))
+                prepared.close()
+            outcome = client.recover_conversation(conversation_id=conversation["conversation_id"], actor_id="surface-repair")
+            item = next(item for item in outcome["runs"] if item["runId"] == run_id)
+            self.assertEqual(item["decision"], "recovered")
+            self.assertEqual(item["run"]["observed_state"], "lost")
+            self.cleanup_container.assert_called_once_with(mock.ANY, run_id=run_id)
 
     def test_writer_recovery_refuses_held_lock(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -201,8 +246,9 @@ class RunRecoveryTests(unittest.TestCase):
                 run_id = prepared.run["run_id"]
                 store.conn.execute("UPDATE runs SET owner_pid=?,owner_start_identity=?,observed_state='running' WHERE run_id=?", (_DEAD_PID, _DEAD_IDENTITY, run_id))
                 client.reconcile_run(run_id=run_id)
-                recovered = client.recover_run(run_id=run_id, actor_id="test-secretary")
-                self.assertEqual(recovered["observed_state"], "lost")
+            recovered = client.recover_run(run_id=run_id, actor_id="test-secretary")
+            self.assertEqual(recovered["observed_state"], "lost")
+            self.cleanup_container.assert_not_called()
 
     def test_writer_lock_probe_never_mutates_lock_content(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -268,6 +314,128 @@ class RunRecoveryTests(unittest.TestCase):
                     self.assertEqual(decisions[prepared.run["run_id"]], "uncertain")
                     run = store.conn.execute("SELECT observed_state FROM runs WHERE run_id=?", (prepared.run["run_id"],)).fetchone()
                     self.assertEqual(run["observed_state"], "needs_attention")
+
+    def _fail_interrupted_writer(self, store: PiStore, run_id: str, *, needs_attention: bool = True) -> None:
+        fail_run(store, run_id=run_id, code="HOST_SUPERVISOR_INTERRUPTED", detail="host supervisor interrupted", needs_attention=needs_attention)
+
+    def test_conversation_recovery_recovers_interrupted_terminal_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            client = PiControllerClient(root / "state")
+            project = self._registered(root, "terminal")
+            with PiStore(root / "state") as store:
+                _register_build(store, root)
+                conversation = self._writer_conversation(store, project, "terminal")
+                prepared = self._prepare_writer(store, project, conversation, "terminal-run")
+                run_id = prepared.run["run_id"]
+                self._kill_run(store, run_id)
+                self._fail_interrupted_writer(store, run_id)
+                run = store.conn.execute("SELECT observed_state FROM runs WHERE run_id=?", (run_id,)).fetchone()
+                self.assertEqual(run["observed_state"], "needs_attention")
+                claim = store.conn.execute("SELECT active_writer_run_id FROM working_copies WHERE working_copy_id=?", (conversation["working_copy_id"],)).fetchone()[0]
+                self.assertEqual(claim, run_id)
+                prepared.close()
+            outcome = client.recover_conversation(conversation_id=conversation["conversation_id"], actor_id="surface-repair")
+            decisions = {item["runId"]: item["decision"] for item in outcome["runs"]}
+            self.assertEqual(decisions[run_id], "recovered")
+            self.assertEqual(outcome["runs"][0]["run"]["observed_state"], "lost")
+            with PiStore(root / "state") as store:
+                claim = store.conn.execute("SELECT active_writer_run_id FROM working_copies WHERE working_copy_id=?", (conversation["working_copy_id"],)).fetchone()[0]
+                self.assertIsNone(claim)
+                fresh = self._prepare_writer(store, project, conversation, "terminal-fresh")
+                fresh.close()
+                self.assertNotEqual(fresh.run["run_id"], run_id)
+
+    def test_recover_run_accepts_interrupted_claiming_writer_and_preserves_code(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            client = PiControllerClient(root / "state")
+            project = self._registered(root, "failed-claim")
+            with PiStore(root / "state") as store:
+                _register_build(store, root)
+                conversation = self._writer_conversation(store, project, "failed-claim")
+                prepared = self._prepare_writer(store, project, conversation, "failed-claim-run")
+                run_id = prepared.run["run_id"]
+                self._kill_run(store, run_id)
+                self._fail_interrupted_writer(store, run_id)
+                prepared.close()
+            recovered = client.recover_run(run_id=run_id, actor_id="test-failed-claim")
+            self.assertEqual(recovered["observed_state"], "lost")
+            self.assertEqual(recovered["error_code"], "HOST_SUPERVISOR_INTERRUPTED")
+            with PiStore(root / "state") as store:
+                claim = store.conn.execute("SELECT active_writer_run_id FROM working_copies WHERE working_copy_id=?", (conversation["working_copy_id"],)).fetchone()[0]
+                self.assertIsNone(claim)
+
+    def test_conversation_recovery_releases_terminal_failed_writer_claim_without_state_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            client = PiControllerClient(root / "state")
+            project = self._registered(root, "no-claim")
+            with PiStore(root / "state") as store:
+                _register_build(store, root)
+                conversation = self._writer_conversation(store, project, "no-claim")
+                prepared = self._prepare_writer(store, project, conversation, "no-claim-run")
+                run_id = prepared.run["run_id"]
+                self._kill_run(store, run_id)
+                self._fail_interrupted_writer(store, run_id, needs_attention=False)
+                run = store.conn.execute("SELECT observed_state FROM runs WHERE run_id=?", (run_id,)).fetchone()
+                self.assertEqual(run["observed_state"], "failed")
+                prepared.close()
+                outcome = client.recover_conversation(conversation_id=conversation["conversation_id"], actor_id="surface-repair")
+                item = next(item for item in outcome["runs"] if item["runId"] == run_id)
+                self.assertEqual(item["decision"], "recovered")
+                recovered = item["run"]
+                self.assertEqual(recovered["observed_state"], "failed")
+                self.assertEqual(recovered["error_code"], "HOST_SUPERVISOR_INTERRUPTED")
+                claim = store.conn.execute("SELECT active_writer_run_id FROM working_copies WHERE working_copy_id=?", (conversation["working_copy_id"],)).fetchone()[0]
+                self.assertIsNone(claim)
+                event = store.conn.execute("SELECT event_kind FROM control_events WHERE resource_id=? ORDER BY sequence DESC LIMIT 1", (run_id,)).fetchone()
+                self.assertEqual(event["event_kind"], "run.writer-claim-recovered")
+                retried = client.recover_run(run_id=run_id, actor_id="test-terminal-claim")
+                self.assertEqual(retried["observed_state"], "failed")
+                fresh = self._prepare_writer(store, project, conversation, "terminal-claim-fresh")
+                fresh.close()
+
+    def test_conversation_recovery_refuses_unproved_container_for_interrupted_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            client = PiControllerClient(root / "state")
+            project = self._registered(root, "unproved")
+            with PiStore(root / "state") as store:
+                _register_build(store, root)
+                conversation = self._writer_conversation(store, project, "unproved")
+                prepared = self._prepare_writer(store, project, conversation, "unproved-run")
+                run_id = prepared.run["run_id"]
+                self._kill_run(store, run_id)
+                self._fail_interrupted_writer(store, run_id, needs_attention=False)
+                store.conn.execute("UPDATE runs SET container_id=? WHERE run_id=?", ("c" * 64, run_id))
+                prepared.close()
+                with mock.patch("scripts.pi_control.docker_runtime.cleanup_run_container", return_value={"absent": False, "errors": ["probe-refused"]}):
+                    outcome = client.recover_conversation(conversation_id=conversation["conversation_id"], actor_id="surface-repair")
+                decisions = {item["runId"]: item["decision"] for item in outcome["runs"]}
+                self.assertEqual(decisions[run_id], "uncertain")
+            with PiStore(root / "state") as store:
+                claim = store.conn.execute("SELECT active_writer_run_id FROM working_copies WHERE working_copy_id=?", (conversation["working_copy_id"],)).fetchone()[0]
+                self.assertEqual(claim, run_id)
+                run = store.conn.execute("SELECT observed_state FROM runs WHERE run_id=?", (run_id,)).fetchone()
+                self.assertEqual(run["observed_state"], "failed")
+
+    def test_launch_error_preserves_specific_writer_message(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            project = PiControllerClient(root / "state").register_project(str(_repo(root, "message")), "message")
+            with PiStore(root / "state") as store:
+                _register_build(store, root)
+                conversation = self._writer_conversation(store, project, "message")
+                prepared = self._prepare_writer(store, project, conversation, "message-run")
+                run_id = prepared.run["run_id"]
+                self._kill_run(store, run_id)
+                self._fail_interrupted_writer(store, run_id)
+                prepared.close()
+                with self.assertRaises(LaunchError) as caught:
+                    self._prepare_writer(store, project, conversation, "message-retry")
+                self.assertIn("writer state changed before acquisition", str(caught.exception))
+                self.assertNotIn("violated a database invariant", str(caught.exception))
 
 
 if __name__ == "__main__":

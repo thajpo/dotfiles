@@ -309,7 +309,7 @@ def main() -> int:
     if "must-not-leak" in combined:
         raise AssertionError("repair journey leaked a credential or environment value")
     digest = lambda value: "sha256:" + hashlib.sha256(value.encode()).hexdigest()
-    evidence_root = Path(os.environ.get("PI_SYSTEM_EVIDENCE_DIR", root))
+    evidence_root = Path(os.environ.get("PI_SYSTEM_EVIDENCE_DIR", root / "evidence"))
     import shutil
     # The release aggregate shares one evidence root across journeys; only a
     # standalone run (fixture-owned default root) wipes it first.

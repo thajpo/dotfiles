@@ -1,10 +1,9 @@
 # Pi Harness Configuration
 
-This directory contains the reproducible, non-secret source for the fresh Pi
+This directory contains the reproducible, non-secret source for the Pi
 system described by [`PI_IMPLEMENTATION_PLAN.md`](../PI_IMPLEMENTATION_PLAN.md).
 
-Status: **component source exists; the complete installed product is not yet
-accepted**.
+Status: **installed and activated on this machine; release acceptance passes.**
 
 ## Product Boundary
 
@@ -48,26 +47,17 @@ The target paths are:
 
 Starting fresh means creating new controller projects and conversations. It
 does not require classifying, importing, reconciling, or cleaning older Pi
-state. Deleting older state is a separate manual choice and is never an
-activation prerequisite.
+state. A schema-format change may deliberately delete the controller state
+through an explicitly approved activation reset; there is no automatic
+migration or import path.
 
-## Installation Status
+## Installed Status
 
-`bin/pi-install` and `scripts/pi_control/pi_install.py` implement the
-staging shape, but installation is not accepted until the staged artifact is
-self-contained and the final installed paths launch real Pi processes. Do not
-treat a successful stage, direct `pi-control` invocation, or help command as a
-release pass.
-
-The required proof is:
-
-1. Create fresh state.
-2. Register a disposable project.
-3. Launch a real controller-bound secretary and call a scoped read tool.
-4. Launch a real coding conversation in its assigned runtime, edit, and test.
-5. Stop and resume the exact fresh conversations.
-6. Verify project, run, tool, container, and session identities.
-7. Roll back the installed command generation without losing new work.
+The product is installed and activated at `~/.local/share/pi-system` with
+controller state at `~/.local/state/pi-system`. Release acceptance runs
+through `tests/system/run-p11-release.sh` against a fresh staged generation
+(installed journeys, Docker, repair, and surface tests); evidence lands under
+the configured `PI_SYSTEM_EVIDENCE_DIR`.
 
 ## Engineering Workflow
 

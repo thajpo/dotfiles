@@ -34,5 +34,14 @@ version, writer epoch, claim, and unique live run. A stale read cannot overwrite
 a newer claim. Idempotent replay must reacquire and retain the same kernel lock;
 the database, rather than the kernel lock alone, remains durable authority.
 
-Normal schema upgrades may evolve this fresh epoch after release. They may not
-be used as an import path from an earlier product.
+Normal schema changes are deliberate fresh-state resets, not migrations. A
+controller refuses an older or checksum-mismatched state database and reports
+that an explicit reset is required. Activation with `--reset-state` replaces
+the controller database only after the user approves the destructive action;
+it preserves no projects, conversations, runs, or preferences from the old
+state. Code and state cut over together, and a failed reset restores both.
+
+Release provenance is explicit: committed builds name their Git commit and
+tree; uncommitted release overlays require `--allow-dirty` and are listed in
+the activation evidence. The installed generation is code/resources only; the
+authoritative controller database remains under `~/.local/state/pi-system`.

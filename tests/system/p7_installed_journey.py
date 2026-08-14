@@ -258,6 +258,7 @@ def main() -> int:
             raise AssertionError("workstream message is not bound to its workstream")
 
         assert_fixture_containers_absent(state)
+        managed = []
 
         combined = personal_stdout + personal_stderr + workstream_stdout + workstream_stderr + json.dumps(child_requests) + json.dumps(workstream_rows) + json.dumps(messages)
         if _LEAK in combined:

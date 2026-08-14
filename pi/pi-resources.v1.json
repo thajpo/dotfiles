@@ -319,6 +319,8 @@
     "bin/pi-start",
     "bin/pi-restart",
     "bin/pidev",
+    "bin/pi-tmux",
+    "bin/pi-tmux-switch",
     "bin/pi-help-custom"
   ],
   "packages": [

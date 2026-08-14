@@ -367,8 +367,7 @@ green end to end.
   passes ("all 31 actions covered by installed evidence"); both repair
   journeys wired in after p12, shared evidence root no longer wiped by the
   journeys, verifier opencode-subdir exclusion fixed.
-- Full unit discovery: 232 tests, only the documented pre-existing
-  test_writer_requires_complete_distinct_image_identities error.
+- Full unit discovery is green, including the writer runtime-spec contract.
 
 Slice 10 finale COMPLETE (user-approved, 2026-08-12): live state reset,
 legacy wipe (backups at ~/pi-finale-backups-20260812T210340; ~/.pi/agent keeps

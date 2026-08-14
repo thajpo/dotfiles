@@ -3,9 +3,9 @@ set -euo pipefail
 
 mode=${1:-quick}
 case "$mode" in
-  quick|-h|--help) [[ $# -le 1 ]] || { printf 'usage: pi help [all]\n' >&2; exit 2; } ;;
-  all|--all) [[ $# -eq 1 ]] || { printf 'usage: pi help [all]\n' >&2; exit 2; } ;;
-  *) printf 'usage: pi help [all]\n' >&2; exit 2 ;;
+  quick|-h|--help) [[ $# -le 1 ]] || { printf 'usage: pi-start help [all]\n' >&2; exit 2; } ;;
+  all|--all) [[ $# -eq 1 ]] || { printf 'usage: pi-start help [all]\n' >&2; exit 2; } ;;
+  *) printf 'usage: pi-start help [all]\n' >&2; exit 2 ;;
 esac
 
 show_quick() {
@@ -13,30 +13,24 @@ show_quick() {
 Pi commands
 ===========
 
-Remember these three:
-  pi                         Work on the repository in the current directory.
-  pi-start all               Start the personal surface: desktop tmux (default).
-  pi-restart                 Rebuild the personal surface as desktop tmux.
+Start the surface:
+  pi-start all               Start the personal + secretary grids (desktop tmux).
+  pi-start                   Start the personal grid only.
+  pi-start -mobile           One conversation per window instead of side-by-side.
+  pi-restart                 Rebuild the grids cleanly.
 
-The complete start matrix (flags are per invocation, not persisted):
-  pi-start all                         desktop + tmux
-  pi-start all -mobile                 mobile  + tmux
-  pi-start all -herdr                  desktop + Herdr
-  pi-start all -mobile -herdr          mobile  + Herdr
+Work in a project:
+  cd REPO && pidev           Project workspace: Neovim + Pi.
+  pi-personal                Open the personal grid; pick a project pane and type.
+  pisec                      Open the secretary grid (read-only planning).
 
-`all` always starts the personal surface. `--mobile` and `--herdr` are
-accepted aliases. If the managed grid is already in another matrix cell,
-`pi-start all` rebuilds it safely. `pi-restart` forces a clean rebuild.
-
-Choose one destination instead:
-  pi-start                   Personal only, desktop tmux.
-  pi-start project [DIR]     Project workspace with Neovim + Pi.
-  pi-start host              Explicit unsandboxed host-maintenance conversation.
+Switch and repair:
+  pi-tmux-switch NAME        Jump to a Pi session (pi-personal, pisec).
+  pi-personal --ensure       Repair missing personal panes.
+  pisec --ensure             Repair missing secretary panes.
 
 More help:
-  pi help all                Full launcher, recovery, and navigation reference.
-  pi --help                  Upstream Pi CLI options.
-  pidev --help               Project workspace options.
+  pi-start help all          Full reference (navigation, recovery, tools).
 HELP
 }
 
@@ -44,92 +38,46 @@ show_all() {
   show_quick
   cat <<'HELP'
 
-Full workspace reference
-========================
+Full reference
+==============
 
-Backend and layout:
-  - Desktop and tmux are defaults on every invocation.
-  - `-mobile` changes layout for that invocation only.
-  - `-herdr` puts the managed personal surface in Herdr for that invocation only.
-  - `pi-start all` safely rebuilds a proven managed grid when its backend or
-    layout differs; single-surface starts never replace another live owner.
-  - `pi-restart` forces a clean rebuild using the requested matrix cell.
-  - Conversation identities survive either backend and layout.
+Layouts:
+  desktop (default)          Two conversations side by side per window.
+  -mobile                    One conversation per window.
 
-What the layouts contain:
-  tmux desktop               Personal roles use paired side-by-side panes.
-  tmux mobile                Each conversation gets its own tmux window.
-  Herdr desktop              Named session `pi-personal`;
-                             personal roles are paired in two Spaces.
-  Herdr mobile               The same named session; each personal role gets
-                             its own Space.
+Navigate:
+  Ctrl-a p                   Switch to pi-personal.
+  Ctrl-a g                   Switch to pisec.
+  Ctrl-a \                   Toggle the previous session.
+  tmux ls                    List sessions.
+  pi-tmux-switch NAME        Switch to a Pi session from any tmux server.
 
-Start and switch examples:
-  pi-start all -mobile       Start or switch the personal surface to mobile tmux.
-  pi-start all -herdr        Start or switch the personal surface to desktop Herdr.
-  pi-restart -herdr          Force a clean rebuild as desktop Herdr.
-  pi-restart -mobile -herdr  Switch cleanly to mobile Herdr.
-  pi-restart -mobile         Switch cleanly to mobile tmux.
-  pi-restart --no-attach     Rebuild without opening a client.
-
-Other launchers:
-  cd REPOSITORY && pi        Start/resume a policy-controlled root conversation.
-  cd REPOSITORY && pidev     Neovim on the left and Pi on the right.
-  cd REPOSITORY && pidev -mobile
-                             Pi only in a full-width project window.
-  pi-host                    Resume the single-writer unsandboxed host session for $PWD.
-
-Switch and navigate:
-  Ctrl-a p                   Switch to pi-personal in tmux.
-  Ctrl-a \                    Toggle the previous tmux session.
-  tmux ls                    List tmux sessions.
-  tmux attach -t NAME        Attach to a named tmux session.
-  Ctrl-b w                   Herdr Spaces/workspace picker.
-  Ctrl-b h/j/k/l             Move between Herdr panes.
-  Ctrl-b c / n / p           Create, next, or previous Herdr tab.
-  Ctrl-b b / q / ?           Sidebar, detach, or Herdr help.
-
-Useful commands inside Pi:
+Inside a conversation:
   /goal <objective>          Work continuously toward an objective.
-  /goal status|pause|resume  Inspect or control the active goal.
-  /goal clear                Remove the active goal.
-  /goal --tokens 100k ...    Give a goal an explicit provider-token budget.
-  /fast on|off|status        OpenAI priority service is on by default; toggle it here.
+  /goal status|pause|resume|clear
+                             Inspect or control the active goal.
+  /observe (Ctrl-I)          Inspect tasks, fleet, messages, and failures.
   /subagents-fleet           Inspect private child runs.
-  /subagents-doctor          Diagnose subagent discovery and routing.
-  /observe or Ctrl-I         Inspect task, fleet, messages, and failures.
   Ctrl-g                     Browse conversation history.
-  Enter / Alt-Enter          Steer now / queue a follow-up while Pi is busy.
+  Enter / Alt-Enter          Steer now / queue a follow-up while busy.
 
 Other tools:
-  pi-harness-feedback        Review the central normalized feedback feed.
-  pi-harness-feedback --repository PATH
-                             Filter harness feedback to one project.
+  pi-harness-feedback [--repository PATH]
+                             Review the harness self-improvement feed.
+  pi-control --help          Controller CLI (advanced).
 
-Recovery and maintenance:
-  pi-restart                 Rebuild the personal surface as desktop tmux.
-  pi-personal --ensure       Repair missing desktop tmux personal panes.
-  pi-personal -mobile --ensure
-                             Repair mobile tmux personal windows.
-  pi-root-session migrate --dry-run
-                             Inspect legacy root-session migration.
-  pi-root-session migrate    Apply the reviewed root-session migration.
-  pi-root-session cleanup --repository PATH
-                             Review stale managed worktrees before cleanup.
-  pi-sandbox-gc              Inspect stale Pi-owned containers and caches.
-  pi-sandbox-gc --apply      Apply only the printed Pi-owned cleanup plan.
-  pi-harness-feedback --format markdown --include-reviewed
-                             Show reviewed and pending self-improvement feedback.
+Recovery:
+  pi-restart                 Rebuild the grids.
+  pi-personal --ensure       Repair missing personal panes.
+  pisec --ensure             Repair missing secretary panes.
 
-Safety boundary:
-  root, personal             Conversation roles and authority profiles.
-  tmux, Herdr                Terminal backends, not authority profiles.
-  Only one backend may own a durable managed conversation at a time.
-  Ordinary `pi` owns repository trust and sandbox selection. Use `pi-host`
-  only when unsandboxed host-user access is intentional.
+State and safety:
+  State:     ~/.local/state/pi-system
+  Installed: ~/.local/share/pi-system
+  The grid is presentation only; conversation identity lives in the controller.
+  Managed Pi runs on its own tmux socket; use pi-tmux-switch to jump there.
 
-Compatibility aliases:
-  pi --help-custom           Same as `pi help`.
+Compatibility:
   pi-start help              Same quick guide.
 HELP
 }

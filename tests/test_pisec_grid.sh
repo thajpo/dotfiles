@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Grid mechanics test for the controller-backed pisec launcher.
 #
-# Uses an isolated tmux server (TMUX_TMPDIR) and a stubbed pi-surface.py so no
+# Uses an isolated Pi tmux socket and a stubbed pi-surface.py so no
 # real Pi process or model provider is contacted. Verifies: active-set
 # ordering, desktop window/pane grouping, mobile layout, dead-pane repair, and
 # single-owner behavior (a live pane is never respawned).
@@ -10,7 +10,7 @@ set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 temporary=$(mktemp -d /tmp/pisec-grid-test.XXXXXX)
 cleanup() {
-  TMUX_TMPDIR="$temporary/tmux" env -u TMUX tmux kill-server >/dev/null 2>&1 || true
+  env -u TMUX tmux -S "$temporary/pi.sock" kill-server >/dev/null 2>&1 || true
   rm -rf "$temporary"
 }
 trap cleanup EXIT
@@ -18,7 +18,9 @@ trap cleanup EXIT
 mkdir -p "$temporary/bin" "$temporary/scripts" "$temporary/state" "$temporary/tmux"
 chmod 700 "$temporary/state"
 cp "$root/bin/pisec" "$temporary/bin/pisec"
+cp "$root/bin/pi-tmux" "$temporary/bin/pi-tmux"
 chmod +x "$temporary/bin/pisec"
+chmod +x "$temporary/bin/pi-tmux"
 
 cat > "$temporary/scripts/pi-surface.py" <<'PY'
 #!/usr/bin/env python3
@@ -90,7 +92,7 @@ def main(argv):
             else:
                 ids.append(flag)
         def tmux(*args):
-            return sp.run(["tmux", *args], capture_output=True, text=True)
+            return sp.run(["tmux", "-S", os.environ["PI_TMUX_SOCKET"], *args], capture_output=True, text=True)
         def conv_title(conv):
             return "pi-secretary %s" % conv
         if not ids:
@@ -149,12 +151,19 @@ if __name__ == "__main__":
 PY
 chmod +x "$temporary/scripts/pi-surface.py"
 
-export TMUX_TMPDIR="$temporary/tmux"
+export PI_TMUX_SOCKET="$temporary/pi.sock"
 unset TMUX
 export PISEC_GRID_STATE="$temporary/state"
-tmux new-session -d -s scratch >/dev/null 2>&1
+ptmux() { tmux -S "$PI_TMUX_SOCKET" "$@"; }
+ptmux new-session -d -s scratch >/dev/null 2>&1
 
 pisec() { "$temporary/bin/pisec" "$@"; }
+
+# Invalid commands must fail before attempting reconciliation or attach.
+if pisec --bogus >/dev/null 2>&1; then echo "FAIL: unknown pisec option accepted"; exit 1; fi
+if pisec list extra >/dev/null 2>&1; then echo "FAIL: extra pisec argument accepted"; exit 1; fi
+if pisec activate >/dev/null 2>&1; then echo "FAIL: empty pisec activation accepted"; exit 1; fi
+if pisec activate --clear extra >/dev/null 2>&1; then echo "FAIL: extra pisec clear argument accepted"; exit 1; fi
 
 # Active set: alpha + gamma in that order (beta inactive).
 pisec activate alpha gamma >/dev/null 2>&1
@@ -162,45 +171,49 @@ pisec activate alpha gamma >/dev/null 2>&1
 # Desktop launch: the active pair shares one window (alpha) with two
 # side-by-side panes; the shell placeholder is removed.
 pisec launch
-tmux has-session -t =pisec || { echo "FAIL: pisec session missing"; exit 1; }
-windows=$(tmux list-windows -t =pisec -F '#{window_name}' | sort | tr '\n' ' ')
+ptmux has-session -t =pisec || { echo "FAIL: pisec session missing"; exit 1; }
+windows=$(ptmux list-windows -t =pisec -F '#{window_name}' | sort | tr '\n' ' ')
 [[ "$windows" == "projects-1 " ]] || { echo "FAIL: expected only projects-1 window, got: $windows"; exit 1; }
 
 # Desktop grouping: the first two active projects share one window with two
 # side-by-side panes.
-pane_count=$(tmux list-panes -a -F '#{session_name}' | grep -c '^pisec$')
+pane_count=$(ptmux list-panes -a -F '#{session_name}' | grep -c '^pisec$')
 (( pane_count == 2 )) || { echo "FAIL: expected 2 panes for 2 active projects, got $pane_count"; exit 1; }
 
 # Single-owner: a second launch must not duplicate live panes.
 pisec launch
-second_count=$(tmux list-panes -a -F '#{session_name}' | grep -c '^pisec$')
+second_count=$(ptmux list-panes -a -F '#{session_name}' | grep -c '^pisec$')
 (( second_count == pane_count )) || { echo "FAIL: duplicate panes after re-launch ($second_count != $pane_count)"; exit 1; }
 
+# Ensure repairs the grid without trying to attach a client. This is the
+# documented recovery path and must work from non-interactive automation too.
+pisec --ensure
+
 # Dead-pane repair: kill one pane process; launch must respawn it.
-dead_pid=$(tmux list-panes -a -F '#{session_name}\t#{pane_pid}' | awk -F'\t' '$1=="pisec" {print $2; exit}')
+dead_pid=$(ptmux list-panes -a -F '#{session_name}\t#{pane_pid}' | awk -F'\t' '$1=="pisec" {print $2; exit}')
 kill "$dead_pid" 2>/dev/null || true
 sleep 1
 pisec launch
-repaired=$(tmux list-panes -a -F '#{session_name}\t#{pane_dead}' | awk -F'\t' '$1=="pisec" && $2==1' | wc -l)
+repaired=$(ptmux list-panes -a -F '#{session_name}\t#{pane_dead}' | awk -F'\t' '$1=="pisec" && $2==1' | wc -l)
 (( repaired == 0 )) || { echo "FAIL: dead pane not repaired"; exit 1; }
 
 # Mobile layout: separate session per invocation context; kill the desktop
 # grid, then launch mobile: one window per project, one pane each.
-tmux kill-session -t =pisec
+ptmux kill-session -t =pisec
 pisec --mobile launch
-mobile_windows=$(tmux list-windows -t =pisec -F '#{window_name}' | sort | tr '\n' ' ')
+mobile_windows=$(ptmux list-windows -t =pisec -F '#{window_name}' | sort | tr '\n' ' ')
 [[ "$mobile_windows" == "projects-1 projects-2 " ]] || { echo "FAIL: mobile windows $mobile_windows"; exit 1; }
 for window in projects-1 projects-2; do
-  count=$(tmux list-panes -t "=pisec:$window" | wc -l)
+  count=$(ptmux list-panes -t "=pisec:$window" | wc -l)
   (( count == 1 )) || { echo "FAIL: mobile window $window has $count panes"; exit 1; }
 done
 
 # Explicitly empty active set: activate --clear must mean an empty grid, not
 # the all-projects fallback. Only the placeholder shell window remains.
-tmux kill-session -t =pisec
+ptmux kill-session -t =pisec
 pisec activate --clear >/dev/null 2>&1
 pisec launch
-empty_windows=$(tmux list-windows -t =pisec -F '#{window_name}' | sort | tr '\n' ' ')
+empty_windows=$(ptmux list-windows -t =pisec -F '#{window_name}' | sort | tr '\n' ' ')
 [[ "$empty_windows" == "shell " ]] || { echo "FAIL: empty grid windows $empty_windows"; exit 1; }
 
 # Re-activate by exact project id: resolution must accept ids and aliases.
@@ -208,7 +221,7 @@ projects_json=$(python3 "$temporary/scripts/pi-surface.py" project-list)
 alpha_id=$(python3 -c "import json,sys; print(json.load(sys.stdin)[0]['project_id'])" <<<"$projects_json")
 pisec activate "$alpha_id" gamma >/dev/null 2>&1
 pisec launch
-window=$(tmux list-windows -t =pisec -F '#{window_name}' | grep -v '^shell$' | head -1)
+window=$(ptmux list-windows -t =pisec -F '#{window_name}' | grep -v '^shell$' | head -1)
 [[ "$window" == "projects-1" ]] || { echo "FAIL: id activation window $window"; exit 1; }
 
 # Stale preference ids must be dropped with a warning, not brick the surface.

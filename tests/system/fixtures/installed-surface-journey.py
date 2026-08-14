@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from tests.system.evidence import Evidence, write_evidence
+from tests.system.container_hygiene import assert_fixture_containers_absent
 from tests.system.staged_install import install
 
 
@@ -76,9 +77,9 @@ def run_with_tty(argv: list[str], env: dict[str, str], timeout: int = 60) -> sub
 
 def tmux(argv: list[str], env: dict[str, str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     # Never touch the caller's live tmux server: drop the inherited TMUX
-    # socket and use the fixture-scoped socket directory exclusively.
+    # socket and use the fixture-scoped Pi socket exclusively.
     isolated = {key: value for key, value in env.items() if key != "TMUX"}
-    return command(["tmux", *argv], env=isolated, check=check, timeout=30)
+    return command(["tmux", "-S", isolated["PI_TMUX_SOCKET"], *argv], env=isolated, check=check, timeout=30)
 
 
 def main() -> int:
@@ -93,7 +94,7 @@ def main() -> int:
         # kill only the fixture tmux server (never the caller's), then prove
         # no managed containers leaked. Evidence and logs stay in the
         # fixture root for inspection.
-        isolated = {"PATH": os.defpath, "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "TMUX_TMPDIR": str(tmux_tmp)}
+        isolated = {"PATH": os.defpath, "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "PI_TMUX_SOCKET": str(root / "pi.sock")}
         subprocess.run(["tmux", "kill-server"], env=isolated, capture_output=True, timeout=30)
         print("fixture cleaned; evidence retained at", root, file=sys.stderr)
 
@@ -115,16 +116,15 @@ def _run_journey(root: Path, tmux_tmp: Path) -> int:
     # Activate the staged generation into a disposable data root (the real
     # activation path; no live mutation).
     data_root = root / "data"
+    state_root = root / "state"
     data_root.mkdir(mode=0o700)
     # The activation CLI is TTY-gated for the real path; the fixture gate
     # performs the identical generation switch in the disposable data root.
-    command([str(staged_root / "bin/pi-install"), "activate", "--staging-root", str(staged_root), "--data-root", str(data_root)], env={**os.environ, "PI_ACTIVATE_TEST_FIXTURE": "1"})
-    # Activation creates the fresh state root inside the data root and
-    # self-registers the activated generation; the daily surface uses that
-    # same state root.
-    state = data_root / "state"
-    json_command([str(data_root / "bin/pi-control"), "--state-root", str(state), "schema", "status"])
-    json_command([str(data_root / "bin/pi-control"), "--state-root", str(state), "build", "register", "--staged-root", str(data_root)])
+    command([str(staged_root / "bin/pi-install"), "activate", "--staging-root", str(staged_root), "--data-root", str(data_root), "--state-root", str(state_root), "--allow-dirty"], env={**os.environ, "PI_ACTIVATE_TEST_FIXTURE": "1"})
+    # Activation initializes and registers against the durable controller root
+    # used by the daily surface; it must not create a second authority inside
+    # the installed generation.
+    json_command([str(data_root / "bin/pi-control"), "--state-root", str(state_root), "schema", "status"])
 
     # Isolate the fixture from the host tmux configuration: a fixture HOME
     # with an empty tmux.conf means the managed server has no auto-ensure,
@@ -136,8 +136,8 @@ def _run_journey(root: Path, tmux_tmp: Path) -> int:
         key: value for key, value in os.environ.items() if key != "TMUX"
     }
     surface_env.update({
-        "HOME": str(fixture_home), "PI_SYSTEM_DATA_ROOT": str(data_root), "PI_SYSTEM_STATE_ROOT": str(state),
-        "TMUX_TMPDIR": str(tmux_tmp), "PI_SYSTEM_MODEL": "scripted/scripted-1",
+        "HOME": str(fixture_home), "PI_SYSTEM_DATA_ROOT": str(data_root), "PI_SYSTEM_STATE_ROOT": str(state_root),
+        "PI_TMUX_SOCKET": str(root / "pi.sock"), "PI_SYSTEM_MODEL": "scripted/scripted-1",
         "TERM": "xterm-256color",
         "OPENAI_API_KEY": "must-not-leak", "GH_TOKEN": "must-not-leak",
     })
@@ -223,13 +223,13 @@ def _run_journey(root: Path, tmux_tmp: Path) -> int:
     # ---- cleanup -------------------------------------------------------
     for session in ("pisec", "pi-personal"):
         tmux(["kill-session", "-t", f"={session}"], surface_env, check=False)
-    assert_fixture_containers_absent(state)
+    assert_fixture_containers_absent(state_root)
     combined = listing + launch_info + " ".join(pisec_windows) + " ".join(personal_windows)
     if "must-not-leak" in combined:
         raise AssertionError("surface journey leaked a credential or environment value")
 
     build_id = json.loads((data_root / "build-manifest.json").read_text())["buildId"]
-    json_command([str(data_root / "bin/pi-control"), "--state-root", str(state), "schema", "status"])
+    json_command([str(data_root / "bin/pi-control"), "--state-root", str(state_root), "schema", "status"])
     digest = lambda value: "sha256:" + hashlib.sha256(value.encode()).hexdigest()
     evidence_root = Path(os.environ.get("PI_SYSTEM_EVIDENCE_DIR", root))
     # The release aggregate shares one evidence root across journeys; only a

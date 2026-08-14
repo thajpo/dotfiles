@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -16,7 +17,7 @@ from unittest import mock
 from scripts.pi_control.controller_channel import ChannelReader, ControllerChannelError, MAX_FRAME_BYTES, receive_frame, send_frame, validate_handshake
 from scripts.pi_control.pi_client import PiControllerClient
 from scripts.pi_control.pi_store import PiStore
-from scripts.pi_control.host_supervisor import HostSupervisorError, _rpc, ensure_session, launch_host_pi
+from scripts.pi_control.host_supervisor import HostSupervisorError, _install_cleanup_signal_handlers, _restore_cleanup_signal_handlers, _rpc, ensure_session, launch_host_pi
 from scripts.pi_control.launch import attest_run, prepare_run, stop_run
 from scripts.pi_control.models import canonical_json, utc_now
 from scripts.pi_control.run_manifest import executable_sha256
@@ -147,6 +148,7 @@ class ProviderAuthProvisioningTests(unittest.TestCase):
             self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
             provisioned = json.loads(destination.read_text())
             self.assertEqual(set(provisioned), {"deepseek"})
+            self.assertEqual(provisioned["deepseek"]["type"], "api_key")
             self.assertEqual(provisioned["deepseek"]["key"], "deepseek-secret")
             self.assertNotIn("openai-codex", provisioned)
 
@@ -351,6 +353,21 @@ s.makefile("rb").readline()
                 finally:
                     prepared.close()
                     store.close()
+
+
+class ShutdownHandlerTests(unittest.TestCase):
+    def test_repeated_signals_are_single_shot_and_handlers_restore(self) -> None:
+        previous, state = _install_cleanup_signal_handlers()
+        try:
+            handler = signal.getsignal(signal.SIGTERM)
+            with self.assertRaises(SystemExit):
+                handler(signal.SIGTERM, None)
+            handler(signal.SIGHUP, None)
+            self.assertTrue(state["started"])
+            self.assertEqual(state["signum"], signal.SIGTERM)
+        finally:
+            _restore_cleanup_signal_handlers(previous)
+        self.assertIsNot(handler, signal.getsignal(signal.SIGTERM))
 
 
 if __name__ == "__main__":

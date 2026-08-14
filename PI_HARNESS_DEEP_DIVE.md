@@ -157,7 +157,6 @@ Phase 3 — fresh install + verify:
 
 ## 7. Verification gates
 - `git grep -i greenfield` → 0
-- `python3 -m unittest discover tests/control_plane -t .` → green (except
-  known pre-existing test_runtime_spec)
+- `python3 -m unittest discover tests/control_plane -t .` → green
 - `pi-restart` from a tmux pane: caller survives, grid up, TUIs interactive
 - release pipeline (P11) passes on the renamed tree

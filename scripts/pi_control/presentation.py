@@ -25,6 +25,7 @@ from typing import Any, Callable, Mapping
 
 from .models import canonical_json, new_id, utc_now, validate_id
 from .presentation_locator import build_locator, parse_locator
+from .tmux_scope import pi_tmux_socket
 
 GRID_SESSION_NAMES = {"pisec", "pi-personal"}
 _SLUG = re.compile(r"[^A-Za-z0-9._-]")
@@ -37,19 +38,24 @@ class PresentationError(RuntimeError):
 class TmuxBackend:
     """Thin fail-closed tmux runner with a clean environment."""
 
-    def __init__(self, *, tmux_tmpdir: str | None = None, home: str | None = None) -> None:
-        self.tmux_tmpdir = tmux_tmpdir if tmux_tmpdir is not None else os.environ.get("TMUX_TMPDIR")
+    def __init__(self, *, socket_path: str | None = None, tmux_tmpdir: str | None = None, home: str | None = None) -> None:
+        # tmux_tmpdir remains a narrow test/API compatibility seam. Production
+        # resolution is always the dedicated Pi socket.
+        if socket_path is None and tmux_tmpdir is not None:
+            socket_path = str(Path(tmux_tmpdir) / "default")
+        self.socket_path = socket_path or pi_tmux_socket(home=home)
         self.home = home
 
     def run(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
         path = shutil.which("tmux", path=os.defpath)
         if path is None:
             raise PresentationError("tmux is unavailable")
+        socket = Path(self.socket_path).expanduser()
+        socket.parent.mkdir(parents=True, exist_ok=True)
         env: dict[str, str] = {"PATH": os.defpath, "HOME": self.home or "/nonexistent", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
-        if self.tmux_tmpdir:
-            env["TMUX_TMPDIR"] = self.tmux_tmpdir
+        env["PI_TMUX_SOCKET"] = str(socket)
         result = subprocess.run(
-            [path, *args], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            [path, "-S", str(socket), *args], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
             timeout=30, check=False, shell=False,
         )

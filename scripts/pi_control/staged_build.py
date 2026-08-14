@@ -248,13 +248,13 @@ def _repository_metadata(repository: Path) -> dict[str, Any] | None:
         observed = observe_repository(repository).as_dict()
     except (GitObservationError, OSError):
         return None
-    observed.pop("observed_at", None)
-    # Preserve dirty-state evidence without embedding the full patch/status.
-    observed.pop("status", None)
-    for worktree in observed.get("worktrees", []):
-        if isinstance(worktree, dict):
-            worktree.pop("status", None)
-    return observed
+    # Build identity must not depend on the checkout path, branch name, dirty
+    # status, or unrelated linked worktrees. Commit/tree identity and artifact
+    # hashes are recorded separately in the manifest.
+    return {
+        "object_format": observed.get("object_format"),
+        "is_bare": observed.get("is_bare"),
+    }
 
 
 def _validate_entry(entry: Any) -> dict[str, Any]:
@@ -445,6 +445,8 @@ def create_build_manifest(
     manifest_path: os.PathLike[str] | str | None = None,
     exclude_paths: Iterable[os.PathLike[str] | str] | None = None,
     require_repository_metadata: bool = False,
+    source_commit: str | None = None,
+    source_tree_hash: str | None = None,
 ) -> BuildManifest:
     root = Path(source_root).expanduser().absolute()
     if not root.is_dir() or root.is_symlink():
@@ -468,8 +470,8 @@ def create_build_manifest(
         "sourceRoot": ".",
         "files": file_entries,
         "repository": repository_metadata,
-        "sourceTreeHash": (repository_metadata or {}).get("tree_oid"),
-        "sourceCommit": (repository_metadata or {}).get("head_oid"),
+        "sourceTreeHash": source_tree_hash if source_tree_hash is not None else (repository_metadata or {}).get("tree_oid"),
+        "sourceCommit": source_commit if source_commit is not None else (repository_metadata or {}).get("head_oid"),
         "packageLockSha256": next(
             (item["sha256"] for item in file_entries if item["path"].endswith("package-lock.json")),
             None,

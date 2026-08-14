@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     record_child_terminal(
                         store, child_request_id=args.child_request_id,
-                        terminal_class="failed", result={"error": type(error).__name__, "message": str(error)[:1024]},
+                        terminal_class="interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "failed", result={"error": type(error).__name__, "message": str(error)[:1024]},
                     )
                 except SubagentError:
                     pass

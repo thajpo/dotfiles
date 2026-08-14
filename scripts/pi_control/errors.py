@@ -36,6 +36,7 @@ class ErrorCode:
     INVALID_REQUEST = "CP_INVALID_REQUEST"
     NOT_FOUND = "CP_NOT_FOUND"
     DB_CORRUPT = "CP_DB_CORRUPT"
+    SCHEMA_RESET_REQUIRED = "CP_SCHEMA_RESET_REQUIRED"
     DB_BUSY = "CP_LOCK_BUSY"
     MIGRATION_FAILED = "CP_MIGRATION_FAILED"
     FOREIGN_KEY = "CP_FOREIGN_KEY"
@@ -203,6 +204,10 @@ class NotFoundError(ControlPlaneError):
 
 class DatabaseCorruptError(ControlPlaneError):
     code = ErrorCode.DB_CORRUPT
+
+
+class SchemaResetRequiredError(DatabaseCorruptError):
+    code = ErrorCode.SCHEMA_RESET_REQUIRED
 
 
 class MigrationError(ControlPlaneError):

@@ -79,7 +79,7 @@ class HostSupervisorError(LaunchError):
     pass
 
 
-def _install_cleanup_signal_handlers() -> None:
+def _install_cleanup_signal_handlers() -> tuple[dict[int, Any], dict[str, Any]]:
     """Convert SIGHUP/SIGTERM into a controlled supervisor unwind.
 
     tmux pane death and `pi-restart` deliver SIGHUP to the supervisor; without
@@ -89,14 +89,41 @@ def _install_cleanup_signal_handlers() -> None:
     in durable state before the process exits.
     """
 
+    state = {"started": False, "signum": None}
+
     def _raise_system_exit(signum: int, _frame: Any) -> None:
+        if state["started"]:
+            return
+        state["started"] = True
+        state["signum"] = signum
         raise SystemExit(f"host supervisor received signal {signum}")
 
-    for signum in (signal.SIGHUP, signal.SIGTERM):
+    previous: dict[int, Any] = {}
+    for signum in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
         try:
-            signal.signal(signum, _raise_system_exit)
+            previous[signum] = signal.signal(signum, _raise_system_exit)
         except (OSError, ValueError):
             pass
+    return previous, state
+
+
+def _restore_cleanup_signal_handlers(previous: dict[int, Any]) -> None:
+    for signum, handler in previous.items():
+        try:
+            signal.signal(signum, handler)
+        except (OSError, ValueError):
+            pass
+
+
+def _terminate_child(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 def _sha256(path: Path) -> str:
@@ -327,6 +354,10 @@ def _provision_provider_auth(runtime: Path, model: str) -> None:
         refreshed = _refresh_codex_credential(stored)
         if refreshed is not None:
             stored = refreshed
+    elif stored.get("type") == "key":
+        # Older auth files used "key"; the installed runtime requires
+        # "api_key" for API-key credentials.
+        stored = {**stored, "type": "api_key"}
     destination = runtime / "agent" / "auth.json"
     try:
         destination.write_text(
@@ -923,23 +954,27 @@ def launch_host_pi(
             state_root=store.state_root, run_id=requested_run_id, image_reference=str(tool_image), project=project,
             working_copy=working, build_id=build_id, writer_epoch=int(working["writer_epoch"]) + 1,
         )
-    prepared = prepare_run(store, conversation_id=conversation_id, build_id=build_id, host_process=host_process, tool_runtime=tool_runtime, owner_pid=os.getpid(), run_id=requested_run_id, parent_run_id=parent_run_id, child_source=child_source)
+    previous_handlers, shutdown_state = _install_cleanup_signal_handlers()
+    try:
+        prepared = prepare_run(store, conversation_id=conversation_id, build_id=build_id, host_process=host_process, tool_runtime=tool_runtime, owner_pid=os.getpid(), run_id=requested_run_id, parent_run_id=parent_run_id, child_source=child_source)
+    except BaseException:
+        _restore_cleanup_signal_handlers(previous_handlers)
+        raise
     process: subprocess.Popen[bytes] | None = None
     parent_channel: socket.socket | None = None
     child_channel: socket.socket | None = None
     terminalized = False
     temporary_terminalized = False
-    temporary_bound = selected["conversation"]["role"] == "reviewer"
+    temporary_bound = selected["conversation"]["role"] in {"investigator", "reviewer"}
     container_prepared = False
     requests_enabled = False
     try:
-        if child_request_id is not None:
-            from .subagents import bind_child_run
-            bind_child_run(store, child_request_id=child_request_id, child_run_id=prepared.run["run_id"])
         if selected["conversation"]["role"] == "investigator":
             from .investigators import bind_investigation_run
             bind_investigation_run(store, conversation_id=conversation_id, run_id=prepared.run["run_id"])
-            temporary_bound = True
+        if child_request_id is not None:
+            from .subagents import bind_child_run
+            bind_child_run(store, child_request_id=child_request_id, child_run_id=prepared.run["run_id"])
         if writer:
             create_start_container(store, run_id=prepared.run["run_id"], manifest=prepared.manifest)
             container_prepared = True
@@ -951,7 +986,6 @@ def launch_host_pi(
             before_spawn()
         if executable_sha256(selected["node"]) != prepared.manifest["hostProcess"]["executableSha256"]:
             raise HostSupervisorError("Node executable changed between prepare and spawn")
-        _install_cleanup_signal_handlers()
         process = subprocess.Popen(argv, cwd=str(cwd), env=environment, stdin=None, stdout=None, stderr=None, shell=False, close_fds=True, pass_fds=(child_channel.fileno(),))
         child_channel.close()
         child_channel = None
@@ -1099,20 +1133,27 @@ def launch_host_pi(
     except BaseException as error:
         requests_enabled = False
         if process is not None and process.poll() is None:
-            process.kill()
-            process.wait()
+            _terminate_child(process)
         cleanup = {"absent": True}
         if writer:
             try:
                 cleanup = cleanup_run_container(store, run_id=prepared.run["run_id"])
             except BaseException as cleanup_error:
                 cleanup = {"absent": False, "errors": [str(cleanup_error)[:1024]]}
-        fail_run(store, run_id=prepared.run["run_id"], code="HOST_ATTESTATION_FAILED", detail=str(error), needs_attention=writer and not cleanup["absent"], release_writer=writer and cleanup["absent"])
+        interrupted = isinstance(error, (KeyboardInterrupt, SystemExit))
+        fail_run(
+            store,
+            run_id=prepared.run["run_id"],
+            code="HOST_SUPERVISOR_INTERRUPTED" if interrupted else "HOST_ATTESTATION_FAILED",
+            detail=str(error),
+            needs_attention=writer and not cleanup["absent"],
+            release_writer=writer and cleanup["absent"],
+        )
         if selected["conversation"]["role"] in {"investigator", "reviewer"} and temporary_bound and not temporary_terminalized:
-            state = "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "failed"
+            state = "interrupted" if interrupted else "failed"
             # An interrupt keeps the temporary conversation active so it can be
             # resumed; ordinary failures archive it.
-            archive = not isinstance(error, (KeyboardInterrupt, SystemExit))
+            archive = not interrupted
             _terminalize_temporary_role(store, conversation=selected["conversation"], state=state, result={"runId": prepared.run["run_id"], "error": type(error).__name__, "message": str(error)[:1024]}, archive=archive)
             temporary_terminalized = True
         terminalized = True
@@ -1123,10 +1164,17 @@ def launch_host_pi(
         if parent_channel is not None:
             parent_channel.close()
         if not terminalized:
-            fail_run(store, run_id=prepared.run["run_id"], code="HOST_SUPERVISOR_INTERRUPTED", detail="host supervisor interrupted")
+            cleanup = {"absent": True}
+            if writer:
+                try:
+                    cleanup = cleanup_run_container(store, run_id=prepared.run["run_id"])
+                except BaseException as cleanup_error:
+                    cleanup = {"absent": False, "errors": [str(cleanup_error)[:1024]]}
+            fail_run(store, run_id=prepared.run["run_id"], code="HOST_SUPERVISOR_INTERRUPTED", detail="host supervisor interrupted", needs_attention=writer and not cleanup["absent"], release_writer=writer and cleanup["absent"])
             if selected["conversation"]["role"] in {"investigator", "reviewer"} and temporary_bound and not temporary_terminalized:
                 _terminalize_temporary_role(store, conversation=selected["conversation"], state="interrupted", result={"runId": prepared.run["run_id"], "reason": "host-supervisor-interrupted"})
         prepared.close()
+        _restore_cleanup_signal_handlers(previous_handlers)
 
 
 __all__ = ["ACCEPTANCE_PROFILE", "CHANNEL_ENVIRONMENT_KEY", "HostSupervisorError", "ensure_session", "launch_host_pi"]

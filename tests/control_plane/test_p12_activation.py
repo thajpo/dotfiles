@@ -8,7 +8,7 @@ import unittest
 
 from scripts.pi_control.activation_approval import ActivationApprovalError, consume_activation_approval, request_activation_approval
 from scripts.pi_control.errors import IdempotencyConflictError, NotFoundError
-from scripts.pi_control.pi_install import InstallError, activate
+from scripts.pi_control.pi_install import InstallError, activate, rollback
 from scripts.pi_control.pi_store import PiStore
 
 
@@ -74,10 +74,13 @@ class ActivationSmokeTests(unittest.TestCase):
             stage_root = root / "stage"
             install(stage_root)
             data_root = root / "data"
-            result = activate(stage_root, data_root)
+            result = activate(stage_root, data_root, state_root=root / "controller-state")
             self.assertTrue(result["activated"])
             self.assertTrue((data_root / "activation.json").is_file())
-            self.assertTrue((data_root / "state" / "control.db").is_file())
+            self.assertTrue((root / "controller-state" / "control.db").is_file())
+            with PiStore(root / "controller-state", read_only=True) as store:
+                from scripts.pi_control.installed_builds import verify_registered_build
+                verify_registered_build(store, result["buildId"])
 
     def test_activate_second_generation_preserves_rollback(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="p12-smoke2-") as raw:
@@ -86,13 +89,29 @@ class ActivationSmokeTests(unittest.TestCase):
             first = root / "stage1"
             install(first)
             data_root = root / "data"
-            activate(first, data_root)
+            activate(first, data_root, state_root=root / "controller-state")
             second = root / "stage2"
             install(second)
-            activate(second, data_root)
+            activate(second, data_root, state_root=root / "controller-state")
             rollbacks = list(root.glob("data.rollback.*"))
             self.assertGreaterEqual(len(rollbacks), 1)
             self.assertTrue((data_root / "activation.json").is_file())
+
+    def test_activate_reset_state_removes_old_controller_data(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="p12-reset-") as raw:
+            root = Path(raw)
+            from tests.system.staged_install import install
+            data_root = root / "data"
+            state_root = root / "controller-state"
+            first = root / "stage1"
+            install(first)
+            activate(first, data_root, state_root=state_root)
+            (state_root / "old-sentinel").write_text("remove", encoding="ascii")
+            second = root / "stage2"
+            install(second)
+            activate(second, data_root, state_root=state_root, reset_state=True)
+            self.assertFalse((state_root / "old-sentinel").exists())
+            self.assertTrue((state_root / "control.db").is_file())
 
     def test_activate_missing_controller_fails_smoke(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="p12-smoke3-") as raw:
@@ -108,7 +127,21 @@ class ActivationSmokeTests(unittest.TestCase):
             shutil.copytree(stage_root, data_root, symlinks=True)
             (data_root / "bin" / "pi-control").unlink()
             with self.assertRaises(InstallError):
-                _bounded_smoke(data_root)
+                _bounded_smoke(data_root, root / "controller-state")
+
+    def test_rollback_without_generation_preserves_active_root(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="p12-no-rollback-") as raw:
+            root = Path(raw)
+            from tests.system.staged_install import install
+            stage_root = root / "stage"
+            install(stage_root)
+            data_root = root / "data"
+            state_root = root / "controller-state"
+            activate(stage_root, data_root, state_root=state_root)
+            result = rollback(data_root, state_root=state_root)
+            self.assertFalse(result["rolledBack"])
+            self.assertIsNone(result["preservedNewRoot"])
+            self.assertTrue((data_root / "activation.json").is_file())
 
 
 if __name__ == "__main__":

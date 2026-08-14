@@ -10,6 +10,8 @@ import sys
 from typing import Any
 
 from .pi_client import PiClientError, PiControllerClient
+from .installed_builds import activate_registered_build
+from .pi_store import PiStore
 from .errors import ControlPlaneError, ErrorCode
 from .pi_protocol import PROTOCOL_VERSION, adapt_request, protocol_request
 
@@ -24,6 +26,8 @@ def _parser() -> argparse.ArgumentParser:
     build_sub = build.add_subparsers(dest="build_command", required=True)
     build_register = build_sub.add_parser("register")
     build_register.add_argument("--staged-root", required=True)
+    build_activate = build_sub.add_parser("activate")
+    build_activate.add_argument("--build-id", required=True)
     project = sub.add_parser("project")
     project_sub = project.add_subparsers(dest="project_command", required=True)
     register = project_sub.add_parser("register")
@@ -135,7 +139,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "schema":
             value = client.negotiate()["schema"]
         elif args.command == "build":
-            value = client.register_build(args.staged_root)
+            if args.build_command == "register":
+                value = client.register_build(args.staged_root)
+            else:
+                with PiStore(args.state_root) as store:
+                    value = activate_registered_build(store, args.build_id)
         elif args.command == "project":
             if args.project_command == "register":
                 value = client.register_project(args.repository, args.name)

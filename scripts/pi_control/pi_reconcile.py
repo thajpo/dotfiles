@@ -107,14 +107,24 @@ def recover_conversation_runs(store: Any, *, conversation_id: str, actor_id: str
     if not isinstance(actor_id, str) or not actor_id or len(actor_id) > 256:
         raise ReconcileError("recovery actor is invalid")
     runs = []
-    for row in store.conn.execute("SELECT * FROM runs WHERE conversation_id=? AND desired_state='running'", (conversation_id,)):
+    rows = store.conn.execute(
+        """SELECT r.* FROM runs r
+           WHERE r.conversation_id=?
+             AND (r.desired_state='running'
+                  OR EXISTS (SELECT 1 FROM working_copies w
+                             WHERE w.active_writer_run_id=r.run_id
+                               AND w.working_copy_id=r.working_copy_id))""",
+        (conversation_id,),
+    )
+    for row in rows:
         observed = _run_observation(row)
         if observed["state"] == "running":
             runs.append({"runId": row["run_id"], "decision": "live"})
             continue
         try:
-            with store.transaction():
-                store.conn.execute("UPDATE runs SET observed_state='needs_attention',error_code='CP_OWNER_UNCERTAIN',error_detail=?,updated_at=? WHERE run_id=? AND observed_state NOT IN ('stopped','failed')", (observed["reason"][:1024], utc_now(), row["run_id"]))
+            if row["observed_state"] not in {"needs_attention", "stopped", "failed", "lost"}:
+                with store.transaction():
+                    store.conn.execute("UPDATE runs SET observed_state='needs_attention',error_code='CP_OWNER_UNCERTAIN',error_detail=?,updated_at=? WHERE run_id=? AND observed_state NOT IN ('needs_attention','stopped','failed','lost')", (observed["reason"][:1024], utc_now(), row["run_id"]))
             recovered = recover_lost_run(store, run_id=row["run_id"], actor_id=actor_id)
             runs.append({"runId": row["run_id"], "decision": "recovered", "run": dict(recovered)})
         except ReconcileError as error:
@@ -123,7 +133,12 @@ def recover_conversation_runs(store: Any, *, conversation_id: str, actor_id: str
 
 
 def recover_lost_run(store: Any, *, run_id: str, actor_id: str) -> dict[str, Any]:
-    """Release a blocked writer only after process identity and kernel-lock proofs."""
+    """Release a blocked writer only after process identity and kernel-lock proofs.
+
+    Failed and stopped are schema-terminal states. A terminal writer that
+    still owns the durable claim therefore keeps its run state and receives a
+    separate claim-recovery event instead of an illegal transition to lost.
+    """
 
     validate_id(run_id, prefix="run")
     if not isinstance(actor_id, str) or not actor_id or len(actor_id) > 256:
@@ -133,16 +148,31 @@ def recover_lost_run(store: Any, *, run_id: str, actor_id: str) -> dict[str, Any
         raise ReconcileError("run not found")
     if row["observed_state"] == "lost":
         return dict(row)
-    if row["observed_state"] != "needs_attention":
-        raise ReconcileError("run is not awaiting explicit recovery")
     is_writer = row["authority"] == "writer-container"
+    working_copy_id = row["working_copy_id"]
+    terminal_claim = False
+    if row["observed_state"] in {"failed", "stopped"}:
+        if not is_writer or not working_copy_id or row["desired_state"] != "stopped":
+            raise ReconcileError("run is not awaiting explicit recovery")
+        current = store.conn.execute("SELECT active_writer_run_id FROM working_copies WHERE working_copy_id=?", (working_copy_id,)).fetchone()
+        if current is None:
+            raise ReconcileError("writer working copy is unavailable")
+        if current["active_writer_run_id"] is None:
+            recovered = store.conn.execute("SELECT 1 FROM control_events WHERE event_kind='run.writer-claim-recovered' AND resource_type='run' AND resource_id=? LIMIT 1", (run_id,)).fetchone()
+            if recovered is not None:
+                return dict(row)
+            raise ReconcileError("terminal writer no longer holds the working-copy claim")
+        terminal_claim = current["active_writer_run_id"] == run_id
+        if not terminal_claim:
+            raise ReconcileError("terminal writer claim belongs to another run")
+    elif row["observed_state"] != "needs_attention":
+        raise ReconcileError("run is not awaiting explicit recovery")
     observation = _run_observation(row)
     for sidecar in (observation.get("owner"), observation.get("child")):
         if sidecar is None:
             continue
         if sidecar["state"] not in {"gone", "reused", "absent"}:
             raise ReconcileError("run process is still present or unobservable")
-    working_copy_id = row["working_copy_id"]
     if is_writer and working_copy_id:
         from .writer_lock import writer_lock_available
         try:
@@ -152,20 +182,32 @@ def recover_lost_run(store: Any, *, run_id: str, actor_id: str) -> dict[str, Any
         if not available:
             raise ReconcileError("writer lock is still held; recovery is unsafe")
     container_cleanup: dict[str, Any] | None = None
-    if is_writer and row["container_id"] is not None:
-        from .docker_runtime import cleanup_run_container
-        try:
-            container_cleanup = cleanup_run_container(store, run_id=run_id)
-        except Exception as error:
-            raise ReconcileError("writer container absence is not proved; recovery is unsafe") from error
-        if not container_cleanup.get("absent"):
-            raise ReconcileError("writer container absence is not proved; recovery is unsafe")
+    if is_writer:
+        if not row["manifest_path"]:
+            if row["container_id"] is not None or row["container_observation_json"] is not None:
+                raise ReconcileError("writer container intent exists without a manifest; recovery is unsafe")
+            container_cleanup = {"absent": True, "proof": "container-create-unreachable-before-manifest"}
+        else:
+            from .docker_runtime import cleanup_run_container
+            try:
+                container_cleanup = cleanup_run_container(store, run_id=run_id)
+            except Exception as error:
+                raise ReconcileError("writer container absence is not proved; recovery is unsafe") from error
+            if not container_cleanup.get("absent"):
+                raise ReconcileError("writer container absence is not proved; recovery is unsafe")
     now = utc_now()
     with store.transaction():
-        store.conn.execute("UPDATE runs SET desired_state='stopped',observed_state='lost',ended_at=?,updated_at=?,error_code='CP_OWNER_LOST',error_detail=? WHERE run_id=? AND observed_state='needs_attention'", (now, now, f"explicit recovery by {actor_id}", run_id))
-        if is_writer and working_copy_id:
-            store.conn.execute("UPDATE working_copies SET active_writer_run_id=NULL,updated_at=?,resource_version=resource_version+1 WHERE working_copy_id=? AND active_writer_run_id=?", (now, working_copy_id, run_id))
-        append_event_in_transaction(store.conn, event_kind="run.recovered-lost", resource_type="run", resource_id=run_id, resource_version=int(row["resource_version"]), payload={"runId": run_id, "actorId": actor_id, "containerCleanup": container_cleanup})
+        if terminal_claim:
+            cursor = store.conn.execute("UPDATE working_copies SET active_writer_run_id=NULL,updated_at=?,resource_version=resource_version+1 WHERE working_copy_id=? AND active_writer_run_id=?", (now, working_copy_id, run_id))
+            if cursor.rowcount != 1:
+                raise ReconcileError("terminal writer claim changed during recovery")
+            store.conn.execute("UPDATE runs SET updated_at=? WHERE run_id=?", (now, run_id))
+            append_event_in_transaction(store.conn, event_kind="run.writer-claim-recovered", resource_type="run", resource_id=run_id, resource_version=int(row["resource_version"]), payload={"runId": run_id, "actorId": actor_id, "priorObservedState": row["observed_state"], "containerCleanup": container_cleanup})
+        else:
+            store.conn.execute("UPDATE runs SET desired_state='stopped',observed_state='lost',ended_at=?,updated_at=?,error_code=COALESCE(error_code,'CP_OWNER_LOST'),error_detail=? WHERE run_id=? AND observed_state='needs_attention'", (now, now, f"explicit recovery by {actor_id}", run_id))
+            if is_writer and working_copy_id:
+                store.conn.execute("UPDATE working_copies SET active_writer_run_id=NULL,updated_at=?,resource_version=resource_version+1 WHERE working_copy_id=? AND active_writer_run_id=?", (now, working_copy_id, run_id))
+            append_event_in_transaction(store.conn, event_kind="run.recovered-lost", resource_type="run", resource_id=run_id, resource_version=int(row["resource_version"]), payload={"runId": run_id, "actorId": actor_id, "containerCleanup": container_cleanup})
     return dict(store.conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone())
 
 

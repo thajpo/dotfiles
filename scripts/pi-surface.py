@@ -320,7 +320,7 @@ def secretary_conversation(project_id: str) -> dict:
 def personal_conversation(project_id: str, display_name: str = "personal") -> dict:
     status = project_status(project_id)
     for conversation in status.get("conversations", []):
-        if conversation.get("role") == "personal":
+        if conversation.get("role") == "personal" and conversation.get("desired_state") == "active":
             return conversation
     primary = next((item for item in status.get("workingCopies", []) if item.get("kind") == "primary"), None)
     if primary is None:

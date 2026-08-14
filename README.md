@@ -1,21 +1,29 @@
 # dotfiles
 
-## Pi Harness System
+## Pi
 
-The fresh Pi system in
-[PI_IMPLEMENTATION_PLAN.md](PI_IMPLEMENTATION_PLAN.md)
-is the working Pi product. It is installed and activated on this machine
-(`release-passed` on 2026-08-11 against
-`build_2faecfee6b4280149422721827640bb4`), and the daily surface commands
-(`pi-restart`, `pisec`, `pi-personal`, `pi-start`, `pidev`) drive the
-Pi controller and its controller-bound conversations.
+Pi is the controller-driven coding surface on this machine. Each registered
+project gets one durable coding conversation with its own writer container and
+working copy, presented as a tmux grid. Conversations keep their identity
+across restarts; the grid is presentation only.
 
-Controller state uses `~/.local/state/pi-system/`, installed artifacts use
-`~/.local/share/pi-system/`, and controller-owned working copies use
-`~/.local/share/pi-system-work/`. Pre-controller chats and lifecycle files are
-not imported or consulted.
+```bash
+pi-start all                     # start the personal + secretary grids
+pi-personal                      # open the personal grid, pick a project, type
+pisec                            # open the secretary grid (read-only planning)
+cd REPO && pidev                 # open one repository as Neovim + Pi
+pi-restart                       # rebuild the grids cleanly
+pi-tmux-switch pi-personal       # jump to the Pi session from anywhere
+```
 
-My terminal setup: tmux + neovim (LazyVim).
+State and data live outside the repository:
+
+- controller state: `~/.local/state/pi-system/`
+- installed generation: `~/.local/share/pi-system/`
+- controller-owned working copies: `~/.local/share/pi-system-work/`
+
+The product boundary is in [`pi/README.md`](pi/README.md); contracts and
+acceptance runbooks are in [`pi/control-plane/`](pi/control-plane/).
 
 ## Pi Harness Development
 
@@ -24,12 +32,18 @@ git clone https://github.com/thajpo/dotfiles.git
 cd dotfiles
 stage=$(mktemp -d /tmp/pi-system-stage.XXXXXX)
 rmdir "$stage"
-./bin/pi-install stage --staging-root "$stage"
+./bin/pi-install stage --source-ref HEAD --staging-root "$stage"
 ./bin/pi-install verify --staging-root "$stage"
-./bin/pi-install activate --staging-root "$stage" --data-root "$HOME/.local/share/pi-system"
-./bin/pi-install init-state --state-root "$HOME/.local/state/pi-system"
+./bin/pi-install activate --staging-root "$stage" \
+  --data-root "$HOME/.local/share/pi-system" \
+  --state-root "$HOME/.local/state/pi-system"
 ./bin/pi-control schema status
 ```
+
+Activating uncommitted release files requires `--allow-dirty` and records the
+changed paths in the approval display. A schema-format change does not migrate
+the controller database: use `--reset-state` only when intentionally deleting
+the old controller state and starting fresh.
 
 These commands exercise the staging API; they are not proof that the installed
 Pi chat product is ready. Acceptance must launch real controller-bound
@@ -229,13 +243,12 @@ threshold is `-55 dBFS`. Override calibration with
 - Syncs to `~/.config/nvim`
 
 ### Pi
-- Fresh controller projects, conversations, runs, workstreams, and messages
-- Controller-scoped host readers and exact one-use command approvals
-- One assigned working copy, writer generation, and isolated runtime per coding run
-- Exact submitted revisions, independent review receipts, and guarded integration
-- Fresh session continuity without importing pre-controller Pi chats
-- Tmux presentation derived from controller state rather than pane identity
-- Reproducible installation and rollback gates before replacing OpenCode
+- Controller-owned projects, conversations, runs, workstreams, and messages
+- One assigned working copy and isolated writer container per coding run
+- Scoped read-only host readers; exact one-use approvals for host/network commands
+- Session continuity across restarts; no pre-controller Pi state is imported
+- Tmux presentation derived from controller state, not pane identity
+- Reproducible install, activation, and rollback gates
 
 See [`pi/README.md`](pi/README.md) for the product boundary and
 [`pi/control-plane/README.md`](pi/control-plane/README.md) for canonical

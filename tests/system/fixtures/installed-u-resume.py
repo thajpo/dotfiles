@@ -136,6 +136,7 @@ def main() -> int:
         day_two_tip = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], stdout=subprocess.PIPE, text=True).stdout.strip()
 
         assert_fixture_containers_absent(state)
+        managed = []
 
         assertions = {
             "dayOneWriterRuns": len(writer_runs),

@@ -68,7 +68,7 @@ def main() -> int:
             command(["git", "-C", str(repo), "commit", "-qm", "base"], env=git_env)
 
             activate = ROOT / "bin/pi-activate"
-            result_a = cli([str(activate), "--staged-root", str(stage_a), "--data-root", str(data_root), "--test-only-decision", "approve"], label="activate A")
+            result_a = cli([str(activate), "--staged-root", str(stage_a), "--data-root", str(data_root), "--state-root", str(state_root), "--allow-dirty", "--test-only-decision", "approve"], label="activate A")
             if not result_a.get("activated"):
                 raise AssertionError(f"activation A failed: {result_a}")
             if not (data_root / "activation.json").is_file():
@@ -85,7 +85,7 @@ def main() -> int:
             build_b = built_b["buildId"]
             marker.write_text("P12-NONPRODUCTION-TEST-ONLY\n", encoding="ascii")
             marker.chmod(0o600)
-            result_b = cli([str(activate), "--staged-root", str(stage_b), "--data-root", str(data_root), "--test-only-decision", "approve"], label="activate B")
+            result_b = cli([str(activate), "--staged-root", str(stage_b), "--data-root", str(data_root), "--state-root", str(state_root), "--allow-dirty", "--test-only-decision", "approve"], label="activate B")
             if not result_b.get("activated"):
                 raise AssertionError(f"activation B failed: {result_b}")
             rollbacks = list(root.glob("data.rollback.*"))
@@ -97,7 +97,11 @@ def main() -> int:
             status_after_b = cli([str(controller_b), "--state-root", str(state_root), "project", "status", state_project], label="project status after B")
 
             # Rollback: B preserved, A restored.
-            rollback_result = rollback(data_root)
+            for rollback_root in root.glob("data.rollback.*"):
+                marker_in_backup = rollback_root / marker.name
+                if marker_in_backup.exists():
+                    marker_in_backup.unlink()
+            rollback_result = rollback(data_root, state_root=state_root)
             if not rollback_result["rolledBack"]:
                 raise AssertionError("rollback did not restore a generation")
             preserved = Path(rollback_result["preservedNewRoot"])

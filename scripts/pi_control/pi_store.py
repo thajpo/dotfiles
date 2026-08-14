@@ -14,7 +14,7 @@ import sqlite3
 import stat
 from typing import Any, Iterator, Sequence
 
-from .errors import DatabaseCorruptError, SchemaNewerError, UnsafeDatabaseError
+from .errors import DatabaseCorruptError, SchemaNewerError, SchemaResetRequiredError, UnsafeDatabaseError
 from .pi_schema import PI_MIGRATION_NAME, PI_SCHEMA_VERSION, apply_schema, schema_digest
 from .models import SchemaStatus, new_id, utc_now
 
@@ -118,7 +118,7 @@ class PiStore:
                 if version not in {0, PI_SCHEMA_VERSION}:
                     if version > PI_SCHEMA_VERSION:
                         raise SchemaNewerError("Pi system database is newer than this controller")
-                    raise DatabaseCorruptError("Pi system schema epoch is obsolete and cannot be migrated")
+                    raise SchemaResetRequiredError("Pi system schema epoch is obsolete; activate with explicit state reset")
                 mode = str(self.conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
                 if mode != "wal":
                     raise UnsafeDatabaseError("Pi system database could not use WAL")
@@ -164,7 +164,7 @@ class PiStore:
             raise DatabaseCorruptError("Pi system schema version is invalid")
         migration = self.conn.execute("SELECT name,source_sha256 FROM schema_migrations WHERE version=?", (PI_SCHEMA_VERSION,)).fetchone()
         if migration is None or tuple(migration) != (PI_MIGRATION_NAME, schema_digest()):
-            raise DatabaseCorruptError("Pi system schema checksum does not match source")
+            raise SchemaResetRequiredError("Pi system schema checksum differs; activate with explicit state reset")
         meta = self.conn.execute("SELECT schema_version FROM control_meta WHERE singleton=1").fetchone()
         if meta is None or int(meta[0]) != version:
             raise DatabaseCorruptError("Pi system metadata disagrees with SQLite user_version")

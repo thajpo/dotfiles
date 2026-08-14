@@ -264,8 +264,15 @@ def main() -> int:
             personal = cli([str(controller), "--state-root", str(state), "conversation", "create", "--request-json", json.dumps({"projectId": project["project_id"], "role": "personal", "displayName": "P10 personal", "workingCopyId": primary["working_copy_id"], "idempotencyKey": "p10-personal"})], label="conversation create personal")
             writer_argv = [str(stage / "bin/pi-system-container-run"), "--state-root", str(state), "--conversation-id", personal["conversation_id"], "--build-id", build_id, "--prompt", json.dumps({"role": "personal"}), "--model", "scripted/scripted-1", "--acceptance-test-profile", "scripted-v1", "--test-provider", str(p7_provider), "--test-probe", str(probe), "--tool-image", PINNED_ACCEPTANCE_IMAGE]
             writer_process = subprocess.Popen(writer_argv, cwd=repo, env=_leak_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            time.sleep(3.0)
-            writer_observations = [item for item in inspect_fixture_containers(state) if item.ref.kind == "writer" and not item.absent]
+            deadline = time.monotonic() + 30
+            writer_observations = []
+            while time.monotonic() < deadline:
+                writer_observations = [item for item in inspect_fixture_containers(state) if item.ref.kind == "writer" and not item.absent]
+                if writer_observations and any(item.running for item in writer_observations):
+                    break
+                if writer_process.poll() is not None:
+                    break
+                time.sleep(0.05)
             if len(writer_observations) != 1 or not writer_observations[0].identity_matches or not writer_observations[0].ref.container_id:
                 raise AssertionError(f"P10 fixture writer identity was not uniquely attested: {[item.as_dict() for item in writer_observations]}")
             writer_container_id = writer_observations[0].ref.container_id

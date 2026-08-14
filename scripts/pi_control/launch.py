@@ -179,6 +179,12 @@ def prepare_run(
         if lock is not None:
             lock.close()
             lock = None
+        if isinstance(error, LaunchError):
+            try:
+                store.fail_operation(operation_id, code="CP_CONSTRAINT", detail=str(error)[:1024], step="run-rejected")
+            except Exception:
+                pass
+            raise
         try:
             store.fail_operation(operation_id, code="CP_CONSTRAINT", detail="run preparation violated a database invariant", step="run-rejected")
         except Exception:

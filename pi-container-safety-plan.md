@@ -386,7 +386,7 @@ Final evidence must establish:
 - Live run IDs, claims, and process identities were not changed by the aggregate.
 - No unrelated tmux session was touched.
 - No global Docker kill/remove command was used.
-- The known pre-existing runtime-spec failure remains separately identified.
+- The runtime-spec contract is covered by a passing control-plane test.
 
 ## Commit Structure
 Use modular commits:

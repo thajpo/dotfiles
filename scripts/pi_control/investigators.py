@@ -77,7 +77,7 @@ def complete_investigation(store: Any, investigation_id: str, *, state: str, res
             if row["state"] == state and canonical_json(dict(result)) == row["result_json"]:
                 return dict(row)
             raise InvestigatorError("investigation already has a different terminal record")
-        if row["run_id"] is None:
+        if row["run_id"] is None and state != "interrupted":
             raise InvestigatorError("investigation has no controller-supervised run")
         now = utc_now()
         store.conn.execute("UPDATE investigations SET state=?,result_json=?,updated_at=?,completed_at=? WHERE investigation_id=?", (state, canonical_json(dict(result)), now, now, investigation_id))

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Grid mechanics test for the controller-backed pi-personal launcher.
 #
-# Uses an isolated tmux server and a stubbed pi-surface.py so no real Pi
+# Uses an isolated Pi tmux socket and a stubbed pi-surface.py so no real Pi
 # process or model provider is contacted. Verifies the personal surface uses
 # the real personal conversation path (not workstream) and applies its own
 # ordered active set independently from the secretary grid.
@@ -10,7 +10,7 @@ set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 temporary=$(mktemp -d /tmp/personal-grid-test.XXXXXX)
 cleanup() {
-  TMUX_TMPDIR="$temporary/tmux" env -u TMUX tmux kill-server >/dev/null 2>&1 || true
+  env -u TMUX tmux -S "$temporary/pi.sock" kill-server >/dev/null 2>&1 || true
   rm -rf "$temporary"
 }
 trap cleanup EXIT
@@ -18,7 +18,9 @@ trap cleanup EXIT
 mkdir -p "$temporary/bin" "$temporary/scripts" "$temporary/state" "$temporary/tmux"
 chmod 700 "$temporary/state"
 cp "$root/bin/pi-personal" "$temporary/bin/pi-personal"
+cp "$root/bin/pi-tmux" "$temporary/bin/pi-tmux"
 chmod +x "$temporary/bin/pi-personal"
+chmod +x "$temporary/bin/pi-tmux"
 
 cat > "$temporary/scripts/pi-surface.py" <<'PY'
 #!/usr/bin/env python3
@@ -88,7 +90,7 @@ def main(argv):
             else:
                 ids.append(flag)
         def tmux(*args):
-            return sp.run(["tmux", *args], capture_output=True, text=True)
+            return sp.run(["tmux", "-S", os.environ["PI_TMUX_SOCKET"], *args], capture_output=True, text=True)
         def conv_title(conv):
             return "pi-personal %s" % conv
         if not ids:
@@ -122,12 +124,19 @@ if __name__ == "__main__":
 PY
 chmod +x "$temporary/scripts/pi-surface.py"
 
-export TMUX_TMPDIR="$temporary/tmux"
+export PI_TMUX_SOCKET="$temporary/pi.sock"
 unset TMUX
 export PERSONAL_GRID_STATE="$temporary/state"
-tmux new-session -d -s scratch >/dev/null 2>&1
+ptmux() { tmux -S "$PI_TMUX_SOCKET" "$@"; }
+ptmux new-session -d -s scratch >/dev/null 2>&1
 
 personal() { "$temporary/bin/pi-personal" "$@"; }
+
+# Invalid commands must fail before attempting reconciliation or attach.
+if personal --bogus >/dev/null 2>&1; then echo "FAIL: unknown personal option accepted"; exit 1; fi
+if personal list extra >/dev/null 2>&1; then echo "FAIL: extra personal argument accepted"; exit 1; fi
+if personal activate >/dev/null 2>&1; then echo "FAIL: empty personal activation accepted"; exit 1; fi
+if personal activate --clear extra >/dev/null 2>&1; then echo "FAIL: extra personal clear argument accepted"; exit 1; fi
 
 # Independent active set: personal shows only beta while the secretary grid
 # (stored preference for pisec) is untouched.
@@ -138,14 +147,14 @@ personal list | grep -q "^ .*alpha" || { echo "FAIL: alpha must be inactive in p
 
 # The personal launch must request the real personal role argv.
 personal launch
-window=$(tmux list-windows -t =pi-personal -F '#{window_name}' | grep -v '^shell$' | head -1)
+window=$(ptmux list-windows -t =pi-personal -F '#{window_name}' | grep -v '^shell$' | head -1)
 [[ "$window" == "projects-1" ]] || { echo "FAIL: expected projects-1 window, got: $window"; exit 1; }
-argv=$(tmux list-panes -t "=pi-personal:$window" -F '#{pane_title}')
+argv=$(ptmux list-panes -t "=pi-personal:$window" -F '#{pane_title}')
 [[ "$argv" == "pi-personal conv_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2" ]] || { echo "FAIL: pane title mismatch: $argv"; exit 1; }
 
 # Single owner on re-launch.
 personal launch
-count=$(tmux list-panes -a -F '#{session_name}' | grep -c '^pi-personal$')
+count=$(ptmux list-panes -a -F '#{session_name}' | grep -c '^pi-personal$')
 (( count == 1 )) || { echo "FAIL: expected 1 pane, got $count"; exit 1; }
 
 echo "pi-personal grid mechanics: ok"
