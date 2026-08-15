@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from scripts.pi_control import controller_channel
 from scripts.pi_control.controller_channel import ChannelReader, ControllerChannelError, MAX_FRAME_BYTES, receive_frame, send_frame, validate_handshake
 from scripts.pi_control.pi_client import PiControllerClient
 from scripts.pi_control.pi_store import PiStore
@@ -83,6 +84,14 @@ class ControllerChannelTests(unittest.TestCase):
             finally:
                 left.close()
                 right.close()
+
+    def test_malformed_frame_debug_dump_preserves_protocol_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dump = Path(directory) / "frame-dump"
+            with mock.patch.dict(os.environ, {"PI_DEBUG_FRAME_DUMP": str(dump)}):
+                with self.assertRaises(ControllerChannelError):
+                    controller_channel._decode_frame(b"not-json")
+            self.assertEqual(dump.read_bytes(), b"not-json\n")
 
     def test_send_and_receive_require_one_canonical_bounded_frame(self) -> None:
         left, right = socket.socketpair()
@@ -161,6 +170,26 @@ class ProviderAuthProvisioningTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(root / "missing")}, clear=False):
                 _provision_provider_auth(runtime, "deepseek/deepseek-v4-flash")
             self.assertFalse((runtime / "agent" / "auth.json").exists())
+
+    def test_provision_uses_login_home_when_surface_home_is_sanitized(self) -> None:
+        from scripts.pi_control.host_supervisor import _provision_provider_auth
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            agent_dir = root / ".pi" / "agent"
+            agent_dir.mkdir(mode=0o700, parents=True)
+            (agent_dir / "auth.json").write_text(json.dumps({
+                "deepseek": {"type": "key", "key": "deepseek-secret"},
+            }))
+            runtime = root / "runtime"
+            (runtime / "agent").mkdir(parents=True, mode=0o700)
+            with mock.patch.dict(os.environ, {"HOME": "/nonexistent"}, clear=True), mock.patch(
+                "scripts.pi_control.host_supervisor.pwd.getpwuid",
+                return_value=mock.Mock(pw_dir=str(root)),
+            ):
+                _provision_provider_auth(runtime, "deepseek/deepseek-v4-flash")
+            provisioned = json.loads((runtime / "agent" / "auth.json").read_text())
+            self.assertEqual(provisioned["deepseek"]["type"], "api_key")
+            self.assertEqual(provisioned["deepseek"]["key"], "deepseek-secret")
 
 
 class SessionTests(unittest.TestCase):

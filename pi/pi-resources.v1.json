@@ -16,6 +16,18 @@
       ]
     },
     {
+      "path": "pi/extensions/web-session/index.ts",
+      "resourceId": "extension:web-session",
+      "roles": [
+        "secretary",
+        "investigator",
+        "reviewer",
+        "personal",
+        "workstream",
+        "integration"
+      ]
+    },
+    {
       "path": "pi/extensions/scoped-project-read/index.ts",
       "resourceId": "extension:scoped-project-read",
       "roles": [
@@ -103,6 +115,7 @@
         "package:pi-core",
         "package:pi-subagents",
         "extension:controller-channel",
+        "extension:web-session",
         "extension:scoped-project-read",
         "extension:project-messages",
         "extension:dependency-review",
@@ -153,6 +166,7 @@
       "resources": [
         "package:pi-core",
         "extension:controller-channel",
+        "extension:web-session",
         "extension:scoped-project-read",
         "extension:project-messages",
         "extension:dependency-review",
@@ -177,6 +191,7 @@
       "resources": [
         "package:pi-core",
         "extension:controller-channel",
+        "extension:web-session",
         "extension:scoped-project-read",
         "extension:project-messages",
         "extension:dependency-review",
@@ -202,6 +217,7 @@
         "package:pi-core",
         "package:pi-subagents",
         "extension:controller-channel",
+        "extension:web-session",
         "package:pi-sandbox-control",
         "extension:project-messages",
         "extension:project-commands",
@@ -249,6 +265,7 @@
         "package:pi-core",
         "package:pi-subagents",
         "extension:controller-channel",
+        "extension:web-session",
         "package:pi-sandbox-control",
         "extension:project-messages",
         "extension:project-commands",
@@ -294,7 +311,8 @@
     {
       "resources": [
         "package:pi-core",
-        "extension:controller-channel"
+        "extension:controller-channel",
+        "extension:web-session"
       ],
       "role": "integration",
       "supported": false,
@@ -303,6 +321,7 @@
   ],
   "launchers": [
     "bin/pi-control",
+    "bin/pi-web",
     "bin/pi-authorize",
     "bin/pi-install",
     "bin/pi-system-run",
@@ -352,6 +371,7 @@
         "package:pi-core",
         "package:pi-subagents",
         "extension:controller-channel",
+        "extension:web-session",
         "extension:scoped-project-read",
         "extension:project-messages",
         "extension:dependency-review",
@@ -366,6 +386,7 @@
       "resources": [
         "package:pi-core",
         "extension:controller-channel",
+        "extension:web-session",
         "extension:scoped-project-read",
         "extension:project-messages",
         "extension:dependency-review",
@@ -377,6 +398,7 @@
       "resources": [
         "package:pi-core",
         "extension:controller-channel",
+        "extension:web-session",
         "extension:scoped-project-read",
         "extension:project-messages",
         "extension:dependency-review",
@@ -390,6 +412,7 @@
         "package:pi-subagents",
         "package:pi-sandbox-control",
         "extension:controller-channel",
+        "extension:web-session",
         "extension:project-messages",
         "extension:project-commands",
         "extension:dependency-review",
@@ -405,6 +428,7 @@
         "package:pi-subagents",
         "package:pi-sandbox-control",
         "extension:controller-channel",
+        "extension:web-session",
         "extension:project-messages",
         "extension:project-commands",
         "extension:dependency-review",
@@ -420,6 +444,7 @@
         "package:pi-subagents",
         "package:pi-sandbox-control",
         "extension:controller-channel",
+        "extension:web-session",
         "extension:project-messages",
         "extension:project-commands",
         "extension:dependency-review",

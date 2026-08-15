@@ -1,0 +1,353 @@
+--- a/dist/core/agent-session.d.ts
++++ b/dist/core/agent-session.d.ts
+@@ -162,6 +162,8 @@
+     source?: InputSource;
+     /** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
+     preflightResult?: (success: boolean) => void;
++    /** Caller-owned ID attached to a queued message. */
++    queueId?: string;
+ }
+ /** Result from cycleModel() */
+ export interface ModelCycleResult {
+@@ -417,6 +419,9 @@
+      */
+     sendUserMessage(content: string | (TextContent | ImageContent)[], options?: {
+         deliverAs?: "steer" | "followUp";
++        expandPromptTemplates?: boolean;
++        preflightResult?: (success: boolean) => void;
++        queueId?: string;
+     }): Promise<void>;
+     /**
+      * Clear all queued messages and return them.
+@@ -427,6 +432,14 @@
+         steering: string[];
+         followUp: string[];
+     };
++    /** Get queued messages with optional caller-owned IDs. */
++    getQueuedMessages(): ReadonlyArray<{
++        id?: string;
++        text: string;
++        deliverAs: "steer" | "followUp";
++    }>;
++    /** Remove one caller-owned queued message without disturbing other queues. */
++    removeQueuedMessage(id: string): boolean;
+     /** Number of pending messages (includes both steering and follow-up) */
+     get pendingMessageCount(): number;
+     /** Get pending steering messages (read-only) */
+@@ -650,4 +663,4 @@
+      */
+     get extensionRunner(): ExtensionRunner;
+ }
+-//# sourceMappingURL=agent-session.d.ts.map
+\ No newline at end of file
++//# sourceMappingURL=agent-session.d.ts.map
+--- a/dist/core/agent-session.js
++++ b/dist/core/agent-session.js
+@@ -88,8 +88,10 @@
+     _resolveIdleWait;
+     /** Tracks pending steering messages for UI display. Removed when delivered. */
+     _steeringMessages = [];
++    _steeringQueueIds = [];
+     /** Tracks pending follow-up messages for UI display. Removed when delivered. */
+     _followUpMessages = [];
++    _followUpQueueIds = [];
+     /** Messages queued to be included with the next user prompt as context ("asides"). */
+     _pendingNextTurnMessages = [];
+     // Compaction state
+@@ -335,6 +337,7 @@
+                 const steeringIndex = this._steeringMessages.indexOf(messageText);
+                 if (steeringIndex !== -1) {
+                     this._steeringMessages.splice(steeringIndex, 1);
++                    this._steeringQueueIds.splice(steeringIndex, 1);
+                     this._emitQueueUpdate();
+                 }
+                 else {
+@@ -342,6 +345,7 @@
+                     const followUpIndex = this._followUpMessages.indexOf(messageText);
+                     if (followUpIndex !== -1) {
+                         this._followUpMessages.splice(followUpIndex, 1);
++                        this._followUpQueueIds.splice(followUpIndex, 1);
+                         this._emitQueueUpdate();
+                     }
+                 }
+@@ -830,10 +834,10 @@
+                     throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+                 }
+                 if (options.streamingBehavior === "followUp") {
+-                    await this._queueFollowUp(expandedText, currentImages);
++                    await this._queueFollowUp(expandedText, currentImages, options?.queueId);
+                 }
+                 else {
+-                    await this._queueSteer(expandedText, currentImages);
++                    await this._queueSteer(expandedText, currentImages, options?.queueId);
+                 }
+                 preflightResult?.(true);
+                 return;
+@@ -1010,8 +1014,9 @@
+     /**
+      * Internal: Queue a steering message (already expanded, no extension command check).
+      */
+-    async _queueSteer(text, images) {
++    async _queueSteer(text, images, queueId) {
+         this._steeringMessages.push(text);
++        this._steeringQueueIds.push(queueId);
+         this._emitQueueUpdate();
+         const content = [{ type: "text", text }];
+         if (images) {
+@@ -1021,13 +1026,15 @@
+             role: "user",
+             content,
+             timestamp: Date.now(),
++            webInputId: queueId,
+         });
+     }
+     /**
+      * Internal: Queue a follow-up message (already expanded, no extension command check).
+      */
+-    async _queueFollowUp(text, images) {
++    async _queueFollowUp(text, images, queueId) {
+         this._followUpMessages.push(text);
++        this._followUpQueueIds.push(queueId);
+         this._emitQueueUpdate();
+         const content = [{ type: "text", text }];
+         if (images) {
+@@ -1037,6 +1044,7 @@
+             role: "user",
+             content,
+             timestamp: Date.now(),
++            webInputId: queueId,
+         });
+     }
+     /**
+@@ -1099,6 +1107,9 @@
+      *
+      * @param content User message content (string or content array)
+      * @param options.deliverAs Delivery mode when streaming: "steer" or "followUp"
++     * @param options.expandPromptTemplates Whether to dispatch extension commands and expand skills/templates
++     * @param options.preflightResult Called after Pi accepts or rejects the prompt
++     * @param options.queueId Stable caller-owned ID for a queued message
+      */
+     async sendUserMessage(content, options) {
+         // Normalize content to text string + optional images
+@@ -1122,12 +1133,15 @@
+             if (images.length === 0)
+                 images = undefined;
+         }
+-        // Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
++        // Extension callers preserve the historical default but may explicitly
++        // opt into Pi's command and skill/template dispatcher.
+         await this.prompt(text, {
+-            expandPromptTemplates: false,
++            expandPromptTemplates: options?.expandPromptTemplates ?? false,
+             streamingBehavior: options?.deliverAs,
+             images,
+             source: "extension",
++            preflightResult: options?.preflightResult,
++            queueId: options?.queueId,
+         });
+     }
+     /**
+@@ -1139,11 +1153,46 @@
+         const steering = [...this._steeringMessages];
+         const followUp = [...this._followUpMessages];
+         this._steeringMessages = [];
++        this._steeringQueueIds = [];
+         this._followUpMessages = [];
++        this._followUpQueueIds = [];
+         this.agent.clearAllQueues();
+         this._emitQueueUpdate();
+         return { steering, followUp };
+     }
++    /** Return queued messages with optional browser-owned IDs. */
++    getQueuedMessages() {
++        return [
++            ...this._steeringMessages.map((text, index) => ({ text, deliverAs: "steer", id: this._steeringQueueIds[index] })),
++            ...this._followUpMessages.map((text, index) => ({ text, deliverAs: "followUp", id: this._followUpQueueIds[index] })),
++        ];
++    }
++    /** Remove one browser-owned queued message without disturbing TTY messages. */
++    removeQueuedMessage(queueId) {
++        if (!queueId)
++            return false;
++        const queues = [
++            [this._steeringMessages, this._steeringQueueIds, this.agent.steeringQueue],
++            [this._followUpMessages, this._followUpQueueIds, this.agent.followUpQueue],
++        ];
++        for (const [messages, ids, queue] of queues) {
++            const index = ids.indexOf(queueId);
++            if (index === -1)
++                continue;
++            const pending = queue?.messages;
++            if (!Array.isArray(pending))
++                return false;
++            const pendingIndex = pending.findIndex((message) => message?.webInputId === queueId);
++            if (pendingIndex === -1)
++                return false;
++            pending.splice(pendingIndex, 1);
++            messages.splice(index, 1);
++            ids.splice(index, 1);
++            this._emitQueueUpdate();
++            return true;
++        }
++        return false;
++    }
+     /** Number of pending messages (includes both steering and follow-up) */
+     get pendingMessageCount() {
+         return this._steeringMessages.length + this._followUpMessages.length;
+@@ -1853,13 +1902,15 @@
+                 });
+             },
+             sendUserMessage: (content, options) => {
+-                this.sendUserMessage(content, options).catch((err) => {
++                const promise = this.sendUserMessage(content, options);
++                promise.catch((err) => {
+                     runner.emitError({
+                         extensionPath: "<runtime>",
+                         event: "send_user_message",
+                         error: err instanceof Error ? err.message : String(err),
+                     });
+                 });
++                return promise;
+             },
+             appendEntry: (customType, data) => {
+                 const entryId = this.sessionManager.appendCustomEntry(customType, data);
+@@ -1904,6 +1955,8 @@
+                 void this.abort();
+             },
+             hasPendingMessages: () => this.pendingMessageCount > 0,
++            getQueuedMessages: () => this.getQueuedMessages(),
++            removeQueuedMessage: (queueId) => this.removeQueuedMessage(queueId),
+             shutdown: () => {
+                 this._extensionShutdownHandler?.();
+             },
+@@ -2682,4 +2735,4 @@
+         return this._extensionRunner;
+     }
+ }
+-//# sourceMappingURL=agent-session.js.map
+\ No newline at end of file
++//# sourceMappingURL=agent-session.js.map
+--- a/dist/core/extensions/loader.js
++++ b/dist/core/extensions/loader.js
+@@ -242,7 +242,7 @@
+         },
+         sendUserMessage(content, options) {
+             runtime.assertActive();
+-            runtime.sendUserMessage(content, options);
++            return runtime.sendUserMessage(content, options);
+         },
+         appendEntry(customType, data) {
+             runtime.assertActive();
+@@ -555,4 +555,4 @@
+     }
+     return loadExtensions(allPaths, resolvedCwd, eventBus);
+ }
+-//# sourceMappingURL=loader.js.map
+\ No newline at end of file
++//# sourceMappingURL=loader.js.map
+--- a/dist/core/extensions/runner.js
++++ b/dist/core/extensions/runner.js
+@@ -134,6 +134,8 @@
+     waitForIdleFn = async () => { };
+     abortFn = () => { };
+     hasPendingMessagesFn = () => false;
++    getQueuedMessagesFn = () => [];
++    removeQueuedMessageFn = () => false;
+     getContextUsageFn = () => undefined;
+     compactFn = () => { };
+     getSystemPromptFn = () => "";
+@@ -179,6 +181,8 @@
+         this.getSignalFn = contextActions.getSignal;
+         this.abortFn = contextActions.abort;
+         this.hasPendingMessagesFn = contextActions.hasPendingMessages;
++        this.getQueuedMessagesFn = contextActions.getQueuedMessages;
++        this.removeQueuedMessageFn = contextActions.removeQueuedMessage;
+         this.shutdownHandler = contextActions.shutdown;
+         this.getContextUsageFn = contextActions.getContextUsage;
+         this.compactFn = contextActions.compact;
+@@ -514,6 +518,14 @@
+                 runner.assertActive();
+                 return runner.hasPendingMessagesFn();
+             },
++            getQueuedMessages: () => {
++                runner.assertActive();
++                return runner.getQueuedMessagesFn();
++            },
++            removeQueuedMessage: (queueId) => {
++                runner.assertActive();
++                return runner.removeQueuedMessageFn(queueId);
++            },
+             shutdown: () => {
+                 runner.assertActive();
+                 runner.shutdownHandler();
+@@ -961,4 +973,4 @@
+             : { action: "continue" };
+     }
+ }
+-//# sourceMappingURL=runner.js.map
+\ No newline at end of file
++//# sourceMappingURL=runner.js.map
+--- a/dist/core/extensions/types.d.ts
++++ b/dist/core/extensions/types.d.ts
+@@ -238,6 +238,14 @@
+     abort(): void;
+     /** Whether there are queued messages waiting */
+     hasPendingMessages(): boolean;
++    /** Return queued messages and their optional caller-owned IDs. */
++    getQueuedMessages(): ReadonlyArray<{
++        id?: string;
++        text: string;
++        deliverAs: "steer" | "followUp";
++    }>;
++    /** Remove one caller-owned queued message without touching other queues. */
++    removeQueuedMessage(id: string): boolean;
+     /** Gracefully shutdown pi and exit. Available in all contexts. */
+     shutdown(): void;
+     /** Get current context usage for the active model. */
+@@ -918,7 +926,10 @@
+      */
+     sendUserMessage(content: string | (TextContent | ImageContent)[], options?: {
+         deliverAs?: "steer" | "followUp";
+-    }): void;
++        expandPromptTemplates?: boolean;
++        preflightResult?: (success: boolean) => void;
++        queueId?: string;
++    }): void | Promise<void>;
+     /** Append a custom entry to the session for state persistence (not sent to LLM). */
+     appendEntry<T = unknown>(customType: string, data?: T): void;
+     /** Set the session display name (shown in session selector). */
+@@ -1113,7 +1124,13 @@
+ }) => void;
+ export type SendUserMessageHandler = (content: string | (TextContent | ImageContent)[], options?: {
+     deliverAs?: "steer" | "followUp";
+-}) => void;
++    /** Dispatch registered commands and expand skills/templates when true. */
++    expandPromptTemplates?: boolean;
++    /** Internal preflight callback invoked after Pi accepts or rejects the input. */
++    preflightResult?: (success: boolean) => void;
++    /** Caller-owned ID attached to a queued browser message. */
++    queueId?: string;
++}) => void | Promise<void>;
+ export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
+ export type SetSessionNameHandler = (name: string) => void;
+ export type GetSessionNameHandler = () => string | undefined;
+@@ -1193,6 +1210,12 @@
+     getSignal: () => AbortSignal | undefined;
+     abort: () => void;
+     hasPendingMessages: () => boolean;
++    getQueuedMessages: () => ReadonlyArray<{
++        id?: string;
++        text: string;
++        deliverAs: "steer" | "followUp";
++    }>;
++    removeQueuedMessage: (id: string) => boolean;
+     shutdown: () => void;
+     getContextUsage: () => ContextUsage | undefined;
+     compact: (options?: CompactOptions) => void;
+@@ -1269,4 +1292,4 @@
+     error: string;
+     stack?: string;
+ }
+-//# sourceMappingURL=types.d.ts.map
+\ No newline at end of file
++//# sourceMappingURL=types.d.ts.map

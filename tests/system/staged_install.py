@@ -31,8 +31,9 @@ def install(
     *,
     pi_core_tarball: Path | None = None,
     npm_cache: Path | None = None,
+    apply_core_patch: bool = True,
 ) -> dict[str, Any]:
-    return build_generation(ROOT, output_root, pi_core_tarball=pi_core_tarball, npm_cache=npm_cache)
+    return build_generation(ROOT, output_root, pi_core_tarball=pi_core_tarball, npm_cache=npm_cache, apply_core_patch=apply_core_patch)
 
 
 def main(argv: list[str] | None = None) -> int:

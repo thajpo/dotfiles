@@ -10,12 +10,16 @@ import tarfile
 import tempfile
 import unittest
 
-from scripts.pi_control.pi_install import InstallError, PI_PACKAGE, _materialize_source, ensure_fresh_state, stage, verify_stage
+from scripts.pi_control.pi_install import InstallError, PI_PACKAGE, _apply_core_patch, _materialize_source, _verify_core_overlay, ensure_fresh_state, stage, verify_stage
 from scripts.pi_control.staged_build import create_build_manifest, load_build_manifest, write_build_manifest
 from tests.system import staged_install
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def verify_test_stage(root: Path) -> dict[str, object]:
+    return verify_stage(root, require_core_patch=False)
 
 
 def pack_test_pi_core(root: Path) -> Path:
@@ -87,6 +91,28 @@ def special_file_test_pi_core(root: Path) -> Path:
 
 
 class GreenfieldInstallTests(unittest.TestCase):
+    def test_pinned_web_overlay_applies_to_installed_core_targets(self) -> None:
+        installed = Path.home() / ".local/share/pi/core/node_modules/@earendil-works/pi-coding-agent"
+        targets = [
+            "dist/core/agent-session.js",
+            "dist/core/agent-session.d.ts",
+            "dist/core/extensions/loader.js",
+            "dist/core/extensions/runner.js",
+            "dist/core/extensions/types.d.ts",
+        ]
+        if not all((installed / relative).is_file() for relative in targets):
+            self.skipTest("the pinned Pi core is not installed on this host")
+        with tempfile.TemporaryDirectory() as raw:
+            package = Path(raw) / "package"
+            for relative in targets:
+                destination = package / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(installed / relative, destination)
+            _apply_core_patch(package, ROOT / "pi/patches/pi-coding-agent-0.83.0-web-dispatch.patch")
+            _apply_core_patch(package, ROOT / "pi/patches/pi-coding-agent-0.83.0-web-queue-identity.patch")
+            self.assertIn("_steeringQueueIds", (package / "dist/core/agent-session.js").read_text(encoding="utf-8"))
+            self.assertIn("removeQueuedMessage", (package / "dist/core/extensions/types.d.ts").read_text(encoding="utf-8"))
+
     def test_dirty_release_source_requires_explicit_override(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             with self.assertRaisesRegex(InstallError, "uncommitted changes"):
@@ -117,8 +143,8 @@ class GreenfieldInstallTests(unittest.TestCase):
             root = Path(raw)
             core = pack_test_pi_core(root)
             stage_root = root / "stage"
-            staged = stage(ROOT, stage_root, pi_core_tarball=core)
-            self.assertTrue(verify_stage(stage_root)["verified"])
+            staged = stage(ROOT, stage_root, pi_core_tarball=core, apply_core_patch=False)
+            self.assertTrue(verify_test_stage(stage_root)["verified"])
             state = ensure_fresh_state(root / "state")
             self.assertTrue(state["fresh"])
             process = subprocess.run(
@@ -129,15 +155,27 @@ class GreenfieldInstallTests(unittest.TestCase):
             )
             self.assertEqual(process.returncode, 0, process.stderr)
             self.assertEqual(json.loads(process.stdout)["schema_version"], 3)
-            self.assertEqual(staged["buildId"], verify_stage(stage_root)["buildId"])
+            self.assertEqual(staged["buildId"], verify_test_stage(stage_root)["buildId"])
+
+    def test_unpatched_generation_cannot_pass_default_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            stage_root = root / "stage"
+            stage(ROOT, stage_root, pi_core_tarball=pack_test_pi_core(root), apply_core_patch=False)
+            with self.assertRaisesRegex(InstallError, "web overlay target"):
+                verify_stage(stage_root)
+
+    def test_unknown_pi_version_cannot_pass_overlay_verification(self) -> None:
+        with self.assertRaisesRegex(InstallError, "no verified Pi core web overlay"):
+            _verify_core_overlay(Path("/tmp/unused"), {"version": "0.84.0", "installedPath": "runtime/node_modules/@earendil-works/pi-coding-agent"})
 
     def test_production_and_test_staging_are_one_deterministic_builder(self) -> None:
         self.assertIs(staged_install.build_generation, stage)
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             core = pack_test_pi_core(root)
-            first = stage(ROOT, root / "first", pi_core_tarball=core)
-            second = staged_install.install(root / "second", pi_core_tarball=core)
+            first = stage(ROOT, root / "first", pi_core_tarball=core, apply_core_patch=False)
+            second = staged_install.install(root / "second", pi_core_tarball=core, apply_core_patch=False)
             self.assertEqual(first["buildId"], second["buildId"])
             self.assertEqual(first["manifestDigest"], second["manifestDigest"])
             manifest = load_build_manifest(root / "first/build-manifest.json")
@@ -151,6 +189,8 @@ class GreenfieldInstallTests(unittest.TestCase):
             self.assertIn("runtime/node_modules/pi-sandbox-control/package.json", paths)
             self.assertIn("runtime/node_modules/pi-subagents/package.json", paths)
             self.assertIn("pi/extensions/scoped-project-read/core.mjs", paths)
+            self.assertIn("pi/patches/pi-coding-agent-0.83.0-web-dispatch.patch", paths)
+            self.assertIn("pi/patches/pi-coding-agent-0.83.0-web-queue-identity.patch", paths)
             self.assertFalse(any(path.startswith(".core-build/") for path in paths))
             self.assertFalse((root / "first/.core-build").exists())
             self.assertFalse(any(path.startswith("fixtures/") for path in paths))
@@ -184,27 +224,27 @@ class GreenfieldInstallTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(installed_verify.returncode, 0, installed_verify.stderr)
-            self.assertEqual(json.loads(installed_verify.stdout)["buildId"], first["buildId"])
-            self.assertTrue(verify_stage(root / "first")["verified"])
+            self.assertNotEqual(installed_verify.returncode, 0)
+            self.assertIn("web overlay", installed_verify.stderr)
+            self.assertTrue(verify_test_stage(root / "first")["verified"])
 
     def test_core_tarball_special_files_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             with self.assertRaisesRegex(InstallError, "special file"):
-                stage(ROOT, root / "stage", pi_core_tarball=special_file_test_pi_core(root))
+                stage(ROOT, root / "stage", pi_core_tarball=special_file_test_pi_core(root), apply_core_patch=False)
             self.assertFalse((root / "stage/special").exists())
 
     def test_verify_rejects_tamper_extra_missing_and_escaping_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             core = pack_test_pi_core(root)
-            stage(ROOT, root / "original", pi_core_tarball=core)
+            stage(ROOT, root / "original", pi_core_tarball=core, apply_core_patch=False)
             variants = {}
             for name in ("tamper", "extra", "missing", "escape"):
                 variants[name] = root / name
                 shutil.copytree(root / "original", variants[name], symlinks=True)
-                self.assertTrue(verify_stage(variants[name])["verified"])
+                self.assertTrue(verify_test_stage(variants[name])["verified"])
             (variants["tamper"] / "bin/pi-control").write_text("tampered\n", encoding="utf-8")
             (variants["extra"] / "extra").write_text("extra\n", encoding="utf-8")
             (variants["missing"] / "bin/pi-control").unlink()
@@ -213,13 +253,13 @@ class GreenfieldInstallTests(unittest.TestCase):
             os.symlink(outside, variants["escape"] / "escape")
             for name, path in variants.items():
                 with self.subTest(name=name), self.assertRaises((RuntimeError, ValueError)):
-                    verify_stage(path)
+                    verify_test_stage(path)
 
     def test_verify_rejects_self_consistent_wrong_semantics(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             core = pack_test_pi_core(root)
-            stage(ROOT, root / "original", pi_core_tarball=core)
+            stage(ROOT, root / "original", pi_core_tarball=core, apply_core_patch=False)
             variants = {}
             for name in ("version", "inventory", "checkout", "escape", "core-shrinkwrap", "core-dependency"):
                 variants[name] = root / name
@@ -255,17 +295,17 @@ class GreenfieldInstallTests(unittest.TestCase):
             for path in variants.values():
                 rebind_test_manifest(path)
             with self.assertRaisesRegex(RuntimeError, "version is wrong"):
-                verify_stage(variants["version"])
+                verify_test_stage(variants["version"])
             with self.assertRaisesRegex(RuntimeError, "inventory is wrong"):
-                verify_stage(variants["inventory"])
+                verify_test_stage(variants["inventory"])
             with self.assertRaisesRegex(RuntimeError, "inventory is wrong"):
-                verify_stage(variants["checkout"])
+                verify_test_stage(variants["checkout"])
             with self.assertRaisesRegex(RuntimeError, "symlink escapes"):
-                verify_stage(variants["escape"])
+                verify_test_stage(variants["escape"])
             with self.assertRaisesRegex(RuntimeError, "did not restore its original"):
-                verify_stage(variants["core-shrinkwrap"])
+                verify_test_stage(variants["core-shrinkwrap"])
             with self.assertRaisesRegex(RuntimeError, "nested runtime dependency"):
-                verify_stage(variants["core-dependency"])
+                verify_test_stage(variants["core-dependency"])
 
 
 if __name__ == "__main__":

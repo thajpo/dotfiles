@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import queue
 import re
 import signal
@@ -337,7 +338,14 @@ def _provision_provider_auth(runtime: Path, model: str) -> None:
     provider = model.split("/", 1)[0]
     if provider in _PROVIDER_ENVIRONMENT:
         return
-    agent_dir = Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent")
+    configured_agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
+    if configured_agent_dir:
+        agent_dir = Path(configured_agent_dir)
+    else:
+        try:
+            agent_dir = Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".pi" / "agent"
+        except (KeyError, OSError):
+            agent_dir = Path.home() / ".pi" / "agent"
     host_auth = agent_dir / "auth.json"
     if not host_auth.is_file() or host_auth.is_symlink():
         return
@@ -372,7 +380,7 @@ def _provision_provider_auth(runtime: Path, model: str) -> None:
         pass
 
 
-def _environment(state_root: Path, run_id: str, fd: int, model: str, *, acceptance: bool, manifest_path: Path, interactive: bool = False) -> dict[str, str]:
+def _environment(state_root: Path, run_id: str, fd: int, model: str, *, acceptance: bool, manifest_path: Path, controller_build_id: str, controller_restart_epoch: str, interactive: bool = False) -> dict[str, str]:
     runtime = state_root / "runtime" / run_id
     values = {
         "HOME": runtime / "home", "XDG_CONFIG_HOME": runtime / "config",
@@ -386,7 +394,7 @@ def _environment(state_root: Path, run_id: str, fd: int, model: str, *, acceptan
         _provision_provider_auth(runtime, model)
     env = {key: str(value) for key, value in values.items()}
     term = os.environ.get("TERM", "dumb") if interactive else "dumb"
-    env.update({"PATH": os.defpath, "LANG": "C", "LC_ALL": "C", "TERM": term, "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0", CHANNEL_ENVIRONMENT_KEY: str(fd), "PI_RUNTIME_MANIFEST": str(manifest_path)})
+    env.update({"PATH": os.defpath, "LANG": "C", "LC_ALL": "C", "TERM": term, "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0", CHANNEL_ENVIRONMENT_KEY: str(fd), "PI_RUNTIME_MANIFEST": str(manifest_path), "PI_SYSTEM_STATE_ROOT": str(state_root), "PI_CONTROLLER_BUILD_ID": controller_build_id, "PI_CONTROLLER_RESTART_EPOCH": controller_restart_epoch})
     if not acceptance:
         provider = model.split("/", 1)[0]
         for key in _PROVIDER_ENVIRONMENT.get(provider, ()):
@@ -937,7 +945,7 @@ def launch_host_pi(
     environment_keys = sorted({
         "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "TMPDIR", "PI_CODING_AGENT_DIR",
         "PATH", "LANG", "LC_ALL", "TERM", "PI_OFFLINE", "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY", CHANNEL_ENVIRONMENT_KEY,
-        "PI_RUNTIME_MANIFEST",
+        "PI_RUNTIME_MANIFEST", "PI_SYSTEM_STATE_ROOT", "PI_CONTROLLER_BUILD_ID", "PI_CONTROLLER_RESTART_EPOCH",
         *provider_keys,
     })
     host_process = {
@@ -979,7 +987,8 @@ def launch_host_pi(
             create_start_container(store, run_id=prepared.run["run_id"], manifest=prepared.manifest)
             container_prepared = True
         parent_channel, child_channel = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        environment = _environment(Path(store.state_root), prepared.run["run_id"], child_channel.fileno(), model, acceptance=acceptance, manifest_path=prepared.manifest_path, interactive=interactive)
+        controller_identity = store.controller_identity()
+        environment = _environment(Path(store.state_root), prepared.run["run_id"], child_channel.fileno(), model, acceptance=acceptance, manifest_path=prepared.manifest_path, controller_build_id=controller_identity["buildId"], controller_restart_epoch=controller_identity["restartEpoch"], interactive=interactive)
         if sorted(environment) != [key for key in environment_keys if key in environment]:
             raise HostSupervisorError("constructed child environment differs from the manifest allowlist")
         if before_spawn is not None:

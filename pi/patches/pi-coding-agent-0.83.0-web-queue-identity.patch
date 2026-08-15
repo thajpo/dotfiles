@@ -1,0 +1,39 @@
+--- a/dist/core/agent-session.js
++++ b/dist/core/agent-session.js
+@@ -332,8 +332,26 @@
+         if (event.type === "message_start" && event.message.role === "user") {
+             this._overflowRecoveryAttempted = false;
+             const messageText = contentText(event.message.content, "");
+-            if (messageText) {
+-                // Check steering queue first
++            const webInputId = event.message.webInputId;
++            if (typeof webInputId === "string") {
++                const steeringIdIndex = this._steeringQueueIds.indexOf(webInputId);
++                if (steeringIdIndex !== -1) {
++                    this._steeringMessages.splice(steeringIdIndex, 1);
++                    this._steeringQueueIds.splice(steeringIdIndex, 1);
++                    this._emitQueueUpdate();
++                }
++                else {
++                    const followUpIdIndex = this._followUpQueueIds.indexOf(webInputId);
++                    if (followUpIdIndex !== -1) {
++                        this._followUpMessages.splice(followUpIdIndex, 1);
++                        this._followUpQueueIds.splice(followUpIdIndex, 1);
++                        this._emitQueueUpdate();
++                    }
++                }
++            }
++            else if (messageText) {
++                // TTY messages have no caller-owned ID, so retain the pinned
++                // runtime's text fallback for their queue display bookkeeping.
+                 const steeringIndex = this._steeringMessages.indexOf(messageText);
+                 if (steeringIndex !== -1) {
+                     this._steeringMessages.splice(steeringIndex, 1);
+@@ -341,7 +359,6 @@
+                     this._emitQueueUpdate();
+                 }
+                 else {
+-                    // Check follow-up queue
+                     const followUpIndex = this._followUpMessages.indexOf(messageText);
+                     if (followUpIndex !== -1) {
+                         this._followUpMessages.splice(followUpIndex, 1);

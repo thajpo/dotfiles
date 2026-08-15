@@ -31,8 +31,24 @@ class InstallUnavailable(InstallError):
 RESOURCE_CATALOG = "pi/pi-resources.v1.json"
 RESOURCE_INVENTORY = "release-resources.json"
 PI_PACKAGE = "@earendil-works/pi-coding-agent"
+PI_CORE_PATCHES = {
+    "0.83.0": (
+        "pi/patches/pi-coding-agent-0.83.0-web-dispatch.patch",
+        "pi/patches/pi-coding-agent-0.83.0-web-queue-identity.patch",
+    ),
+}
+PI_CORE_OVERLAY_MARKERS = {
+    "0.83.0": (
+        ("dist/core/agent-session.js", "_steeringQueueIds = [];"),
+        ("dist/core/agent-session.js", "const webInputId = event.message.webInputId;"),
+        ("dist/core/extensions/loader.js", "return runtime.sendUserMessage(content, options);"),
+        ("dist/core/extensions/runner.js", "getQueuedMessagesFn = () => [];"),
+        ("dist/core/extensions/types.d.ts", "removeQueuedMessage(id: string): boolean;"),
+    ),
+}
 CANARY_LAUNCHERS = (
     "bin/pi-control",
+    "bin/pi-web",
     "bin/pi-authorize",
     "bin/pi-install",
     "bin/pi-system-run",
@@ -56,6 +72,7 @@ CANARY_LAUNCHERS = (
 EXCLUDED_LAUNCHERS = ("bin/pi",)
 EXTENSION_ROLES = {
     "extension:controller-channel": ("pi/extensions/controller-channel/index.ts", ("secretary", "investigator", "reviewer", "personal", "workstream", "integration")),
+    "extension:web-session": ("pi/extensions/web-session/index.ts", ("secretary", "investigator", "reviewer", "personal", "workstream", "integration")),
     "extension:scoped-project-read": ("pi/extensions/scoped-project-read/index.ts", ("secretary", "investigator", "reviewer")),
     "extension:project-messages": ("pi/extensions/project-messages/index.ts", ("secretary", "investigator", "reviewer", "personal", "workstream", "integration")),
     "extension:project-commands": ("pi/extensions/project-commands/index.ts", ("personal", "workstream", "integration")),
@@ -76,20 +93,20 @@ FIRST_PARTY_RUNTIME_DEPENDENCIES = {
 _MAX_PACKAGE_MEMBERS = 16_384
 _MAX_PACKAGE_BYTES = 512 * 1024 * 1024
 ROLE_RESOURCES = {
-    "secretary": ("package:pi-core", "package:pi-subagents", "extension:controller-channel", "extension:scoped-project-read", "extension:project-messages", "extension:dependency-review", "extension:secretary-work", "extension:change-flow", "extension:observability", "extension:harness-feedback"),
-    "investigator": ("package:pi-core", "extension:controller-channel", "extension:scoped-project-read", "extension:project-messages", "extension:dependency-review", "extension:harness-feedback"),
-    "reviewer": ("package:pi-core", "extension:controller-channel", "extension:scoped-project-read", "extension:project-messages", "extension:dependency-review", "extension:harness-feedback"),
-    "personal": ("package:pi-core", "package:pi-subagents", "package:pi-sandbox-control", "extension:controller-channel", "extension:project-messages", "extension:project-commands", "extension:dependency-review", "extension:change-flow", "extension:observability", "extension:harness-feedback"),
-    "workstream": ("package:pi-core", "package:pi-subagents", "package:pi-sandbox-control", "extension:controller-channel", "extension:project-messages", "extension:project-commands", "extension:dependency-review", "extension:change-flow", "extension:observability", "extension:harness-feedback"),
-    "integration": ("package:pi-core", "package:pi-subagents", "package:pi-sandbox-control", "extension:controller-channel", "extension:project-messages", "extension:project-commands", "extension:dependency-review", "extension:change-flow", "extension:observability", "extension:harness-feedback"),
+    "secretary": ("package:pi-core", "package:pi-subagents", "extension:controller-channel", "extension:web-session", "extension:scoped-project-read", "extension:project-messages", "extension:dependency-review", "extension:secretary-work", "extension:change-flow", "extension:observability", "extension:harness-feedback"),
+    "investigator": ("package:pi-core", "extension:controller-channel", "extension:web-session", "extension:scoped-project-read", "extension:project-messages", "extension:dependency-review", "extension:harness-feedback"),
+    "reviewer": ("package:pi-core", "extension:controller-channel", "extension:web-session", "extension:scoped-project-read", "extension:project-messages", "extension:dependency-review", "extension:harness-feedback"),
+    "personal": ("package:pi-core", "package:pi-subagents", "package:pi-sandbox-control", "extension:controller-channel", "extension:web-session", "extension:project-messages", "extension:project-commands", "extension:dependency-review", "extension:change-flow", "extension:observability", "extension:harness-feedback"),
+    "workstream": ("package:pi-core", "package:pi-subagents", "package:pi-sandbox-control", "extension:controller-channel", "extension:web-session", "extension:project-messages", "extension:project-commands", "extension:dependency-review", "extension:change-flow", "extension:observability", "extension:harness-feedback"),
+    "integration": ("package:pi-core", "package:pi-subagents", "package:pi-sandbox-control", "extension:controller-channel", "extension:web-session", "extension:project-messages", "extension:project-commands", "extension:dependency-review", "extension:change-flow", "extension:observability", "extension:harness-feedback"),
 }
 HOST_LAUNCH_PROFILES = {
-    "secretary": {"supported": True, "resources": ("package:pi-core", "package:pi-subagents", "extension:controller-channel", "extension:scoped-project-read", "extension:project-messages", "extension:dependency-review", "extension:secretary-work", "extension:change-flow", "extension:observability", "extension:harness-feedback"), "tools": ("acknowledge_project_message", "analyze_integration", "approve_workstream", "check_package_review_gate", "git_read", "grep", "list_changes", "list_project_messages", "ls", "observe_change_queue", "observe_fleet", "observe_messages", "observe_tasks", "post_project_message", "propose_integration", "propose_review", "propose_workstream", "project_work_index", "read", "record_dependency_disposition", "reply_project_message", "request_review", "start_investigation", "subagent", "subagent_interrupt", "subagent_list", "subagent_resume", "subagent_start", "subagent_status", "subagent_steer", "subagent_stop", "subagent_wait", "harness_feedback")},
-    "investigator": {"supported": True, "resources": ("package:pi-core", "extension:controller-channel", "extension:scoped-project-read", "extension:project-messages", "extension:dependency-review", "extension:harness-feedback"), "tools": ("acknowledge_project_message", "git_read", "grep", "list_project_messages", "ls", "post_project_message", "read", "record_package_security_review", "reply_project_message", "harness_feedback")},
-    "reviewer": {"supported": True, "resources": ("package:pi-core", "extension:controller-channel", "extension:scoped-project-read", "extension:project-messages", "extension:dependency-review", "extension:harness-feedback"), "tools": ("acknowledge_project_message", "check_package_review_gate", "git_read", "grep", "list_project_messages", "ls", "post_project_message", "read", "reply_project_message", "harness_feedback")},
-    "personal": {"supported": True, "resources": ("package:pi-core", "package:pi-subagents", "extension:controller-channel", "package:pi-sandbox-control", "extension:project-messages", "extension:project-commands", "extension:dependency-review", "extension:change-flow", "extension:observability", "extension:harness-feedback"), "tools": ("acknowledge_project_message", "bash", "edit", "inventory_dependency_changes", "list_project_messages", "observe_change_queue", "observe_fleet", "observe_messages", "observe_tasks", "package_operation_status", "post_project_message", "project_command_status", "read", "reply_project_message", "request_package_operation", "request_project_command", "subagent", "subagent_interrupt", "subagent_list", "subagent_resume", "subagent_start", "subagent_status", "subagent_steer", "subagent_stop", "subagent_wait", "submit_change", "worker_start", "write", "harness_feedback")},
-    "workstream": {"supported": True, "resources": ("package:pi-core", "package:pi-subagents", "extension:controller-channel", "package:pi-sandbox-control", "extension:project-messages", "extension:project-commands", "extension:dependency-review", "extension:change-flow", "extension:observability", "extension:harness-feedback"), "tools": ("acknowledge_project_message", "bash", "edit", "inventory_dependency_changes", "list_project_messages", "observe_change_queue", "observe_fleet", "observe_messages", "observe_tasks", "package_operation_status", "post_project_message", "project_command_status", "read", "reply_project_message", "request_package_operation", "request_project_command", "subagent", "subagent_interrupt", "subagent_list", "subagent_resume", "subagent_start", "subagent_status", "subagent_steer", "subagent_stop", "subagent_wait", "submit_change", "worker_start", "write", "harness_feedback")},
-    "integration": {"supported": False, "resources": ("package:pi-core", "extension:controller-channel"), "tools": ()},
+    "secretary": {"supported": True, "resources": ("package:pi-core", "package:pi-subagents", "extension:controller-channel", "extension:web-session", "extension:scoped-project-read", "extension:project-messages", "extension:dependency-review", "extension:secretary-work", "extension:change-flow", "extension:observability", "extension:harness-feedback"), "tools": ("acknowledge_project_message", "analyze_integration", "approve_workstream", "check_package_review_gate", "git_read", "grep", "list_changes", "list_project_messages", "ls", "observe_change_queue", "observe_fleet", "observe_messages", "observe_tasks", "post_project_message", "propose_integration", "propose_review", "propose_workstream", "project_work_index", "read", "record_dependency_disposition", "reply_project_message", "request_review", "start_investigation", "subagent", "subagent_interrupt", "subagent_list", "subagent_resume", "subagent_start", "subagent_status", "subagent_steer", "subagent_stop", "subagent_wait", "harness_feedback")},
+    "investigator": {"supported": True, "resources": ("package:pi-core", "extension:controller-channel", "extension:web-session", "extension:scoped-project-read", "extension:project-messages", "extension:dependency-review", "extension:harness-feedback"), "tools": ("acknowledge_project_message", "git_read", "grep", "list_project_messages", "ls", "post_project_message", "read", "record_package_security_review", "reply_project_message", "harness_feedback")},
+    "reviewer": {"supported": True, "resources": ("package:pi-core", "extension:controller-channel", "extension:web-session", "extension:scoped-project-read", "extension:project-messages", "extension:dependency-review", "extension:harness-feedback"), "tools": ("acknowledge_project_message", "check_package_review_gate", "git_read", "grep", "list_project_messages", "ls", "post_project_message", "read", "reply_project_message", "harness_feedback")},
+    "personal": {"supported": True, "resources": ("package:pi-core", "package:pi-subagents", "extension:controller-channel", "extension:web-session", "package:pi-sandbox-control", "extension:project-messages", "extension:project-commands", "extension:dependency-review", "extension:change-flow", "extension:observability", "extension:harness-feedback"), "tools": ("acknowledge_project_message", "bash", "edit", "inventory_dependency_changes", "list_project_messages", "observe_change_queue", "observe_fleet", "observe_messages", "observe_tasks", "package_operation_status", "post_project_message", "project_command_status", "read", "reply_project_message", "request_package_operation", "request_project_command", "subagent", "subagent_interrupt", "subagent_list", "subagent_resume", "subagent_start", "subagent_status", "subagent_steer", "subagent_stop", "subagent_wait", "submit_change", "worker_start", "write", "harness_feedback")},
+    "workstream": {"supported": True, "resources": ("package:pi-core", "package:pi-subagents", "extension:controller-channel", "extension:web-session", "package:pi-sandbox-control", "extension:project-messages", "extension:project-commands", "extension:dependency-review", "extension:change-flow", "extension:observability", "extension:harness-feedback"), "tools": ("acknowledge_project_message", "bash", "edit", "inventory_dependency_changes", "list_project_messages", "observe_change_queue", "observe_fleet", "observe_messages", "observe_tasks", "package_operation_status", "post_project_message", "project_command_status", "read", "reply_project_message", "request_package_operation", "request_project_command", "subagent", "subagent_interrupt", "subagent_list", "subagent_resume", "subagent_start", "subagent_status", "subagent_steer", "subagent_stop", "subagent_wait", "submit_change", "worker_start", "write", "harness_feedback")},
+    "integration": {"supported": False, "resources": ("package:pi-core", "extension:controller-channel", "extension:web-session"), "tools": ()},
 }
 RELEASE_FILES = (
     *CANARY_LAUNCHERS,
@@ -143,8 +160,19 @@ RELEASE_FILES = (
     "scripts/pi_control/presentation_locator.py",
     "scripts/pi_control/reconcile.py",
     "scripts/pi_control/run_manifest.py",
+    "scripts/pi_control/web_timeline.py",
+    "scripts/pi_control/web_projection.py",
+    "scripts/pi_control/web_api.py",
+    "scripts/pi-web-gateway.py",
+    "pi/web/index.html",
+    "pi/web/styles.css",
+    "pi/web/data.js",
+    "pi/web/core.js",
+    "pi/web/app.js",
     "scripts/pi_control/staged_build.py",
     "pi/PI_VERSION",
+    "pi/pi-web.service",
+    *(path for paths in PI_CORE_PATCHES.values() for path in paths),
     RESOURCE_CATALOG,
     "pi/repository-policy.json",
     *(str(PurePosixPath(path).parent) for path, _roles in EXTENSION_ROLES.values()),
@@ -341,7 +369,26 @@ def _materialize_core(packages: Path, version: str, *, pi_core_tarball: Path | N
     return target
 
 
-def _install_core(tarball: Path, runtime: Path, version: str, *, npm_cache: Path | None) -> None:
+def _apply_core_patch(package_root: Path, patch_path: Path) -> None:
+    patch_executable = shutil.which("patch", path=os.defpath)
+    if patch_executable is None:
+        raise InstallUnavailable("the patch utility is unavailable for the pinned Pi overlay")
+    if patch_path.is_symlink() or not patch_path.is_file() or patch_path.stat().st_size > 512 * 1024:
+        raise InstallError("the pinned Pi overlay is missing or unsafe")
+    try:
+        subprocess.run(
+            [patch_executable, "--batch", "--forward", "--fuzz=0", "-p1", "-i", str(patch_path)],
+            cwd=package_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout or "").strip()[-1024:]
+        raise InstallError(f"the pinned Pi overlay did not apply cleanly: {detail}") from error
+
+
+def _install_core(tarball: Path, runtime: Path, version: str, *, npm_cache: Path | None, patch_paths: tuple[Path, ...] = ()) -> None:
     build_root = runtime.parent / ".core-build"
     if build_root.exists() or build_root.is_symlink():
         raise InstallError("temporary Pi core build root already exists")
@@ -368,6 +415,8 @@ def _install_core(tarball: Path, runtime: Path, version: str, *, npm_cache: Path
         _run_npm([
             "npm", "ci", "--offline", "--ignore-scripts", "--omit=dev", "--legacy-peer-deps",
         ], cwd=package_root, npm_cache=npm_cache)
+        for patch_path in patch_paths:
+            _apply_core_patch(package_root, patch_path)
     finally:
         package_path.write_bytes(original_package)
         package_path.chmod(original_mode)
@@ -549,7 +598,24 @@ def _verify_package_lock(root: Path, records: list[dict[str, Any]]) -> None:
                 raise InstallError(f"the runtime package lock lacks exact integrity for {key}")
 
 
-def _inventory(root: Path, catalog: dict[str, Any]) -> dict[str, Any]:
+def _verify_core_overlay(root: Path, record: dict[str, Any]) -> None:
+    markers = PI_CORE_OVERLAY_MARKERS.get(record["version"])
+    if markers is None:
+        raise InstallError(f"no verified Pi core web overlay is registered for {record['version']}")
+    core = root / record["installedPath"]
+    for relative, marker in markers:
+        path = core / relative
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 16 * 1024 * 1024:
+            raise InstallError(f"installed Pi core web overlay target is missing or unsafe: {relative}")
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            raise InstallError(f"installed Pi core web overlay target is unreadable: {relative}") from error
+        if marker not in content:
+            raise InstallError(f"installed Pi core web overlay was not applied: {relative}")
+
+
+def _inventory(root: Path, catalog: dict[str, Any], *, require_core_patch: bool = True) -> dict[str, Any]:
     records = _package_records(root, catalog)
     extension_entrypoints = {
         "package:pi-sandbox-control": "src/index.ts",
@@ -566,6 +632,8 @@ def _inventory(root: Path, catalog: dict[str, Any]) -> dict[str, Any]:
         record["extensionSha256"] = "sha256:" + hashlib.sha256(extension.read_bytes()).hexdigest()
     core_record = next(record for record in records if record["name"] == PI_PACKAGE)
     core_record["productionDependencies"] = _verify_core_install(root, core_record)
+    if require_core_patch:
+        _verify_core_overlay(root, core_record)
     _verify_package_lock(root, records)
     pi_cli = root / f"runtime/node_modules/{PI_PACKAGE}/dist/cli.js"
     if pi_cli.is_symlink() or not pi_cli.is_file() or not os.access(pi_cli, os.X_OK):
@@ -621,6 +689,7 @@ def _stage_from_source(
     source_commit: str | None = None,
     source_tree_hash: str | None = None,
     source_metadata: dict[str, Any] | None = None,
+    apply_core_patch: bool = True,
 ) -> dict[str, Any]:
     """Build one complete generation; no caller may add production bytes."""
 
@@ -633,6 +702,8 @@ def _stage_from_source(
     source_manifest = create_build_manifest(source, files=RELEASE_FILES, repository=repository_root or source, source_commit=source_commit, source_tree_hash=source_tree_hash, metadata=source_metadata)
     _copy_entries(source, stage_path, source_manifest)
     pi_version, catalog = _load_catalog(stage_path)
+    if apply_core_patch and pi_version not in PI_CORE_PATCHES:
+        raise InstallError(f"no pinned Pi core web overlay is registered for {pi_version}")
     packages = stage_path / "packages"
     runtime = stage_path / "runtime"
     packages.mkdir(mode=0o700)
@@ -659,8 +730,13 @@ def _stage_from_source(
         "npm", "install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund",
         "--package-lock", "--legacy-peer-deps", "--prefix", str(runtime),
     ], cwd=runtime, npm_cache=cache_path)
-    _install_core(core_tarball, runtime, pi_version, npm_cache=cache_path)
-    inventory = _inventory(stage_path, catalog)
+    core_patch_relatives = PI_CORE_PATCHES.get(pi_version, ()) if apply_core_patch else ()
+    core_patches = tuple(stage_path / relative for relative in core_patch_relatives)
+    for relative, patch_path in zip(core_patch_relatives, core_patches):
+        if not patch_path.is_file():
+            raise InstallError(f"the pinned Pi overlay is missing from the staged source: {relative}")
+    _install_core(core_tarball, runtime, pi_version, npm_cache=cache_path, patch_paths=core_patches)
+    inventory = _inventory(stage_path, catalog, require_core_patch=apply_core_patch)
     _canonical_json(stage_path / RESOURCE_INVENTORY, inventory)
     _verify_symlinks(stage_path)
     manifest = create_build_manifest(
@@ -782,6 +858,7 @@ def stage(
     source_ref: str | None = None,
     overlays: list[str] | None = None,
     allow_dirty: bool = True,
+    apply_core_patch: bool = True,
 ) -> dict[str, Any]:
     source = _safe_root(source_root)
     overlay_paths = sorted(set(overlays or []))
@@ -793,10 +870,10 @@ def stage(
     materialized: Path | None = None
     try:
         if source_ref is None:
-            return _stage_from_source(source, staging_root, pi_core_tarball=pi_core_tarball, npm_cache=npm_cache, repository_root=source, source_metadata={"sourceMode": "working-tree", "dirtyReleasePaths": dirty})
+            return _stage_from_source(source, staging_root, pi_core_tarball=pi_core_tarball, npm_cache=npm_cache, repository_root=source, source_metadata={"sourceMode": "working-tree", "dirtyReleasePaths": dirty}, apply_core_patch=apply_core_patch)
         materialized, commit, tree, _mode, _ = _materialize_source(source, source_ref, overlay_paths)
         copied = [path for path in overlay_paths if _release_path_allowed(path)]
-        return _stage_from_source(materialized, staging_root, pi_core_tarball=pi_core_tarball, npm_cache=npm_cache, repository_root=source, source_commit=commit, source_tree_hash=tree, source_metadata={"sourceMode": "git-ref", "sourceRef": source_ref, "overlayFiles": copied})
+        return _stage_from_source(materialized, staging_root, pi_core_tarball=pi_core_tarball, npm_cache=npm_cache, repository_root=source, source_commit=commit, source_tree_hash=tree, source_metadata={"sourceMode": "git-ref", "sourceRef": source_ref, "overlayFiles": copied}, apply_core_patch=apply_core_patch)
     finally:
         if materialized is not None:
             shutil.rmtree(materialized, ignore_errors=True)
@@ -818,7 +895,7 @@ def _activation_artifacts(root: Path) -> list[str]:
     return exclude
 
 
-def verify_stage(stage_root: os.PathLike[str] | str) -> dict[str, Any]:
+def verify_stage(stage_root: os.PathLike[str] | str, *, require_core_patch: bool = True) -> dict[str, Any]:
     root = _safe_root(stage_root)
     manifest = load_build_manifest(root / "build-manifest.json")
     manifest.verify_files(root, exclude=["build-manifest.json", *_activation_artifacts(root)])
@@ -831,7 +908,7 @@ def verify_stage(stage_root: os.PathLike[str] | str) -> dict[str, Any]:
         resources = json.loads(inventory_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         raise InstallError("the release resource inventory is invalid JSON") from error
-    expected = _inventory(root, catalog)
+    expected = _inventory(root, catalog, require_core_patch=require_core_patch)
     if resources != expected:
         raise InstallError("the release resource inventory is wrong")
     return {
