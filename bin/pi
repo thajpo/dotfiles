@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v omp >/dev/null 2>&1; then
+  printf 'pi: oh-my-pi is not installed; install it from https://omp.sh/install\n' >&2
+  exit 127
+fi
+
+exec omp "$@"

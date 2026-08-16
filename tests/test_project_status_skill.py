@@ -52,7 +52,7 @@ class ProjectStatusSkillTests(unittest.TestCase):
         self.assertIn("$project-status", metadata)
         self.assertNotIn("TODO", metadata)
 
-    def test_installer_keeps_shared_skills_out_of_pi_agents_tree(self):
+    def test_installer_keeps_shared_skills_out_of_agents_tree(self):
         installer = (ROOT / "scripts/agent-workflow-install.sh").read_text()
         self.assertIn('link_file "$DOTFILES_DIR/skills" "$HOME/.skills"', installer)
         self.assertNotIn('mkdir -p "$HOME/.agents/skills"', installer)

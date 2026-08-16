@@ -1,0 +1,15 @@
+[Unit]
+Description=Pisec OMP auth gateway
+After=network-online.target pisec-auth-broker.service
+Wants=network-online.target pisec-auth-broker.service
+
+[Service]
+EnvironmentFile=-%h/.config/pisec/ports.env
+Type=simple
+ExecStart=%h/.local/lib/pisec/bin/pisec-auth-gateway
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+
+[Install]
+WantedBy=default.target

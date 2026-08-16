@@ -1,0 +1,206 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { test } from "bun:test";
+
+const ROOT = new URL("../../", import.meta.url).pathname;
+const EXTENSION = new URL("./pisec.ts", import.meta.url).href;
+type JsonRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): JsonRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("probe result must be an object");
+  return value as JsonRecord;
+}
+
+function stringValue(record: JsonRecord, key: string): string {
+  const value = record[key];
+  if (typeof value !== "string") throw new TypeError(`probe field ${key} must be a string`);
+  return value;
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new TypeError("probe field must be an array");
+  return value.map(item => {
+    if (typeof item !== "string") throw new TypeError("probe array item must be a string");
+    return item;
+  });
+}
+
+function runProbe(source: string): JsonRecord {
+  const result = spawnSync("bun", ["-e", source], {
+    cwd: ROOT,
+    env: { ...process.env },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return asRecord(JSON.parse(result.stdout) as unknown);
+}
+
+test("Pisec extension is inert without a Pisec role", () => {
+  const output = runProbe(`
+    const records = { tools: [], events: [] };
+    for (const key of Object.keys(process.env)) if (key.startsWith("PISEC_")) delete process.env[key];
+    const pi = {
+      zod: {},
+      registerTool(value) { records.tools.push(value.name); },
+      on(value) { records.events.push(value); },
+      setLabel() {},
+      setActiveTools() { throw new Error("inactive extension activated tools"); },
+    };
+    // Child process isolates environment captured at module evaluation.
+    const module = await import(${JSON.stringify(EXTENSION)});
+    console.log(JSON.stringify(records));
+  `);
+  assert.deepEqual(output, { tools: [], events: [] });
+});
+
+test("secretary exposes the exact semantic surface and UI-bound approval", () => {
+  const output = runProbe(`
+    const records = { tools: [], events: [], labels: [] };
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
+    const zod = { string: chain, enum: chain, any: chain, object: value => value, literal: chain, array: chain, number: chain, boolean: chain };
+    Object.assign(process.env, {
+      PISEC_ROLE: "secretary",
+      PISEC_RUNTIME_SOCKET: "/tmp/runtime.sock",
+      PISEC_SECRETARY_SOCKET: "/tmp/secretary.sock",
+      PISEC_RUNTIME_TOKEN: "t".repeat(48),
+      PISEC_WORKSTREAM_ID: "ws_" + "a".repeat(32),
+      PISEC_RUNTIME_INSTANCE_ID: "instance",
+      PISEC_SURFACE_ID: "w1:p1",
+    });
+    const pi = {
+      zod,
+      registerTool(value) { records.tools.push(value); },
+      on(value) { records.events.push(value); },
+      setLabel(value) { records.labels.push(value); },
+      setActiveTools() { return Promise.resolve(); },
+    };
+    // Child process isolates environment captured at module evaluation.
+    const module = await import(${JSON.stringify(EXTENSION)} + "?secretary=" + Date.now());
+    module.default(pi);
+    const create = records.tools.find(value => value.name === "pisec_create_workstream");
+    const scope = {
+      operationId: "op_" + "a".repeat(32),
+      projectId: "prj_" + "b".repeat(32),
+      workstreamId: "ws_" + "a".repeat(32),
+      title: "Title",
+      purpose: "Purpose",
+      brief: "Full brief",
+      harnessId: "omp",
+      workspaceAdapterId: "herdr",
+      executionProfile: "worker-default",
+      targetRef: "main",
+      baseCommitOid: "a".repeat(40),
+      branchName: "pisec/ws_" + "a".repeat(32) + "/work",
+      worktreePath: "/tmp/work",
+      agentName: "pisec-agent",
+      externalDomains: [],
+      effects: ["create"],
+      nonEffects: ["push"],
+    };
+    const refused = await create.execute("id", { approval_scope: scope }, undefined, undefined, { hasUI: false });
+    console.log(JSON.stringify({
+      tools: records.tools.map(value => value.name),
+      events: records.events,
+      label: records.labels[0],
+      approval: create.approval(scope),
+      refused,
+    }));
+  `);
+  const tools = stringArray(output.tools);
+  const events = stringArray(output.events);
+  const approval = asRecord(output.approval);
+  const refused = asRecord(output.refused);
+  const content = refused.content;
+  if (!Array.isArray(content) || content.length === 0) throw new TypeError("refusal content is missing");
+  const refusalText = stringValue(asRecord(content[0]), "text");
+  assert.deepEqual(tools, [
+    "pisec_project_status",
+    "pisec_git_status",
+    "pisec_inspect_workstream_changes",
+    "pisec_prepare_workstream_merge",
+    "pisec_merge_workstream",
+    "pisec_list_workstreams",
+    "pisec_inspect_workstream",
+    "pisec_prepare_workstream",
+    "pisec_create_workstream",
+    "pisec_send_workstream",
+    "pisec_focus_workstream",
+    "pisec_complete_workstream",
+    "pisec_retire_workstream",
+    "pisec_list_decisions",
+    "pisec_record_decision",
+    "pisec_resolve_decision",
+    "pisec_list_worker_research_requests",
+    "pisec_claim_worker_research",
+    "pisec_request_worker_research_context",
+    "pisec_answer_worker_research",
+    "pisec_decline_worker_research",
+  ]);
+  assert.equal(stringValue(output, "label"), "Pisec Secretary");
+  assert.equal(approval.tier, "exec");
+  assert.equal(approval.policy, "prompt");
+  const approvalReason = stringValue(approval, "reason");
+  for (const line of [
+    "operation id: op_" + "a".repeat(32),
+    "project id: prj_" + "b".repeat(32),
+    "workstream id: ws_" + "a".repeat(32),
+    "title: Title",
+    "purpose: Purpose",
+    "full brief: Full brief",
+    "harness adapter: omp",
+    "workspace adapter: herdr",
+    "execution profile: worker-default",
+    "target ref: main",
+    "base commit OID: " + "a".repeat(40),
+    "branch: pisec/ws_" + "a".repeat(32) + "/work",
+    "checkout path: /tmp/work",
+    "agent name: pisec-agent",
+    "exact external domains: (empty)",
+    "effects: create",
+    "non-effects: push",
+  ]) assert.ok(approvalReason.includes(line), line);
+  assert.equal(refused.isError, true);
+  assert.match(refusalText, /interactive approval UI/);
+  assert.ok(events.includes("session_shutdown"));
+});
+
+test("worker registers runtime handling without secretary tools", () => {
+  const output = runProbe(`
+    const records = { tools: [], events: [], labels: [] };
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
+    const zod = { string: chain, enum: chain, any: chain, object: value => value, literal: chain, array: chain, number: chain, boolean: chain };
+    Object.assign(process.env, {
+      PISEC_ROLE: "worker",
+      PISEC_RUNTIME_SOCKET: "/tmp/runtime.sock",
+      PISEC_RUNTIME_TOKEN: "t".repeat(48),
+      PISEC_WORKSTREAM_ID: "ws_" + "a".repeat(32),
+      PISEC_RUNTIME_INSTANCE_ID: "instance",
+      PISEC_SURFACE_ID: "w1:p1",
+    });
+    const pi = {
+      zod,
+      registerTool(value) { records.tools.push(value.name); },
+      on(value) { records.events.push(value); },
+      setLabel(value) { records.labels.push(value); },
+      setActiveTools() { return Promise.resolve(); },
+    };
+    // Child process isolates environment captured at module evaluation.
+    const module = await import(${JSON.stringify(EXTENSION)} + "?worker=" + Date.now());
+    module.default(pi);
+    console.log(JSON.stringify(records));
+  `);
+  const tools = stringArray(output.tools);
+  const events = stringArray(output.events);
+  assert.deepEqual(tools, [
+    "pisec_show_task_packet",
+    "pisec_request_secretary_research",
+    "pisec_check_secretary_research",
+    "pisec_add_secretary_research_context",
+    "pisec_acknowledge_secretary_research",
+  ]);
+  const labels = stringArray(output.labels);
+  assert.equal(labels[0], "Pisec Worker");
+  assert.ok(events.includes("session_start"));
+  assert.ok(events.includes("before_agent_start"));
+  assert.ok(events.includes("session_shutdown"));
+});

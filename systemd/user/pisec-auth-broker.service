@@ -1,0 +1,14 @@
+[Unit]
+Description=Pisec OMP credential broker
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/pisec/ports.env
+ExecStart=%h/.local/lib/pisec/bin/pisec-auth-broker
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+
+[Install]
+WantedBy=default.target

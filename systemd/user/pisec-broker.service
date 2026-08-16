@@ -1,0 +1,14 @@
+[Unit]
+Description=Pisec workflow broker
+After=pisec-auth-gateway.service
+Requires=pisec-auth-gateway.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/lib/pisec/bin/pisec-broker
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+
+[Install]
+WantedBy=default.target

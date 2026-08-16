@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import curses
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.pisec.broker import socket_paths
+from scripts.pisec.models import InvalidRequestError, parse_json_strict
+from scripts.pisec.protocol import request
+
+
+def _admin_socket() -> Path:
+    configured = os.environ.get("PISEC_ADMIN_SOCKET")
+    path = Path(configured) if configured else socket_paths()["admin"]
+    if not path.is_absolute():
+        raise InvalidRequestError("Pisec admin socket path must be absolute")
+    try:
+        info = path.lstat()
+        parent_info = path.parent.lstat()
+    except OSError as error:
+        raise InvalidRequestError("Pisec admin socket is unavailable") from error
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISSOCK(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+        or stat.S_ISLNK(parent_info.st_mode)
+        or not stat.S_ISDIR(parent_info.st_mode)
+        or parent_info.st_uid != os.geteuid()
+        or stat.S_IMODE(parent_info.st_mode) != 0o700
+    ):
+        raise InvalidRequestError("Pisec admin socket is unsafe")
+    return path
+
+
+def admin(operation: str, payload: dict) -> object:
+    return request(_admin_socket(), operation, payload, timeout=10)
+
+
+def bounded_environment_json(name: str) -> dict:
+    raw = os.environ.get(name, "{}")
+    if len(raw.encode("utf-8")) > 64 * 1024:
+        raise InvalidRequestError(f"{name} is too large")
+    value = parse_json_strict(raw)
+    if not isinstance(value, dict):
+        raise InvalidRequestError(f"{name} must be an object")
+    return value
+
+
+def startup() -> int:
+    socket_path = Path(os.environ.get("HERDR_SOCKET_PATH", "")).resolve(strict=False)
+    expected = Path.home() / ".config" / "herdr" / "sessions" / "pisec" / "herdr.sock"
+    if socket_path != expected.resolve(strict=False):
+        return 0
+    admin("workspace.startup", {"adapterId": "herdr", "socketPath": str(socket_path)})
+    return 0
+
+
+def event() -> int:
+    payload = bounded_environment_json("HERDR_PLUGIN_EVENT_JSON")
+    event_name = os.environ.get("HERDR_PLUGIN_EVENT", "unknown")
+    if not event_name or len(event_name) > 128 or any(ord(char) < 0x20 for char in event_name):
+        raise InvalidRequestError("Herdr plugin event name is invalid")
+    admin("workspace.event", {"adapterId": "herdr", "event": event_name, "payload": payload})
+    return 0
+
+def _context_repository(context: dict[str, Any]) -> str:
+    worktree = context.get("worktree")
+    workspace = context.get("workspace")
+    pane = context.get("pane")
+    selectors: list[object] = []
+    if isinstance(worktree, dict):
+        selectors.extend((worktree.get("repo_root"), worktree.get("path"), worktree.get("checkout_path")))
+    if isinstance(workspace, dict):
+        selectors.append(workspace.get("cwd"))
+        selected_worktree = workspace.get("worktree")
+        if isinstance(selected_worktree, dict):
+            selectors.extend((selected_worktree.get("repo_root"), selected_worktree.get("checkout_path"), selected_worktree.get("path")))
+    if isinstance(pane, dict):
+        selectors.extend((pane.get("cwd"), pane.get("foreground_cwd")))
+    for selector in selectors:
+        if not isinstance(selector, str) or not selector or len(selector) > 4096 or "\x00" in selector:
+            continue
+        path = Path(selector)
+        if not path.is_absolute():
+            continue
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved.is_dir():
+            return str(resolved)
+    raise InvalidRequestError("selected Herdr context has no canonical repository")
+
+
+def focus_secretary() -> int:
+    admin("secretary.focus", {"project": _context_repository(bounded_environment_json("HERDR_PLUGIN_CONTEXT_JSON"))})
+    return 0
+
+
+def rows() -> list[dict[str, Any]]:
+    result = admin("system.status", {})
+    if not isinstance(result, dict) or not isinstance(result.get("projects"), list):
+        raise InvalidRequestError("Pisec admin returned an invalid project list")
+    output: list[dict[str, Any]] = []
+    for project in result["projects"]:
+        if not isinstance(project, dict):
+            continue
+        project_id = project.get("project_id")
+        if not isinstance(project_id, str) or not project_id:
+            continue
+        status = admin("system.status", {"project": project_id})
+        if not isinstance(status, dict) or not isinstance(status.get("workstreams"), list):
+            raise InvalidRequestError("Pisec admin returned an invalid workstream list")
+        research_counts = status.get("researchCounts", {})
+        if not isinstance(research_counts, dict):
+            raise InvalidRequestError("Pisec admin returned invalid research counts")
+        workstreams = status["workstreams"]
+        if not workstreams:
+            output.append({"project": project, "workstream": None, "research_counts": research_counts})
+        for workstream in workstreams:
+            if isinstance(workstream, dict):
+                output.append({"project": project, "workstream": workstream, "research_counts": research_counts})
+    return output
+
+
+def _display(value: object, width: int) -> str:
+    text = str(value)
+    text = "".join(char if ord(char) >= 0x20 and ord(char) != 0x7F else " " for char in text)
+    return text[:width].ljust(width)
+
+
+def _research_summary(value: object) -> str:
+    if not isinstance(value, dict):
+        return "r:?"
+    fields = ("pending", "researching", "needs_context", "answered", "declined", "unacknowledged")
+    values = [f"{name[:3]}={value.get(name, 0)}" for name in fields if isinstance(value.get(name, 0), int) and not isinstance(value.get(name, 0), bool)]
+    return " ".join(values) if values else "r:?"
+
+
+def _line(item: dict[str, Any]) -> str:
+    project = item["project"]
+    workstream = item.get("workstream")
+    name = project.get("display_name", project.get("project_id", "?"))
+    research = _research_summary(item.get("research_counts"))
+    if workstream is None:
+        values = (name, "-", "-", "-", "-", "-", "-", research, "-", "-")
+    else:
+        values = (
+            name,
+            workstream.get("kind", "?"),
+            workstream.get("title", "?"),
+            workstream.get("desired_state", "?"),
+            workstream.get("provisioning_state", "?"),
+            workstream.get("observed_state") or "?",
+            workstream.get("execution_profile", "?"),
+            research,
+            workstream.get("last_observed_at") or "-",
+            workstream.get("attention_reason") or "-",
+        )
+    widths = (20, 10, 28, 16, 16, 16, 24, 38, 16, 96)
+    return " ".join(_display(value, width) for value, width in zip(values, widths)).rstrip()
+
+
+def _focus_selected(item: dict[str, Any]) -> None:
+    project = item["project"]
+    workstream = item.get("workstream")
+    if isinstance(workstream, dict) and isinstance(workstream.get("workstream_id"), str):
+        admin("workstream.focus", {"project": project.get("project_id"), "workstreamId": workstream["workstream_id"]})
+    else:
+        admin("secretary.focus", {"project": project.get("project_id")})
+
+
+def board() -> int:
+    items = rows()
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("Pisec board")
+        print("===========")
+        print("project              kind       title                        desired          provisioning     observed          profile                  research counts                         last observed    attention")
+        for item in items:
+            print(_line(item))
+        return 0
+
+    selected = 0
+
+    def draw(screen: Any) -> None:
+        nonlocal selected
+        curses.curs_set(0)
+        screen.keypad(True)
+        while True:
+            screen.erase()
+            height, width = screen.getmaxyx()
+            screen.addnstr(0, 0, "Pisec board — arrows/j/k select, Enter/f focus, s secretary, r refresh, q quit", width - 1, curses.A_BOLD)
+            screen.addnstr(1, 0, "project              kind       title                        desired          provisioning     observed          profile                  research counts                         last observed    attention", width - 1)
+            if items:
+                selected = max(0, min(selected, len(items) - 1))
+            for index, item in enumerate(items[: max(0, height - 3)]):
+                attr = curses.A_REVERSE if index == selected else curses.A_NORMAL
+                screen.addnstr(index + 2, 0, _line(item), width - 1, attr)
+            screen.refresh()
+            key = screen.get_wch()
+            if key in ("q", "Q", "\x1b"):
+                return
+            if key in (curses.KEY_DOWN, "j") and items:
+                selected = min(selected + 1, len(items) - 1)
+            elif key in (curses.KEY_UP, "k") and items:
+                selected = max(selected - 1, 0)
+            elif key in ("r", "R"):
+                items[:] = rows()
+            elif key in ("f", "F", "\n", "\r") and items:
+                _focus_selected(items[selected])
+            elif key in ("s", "S") and items:
+                admin("secretary.focus", {"project": items[selected]["project"].get("project_id")})
+
+    curses.wrapper(draw)
+    return 0
+
+
+def main() -> int:
+    command = sys.argv[1] if len(sys.argv) > 1 else ""
+    handlers = {"startup": startup, "event": event, "focus-secretary": focus_secretary, "board": board}
+    handler = handlers.get(command)
+    if handler is None:
+        print("pisec-plugin: unknown command", file=sys.stderr)
+        return 2
+    try:
+        return handler()
+    except Exception as error:
+        print(f"pisec-plugin: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

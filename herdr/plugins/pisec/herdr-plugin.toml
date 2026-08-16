@@ -1,0 +1,47 @@
+id = "local.pisec"
+name = "Pisec"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Pisec reconciliation, workflow board, and secretary focus"
+platforms = ["linux"]
+
+[[startup]]
+command = ["./pisec-plugin", "startup"]
+
+[[events]]
+on = "workspace.created"
+command = ["./pisec-plugin", "event"]
+
+[[events]]
+on = "workspace.closed"
+command = ["./pisec-plugin", "event"]
+
+[[events]]
+on = "worktree.created"
+command = ["./pisec-plugin", "event"]
+
+[[events]]
+on = "worktree.opened"
+command = ["./pisec-plugin", "event"]
+
+[[events]]
+on = "worktree.removed"
+command = ["./pisec-plugin", "event"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["./pisec-plugin", "event"]
+
+[[panes]]
+id = "board"
+title = "Pisec board"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["./pisec-plugin", "board"]
+
+[[actions]]
+id = "focus-secretary"
+title = "Focus Pisec secretary"
+contexts = ["workspace", "pane"]
+command = ["./pisec-plugin", "focus-secretary"]

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fencesandbox/fence/v0.1.66/docs/schema/fence.schema.json",
+  "allowPty": true,
+  "forceNewSession": true,
+  "network": {
+    "defaultAction": "deny",
+    "allowedDomains": ["*"],
+    "deniedDomains": ["169.254.169.254"],
+    "allowLocalBinding": false,
+    "allowLocalOutbound": true,
+    "allowLocalOutboundPorts": ["${GATEWAY_PORT}"]
+  },
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": ["${CWD}", "${PERSONAL_HOME}", "${HARNESS_EXECUTABLE}", "${HARNESS_NATIVES}"],
+    "allowWrite": ["${CWD}", "${PERSONAL_HOME}"],
+    "denyRead": ["${REAL_HOME}/.ssh", "${REAL_HOME}/.aws", "${REAL_HOME}/.gnupg", "${REAL_HOME}/.kube", "${REAL_HOME}/.docker", "${REAL_HOME}/.omp/agent", "${WORKSPACE_CONFIG}"]
+  },
+  "devices": {"mode": "minimal"},
+  "command": {
+    "useDefaults": true,
+    "runtimeExecPolicy": "argv",
+    "deny": ["sudo", "docker", "podman", "kubectl", "mount", "umount", "nsenter"]
+  }
+}

@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Fail-closed OMP launcher used only by the dedicated Pisec Herdr server."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import secrets
+import stat
+import sys
+
+ENTRY_FIELDS = frozenset({"canonicalRoot", "projectId", "workstreamId", "role", "executionProfile", "harnessHome", "xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot", "overlayPath", "policyPath", "policySha256", "extensionPath", "runtimeSocketPath", "secretarySocketPath", "launchSecretPath", "privateGitObjectDir", "gitCommonObjectDir"})
+
+
+def fail(message: str, code: int = 126) -> "NoReturn":
+    print(f"pisec omp shim: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def secure_file(path: Path, mode: int | None = 0o600, *, executable: bool = False) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail(f"required file is missing: {path}", 127)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+        fail(f"required file is not an owner-controlled regular file: {path}")
+    if executable:
+        if info.st_mode & 0o022 or not os.access(path, os.X_OK):
+            fail(f"required executable is unsafe: {path}")
+    elif info.st_mode & 0o022 or (mode is not None and stat.S_IMODE(info.st_mode) != mode):
+        fail(f"required file has unsafe mode: {path}")
+
+
+def generic_config_dir(agent_dir: Path) -> str | None:
+    """Return the PI_CONFIG_DIR value that points at this runtime surface."""
+    try:
+        home = Path.home().resolve(strict=True)
+        relative = agent_dir.resolve(strict=True).relative_to(home)
+    except (OSError, ValueError):
+        return None
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        return None
+    value = relative.as_posix()
+    return value if len(value) <= 4096 else None
+
+
+def load_map() -> tuple[dict, Path]:
+    state = Path(os.environ.get("PISEC_STATE_ROOT", Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "pisec"))
+    path = Path(os.environ.get("PISEC_LAUNCH_MAP", state / "launch-map.json"))
+    secure_file(path)
+    if stat.S_IMODE(path.parent.lstat().st_mode) != 0o700 or path.parent.lstat().st_uid != os.geteuid():
+        fail("launch-map directory is not owner-only")
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        fail("launch map is invalid")
+    if not isinstance(document, dict) or set(document) != {"version", "harnessId", "executablePath", "fencePath", "entries"} or document["version"] != 2 or document["harnessId"] != "omp" or not isinstance(document["entries"], list):
+        fail("launch map schema is invalid")
+    return document, path
+
+
+def select_entry(entries: list[object]) -> dict:
+    cwd = Path.cwd().resolve(strict=True)
+    matches: list[tuple[int, dict]] = []
+    nullable = {"secretarySocketPath", "privateGitObjectDir", "gitCommonObjectDir"}
+    for value in entries:
+        if not isinstance(value, dict) or set(value) != ENTRY_FIELDS:
+            fail("launch map entry schema is invalid")
+        for key in ENTRY_FIELDS:
+            if key in nullable and value[key] is None:
+                continue
+            if not isinstance(value[key], str) or len(value[key]) > 4096:
+                fail("launch map entry value is invalid")
+        root = Path(value["canonicalRoot"])
+        if not root.is_absolute() or root != root.resolve(strict=True):
+            fail("launch root is not canonical")
+        root_info = root.lstat()
+        if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.geteuid() or root_info.st_mode & 0o022:
+            fail("launch root is unsafe")
+        for key in ("harnessHome", "xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot", "overlayPath", "policyPath", "extensionPath", "runtimeSocketPath", "launchSecretPath"):
+            if not Path(value[key]).is_absolute():
+                fail("launch map path is not absolute")
+        if value["secretarySocketPath"] is not None and not Path(value["secretarySocketPath"]).is_absolute():
+            fail("secretary socket path is not absolute")
+        for key in ("privateGitObjectDir", "gitCommonObjectDir"):
+            if value[key] is not None and not Path(value[key]).is_absolute():
+                fail("Git object path is not absolute")
+        if cwd.is_relative_to(root):
+            matches.append((len(root.parts), value))
+    if not matches:
+        fail("current directory has no managed Pisec binding")
+    matches.sort(key=lambda item: item[0], reverse=True)
+    if len(matches) > 1 and matches[0][0] == matches[1][0]:
+        fail("current directory matches ambiguous Pisec bindings")
+    return matches[0][1]
+
+def validate_original_args(arguments: list[str]) -> str:
+    if not arguments:
+        return "startup"
+    if len(arguments) == 1 and arguments[0].startswith("--resume=") and arguments[0] != "--resume=":
+        return "resume"
+    if len(arguments) == 2 and arguments[0] == "--resume" and arguments[1]:
+        return "resume"
+    fail("Herdr supplied unsupported OMP arguments")
+
+
+def main() -> None:
+    document, _ = load_map()
+    entry = select_entry(document["entries"])
+    role = entry["role"]
+    profile = entry["executionProfile"]
+    if role not in {"secretary", "worker"}:
+        fail("unknown Pisec role")
+    expected_profiles = {"secretary": {"secretary-project"}, "worker": {"worker-default", "worker-networked"}}
+    if profile not in expected_profiles[role]:
+        fail("role and execution profile do not match")
+    start_source = validate_original_args(sys.argv[1:])
+    real_omp = Path(document["executablePath"])
+    fence = Path(document["fencePath"])
+    policy = Path(entry["policyPath"])
+    overlay = Path(entry["overlayPath"])
+    extension = Path(entry["extensionPath"])
+    secret_path = Path(entry["launchSecretPath"])
+    agent_dir = Path(entry["harnessHome"])
+    agent_info = agent_dir.lstat()
+    if stat.S_ISLNK(agent_info.st_mode) or not stat.S_ISDIR(agent_info.st_mode) or agent_info.st_uid != os.geteuid() or stat.S_IMODE(agent_info.st_mode) != 0o700:
+        fail("harness home is unsafe")
+    for executable in (real_omp, fence):
+        if not executable.is_absolute():
+            fail("configured executable path is not absolute")
+        secure_file(executable, executable=True)
+    for file_path in (policy, overlay, secret_path):
+        if not file_path.is_absolute():
+            fail("managed file path is not absolute")
+        secure_file(file_path)
+    if not extension.is_absolute():
+        fail("harness extension path is not absolute")
+    secure_file(extension, mode=None)
+    for key in ("xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot"):
+        xdg_path = Path(entry[key])
+        try:
+            xdg_info = xdg_path.lstat()
+        except FileNotFoundError:
+            fail("isolated XDG directory is missing", 127)
+        if stat.S_ISLNK(xdg_info.st_mode) or not stat.S_ISDIR(xdg_info.st_mode) or xdg_info.st_uid != os.geteuid() or stat.S_IMODE(xdg_info.st_mode) != 0o700:
+            fail("isolated XDG directory is unsafe")
+        if not xdg_path.is_relative_to(agent_dir):
+            fail("isolated XDG directory escapes the harness home")
+    if role == "worker":
+        private_value = entry["privateGitObjectDir"]
+        common_value = entry["gitCommonObjectDir"]
+        if not isinstance(private_value, str) or not isinstance(common_value, str):
+            fail("worker binding lacks Git object capabilities")
+        private_objects = Path(private_value)
+        common_objects = Path(common_value)
+        for object_path, private in ((private_objects, True), (common_objects, False)):
+            if not object_path.is_absolute():
+                fail("Git object path is not absolute")
+            try:
+                object_info = object_path.lstat()
+            except FileNotFoundError:
+                fail("Git object path is missing", 127)
+            if stat.S_ISLNK(object_info.st_mode) or not stat.S_ISDIR(object_info.st_mode) or object_info.st_uid != os.geteuid():
+                fail("Git object path is unsafe")
+            if private and stat.S_IMODE(object_info.st_mode) != 0o700:
+                fail("private Git object directory is unsafe")
+            if not private and object_info.st_mode & 0o022:
+                fail("common Git object directory is writable")
+    runtime_token = secret_path.read_text().strip()
+    if len(runtime_token) < 32 or len(runtime_token) > 512 or "\x00" in runtime_token:
+        fail("runtime token is invalid")
+    surface_id = os.environ.get("HERDR_PANE_ID")
+    if not surface_id or len(surface_id) > 256 or "\x00" in surface_id:
+        fail("workspace surface identity is invalid")
+
+    mandatory = ["--extension", str(extension), "--config", str(overlay)]
+    if role == "secretary":
+        mandatory = ["--extension", str(extension), "--approval-mode=always-ask", "--config", str(overlay)]
+    fence_args = [str(fence), "--settings", str(policy)]
+    if role == "worker":
+        common_objects = entry["gitCommonObjectDir"]
+        if not isinstance(common_objects, str):
+            fail("worker binding lacks common Git object capability")
+        fence_args.extend(["--expose-host-path", str(Path(common_objects).absolute())])
+    argv = [*fence_args, "--", str(real_omp), *mandatory, *sys.argv[1:]]
+    environment: dict[str, str] = {}
+    for key in ("HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM", "LANG", "TZ", "TMPDIR"):
+        value = os.environ.get(key)
+        if value:
+            environment[key] = value
+    for key, value in os.environ.items():
+        if key.startswith("LC_"):
+            environment[key] = value
+    environment["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+    environment.update({
+        "HERDR_AGENT": "omp",
+        "PI_CODING_AGENT_DIR": str(agent_dir),
+        "XDG_DATA_HOME": entry["xdgDataHome"],
+        "XDG_STATE_HOME": entry["xdgStateHome"],
+        "XDG_CACHE_HOME": entry["xdgCacheHome"],
+        "XDG_CONFIG_HOME": entry["xdgConfigHome"],
+        "PISEC_PROJECT_ID": entry["projectId"],
+        "PISEC_WORKSTREAM_ID": entry["workstreamId"],
+        "PISEC_ROLE": role,
+        "PISEC_RUNTIME_SOCKET": entry["runtimeSocketPath"],
+        "PISEC_RUNTIME_TOKEN": runtime_token,
+        "PISEC_RUNTIME_INSTANCE_ID": secrets.token_hex(16),
+        "PISEC_SESSION_START_SOURCE": start_source,
+        "PISEC_SURFACE_ID": surface_id,
+    })
+    environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_COUNT"] = "2"
+    environment["GIT_CONFIG_KEY_0"] = "gc.auto"
+    environment["GIT_CONFIG_VALUE_0"] = "0"
+    environment["GIT_CONFIG_KEY_1"] = "maintenance.auto"
+    environment["GIT_CONFIG_VALUE_1"] = "false"
+    config_dir = generic_config_dir(agent_dir)
+    if config_dir is not None:
+        environment["PI_CONFIG_DIR"] = config_dir
+    if role == "secretary":
+        if not entry["secretarySocketPath"]:
+            fail("secretary binding lacks its semantic socket")
+        environment["PISEC_SECRETARY_SOCKET"] = entry["secretarySocketPath"]
+    else:
+        private_objects = entry["privateGitObjectDir"]
+        common_objects = entry["gitCommonObjectDir"]
+        if not isinstance(private_objects, str) or not isinstance(common_objects, str):
+            fail("worker binding lacks Git object capabilities")
+        environment["GIT_OBJECT_DIRECTORY"] = private_objects
+        environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = common_objects
+    os.execve(fence, argv, environment)
+
+
+if __name__ == "__main__":
+    main()
