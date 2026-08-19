@@ -32,6 +32,10 @@ command = ["./pisec-plugin", "event"]
 on = "pane.agent_status_changed"
 command = ["./pisec-plugin", "event"]
 
+[[events]]
+on = "pane.exited"
+command = ["./pisec-plugin", "event"]
+
 [[panes]]
 id = "board"
 title = "Pisec board"

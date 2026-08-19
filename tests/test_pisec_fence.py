@@ -2,6 +2,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -13,8 +14,9 @@ from scripts.pisec.models import AuthorizationError, ConflictError, new_id
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
 from scripts.pisec.runtime import report_runtime
+from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
-from scripts.pisec.harnesses.omp import OmpHarnessAdapter
+from scripts.pisec.harnesses.omp import OmpHarnessAdapter, _copy_user_surface
 WEB_SEARCH_DOMAINS = ("html.duckduckgo.com",)
 from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
 
@@ -62,7 +64,26 @@ class RuntimeMaterializationTests(unittest.TestCase):
             overlay = json.loads((Path(artifacts.harness_home) / "config.yml").read_text())
             self.assertTrue(overlay["mcp"]["enableProjectConfig"])
             self.assertTrue(overlay["web_search"]["enabled"])
+            self.assertEqual(overlay["tools"]["approvalMode"], "yolo")
             self.assertEqual(Path(artifacts.launch_secret_path).stat().st_mode & 0o777, 0o600)
+            self.assertFalse((Path(artifacts.harness_home) / "extensions" / "herdr-omp-agent-state.ts").exists())
+            self.assertFalse((Path(artifacts.harness_home) / "agent" / "extensions" / "herdr-omp-agent-state.ts").exists())
+            self.assertEqual(Path(artifacts.adapter_data["extensionPath"]).name, "pisec.ts")
+
+    def test_user_surface_omits_competing_herdr_omp_lifecycle_extension(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            extensions = home / ".omp" / "agent" / "extensions"
+            extensions.mkdir(parents=True)
+            (extensions / "herdr-omp-agent-state.ts").write_text("competing lifecycle reporter\n")
+            (extensions / "custom.ts").write_text("custom extension\n")
+            destination = root / "isolated"
+            destination.mkdir()
+            with patch("scripts.pisec.harnesses.omp.Path.home", return_value=home):
+                _copy_user_surface(destination)
+            self.assertFalse((destination / "extensions" / "herdr-omp-agent-state.ts").exists())
+            self.assertEqual((destination / "extensions" / "custom.ts").read_text(), "custom extension\n")
 
     def test_profile_replay_reuses_runtime_token_and_agent_surface(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -90,6 +111,7 @@ class RuntimeMaterializationTests(unittest.TestCase):
             self.assertTrue((Path(first.harness_home) / "agents" / "pisec-web-research.md").is_file())
             self.assertTrue((Path(first.harness_home) / "agent" / "agents" / "pisec-web-research.md").is_file())
             self.assertTrue(overlay["web_search"]["enabled"])
+            self.assertEqual(overlay["tools"]["approvalMode"], "yolo")
             self.assertEqual(overlay["providers"]["webSearchOrder"], ["duckduckgo"])
 
     def test_private_object_store_keeps_one_way_alternate_and_removes_legacy_pisec_entries(self):
@@ -117,21 +139,29 @@ class RuntimeMaterializationTests(unittest.TestCase):
             self.assertEqual((private / "info" / "alternates").read_text(), str(common.resolve()) + "\n")
             self.assertEqual((common / "info" / "alternates").read_text().splitlines(), [str(external)])
 
-    def test_launch_map_is_atomic_and_contains_no_runtime_token(self):
+    def test_private_binding_descriptor_is_atomic_and_contains_no_runtime_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             managed = root / "managed"
             managed.mkdir()
             adapter = OmpHarnessAdapter(state_root=root / "state", config=make_config(root))
             scope = {"projectId": new_id("prj"), "workstreamId": new_id("ws"), "executionProfile": "secretary-project", "worktreePath": str(managed)}
+            control_db = root / "state" / "control.db"
+            control_db.parent.mkdir(parents=True, exist_ok=True)
+            control_db.touch()
+            os.chmod(control_db, 0o600)
             artifacts = adapter.materialize_profile(scope)
-            launch_map = adapter.commit_launch_binding(scope, artifacts)
-            document = json.loads(launch_map.read_text())
-            self.assertEqual(document["version"], 2)
+            launcher = adapter.commit_launch_binding(scope, artifacts, workspace_session_name="main", workspace_id="w1", workspace_view_id="w1:t1", workspace_surface_id="w1:p1")
+            descriptor_path = launcher.parent / "binding.json"
+            document = json.loads(descriptor_path.read_text())
+            self.assertEqual(document["schemaVersion"], 2)
             self.assertEqual(document["harnessId"], "omp")
-            self.assertEqual(document["entries"][0]["canonicalRoot"], str(managed.resolve()))
-            self.assertNotIn(Path(artifacts.launch_secret_path).read_text().strip(), launch_map.read_text())
-            self.assertEqual(launch_map.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(document["canonicalRoot"], str(managed.resolve()))
+            self.assertEqual(document["workspaceSessionName"], "main")
+            self.assertEqual(document["workspaceSurfaceId"], "w1:p1")
+            self.assertNotIn(Path(artifacts.launch_secret_path).read_text().strip(), descriptor_path.read_text())
+            self.assertEqual(descriptor_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(launcher.stat().st_mode & 0o777, 0o700)
 
 
 class FencePolicyAndShimTests(unittest.TestCase):
@@ -226,14 +256,25 @@ class FencePolicyAndShimTests(unittest.TestCase):
             curl_denied = subprocess.run(["fence", "--settings", str(policy_path), "--", "curl", "--version"], cwd=worktree, text=True, capture_output=True)
             self.assertNotEqual(curl_denied.returncode, 0)
 
-    def make_shim_binding(self, root: Path, *, role: str, private: Path | None = None, common: Path | None = None) -> tuple[Path, dict, Path]:
+    def make_shim_binding(
+        self,
+        root: Path,
+        *,
+        role: str,
+        private: Path | None = None,
+        common: Path | None = None,
+        selected: bool = False,
+    ) -> tuple[Path, dict, Path]:
         managed = root / "repo"
         nested = managed / "nested"
         nested.mkdir(parents=True)
         os.chmod(managed, 0o755)
         state = root / "state"
+        launch_dir = state / "launchers"
+        launch_dir.mkdir(parents=True)
         agent = state / "agent"
-        agent.mkdir(parents=True)
+        (agent / "sessions").mkdir(parents=True)
+        os.chmod(agent / "sessions", 0o700)
         os.chmod(agent, 0o700)
         xdg = {name: agent / "xdg" / name for name in ("data", "state", "cache", "config")}
         for path in xdg.values():
@@ -242,81 +283,188 @@ class FencePolicyAndShimTests(unittest.TestCase):
         plugin_root = xdg["data"] / "omp" / "plugins"
         plugin_root.mkdir(parents=True)
         os.chmod(plugin_root, 0o700)
+        user_config = root / "home" / ".omp" / "agent" / "config.yml"
+        user_config.parent.mkdir(parents=True)
+        user_config.write_text("tools:\n  approvalMode: yolo\n")
+        os.chmod(user_config, 0o600)
         overlay = agent / "config.yml"
         overlay.write_text("{}\n")
         policy = state / "policy.json"
         policy.write_text("{}\n")
         secret = state / "secret"
         secret.write_text("r" * 48 + "\n")
+        session = agent / "sessions" / "one.jsonl"
+        session.write_text("session\n")
         extension = Path(__file__).resolve().parents[1] / "omp" / "extensions" / "pisec.ts"
         fake_omp = root / "real-omp"
         fake_omp.write_text("#!/bin/sh\nexit 0\n")
         fake_fence = root / "fake-fence"
         fake_fence.write_text("#!/usr/bin/python3\nimport json, os, sys\nprint(json.dumps({'argv': sys.argv[1:], 'env': dict(os.environ)}))\n")
-        for path in (overlay, policy, secret):
+        for path in (overlay, policy, secret, session):
             os.chmod(path, 0o600)
         for path in (fake_omp, fake_fence):
             os.chmod(path, 0o755)
         workstream_id = new_id("ws")
         project_id = new_id("prj")
-        entry = {"canonicalRoot": str(managed.resolve()), "projectId": project_id, "workstreamId": workstream_id, "role": role, "executionProfile": "secretary-project" if role == "secretary" else "worker-default", "harnessHome": str(agent), "xdgDataHome": str(xdg["data"]), "xdgStateHome": str(xdg["state"]), "xdgCacheHome": str(xdg["cache"]), "xdgConfigHome": str(xdg["config"]), "pluginRoot": str(plugin_root), "overlayPath": str(overlay), "policyPath": str(policy), "policySha256": hashlib.sha256(policy.read_bytes()).hexdigest(), "extensionPath": str(extension), "runtimeSocketPath": str(root / "runtime.sock"), "secretarySocketPath": str(root / "secretary.sock") if role == "secretary" else None, "launchSecretPath": str(secret), "privateGitObjectDir": None if private is None else str(private), "gitCommonObjectDir": None if common is None else str(common)}
-        map_path = state / "launch-map.json"
-        map_path.write_text(json.dumps({"version": 2, "harnessId": "omp", "executablePath": str(fake_omp), "fencePath": str(fake_fence), "entries": [entry]}))
+        workspace_id, view_id, surface_id = "w1", "w1:t1", "w1:p1"
+        if private is not None:
+            private.mkdir(parents=True, exist_ok=True)
+            os.chmod(private, 0o700)
+        if common is not None:
+            common.mkdir(parents=True, exist_ok=True)
+            os.chmod(common, 0o755)
+        control_db = state / "control.db"
+        connection = sqlite3.connect(control_db)
+        connection.executescript(
+            """
+            CREATE TABLE workstreams (
+                workstream_id TEXT PRIMARY KEY,
+                project_id TEXT,
+                kind TEXT,
+                execution_profile TEXT,
+                worktree_path TEXT,
+                desired_state TEXT,
+                provisioning_state TEXT
+            );
+            CREATE TABLE runtime_bindings (
+                workstream_id TEXT PRIMARY KEY,
+                workspace_session_name TEXT,
+                workspace_id TEXT,
+                workspace_view_id TEXT,
+                workspace_surface_id TEXT,
+                harness_id TEXT,
+                harness_home TEXT,
+                launch_secret_path TEXT,
+                policy_path TEXT,
+                policy_sha256 TEXT,
+                desired_generation_sha256 TEXT,
+                private_git_object_dir TEXT,
+                native_session_kind TEXT,
+                native_session_value TEXT,
+                observed_state TEXT
+            );
+            """
+        )
+        os.chmod(control_db, 0o600)
+        session_kind = "path" if selected else None
+        session_value = str(session) if selected else None
+        connection.execute(
+            "INSERT INTO workstreams VALUES(?,?,?,?,?,?,?)",
+            (workstream_id, project_id, role, "secretary-project" if role == "secretary" else "worker-default", str(managed.resolve()), "active", "bound"),
+        )
+        connection.execute(
+            "INSERT INTO runtime_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (workstream_id, "main", workspace_id, view_id, surface_id, "omp", str(agent), str(secret), str(policy), hashlib.sha256(policy.read_bytes()).hexdigest(), "a" * 64, None if private is None else str(private), session_kind, session_value, "starting"),
+        )
+        connection.commit()
+        connection.close()
+        descriptor = {
+            "schemaVersion": 2,
+            "harnessId": "omp",
+            "stateRoot": str(state.resolve()),
+            "controlDbPath": str(control_db.resolve()),
+            "workstreamId": workstream_id,
+            "projectId": project_id,
+            "role": role,
+            "executionProfile": "secretary-project" if role == "secretary" else "worker-default",
+            "canonicalRoot": str(managed.resolve()),
+            "workspaceSessionName": "main",
+            "workspaceId": workspace_id,
+            "workspaceViewId": view_id,
+            "workspaceSurfaceId": surface_id,
+            "harnessExecutablePath": str(fake_omp),
+            "fencePath": str(fake_fence),
+            "harnessHome": str(agent),
+            "overlayPath": str(overlay),
+            "extensionPath": str(extension),
+            "policyPath": str(policy),
+            "policySha256": hashlib.sha256(policy.read_bytes()).hexdigest(),
+            "generationSha256": "a" * 64,
+            "xdgDataHome": str(xdg["data"]),
+            "xdgStateHome": str(xdg["state"]),
+            "xdgCacheHome": str(xdg["cache"]),
+            "xdgConfigHome": str(xdg["config"]),
+            "pluginRoot": str(plugin_root),
+            "runtimeSocketPath": str(root / "runtime.sock"),
+            "secretarySocketPath": str(root / "secretary.sock") if role == "secretary" else None,
+            "launchSecretPath": str(secret),
+            "privateGitObjectDir": None if private is None else str(private),
+            "gitCommonObjectDir": None if common is None else str(common),
+        }
+        descriptor["identitySha256"] = hashlib.sha256(json.dumps({key: value for key, value in descriptor.items()}, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        descriptor_dir = launch_dir / workstream_id
+        descriptor_dir.mkdir()
+        descriptor_path = descriptor_dir / "binding.json"
+        os.chmod(descriptor_dir, 0o700)
+        descriptor_path.write_text(json.dumps(descriptor, sort_keys=True) + "\n")
+        os.chmod(descriptor_path, 0o600)
+        launcher = descriptor_dir / "omp"
+        template = Path(__file__).resolve().parents[1] / "pisec" / "runtime-bin" / "omp"
+        launcher.write_text(template.read_text())
+        os.chmod(launcher, 0o700)
         os.chmod(state, 0o700)
-        os.chmod(map_path, 0o600)
-        return nested, entry, map_path
+        os.chmod(launch_dir, 0o700)
+        return nested, descriptor, launcher
 
-    def test_private_shim_selects_binding_and_sanitizes_environment(self):
+    def test_private_binding_selects_descriptor_and_sanitizes_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            nested, entry, map_path = self.make_shim_binding(root, role="secretary")
+            nested, entry, launcher = self.make_shim_binding(root, role="secretary", selected=True)
             environment = os.environ.copy()
-            environment.update({"PISEC_LAUNCH_MAP": str(map_path), "HERDR_PANE_ID": "w1:p1", "SSH_AUTH_SOCK": "/tmp/agent.sock", "OPENAI_API_KEY": "forbidden"})
-            shim = Path(__file__).resolve().parents[1] / "pisec" / "runtime-bin" / "omp"
-            result = subprocess.run([str(shim), "--resume=/sessions/one"], cwd=nested, env=environment, text=True, capture_output=True)
+            environment.update({"HOME": str(root / "home"), "HERDR_SESSION": "main", "HERDR_PANE_ID": "w1:p1", "SSH_AUTH_SOCK": "/tmp/agent.sock", "OPENAI_API_KEY": "forbidden"})
+            result = subprocess.run([str(launcher), f"--resume={root / 'state' / 'agent' / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             captured = json.loads(result.stdout)
-            self.assertIn("--approval-mode=always-ask", captured["argv"])
+            self.assertIn("--approval-mode=yolo", captured["argv"])
             self.assertIn(entry["extensionPath"], captured["argv"])
             self.assertIn(entry["overlayPath"], captured["argv"])
+            self.assertIn(str(Path(entry["harnessHome"]) / "user-config.yml"), captured["argv"])
             self.assertEqual(captured["env"]["PISEC_SESSION_START_SOURCE"], "resume")
             self.assertEqual(captured["argv"][0:3], ["--settings", entry["policyPath"], "--"])
-            self.assertEqual(captured["argv"][3], str(Path(map_path).parent.parent / "real-omp"))
+            self.assertEqual(captured["argv"][3], str(root / "real-omp"))
             self.assertEqual(captured["env"]["PISEC_RUNTIME_SOCKET"], entry["runtimeSocketPath"])
             self.assertEqual(captured["env"]["PISEC_SECRETARY_SOCKET"], entry["secretarySocketPath"])
-            self.assertEqual(captured["env"]["GIT_CONFIG_KEY_0"], "gc.auto")
             self.assertNotIn("OPENAI_API_KEY", captured["env"])
             os.chmod(Path(entry["canonicalRoot"]), 0o775)
-            unsafe_root = subprocess.run([str(shim)], cwd=nested, env=environment, text=True, capture_output=True)
+            unsafe_root = subprocess.run([str(launcher), f"--resume={root / 'state' / 'agent' / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)
             self.assertNotEqual(unsafe_root.returncode, 0)
-            self.assertIn("launch root is unsafe", unsafe_root.stderr)
+            self.assertIn("binding root is unsafe", unsafe_root.stderr)
             os.chmod(Path(entry["canonicalRoot"]), 0o755)
-            unsupported_args = subprocess.run([str(shim), "--shell"], cwd=nested, env=environment, text=True, capture_output=True)
+            unsupported_args = subprocess.run([str(launcher), "--shell"], cwd=nested, env=environment, text=True, capture_output=True)
             self.assertNotEqual(unsupported_args.returncode, 0)
-            self.assertIn("unsupported OMP arguments", unsupported_args.stderr)
+            self.assertIn("does not match the selected durable session", unsupported_args.stderr)
 
-    def test_worker_shim_sets_private_git_capabilities(self):
+    def test_private_binding_rejects_database_surface_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested, entry, launcher = self.make_shim_binding(root, role="secretary")
+            connection = sqlite3.connect(root / "state" / "control.db")
+            connection.execute("UPDATE runtime_bindings SET workspace_surface_id='w1:p9'")
+            connection.commit()
+            connection.close()
+            environment = os.environ.copy()
+            environment.update({"HOME": str(root / "home"), "HERDR_SESSION": "main", "HERDR_PANE_ID": "w1:p1"})
+            result = subprocess.run([str(launcher)], cwd=nested, env=environment, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("durable binding identity", result.stderr)
+
+    def test_worker_binding_sets_private_git_capabilities(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             private = root / "state" / "objects"
-            private.mkdir(parents=True)
-            os.chmod(private, 0o700)
             common = root / "common"
-            common.mkdir()
-            os.chmod(common, 0o755)
-            nested, entry, map_path = self.make_shim_binding(root, role="worker", private=private, common=common)
+            nested, entry, launcher = self.make_shim_binding(root, role="worker", private=private, common=common)
             environment = os.environ.copy()
-            environment.update({"PISEC_LAUNCH_MAP": str(map_path), "HERDR_PANE_ID": "w1:p1"})
-            shim = Path(__file__).resolve().parents[1] / "pisec" / "runtime-bin" / "omp"
-            result = subprocess.run([str(shim)], cwd=nested, env=environment, text=True, capture_output=True)
+            environment.update({"HOME": str(root / "home"), "HERDR_SESSION": "main", "HERDR_PANE_ID": "w1:p1"})
+            result = subprocess.run([str(launcher)], cwd=nested, env=environment, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             captured = json.loads(result.stdout)
+            self.assertIn("--approval-mode=yolo", captured["argv"])
             self.assertEqual(captured["argv"][0:5], ["--settings", entry["policyPath"], "--expose-host-path", str(common), "--"])
             self.assertEqual(captured["env"]["GIT_OBJECT_DIRECTORY"], str(private))
             self.assertEqual(captured["env"]["GIT_ALTERNATE_OBJECT_DIRECTORIES"], str(common))
             self.assertEqual(captured["env"]["GIT_CONFIG_COUNT"], "2")
             self.assertNotIn("PISEC_SECRETARY_SOCKET", captured["env"])
-
 
 class RuntimeReportTests(unittest.TestCase):
     def setUp(self):
@@ -328,6 +476,7 @@ class RuntimeReportTests(unittest.TestCase):
         project = register_project(self.store, repo)
         self.harness = FixtureHarness(self.root)
         self.workspace = FixtureWorkspace(self.root, self.store)
+        ensure_secretary(self.store, project["project_id"], self.harness, self.workspace)
         packet = {"schemaVersion": 1, "outcome": "Runtime report behavior is verified.", "boundaries": ["Change runtime reporting only."], "acceptance": ["Runtime reports are monotonic."], "openQuestions": [], "evidence": ["Test output."]}
         prepared = prepare_workstream(self.store, project_id=project["project_id"], title="Runtime", purpose="Verify runtime", brief="Verify runtime reports.", task_packet=packet, idempotency_key="runtime", harness=self.harness, workspace=self.workspace, work_root=self.root / "worktrees", object_root=self.root / "objects")
         result = authorize_apply_workstream(self.store, scope=prepared["approvalScope"], harness=self.harness, workspace=self.workspace, git_objects=FixtureGitObjects())
@@ -344,7 +493,7 @@ class RuntimeReportTests(unittest.TestCase):
         self.temp.cleanup()
 
     def payload(self, **changes):
-        value = {"workstreamId": self.workstream_id, "runtimeInstanceId": "instance-1", "seq": 1, "event": "session_start", "state": "starting", "nativeSessionKind": "path", "nativeSessionValue": str(self.session), "startSource": "startup", "surfaceId": self.binding["workspace_surface_id"], "token": self.token}
+        value = {"workstreamId": self.workstream_id, "runtimeInstanceId": "instance-1", "seq": 1, "event": "session_start", "reason": None, "state": "starting", "nativeSessionKind": "path", "nativeSessionValue": str(self.session), "startSource": "startup", "surfaceId": self.binding["workspace_surface_id"], "token": self.token}
         value.update(changes)
         return value
 

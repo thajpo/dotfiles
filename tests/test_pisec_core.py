@@ -73,15 +73,39 @@ class StoreTests(unittest.TestCase):
                 PiStore(root)
 
 
-    def test_epoch_three_authorization_is_an_immutable_receipt(self):
+    def test_epoch_six_adds_runtime_generations(self):
         with tempfile.TemporaryDirectory() as tmp, PiStore(Path(tmp) / "state") as store:
             metadata = store.conn.execute("SELECT schema_name,schema_version,migration_name FROM control_meta").fetchone()
-            self.assertEqual(tuple(metadata), ("pisec-core", 3, "pisec-core-epoch-3"))
+            self.assertEqual(tuple(metadata), ("pisec-core", 6, "pisec-core-epoch-6"))
             columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(authorizations)")}
             self.assertNotIn("state", columns)
             self.assertNotIn("expires_at", columns)
+            project_columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(projects)")}
+            self.assertIn("remote_url", project_columns)
+            binding_columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(runtime_bindings)")}
+            self.assertIn("desired_generation_sha256", binding_columns)
+            self.assertIn("applied_generation_sha256", binding_columns)
+            self.assertIn("launch_generation_sha256", binding_columns)
+            self.assertIn("refresh_pending", binding_columns)
             operation_sql = store.conn.execute("SELECT sql FROM sqlite_master WHERE name='operations'").fetchone()[0]
             self.assertNotIn("'authorized'", operation_sql)
+
+    def test_epoch_five_state_migrates_without_resetting_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            store = PiStore(root)
+            project_id = "prj_" + "a" * 32
+            store.conn.execute("INSERT INTO projects(project_id,display_name,repository_path,git_common_dir,default_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (project_id, "Project", "/repo", "/repo/.git", "main", "now", "now"))
+            store.conn.execute("ALTER TABLE runtime_bindings DROP COLUMN refresh_pending")
+            store.conn.execute("ALTER TABLE runtime_bindings DROP COLUMN launch_generation_sha256")
+            store.conn.execute("ALTER TABLE runtime_bindings DROP COLUMN applied_generation_sha256")
+            store.conn.execute("ALTER TABLE runtime_bindings DROP COLUMN desired_generation_sha256")
+            store.conn.execute("UPDATE control_meta SET schema_version=5,schema_sha256=?,migration_name='pisec-core-epoch-5'", ("sha256:e38d8d1f33e79fa188123c39236c3adf7a0157fe9cf26aef7edcfd6f0360b20a",))
+            store.close()
+            with PiStore(root) as migrated:
+                project = migrated.conn.execute("SELECT display_name,remote_url FROM projects WHERE project_id=?", (project_id,)).fetchone()
+                self.assertEqual(tuple(project), ("Project", None))
+                self.assertEqual(tuple(migrated.conn.execute("SELECT schema_version,migration_name FROM control_meta").fetchone()), (6, "pisec-core-epoch-6"))
 class OperationEventTests(unittest.TestCase):
     def test_idempotency_binds_key_to_request_forever(self):
         with tempfile.TemporaryDirectory() as tmp, PiStore(Path(tmp) / "state") as store:

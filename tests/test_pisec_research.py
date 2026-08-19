@@ -58,6 +58,7 @@ class ResearchTests(unittest.TestCase):
         harness = FixtureHarness(root)
         workspace = workspace_type(root, store)
         secretary = ensure_secretary(store, project_a["project_id"], harness, workspace)
+        ensure_secretary(store, project_b["project_id"], harness, workspace)
         worker_results = []
         for project, key in ((project_a, "worker-a"), (project_b, "worker-b")):
             prepared = prepare_workstream(store, project_id=project["project_id"], title="Worker", purpose="Research", brief="Bounded fixture", task_packet=task_packet(), idempotency_key=key, harness=harness, workspace=workspace, work_root=root / "worktrees", object_root=root / "objects")

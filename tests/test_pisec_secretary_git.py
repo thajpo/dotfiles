@@ -4,11 +4,13 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from scripts.pisec.models import ConflictError, ScopeMismatchError
+import scripts.pisec.secretary_git as secretary_git_module
+from scripts.pisec.models import ConflictError, InvalidRequestError, NeedsAttentionError, ScopeMismatchError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
-from scripts.pisec.secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge
+from scripts.pisec.secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge, push_branch
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace
 from scripts.pisec.workstreams import prepare_workstream
 
@@ -144,6 +146,129 @@ class SecretaryGitTests(unittest.TestCase):
             with self.assertRaisesRegex(ConflictError, "fast-forward"):
                 prepare_workstream_merge(store, project["project_id"], scope["workstreamId"])
 
+    def push_fixture(self, root: Path):
+        remote = root / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-q", "--initial-branch=main", str(remote)], check=True)
+        repo = root / "push-repo"
+        make_repo(repo)
+        git(repo, "config", "--local", "remote.origin.url", str(remote))
+        git(remote, "fetch", "-q", str(repo), "refs/heads/main:refs/heads/main")
+        git(repo, "switch", "-q", "-c", "research/topic")
+        (repo / "research.txt").write_text("published base\n")
+        git(repo, "add", "research.txt")
+        git(repo, "commit", "-qm", "published branch")
+        git(remote, "fetch", "-q", str(repo), "refs/heads/research/topic:refs/heads/research/topic")
+        remote_oid = git(repo, "rev-parse", "HEAD")
+        for index in range(3):
+            (repo / "research.txt").write_text(f"local {index}\n")
+            git(repo, "add", "research.txt")
+            git(repo, "commit", "-qm", f"local {index}")
+        local_oid = git(repo, "rev-parse", "HEAD")
+        store = PiStore(root / "push-state")
+        self.addCleanup(store.close)
+        project = register_project(store, repo, default_ref="main")
+        return store, project, repo, remote, remote_oid, local_oid
+
+    def test_existing_non_default_branch_pushes_fast_forward_and_replays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            store, project, repo, remote, remote_oid, local_oid = self.push_fixture(root)
+            real_run_git = secretary_git_module._run_git
+            pushed_commands = []
+
+            def simulate_push(path, *args, **kwargs):
+                if args[0] != "push":
+                    return real_run_git(path, *args, **kwargs)
+                pushed_commands.append(args)
+                remote_path = Path(args[-2])
+                target_ref = args[-1].split(":", 1)[1]
+                real_run_git(
+                    remote_path,
+                    "fetch",
+                    "--quiet",
+                    str(repo),
+                    f"refs/heads/research/topic:{target_ref}",
+                )
+                return 0, "simulated push"
+
+            with patch.dict(os.environ, {"HOME": str(home)}), patch.object(secretary_git_module, "_run_git", side_effect=simulate_push):
+                result = push_branch(
+                    store,
+                    project["project_id"],
+                    branch="research/topic",
+                    expected_local_oid=local_oid,
+                    expected_remote_oid=remote_oid,
+                )
+                replay = push_branch(
+                    store,
+                    project["project_id"],
+                    branch="research/topic",
+                    expected_local_oid=local_oid,
+                    expected_remote_oid=remote_oid,
+                )
+            self.assertEqual(len(pushed_commands), 1)
+            self.assertIn(f"--force-with-lease=refs/heads/research/topic:{remote_oid}", pushed_commands[0])
+            self.assertTrue(result["pushed"])
+            self.assertFalse(result["reused"])
+            self.assertTrue(replay["reused"])
+            self.assertEqual(git(remote, "rev-parse", "refs/heads/research/topic"), local_oid)
+            self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='project.git_pushed'").fetchone()[0], 1)
+
+    def test_autonomous_push_refuses_default_branch_and_origin_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            store, project, repo, _remote, remote_oid, local_oid = self.push_fixture(root)
+            main_oid = git(repo, "rev-parse", "refs/heads/main")
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                with self.assertRaisesRegex(InvalidRequestError, "default branch"):
+                    push_branch(
+                        store,
+                        project["project_id"],
+                        branch="main",
+                        expected_local_oid=main_oid,
+                        expected_remote_oid=main_oid,
+                    )
+                other_remote = root / "other.git"
+                subprocess.run(["git", "init", "--bare", "-q", "--initial-branch=main", str(other_remote)], check=True)
+                git(repo, "config", "--local", "remote.origin.url", str(other_remote))
+                with self.assertRaisesRegex(NeedsAttentionError, "origin remote drifted"):
+                    push_branch(
+                        store,
+                        project["project_id"],
+                        branch="research/topic",
+                        expected_local_oid=local_oid,
+                        expected_remote_oid=remote_oid,
+                    )
+
+    def test_autonomous_push_refuses_non_fast_forward_remote(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            store, project, _repo, remote, _remote_oid, local_oid = self.push_fixture(root)
+            competing = root / "competing"
+            subprocess.run(["git", "clone", "-q", str(remote), str(competing)], check=True)
+            git(competing, "config", "user.name", "Competing Writer")
+            git(competing, "config", "user.email", "competing@example.invalid")
+            git(competing, "switch", "-q", "research/topic")
+            (competing / "remote.txt").write_text("remote advance\n")
+            git(competing, "add", "remote.txt")
+            git(competing, "commit", "-qm", "remote advance")
+            advanced_remote_oid = git(competing, "rev-parse", "HEAD")
+            git(remote, "fetch", "-q", str(competing), "refs/heads/research/topic:refs/heads/research/topic")
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                with self.assertRaisesRegex(ConflictError, "not a fast-forward"):
+                    push_branch(
+                        store,
+                        project["project_id"],
+                        branch="research/topic",
+                        expected_local_oid=local_oid,
+                        expected_remote_oid=advanced_remote_oid,
+                    )
 
 if __name__ == "__main__":
     unittest.main()

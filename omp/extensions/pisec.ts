@@ -1,11 +1,13 @@
+import { lstatSync, realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 type JsonObject = Record<string, unknown>;
 type RuntimeState = "starting" | "working" | "blocked" | "idle" | "done" | "stopped" | "missing" | "error" | "unknown";
+type SessionSwitchReason = "new" | "resume" | "fork" | "handoff";
 type SessionReference = { kind: "path" | "id" | null; value: string | null };
-
-type RuntimeContext = { sessionManager: { getSessionFile?: () => string | undefined } };
+type RuntimeContext = { hasUI: boolean; sessionManager: { getSessionFile?: () => string | undefined } };
 
 const ROLE = process.env.PISEC_ROLE;
 const RUNTIME_SOCKET = process.env.PISEC_RUNTIME_SOCKET;
@@ -15,7 +17,7 @@ const WORKSTREAM_ID = process.env.PISEC_WORKSTREAM_ID;
 const INSTANCE_ID = process.env.PISEC_RUNTIME_INSTANCE_ID;
 const START_SOURCE = process.env.PISEC_SESSION_START_SOURCE === "resume" ? "resume" : "startup";
 const SURFACE_ID = process.env.PISEC_SURFACE_ID;
-
+const HARNESS_HOME = process.env.PI_CODING_AGENT_DIR;
 function isPisecRole(value: string | undefined): value is "secretary" | "worker" {
   return value === "secretary" || value === "worker";
 }
@@ -40,23 +42,45 @@ function requestId(): string {
 function sessionReference(ctx: RuntimeContext): SessionReference {
   const value = ctx.sessionManager.getSessionFile?.();
   if (!value) return { kind: null, value: null };
-  if (value.startsWith("/")) return { kind: "path", value };
+  if (value.startsWith("/")) return ownerControlledSessionFile(value) ? { kind: "path", value } : { kind: null, value: null };
   return { kind: "id", value };
 }
+function ownerControlledSessionFile(value: unknown): value is string {
+  if (!HARNESS_HOME || typeof value !== "string" || !isAbsolute(value) || !value.endsWith(".jsonl")) return false;
+  if (typeof process.getuid !== "function") return false;
+  const uid = process.getuid();
+  const sessionRoot = resolve(HARNESS_HOME, "sessions");
+  try {
+    const rootInfo = lstatSync(sessionRoot);
+    const targetInfo = lstatSync(value);
+    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || rootInfo.uid !== uid || (rootInfo.mode & 0o022) !== 0) return false;
+    if (!targetInfo.isFile() || targetInfo.isSymbolicLink() || targetInfo.uid !== uid || (targetInfo.mode & 0o022) !== 0) return false;
+    const resolvedRoot = realpathSync(sessionRoot);
+    const resolvedTarget = realpathSync(value);
+    if (resolvedTarget !== resolve(value)) return false;
+    const withinRoot = relative(resolvedRoot, resolvedTarget);
+    return withinRoot !== "" && withinRoot !== ".." && !withinRoot.startsWith(`..${sep}`) && !isAbsolute(withinRoot);
+  } catch {
+    return false;
+  }
+}
+
 
 function runtimePayload(
   state: RuntimeState,
   event: "session_start" | "lifecycle" | "session_shutdown",
+  reason: SessionSwitchReason | null,
   seq: number,
   ctx: RuntimeContext,
   reference?: SessionReference,
 ): JsonObject {
-  const current = reference ?? { kind: null, value: null };
+  const current = reference ?? sessionReference(ctx);
   return {
     workstreamId: WORKSTREAM_ID,
     runtimeInstanceId: INSTANCE_ID,
     seq,
     event,
+    reason,
     state,
     nativeSessionKind: current.kind,
     nativeSessionValue: current.value,
@@ -210,25 +234,28 @@ function renderMergeScope(value: unknown): string {
 
 function registerRuntime(pi: ExtensionAPI): void {
   let sequence = 0;
-  let state: RuntimeState = "idle";
+  let rootSession = false;
+  let agentActive = false;
   let reportQueue: Promise<void> = Promise.resolve();
   const report = (
     nextState: RuntimeState,
     event: "session_start" | "lifecycle" | "session_shutdown" = "lifecycle",
     ctx: RuntimeContext,
     reference?: SessionReference,
+    reason: SessionSwitchReason | null = null,
   ) => {
     sequence += 1;
-    state = nextState;
-    const payload = runtimePayload(nextState, event, sequence, ctx, reference);
+    const payload = runtimePayload(nextState, event, reason, sequence, ctx, reference);
     const task = reportQueue.catch(() => undefined).then(async () => {
       await runtimeRequest(payload);
     });
     reportQueue = task;
     return task;
   };
-
   pi.on("session_start", async (_event, ctx) => {
+    rootSession = ctx.hasUI === true;
+    if (!rootSession) return;
+    agentActive = false;
     try {
       await report("idle", "session_start", ctx, sessionReference(ctx));
     } catch (error) {
@@ -236,17 +263,50 @@ function registerRuntime(pi: ExtensionAPI): void {
       throw error;
     }
   });
-  pi.on("session_switch", async (_event, ctx) => report("idle", "lifecycle", ctx, sessionReference(ctx)));
-  pi.on("session_branch", async (_event, ctx) => report("idle", "lifecycle", ctx, sessionReference(ctx)));
-  pi.on("session_tree", async (_event, ctx) => report("idle", "lifecycle", ctx, sessionReference(ctx)));
+  pi.on("session_before_switch", async (event, ctx) => {
+    if (!rootSession) return { cancel: true };
+    if (event.reason === "handoff") return { cancel: true };
+    const targetSessionFile = event.reason === "resume" && ownerControlledSessionFile(event.targetSessionFile)
+      ? event.targetSessionFile
+      : null;
+    if (event.reason === "resume" && targetSessionFile === null) return { cancel: true };
+    try {
+      await runtimeOperation("session.switch.prepare", { reason: event.reason, targetSessionFile });
+      return;
+    } catch (error) {
+      ctx.ui.notify(`Pisec session switch refused: ${error instanceof Error ? error.message : String(error)}`, "error");
+      return { cancel: true };
+    }
+  });
+  pi.on("session_switch", async (event, ctx) => {
+    if (!rootSession) return;
+    agentActive = false;
+    try {
+      await report("idle", "lifecycle", ctx, sessionReference(ctx), event.reason);
+    } catch (error) {
+      const previous = event.previousSessionFile;
+      const suffix = previous ? `; previous session was ${previous}` : "";
+      ctx.ui.notify(`Pisec session switch report failed${suffix}: ${error instanceof Error ? error.message : String(error)}`, "error");
+      throw error;
+    }
+  });
+  pi.on("session_branch", async (_event, ctx) => {
+    if (!rootSession) return;
+    agentActive = false;
+    return report("idle", "lifecycle", ctx, sessionReference(ctx));
+  });
+  pi.on("session_tree", async (_event, ctx) => {
+    if (!rootSession) return;
+    agentActive = false;
+    return report("idle", "lifecycle", ctx, sessionReference(ctx));
+  });
   pi.on("before_agent_start", async (event, ctx) => {
-    await report("working", "lifecycle", ctx);
-    await reportQueue;
+    await runtimeOperation("runtime.turn.prepare");
     if (ROLE === "secretary") {
       return {
         systemPrompt: [
           ...event.systemPrompt,
-          "Pisec secretary contract: you are trusted inside exactly one registered project Fence. You may use the full standard OMP tool surface, installed plugins, project MCP, copied user extensions/skills/rules/commands/themes/agents, normal local Git, project writes, and broad public web access. Plugins and MCP are trusted code inside this same Fence boundary, not extra sandboxes. Fence denies sibling projects, host secrets, metadata IP, and the real harness/workspace state. Keep worker creation and merge application behind exact interactive approval. For independent worker research requests, list pending packets and launch the exact @smol pisec-web-research agent in one task batch; return every answer through durable Pisec research tools. Do not claim product state from memory; inspect through Pisec adapters.",
+          "Pisec secretary contract: you are trusted inside exactly one registered project Fence. You may use the full standard OMP tool surface, installed plugins, project MCP, copied user extensions/skills/rules/commands/themes/agents, normal local Git, project writes, and broad public web access. Plugins and MCP are trusted code inside this same Fence boundary, not extra sandboxes. Fence denies sibling projects, host secrets, metadata IP, and the real harness/workspace state. Raw git push remains denied; publish an existing non-default branch with pisec_push_branch, which performs only a pinned-origin fast-forward through the host broker without exposing credentials. Keep worker creation and merge application behind exact interactive approval. For independent worker research requests, list pending packets and launch the exact @smol pisec-web-research agent in one task batch; return every answer through durable Pisec research tools. Do not claim product state from memory; inspect through Pisec adapters.",
         ],
       };
     }
@@ -268,12 +328,37 @@ function registerRuntime(pi: ExtensionAPI): void {
       throw new Error(`Pisec worker startup failed closed: ${error instanceof Error ? error.message : String(error)}`);
     }
   });
-  pi.on("agent_end", async (_event, ctx) => report("idle", "lifecycle", ctx));
-  pi.on("tool_approval_requested", async (_event, ctx) => report("blocked", "lifecycle", ctx));
-  pi.on("tool_approval_resolved", async (_event, ctx) => report(state === "blocked" ? "working" : state, "lifecycle", ctx));
-  pi.on("auto_retry_start", async (_event, ctx) => report("blocked", "lifecycle", ctx));
-  pi.on("auto_retry_end", async (_event, ctx) => report(state === "blocked" ? "working" : state, "lifecycle", ctx));
-  pi.on("session_shutdown", async (_event, ctx) => report("stopped", "session_shutdown", ctx));
+  pi.on("agent_start", async (_event, ctx) => {
+    if (!rootSession) return;
+    agentActive = true;
+    return report("working", "lifecycle", ctx, sessionReference(ctx));
+  });
+  pi.on("agent_end", async (_event, ctx) => {
+    if (!rootSession || !agentActive) return;
+    agentActive = false;
+    return report("idle", "lifecycle", ctx);
+  });
+  pi.on("tool_approval_requested", async (_event, ctx) => {
+    if (!rootSession || !agentActive) return;
+    return report("blocked", "lifecycle", ctx);
+  });
+  pi.on("tool_approval_resolved", async (_event, ctx) => {
+    if (!rootSession) return;
+    return report(agentActive ? "working" : "idle", "lifecycle", ctx);
+  });
+  pi.on("auto_retry_start", async (_event, ctx) => {
+    if (!rootSession || !agentActive) return;
+    return report("blocked", "lifecycle", ctx);
+  });
+  pi.on("auto_retry_end", async (_event, ctx) => {
+    if (!rootSession) return;
+    return report(agentActive ? "working" : "idle", "lifecycle", ctx);
+  });
+  pi.on("session_shutdown", async (_event, ctx) => {
+    if (!rootSession) return;
+    agentActive = false;
+    return report("stopped", "session_shutdown", ctx);
+  });
 }
 
 function secretaryTools(pi: ExtensionAPI): void {
@@ -297,6 +382,7 @@ function secretaryTools(pi: ExtensionAPI): void {
 
   semantic("pisec_project_status", "Pisec project status", "project.status", z.object({}), "read");
   semantic("pisec_git_status", "Pisec Git status", "git.status", z.object({}), "read");
+  semantic("pisec_push_branch", "Push project branch", "git.push", z.object({ branch: z.string().min(1).max(512), expected_local_oid: z.string().min(40).max(64), expected_remote_oid: z.string().min(40).max(64) }), "exec", params => ({ branch: params.branch, expectedLocalOid: params.expected_local_oid, expectedRemoteOid: params.expected_remote_oid }));
   semantic("pisec_inspect_workstream_changes", "Inspect workstream Git changes", "git.workstream_changes", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }));
   semantic("pisec_prepare_workstream_merge", "Prepare workstream merge", "git.merge.prepare", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }));
   pi.registerTool({

@@ -17,7 +17,7 @@ def _git(path: Path, *args: str) -> str:
     executable = shutil.which("git", path=os.defpath)
     if executable is None:
         raise InvalidRequestError("git is unavailable")
-    environment = {"HOME": str(Path.home()), "PATH": os.defpath, "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
+    environment = {"HOME": "/nonexistent", "PATH": os.defpath, "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
     result = subprocess.run([executable, "-C", str(path), *args], env=environment, text=True, capture_output=True, timeout=10, check=False)
     if result.returncode != 0:
         raise InvalidRequestError("Git repository observation failed", detail={"command": args[0], "stderr": result.stderr.strip()[:512]})
@@ -26,7 +26,17 @@ def _git(path: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def observe_project(path: str | Path, default_ref: str | None = None) -> dict[str, str]:
+def _origin_url(path: Path) -> str | None:
+    try:
+        value = _git(path, "config", "--local", "--get", "remote.origin.url")
+    except InvalidRequestError:
+        return None
+    if not value or len(value) > 2048 or value.startswith("-") or any(ord(char) < 0x20 for char in value):
+        raise InvalidRequestError("origin remote URL is invalid")
+    return value
+
+
+def observe_project(path: str | Path, default_ref: str | None = None) -> dict[str, Any]:
     requested = Path(path).expanduser().resolve(strict=True)
     if _git(requested, "rev-parse", "--is-bare-repository") != "false":
         raise InvalidRequestError("bare repositories are not supported")
@@ -42,7 +52,7 @@ def observe_project(path: str | Path, default_ref: str | None = None) -> dict[st
     oid = _git(top, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}").lower()
     if len(oid) not in (40, 64) or any(char not in "0123456789abcdef" for char in oid):
         raise InvalidRequestError("Git returned an invalid commit object id")
-    return {"repository_path": str(top), "git_common_dir": str(common), "default_ref": ref, "default_oid": oid}
+    return {"repository_path": str(top), "git_common_dir": str(common), "default_ref": ref, "default_oid": oid, "remote_url": _origin_url(top)}
 
 
 def get_project(store: Any, project_id: str) -> dict[str, Any]:
@@ -73,14 +83,26 @@ def register_project(store: Any, path: str | Path, *, display_name: str | None =
     observed = observe_project(path, default_ref)
     existing = store.conn.execute("SELECT * FROM projects WHERE git_common_dir=?", (observed["git_common_dir"],)).fetchone()
     if existing is not None:
-        return dict(existing)
+        value = dict(existing)
+        registered_remote = value.get("remote_url")
+        observed_remote = observed["remote_url"]
+        if registered_remote is None and observed_remote is not None:
+            with store.transaction():
+                store.conn.execute(
+                    "UPDATE projects SET remote_url=?,updated_at=? WHERE project_id=? AND remote_url IS NULL",
+                    (observed_remote, utc_now(), value["project_id"]),
+                )
+            return get_project(store, value["project_id"])
+        if registered_remote != observed_remote:
+            raise InvalidRequestError("registered project origin remote drifted")
+        return value
     project_id = new_id("prj")
     name = bounded_text(display_name or Path(observed["repository_path"]).name, name="display_name", limit=512)
     now = utc_now()
     with store.transaction():
         store.conn.execute(
-            "INSERT INTO projects(project_id,display_name,repository_path,git_common_dir,default_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-            (project_id, name, observed["repository_path"], observed["git_common_dir"], observed["default_ref"], now, now),
+            "INSERT INTO projects(project_id,display_name,repository_path,git_common_dir,default_ref,remote_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (project_id, name, observed["repository_path"], observed["git_common_dir"], observed["default_ref"], observed["remote_url"], now, now),
         )
         append_event_in_transaction(store.conn, kind="project.registered", project_id=project_id, payload={"displayName": name, "repositoryPath": observed["repository_path"], "gitCommonDir": observed["git_common_dir"], "defaultRef": observed["default_ref"]})
     return get_project(store, project_id)

@@ -46,8 +46,10 @@ def run_broker() -> None:
     state_root = default_state_root()
     dispatcher = build_adapters(load_config(), state_root)
     service = BrokerService(dispatcher, runtime_root=default_runtime_root())
+    dispatcher.wait_for_workspace()
     service.start()
     try:
+        dispatcher.startup_reconcile()
         threading.Event().wait()
     except KeyboardInterrupt:
         pass

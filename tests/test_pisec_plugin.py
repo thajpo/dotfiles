@@ -82,8 +82,8 @@ class PluginTests(unittest.TestCase):
             environment.update(extra)
         return subprocess.run([str(PLUGIN), command], cwd=ROOT, env=environment, text=True, capture_output=True)
 
-    def test_startup_forwards_only_dedicated_herdr_session(self):
-        socket_path = Path.home() / ".config" / "herdr" / "sessions" / "pisec" / "herdr.sock"
+    def test_startup_forwards_only_main_herdr_session(self):
+        socket_path = Path.home() / ".config" / "herdr" / "sessions" / "main" / "herdr.sock"
         result = self.run_plugin("startup", extra={"HERDR_SOCKET_PATH": str(socket_path)})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.state.requests), 1)

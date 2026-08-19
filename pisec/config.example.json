@@ -39,8 +39,8 @@
   "workspace": {
     "id": "herdr",
     "config": {
-      "sessionName": "pisec",
-      "socketPath": "~/.config/herdr/sessions/pisec/herdr.sock"
+      "sessionName": "main",
+      "socketPath": "~/.config/herdr/sessions/main/herdr.sock"
     }
   }
 }

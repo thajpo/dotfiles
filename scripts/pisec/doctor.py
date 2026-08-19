@@ -191,7 +191,7 @@ def run_doctor(store: Any = None, config: Mapping[str, Any] | None = None, regis
             expected = {"schema_name": SCHEMA_NAME, "schema_version": SCHEMA_VERSION, "schema_sha256": schema_digest(), "migration_name": MIGRATION_NAME}
             _check(checks, "Schema identity", schema_identity == expected, canonical_json(schema_identity))
         for row in store.conn.execute(
-            "SELECT r.*,w.kind AS workstream_kind,w.desired_state AS workstream_desired_state,w.execution_profile AS workstream_execution_profile,w.worktree_path AS workstream_worktree_path,w.harness_id AS workstream_harness_id,w.workspace_adapter_id AS workstream_workspace_adapter_id "
+            "SELECT r.*,w.kind AS workstream_kind,w.desired_state AS workstream_desired_state,w.provisioning_state AS workstream_provisioning_state,w.execution_profile AS workstream_execution_profile,w.worktree_path AS workstream_worktree_path,w.harness_id AS workstream_harness_id,w.workspace_adapter_id AS workstream_workspace_adapter_id "
             "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) ORDER BY r.workstream_id"
         ):
             ids_ok = (
@@ -204,8 +204,23 @@ def run_doctor(store: Any = None, config: Mapping[str, Any] | None = None, regis
                 and row["workspace_adapter_id"] == row["workstream_workspace_adapter_id"]
             )
             _check(checks, f"Binding {row['workstream_id']}", ids_ok, f"harness={row['harness_id']} workspace={row['workspace_adapter_id']} state={row['observed_state']}")
+            generation_ok = (
+                row["workstream_desired_state"] != "active"
+                or row["workstream_provisioning_state"] != "bound"
+                or (
+                    isinstance(row["desired_generation_sha256"], str)
+                    and len(row["desired_generation_sha256"]) == 64
+                    and row["applied_generation_sha256"] == row["desired_generation_sha256"]
+                )
+            )
+            _check(
+                checks,
+                f"Binding generation {row['workstream_id']}",
+                generation_ok,
+                "current" if generation_ok else "stale; run pisec project refresh --all",
+            )
             cleaned = row["workstream_desired_state"] == "retired" and row["observed_state"] == "stopped" and row["workspace_id"] is None and row["workspace_view_id"] is None and row["workspace_surface_id"] is None
-            if ids_ok and registry is not None and not cleaned:
+            if ids_ok and registry is not None and not cleaned and row["workstream_desired_state"] == "active" and row["workstream_provisioning_state"] == "bound":
                 binding = dict(row)
                 workstream = {
                     "kind": row["workstream_kind"],
@@ -218,6 +233,43 @@ def run_doctor(store: Any = None, config: Mapping[str, Any] | None = None, regis
                         _check(checks, f"Harness {row['harness_id']} {row['workstream_id']}: {health.name}", health.ok, health.detail)
                 except Exception as error:
                     _check(checks, f"Harness {row['harness_id']} {row['workstream_id']}: health", False, str(error)[:256])
+        for retained in store.conn.execute("SELECT * FROM retained_session_roots ORDER BY workstream_id"):
+            retained_path = Path(str(retained["harness_home"])).absolute()
+            session_root = retained_path / "sessions"
+            ok = False
+            detail = str(session_root)
+            try:
+                state_root = root.absolute().resolve(strict=False)
+                if not retained_path.resolve(strict=False).is_relative_to(state_root):
+                    raise OSError("retained root escapes Pisec state")
+                home_info = retained_path.lstat()
+                session_info = session_root.lstat()
+                ok = (
+                    stat.S_ISDIR(home_info.st_mode)
+                    and stat.S_IMODE(home_info.st_mode) == 0o700
+                    and home_info.st_uid == os.geteuid()
+                    and stat.S_ISDIR(session_info.st_mode)
+                    and stat.S_IMODE(session_info.st_mode) == 0o700
+                    and session_info.st_uid == os.geteuid()
+                    and not stat.S_ISLNK(home_info.st_mode)
+                    and not stat.S_ISLNK(session_info.st_mode)
+                )
+                for directory, names, files in os.walk(session_root, topdown=True, followlinks=False):
+                    for name in [*names, *files]:
+                        child = Path(directory) / name
+                        child_info = child.lstat()
+                        if child_info.st_uid != os.geteuid() or stat.S_ISLNK(child_info.st_mode) or child_info.st_mode & 0o022:
+                            ok = False
+                if ok and registry is not None and retained["harness_id"] in harness_ids:
+                    registry.resolve_harness(str(retained["harness_id"])).validate_native_session(
+                        {"harness_home": str(retained_path)},
+                        retained["native_session_kind"],
+                        retained["native_session_value"],
+                    )
+            except Exception as error:
+                ok = False
+                detail = str(error)[:256]
+            _check(checks, f"Retained session root {retained['workstream_id']}", ok, detail)
     _deployment_checks(checks)
     ok = all(item["status"] == "ok" for item in checks)
     return {

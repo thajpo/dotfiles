@@ -57,7 +57,7 @@ def bounded_environment_json(name: str) -> dict:
 
 def startup() -> int:
     socket_path = Path(os.environ.get("HERDR_SOCKET_PATH", "")).resolve(strict=False)
-    expected = Path.home() / ".config" / "herdr" / "sessions" / "pisec" / "herdr.sock"
+    expected = Path.home() / ".config" / "herdr" / "sessions" / "main" / "herdr.sock"
     if socket_path != expected.resolve(strict=False):
         return 0
     admin("workspace.startup", {"adapterId": "herdr", "socketPath": str(socket_path)})

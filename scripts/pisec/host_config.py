@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import secrets
 
 
@@ -45,19 +46,36 @@ def seed_config(source: Path, destination: Path) -> bool:
     return True
 
 
+HERDR_PLUGIN_KEYS_START = "# >>> dotfiles Herdr plugin keys >>>"
+HERDR_PLUGIN_KEYS_END = "# <<< dotfiles Herdr plugin keys <<<"
+HERDR_PLUGIN_KEYS = (
+    ("prefix+shift+e", "plugin:chmarax.herdr-nvim:toggle"),
+    ("prefix+shift+f", "plugin:chmarax.herdr-nvim:pick-file"),
+    ("prefix+shift+v", "plugin:persiyanov.reviewr:toggle"),
+)
+
+
 def patch_herdr_config(path: Path) -> None:
     try:
         lines = path.read_text().splitlines()
     except FileNotFoundError:
         lines = []
-    desired = {("session", "resume_agents_on_restore"): "true", ("experimental", "pane_history"): "false"}
-    sections: dict[str, list[int]] = {}
-    current: str | None = None
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            current = stripped[1:-1].strip()
-            sections.setdefault(current, []).append(index)
+    if HERDR_PLUGIN_KEYS_START in lines:
+        start = lines.index(HERDR_PLUGIN_KEYS_START)
+        try:
+            end = lines.index(HERDR_PLUGIN_KEYS_END, start + 1)
+        except ValueError as error:
+            raise ValueError("Herdr plugin key block is incomplete") from error
+        del lines[start : end + 1]
+        while lines and lines[-1] == "":
+            lines.pop()
+    elif HERDR_PLUGIN_KEYS_END in lines:
+        raise ValueError("Herdr plugin key block is incomplete")
+    desired = {
+        ("keys", "prefix"): '"ctrl+a"',
+        ("session", "resume_agents_on_restore"): "false",
+        ("experimental", "pane_history"): "false",
+    }
     for (section, key), value in desired.items():
         section_indexes = [index for index, line in enumerate(lines) if line.strip() == f"[{section}]"]
         if not section_indexes:
@@ -66,7 +84,14 @@ def patch_herdr_config(path: Path) -> None:
             lines.extend([f"[{section}]", f"{key} = {value}"])
             continue
         start = section_indexes[-1]
-        end = next((index for index in range(start + 1, len(lines)) if lines[index].strip().startswith("[") and lines[index].strip().endswith("]")), len(lines))
+        end = next(
+            (
+                index
+                for index in range(start + 1, len(lines))
+                if lines[index].strip().startswith("[") and lines[index].strip().endswith("]")
+            ),
+            len(lines),
+        )
         found = False
         for index in range(start + 1, end):
             stripped = lines[index].strip()
@@ -76,23 +101,46 @@ def patch_herdr_config(path: Path) -> None:
                 break
         if not found:
             lines.insert(end, f"{key} = {value}")
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.append(HERDR_PLUGIN_KEYS_START)
+    for key, command in HERDR_PLUGIN_KEYS:
+        lines.extend(
+            (
+                "[[keys.command]]",
+                f'key = "{key}"',
+                f'command = "{command}"',
+                "",
+            )
+        )
+    lines.append(HERDR_PLUGIN_KEYS_END)
     _atomic_write(path, "\n".join(lines).rstrip() + "\n", 0o600)
 
-def write_pisec_herdr_config(path: Path, *, shell_path: str) -> None:
-    shell = Path(shell_path).resolve(strict=True)
-    if not shell.is_file() or not os.access(shell, os.X_OK):
-        raise ValueError("Pisec Herdr shell is not executable")
-    text = (
-        "onboarding = false\n\n"
-        "[session]\n"
-        "resume_agents_on_restore = true\n\n"
-        "[terminal]\n"
-        f"default_shell = {json.dumps(str(shell))}\n"
-        'shell_mode = "non_login"\n\n'
-        "[experimental]\n"
-        "pane_history = false\n"
+def patch_bashrc(path: Path, *, bin_dir: str) -> None:
+    if path.is_symlink():
+        raise ValueError(f"refusing to replace symlink: {path}")
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        text = ""
+    start = "# >>> Pisec OMP routing >>>"
+    end = "# <<< Pisec OMP routing <<<"
+    pattern = re.compile(rf"(?ms)^{re.escape(start)}\n.*?^{re.escape(end)}\n?")
+    text = pattern.sub("", text)
+    block = "\n".join(
+        (
+            start,
+            f"export PATH={shlex.quote(bin_dir)}:\"$PATH\"",
+            "omp() {",
+            "  printf '%s\\n' 'Pisec owns project OMP sessions. Use \"pisec project open <repository>\" for project work or \"omp-admin\" for broad host work.' >&2",
+            "  return 126",
+            "}",
+            end,
+            "",
+        )
     )
-    _atomic_write(path, text, 0o600)
+    _atomic_write(path, text.rstrip() + ("\n\n" if text.strip() else "") + block, 0o600)
+
 
 
 def _validate_pisec_envelope(value: object) -> dict:
@@ -162,8 +210,8 @@ def patch_pisec_config(path: Path, *, real_omp_path: str, fence_path: str) -> No
             "workspace": {
                 "id": "herdr",
                 "config": {
-                    "sessionName": "pisec",
-                    "socketPath": str((Path.home() / ".config" / "herdr" / "sessions" / "pisec" / "herdr.sock").absolute()),
+                    "sessionName": "main",
+                    "socketPath": str((Path.home() / ".config" / "herdr" / "sessions" / "main" / "herdr.sock").absolute()),
                 },
             },
         }
@@ -180,11 +228,12 @@ def patch_pisec_config(path: Path, *, real_omp_path: str, fence_path: str) -> No
             if not isinstance(gateway, dict) or set(gateway) != {"baseUrl", "tokenFile"}:
                 raise ValueError("Pisec OMP gateway configuration fields are invalid")
             gateway["baseUrl"] = f"http://127.0.0.1:{gateway_port}"
-        workspace_config = value["workspace"]["config"]
         if value["workspace"]["id"] == "herdr":
-            if set(workspace_config) != {"sessionName", "socketPath"} or workspace_config.get("sessionName") != "pisec":
+            workspace_config = value["workspace"]["config"]
+            if set(workspace_config) != {"sessionName", "socketPath"}:
                 raise ValueError("Pisec Herdr workspace configuration fields are invalid")
-            workspace_config["socketPath"] = str(Path(workspace_config["socketPath"]).expanduser().absolute())
+            workspace_config["sessionName"] = "main"
+            workspace_config["socketPath"] = str((Path.home() / ".config" / "herdr" / "sessions" / "main" / "herdr.sock").absolute())
     _atomic_write_pisec_config(path, value)
 
 def write_collie_env(path: Path, *, host: str, trusted_user: str) -> None:
@@ -203,9 +252,9 @@ def write_collie_env(path: Path, *, host: str, trusted_user: str) -> None:
         "COLLIE_HOST": "127.0.0.1",
         "COLLIE_PORT": str(_port_from_environment("PISEC_COLLIE_PORT", 8787)),
         "COLLIE_SERVE_MODE": "https",
-        "COLLIE_MULTI_SESSION": "on",
+        "COLLIE_MULTI_SESSION": "off",
         "COLLIE_TRANSCRIPT": "on",
-        "COLLIE_TRANSCRIPT_ROOT": "%h/.omp/agent/sessions,%h/.local/state/pisec/omp,%h/.local/state/pisec-personal/profiles",
+        "COLLIE_TRANSCRIPT_ROOT": "%h/.config/herdr/sessions/main",
         "COLLIE_TRUSTED_USER": trusted_user,
         "COLLIE_PUBLIC_HOSTS": host,
         "COLLIE_ALLOWED_ORIGINS": f"https://{host}",
@@ -225,18 +274,18 @@ def main(argv: list[str] | None = None) -> int:
     pisec.add_argument("path", type=Path)
     pisec.add_argument("real_omp_path")
     pisec.add_argument("fence_path")
-    pisec_herdr = commands.add_parser("write-pisec-herdr")
-    pisec_herdr.add_argument("path", type=Path)
-    pisec_herdr.add_argument("shell_path")
     collie = commands.add_parser("collie-env")
     collie.add_argument("path", type=Path)
     collie.add_argument("host")
     collie.add_argument("trusted_user")
+    bashrc = commands.add_parser("patch-bashrc")
+    bashrc.add_argument("path", type=Path)
+    bashrc.add_argument("bin_dir")
     args = parser.parse_args(argv)
     if args.command == "patch-herdr":
         patch_herdr_config(args.path)
-    elif args.command == "write-pisec-herdr":
-        write_pisec_herdr_config(args.path, shell_path=args.shell_path)
+    elif args.command == "patch-bashrc":
+        patch_bashrc(args.path, bin_dir=args.bin_dir)
     elif args.command == "patch-pisec":
         patch_pisec_config(args.path, real_omp_path=args.real_omp_path, fence_path=args.fence_path)
     else:

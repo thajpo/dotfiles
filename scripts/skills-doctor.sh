@@ -30,7 +30,7 @@ fi
 
 ln -sfn "$DOTFILES_SKILLS" "$SHARED_SKILLS"
 
+repair_path "$HOME/.omp/agent/skills"
 repair_path "$HOME/.codex/skills"
 repair_path "$HOME/.config/opencode/skills"
-
 echo "skills-doctor: repaired symlinks and merged local skills into $DOTFILES_SKILLS"

@@ -5,21 +5,24 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import re
+import shlex
 import socket
 import stat
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
-from ..adapters import AdapterHealth, AgentObservation, HarnessManifest, WorkspaceAdapter, WorkspaceManifest, WorkspaceObservation
+from ..adapters import AdapterHealth, AgentObservation, HarnessManifest, RuntimeProcessObservation, WorkspaceAdapter, WorkspaceManifest, WorkspaceObservation
 from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canonical_json, new_id, parse_json_strict, utc_now
 from ..runtime import WORKSPACE_RUNTIME_MISSING
 
 HERDR_PROTOCOL = 19
 HERDR_MIN_VERSION = (0, 8, 0)
 MAX_RESPONSE = 2 * 1024 * 1024
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def default_socket_path() -> Path:
-    return Path.home() / ".config" / "herdr" / "sessions" / "pisec" / "herdr.sock"
+    return Path.home() / ".config" / "herdr" / "sessions" / "main" / "herdr.sock"
 
 
 def _version_tuple(value: str) -> tuple[int, int, int]:
@@ -37,14 +40,14 @@ def _runtime_source(runtime_instance_id: str) -> str:
 
 
 class HerdrWorkspaceAdapter:
-    manifest = WorkspaceManifest(adapter_id="herdr", session_name="pisec", version_label="0.8.x", protocol_version=HERDR_PROTOCOL)
+    manifest = WorkspaceManifest(adapter_id="herdr", session_name="main", version_label="0.8.x", protocol_version=HERDR_PROTOCOL)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, timeout: float = 30.0, validate: bool = True) -> "HerdrWorkspaceAdapter":
         if not isinstance(config, Mapping) or set(config) != {"sessionName", "socketPath"}:
             raise InvalidRequestError("Herdr workspace configuration fields are invalid")
         if config.get("sessionName") != cls.manifest.session_name:
-            raise InvalidRequestError("workspace session must use the dedicated Pisec session")
+            raise InvalidRequestError("workspace session must use the persistent main session")
         socket_path = config.get("socketPath")
         if not isinstance(socket_path, str) or not socket_path or "\x00" in socket_path:
             raise InvalidRequestError("Herdr workspace socketPath is invalid")
@@ -53,9 +56,9 @@ class HerdrWorkspaceAdapter:
             raise InvalidRequestError("Herdr workspace socketPath must be absolute or home-relative")
         return cls(path.absolute(), session_name=cls.manifest.session_name, timeout=timeout, validate=validate)
 
-    def __init__(self, socket_path: Path | str | None = None, *, session_name: str = "pisec", timeout: float = 30.0, validate: bool = True):
+    def __init__(self, socket_path: Path | str | None = None, *, session_name: str = "main", timeout: float = 30.0, validate: bool = True):
         if session_name != self.manifest.session_name:
-            raise PisecError("workspace session is not the dedicated Pisec session")
+            raise PisecError("workspace session must use the persistent main session")
         self.socket_path = Path(socket_path) if socket_path is not None else default_socket_path()
         self.timeout = timeout
         self._validated = False
@@ -166,7 +169,7 @@ class HerdrWorkspaceAdapter:
     def _observation(identity: Mapping[str, Any], *, worktree_path: str | None, branch_name: str | None, agent: Mapping[str, Any] | None) -> WorkspaceObservation:
         agent_observation = None
         if agent is not None:
-            name = agent.get("name")
+            name = agent.get("name", agent.get("agent"))
             surface_id = agent.get("pane_id")
             state = agent.get("agent_status", "unknown")
             if isinstance(name, str) and isinstance(surface_id, str):
@@ -182,25 +185,44 @@ class HerdrWorkspaceAdapter:
         )
 
     def create_workspace(self, cwd: str, label: str, focus: bool = False) -> WorkspaceObservation:
-        identity, _result = self._created(self._request("workspace.create", {"cwd": cwd, "label": label, "focus": focus}), "workspace_created")
+        params: dict[str, Any] = {"cwd": cwd, "label": label, "focus": focus}
+        identity, _result = self._created(self._request("workspace.create", params), "workspace_created")
         return self._observation(identity, worktree_path=None, branch_name=None, agent=None)
 
-    def create_worktree(self, *, cwd: str, branch: str, base: str, path: str, label: str, focus: bool = False) -> WorkspaceObservation:
-        existing = self.observe_workstream(path=path, agent_name="")
-        if existing is not None:
-            if existing.branch_name not in {branch, f"refs/heads/{branch}"}:
-                raise NeedsAttentionError("existing workspace worktree does not match the approved branch")
-            return existing
-        identity, result = self._created(self._request("worktree.create", {"cwd": cwd, "branch": branch, "base": base, "path": path, "label": label, "focus": focus}), "worktree_created")
-        worktree = result.get("worktree")
-        if not isinstance(worktree, dict) or worktree.get("branch") not in (branch, f"refs/heads/{branch}"):
-            raise NeedsAttentionError("workspace create response does not match the approved branch")
-        return self._observation(identity, worktree_path=str(worktree.get("path", path)), branch_name=branch, agent=None)
 
-    def start_agent(self, surface_id: str, name: str, agent_kind: str) -> dict[str, Any]:
-        result = self._request("agent.start", {"pane_id": surface_id, "name": name, "kind": agent_kind})
-        if result.get("type") != "agent_started":
-            raise PisecError("workspace did not start the requested agent")
+    def create_tab(self, *, workspace_id: str, cwd: str, label: str, focus: bool = False) -> WorkspaceObservation:
+        params = {"workspace_id": workspace_id, "cwd": cwd, "label": label, "focus": focus}
+        identity, _result = self._created(self._request("tab.create", params), "tab_created")
+        if identity["workspace_id"] != workspace_id:
+            raise NeedsAttentionError("workspace tab create response escaped the project workspace")
+        return self._observation(identity, worktree_path=None, branch_name=None, agent=None)
+    def rename_tab(self, view_id: str, label: str) -> dict[str, Any]:
+        if not isinstance(view_id, str) or not view_id or not isinstance(label, str) or not label or "\x00" in label:
+            raise InvalidRequestError("workspace tab label is invalid")
+        return self._request("tab.rename", {"tab_id": view_id, "label": label})
+
+    def run_command(self, surface_id: str, argv: Sequence[str], env: Mapping[str, str] | None = None) -> dict[str, Any]:
+        if not isinstance(surface_id, str) or not surface_id or "\x00" in surface_id:
+            raise InvalidRequestError("workspace surface id is invalid")
+        values = list(argv)
+        if not values or any(not isinstance(value, str) or not value or "\x00" in value for value in values):
+            raise InvalidRequestError("workspace command argv is invalid")
+        assignments: list[str] = []
+        for key, value in (env or {}).items():
+            if not isinstance(key, str) or _ENV_KEY_RE.fullmatch(key) is None or not isinstance(value, str) or "\x00" in value:
+                raise InvalidRequestError("workspace command environment is invalid")
+            assignments.append(f"{key}={shlex.quote(value)}")
+        command = shlex.join(values)
+        if assignments:
+            command = " ".join((*assignments, command))
+        return self._request("pane.send_input", {"pane_id": surface_id, "text": command, "keys": ["Enter"]})
+
+    def stop_runtime(self, surface_id: str) -> dict[str, Any]:
+        if not isinstance(surface_id, str) or not surface_id or "\x00" in surface_id:
+            raise InvalidRequestError("workspace surface id is invalid")
+        result = self._request("pane.send_keys", {"pane_id": surface_id, "keys": ["ctrl+d"]})
+        if result.get("type") != "ok":
+            raise PisecError("workspace did not accept the runtime stop request")
         return result
 
     def prompt_agent(self, surface_id: str, text: str, wait_until: tuple[str, ...], timeout_ms: int) -> dict[str, Any]:
@@ -215,9 +237,16 @@ class HerdrWorkspaceAdapter:
             raise PisecError("workspace did not deliver the prompt")
         return result
 
-    def focus_agent(self, surface_id: str) -> dict[str, Any]:
-        return self._request("agent.focus", {"target": surface_id})
+    def focus_pane(self, surface_id: str) -> dict[str, Any]:
+        return self._request("pane.focus", {"pane_id": surface_id})
 
+    def close_tab(self, view_id: str) -> dict[str, Any]:
+        try:
+            return self._request("tab.close", {"tab_id": view_id})
+        except PisecError as error:
+            if str(error) == f"tab {view_id} not found":
+                return {"type": "tab_closed", "tab_id": view_id, "already_closed": True}
+            raise
     def close_workspace(self, workspace_id: str) -> dict[str, Any]:
         try:
             return self._request("workspace.close", {"workspace_id": workspace_id})
@@ -249,7 +278,13 @@ class HerdrWorkspaceAdapter:
             if isinstance(worktree, dict) and str(Path(worktree.get("checkout_path", "")).resolve(strict=False)) == target:
                 candidates.append(item)
         if not candidates:
-            workspace_ids = {item.get("workspace_id") for item in panes if isinstance(item, dict) and isinstance(item.get("workspace_id"), str) and isinstance(item.get("cwd"), str) and str(Path(item["cwd"]).resolve(strict=False)) == target}
+            workspace_ids = {
+                item.get("workspace_id")
+                for item in panes
+                if isinstance(item, dict)
+                and isinstance(item.get("workspace_id"), str)
+                and any(isinstance(value, str) and str(Path(value).resolve(strict=False)) == target for value in (item.get("cwd"), item.get("foreground_cwd")))
+            }
             candidates = [item for item in workspaces if isinstance(item, dict) and item.get("workspace_id") in workspace_ids]
         workspace: Mapping[str, Any] | None = None
         if agent is not None:
@@ -263,66 +298,197 @@ class HerdrWorkspaceAdapter:
         workspace_id = workspace.get("workspace_id")
         if not isinstance(workspace_id, str) or not workspace_id:
             raise PisecError("workspace observation lacks workspace identity")
-        surface_id = agent.get("pane_id") if agent is not None else next((item.get("pane_id") for item in panes if isinstance(item, dict) and item.get("workspace_id") == workspace_id), None)
+        matching_panes = [
+            item
+            for item in panes
+            if isinstance(item, dict)
+            and item.get("workspace_id") == workspace_id
+            and any(isinstance(value, str) and str(Path(value).resolve(strict=False)) == target for value in (item.get("cwd"), item.get("foreground_cwd")))
+        ]
+        if len(matching_panes) > 1:
+            raise NeedsAttentionError("workspace has duplicate panes for the approved checkout")
+        matching_pane = matching_panes[0] if matching_panes else None
+        surface_id = agent.get("pane_id") if agent is not None else (matching_pane or {}).get("pane_id")
         if not isinstance(surface_id, str) or not surface_id:
             return None
-        view_id = agent.get("tab_id") if agent is not None else next((item.get("tab_id") for item in panes if isinstance(item, dict) and item.get("pane_id") == surface_id), None)
+        view_id = agent.get("tab_id") if agent is not None else (matching_pane or {}).get("tab_id")
         if not isinstance(view_id, str) or not view_id:
             return None
+        if agent is None:
+            pane_agents = [item for item in agents if isinstance(item, dict) and item.get("pane_id") == surface_id]
+            if len(pane_agents) > 1:
+                raise NeedsAttentionError("workspace pane has duplicate agent identities")
+            agent = pane_agents[0] if pane_agents else None
         worktree = workspace.get("worktree")
         worktree_path = worktree.get("checkout_path") if isinstance(worktree, dict) else None
         branch_name = worktree.get("branch") if isinstance(worktree, dict) else None
         return self._observation({"workspace_id": workspace_id, "view_id": view_id, "surface_id": surface_id}, worktree_path=worktree_path, branch_name=branch_name, agent=agent)
+    def observe_tab(self, *, workspace_id: str, cwd: str) -> WorkspaceObservation | None:
+        snapshot = self.snapshot()
+        workspace = next((item for item in snapshot["workspaces"] if isinstance(item, dict) and item.get("workspace_id") == workspace_id), None)
+        if workspace is None:
+            return None
+        expected = str(Path(cwd).resolve(strict=False))
+        panes = [
+            item
+            for item in snapshot["panes"]
+            if isinstance(item, dict)
+            and item.get("workspace_id") == workspace_id
+            and any(isinstance(value, str) and str(Path(value).resolve(strict=False)) == expected for value in (item.get("cwd"), item.get("foreground_cwd")))
+        ]
+        if len(panes) > 1:
+            raise NeedsAttentionError("workspace has duplicate tabs for the approved checkout")
+        if not panes:
+            return None
+        pane = panes[0]
+        view_id = pane.get("tab_id")
+        surface_id = pane.get("pane_id")
+        if not isinstance(view_id, str) or not view_id or not isinstance(surface_id, str) or not surface_id:
+            raise NeedsAttentionError("workspace tab observation lacks pane identity")
+        agents = [item for item in snapshot["agents"] if isinstance(item, dict) and item.get("pane_id") == surface_id]
+        if len(agents) > 1:
+            raise NeedsAttentionError("workspace tab has duplicate agent identities")
+        return self._observation(
+            {"workspace_id": workspace_id, "view_id": view_id, "surface_id": surface_id},
+            worktree_path=expected,
+            branch_name=None,
+            agent=agents[0] if agents else None,
+        )
+
+
+    def observe_surface(self, *, workspace_id: str, view_id: str, surface_id: str, cwd: str) -> WorkspaceObservation | None:
+        snapshot = self.snapshot()
+        workspace = next((item for item in snapshot["workspaces"] if isinstance(item, dict) and item.get("workspace_id") == workspace_id), None)
+        tab = next((item for item in snapshot["tabs"] if isinstance(item, dict) and item.get("tab_id") == view_id and item.get("workspace_id") == workspace_id), None)
+        pane = next((item for item in snapshot["panes"] if isinstance(item, dict) and item.get("pane_id") == surface_id and item.get("tab_id") == view_id and item.get("workspace_id") == workspace_id), None)
+        if workspace is None or tab is None or pane is None:
+            return None
+        expected = str(Path(cwd).resolve(strict=False))
+        observed_cwds = [pane.get("cwd"), pane.get("foreground_cwd")]
+        if not any(isinstance(value, str) and str(Path(value).resolve(strict=False)) == expected for value in observed_cwds):
+            raise NeedsAttentionError("workspace pane cwd does not match the durable binding")
+        agents = [item for item in snapshot["agents"] if isinstance(item, dict) and item.get("pane_id") == surface_id]
+        if len(agents) > 1:
+            raise NeedsAttentionError("workspace pane has duplicate agent identities")
+        worktree = workspace.get("worktree")
+        worktree_path = worktree.get("checkout_path") if isinstance(worktree, dict) else None
+        branch_name = worktree.get("branch") if isinstance(worktree, dict) else None
+        return self._observation(
+            {"workspace_id": workspace_id, "view_id": view_id, "surface_id": surface_id},
+            worktree_path=worktree_path,
+            branch_name=branch_name,
+            agent=agents[0] if agents else None,
+        )
+
+    def observe_runtime(self, surface_id: str, process_identity: str) -> RuntimeProcessObservation:
+        if not isinstance(surface_id, str) or not surface_id or "\x00" in surface_id:
+            raise InvalidRequestError("workspace surface id is invalid")
+        if not isinstance(process_identity, str) or not process_identity or "\x00" in process_identity:
+            raise InvalidRequestError("runtime process identity is invalid")
+        result = self._request("pane.process_info", {"pane_id": surface_id})
+        process_info = result.get("process_info")
+        if result.get("type") != "pane_process_info" or not isinstance(process_info, dict) or process_info.get("pane_id") != surface_id:
+            raise PisecError("workspace returned invalid pane process information")
+        processes = process_info.get("foreground_processes")
+        shell_pid = process_info.get("shell_pid")
+        if not isinstance(processes, list) or len(processes) > 128 or not isinstance(shell_pid, int) or isinstance(shell_pid, bool) or shell_pid < 1:
+            return RuntimeProcessObservation("unknown", "invalid foreground process information")
+        valid_processes: list[Mapping[str, Any]] = []
+        for process in processes:
+            if not isinstance(process, dict):
+                return RuntimeProcessObservation("unknown", "invalid foreground process information")
+            argv = process.get("argv")
+            pid = process.get("pid")
+            if not isinstance(argv, list) or any(not isinstance(value, str) for value in argv) or not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
+                return RuntimeProcessObservation("unknown", "invalid foreground process information")
+            valid_processes.append(process)
+            for index, value in enumerate(argv[:-1]):
+                if value == "--settings" and argv[index + 1] == process_identity and "--" in argv[index + 2 :]:
+                    return RuntimeProcessObservation("live", f"pid={pid}")
+        if len(valid_processes) == 1 and valid_processes[0]["pid"] == shell_pid:
+            return RuntimeProcessObservation("stopped", f"shell_pid={shell_pid}")
+        if not valid_processes:
+            return RuntimeProcessObservation("unknown", "no foreground process information")
+        return RuntimeProcessObservation("unknown", "foreground process does not match the durable runtime")
 
     def report_session(self, surface_id: str, native_session: tuple[str, str], seq: int, start_source: str, runtime_instance_id: str, harness: HarnessManifest) -> dict[str, Any]:
         kind, value = native_session
         if kind not in {"path", "id"} or start_source not in {"startup", "resume"}:
             raise ValueError("invalid native session report")
-        params: dict[str, Any] = {"pane_id": surface_id, "source": f"herdr:{harness.agent_kind}", "agent": harness.agent_kind, "seq": seq, "session_start_source": start_source}
+        params: dict[str, Any] = {"pane_id": surface_id, "source": _runtime_source(runtime_instance_id), "agent": harness.agent_kind, "seq": seq, "session_start_source": start_source}
         params["agent_session_path" if kind == "path" else "agent_session_id"] = value
-        return self._request("pane.report_agent_session", params)
+        result = self._request("pane.report_agent_session", params)
+        if result.get("type") != "ok":
+            raise PisecError("workspace rejected the runtime session report")
+        return result
 
     def report_state(self, surface_id: str, state: str, message: str | None, seq: int, runtime_instance_id: str, harness: HarnessManifest) -> dict[str, Any]:
         if state not in {"idle", "working", "blocked", "unknown"}:
             raise ValueError("invalid workspace report state")
-        return self._request("pane.report_agent", {"pane_id": surface_id, "source": _runtime_source(runtime_instance_id), "agent": harness.agent_kind, "state": state, "message": message, "seq": seq})
+        result = self._request("pane.report_agent", {"pane_id": surface_id, "source": _runtime_source(runtime_instance_id), "agent": harness.agent_kind, "state": state, "message": message, "seq": seq})
+        if result.get("type") != "ok":
+            raise PisecError("workspace rejected the runtime state report")
+        return result
 
     def release_agent(self, surface_id: str, seq: int, runtime_instance_id: str, harness: HarnessManifest) -> dict[str, Any]:
-        return self._request("pane.release_agent", {"pane_id": surface_id, "source": _runtime_source(runtime_instance_id), "agent": harness.agent_kind, "seq": seq})
+        result = self._request("pane.release_agent", {"pane_id": surface_id, "source": _runtime_source(runtime_instance_id), "agent": harness.agent_kind, "seq": seq})
+        if result.get("type") != "ok":
+            raise PisecError("workspace rejected the runtime release report")
+        return result
 
     def reconcile(self, store: Any, event: Mapping[str, Any] | None = None) -> dict[str, Any]:
         snapshot = self.snapshot()
-        agents = {item.get("name"): item for item in snapshot.get("agents", []) if isinstance(item, dict) and item.get("name")}
+        agents = [item for item in snapshot.get("agents", []) if isinstance(item, dict)]
         workspaces = snapshot.get("workspaces", [])
+        panes = snapshot.get("panes", [])
         rows = store.conn.execute(
-            "SELECT w.workstream_id,w.kind,w.worktree_path,w.desired_state,w.provisioning_state,r.agent_name,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,(SELECT o.state FROM operations o WHERE o.workstream_id=w.workstream_id ORDER BY o.created_at DESC LIMIT 1) AS latest_operation_state FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) WHERE w.desired_state <> 'retired' AND w.provisioning_state <> 'proposed'"
+            "SELECT w.workstream_id,w.kind,w.worktree_path,w.desired_state,w.provisioning_state,r.observed_state,r.agent_name,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,r.policy_path,(SELECT o.state FROM operations o WHERE o.workstream_id=w.workstream_id ORDER BY o.created_at DESC LIMIT 1) AS latest_operation_state FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) WHERE w.desired_state <> 'retired' AND w.provisioning_state <> 'proposed'"
         ).fetchall()
         updated = 0
         missing = 0
+        skipped = {
+            str(workstream_id)
+            for workstream_id in (event or {}).get("skipWorkstreams", [])
+            if isinstance(workstream_id, str) and workstream_id
+        }
         for row in rows:
-            agent = agents.get(row["agent_name"])
-            workspace = next((item for item in workspaces if isinstance(item, dict) and item.get("workspace_id") == (agent or {}).get("workspace_id")), None) if agent is not None else None
-            if workspace is None and row["kind"] == "worker":
-                target = str(Path(row["worktree_path"]).resolve(strict=False))
-                workspace = next((item for item in workspaces if isinstance(item, dict) and isinstance(item.get("worktree"), dict) and str(Path(item["worktree"].get("checkout_path", "")).resolve(strict=False)) == target), None)
+            if row["workstream_id"] in skipped:
+                continue
+            workspace = next((item for item in workspaces if isinstance(item, dict) and item.get("workspace_id") == row["workspace_id"]), None)
+            pane = next(
+                (
+                    item
+                    for item in panes
+                    if isinstance(item, dict)
+                    and item.get("pane_id") == row["workspace_surface_id"]
+                    and item.get("tab_id") == row["workspace_view_id"]
+                    and item.get("workspace_id") == row["workspace_id"]
+                ),
+                None,
+            )
+            agent = next((item for item in agents if item.get("pane_id") == row["workspace_surface_id"]), None)
             if row["provisioning_state"] in {"creating", "needs_attention"} and row["latest_operation_state"] not in {"succeeded", "cancelled"}:
                 continue
-            if workspace is None or agent is None:
+            if workspace is None or pane is None:
                 with store.transaction():
                     now = utc_now()
                     store.conn.execute("UPDATE runtime_bindings SET observed_state='missing',last_observed_at=?,updated_at=? WHERE workstream_id=?", (now, now, row["workstream_id"]))
                     store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason=?,updated_at=? WHERE workstream_id=?", (WORKSPACE_RUNTIME_MISSING, now, row["workstream_id"]))
                 missing += 1
                 continue
-            view_id = agent.get("tab_id")
-            surface_id = agent.get("pane_id")
-            mismatch = not all(isinstance(agent.get(key), str) and agent.get(key) for key in ("workspace_id", "tab_id", "pane_id"))
-            for column, observed in (("workspace_id", agent.get("workspace_id")), ("workspace_view_id", view_id), ("workspace_surface_id", surface_id)):
-                if row[column] and row[column] != observed:
-                    mismatch = True
+            view_id = pane.get("tab_id")
+            surface_id = pane.get("pane_id")
+            mismatch = not isinstance(view_id, str) or not view_id or not isinstance(surface_id, str) or not surface_id
+            if agent is not None:
+                expected_names = {str(row["agent_name"]), "omp"}
+                mismatch = mismatch or agent.get("name", agent.get("agent")) not in expected_names
             if row["kind"] == "worker":
                 worktree = workspace.get("worktree") if isinstance(workspace, dict) else None
                 observed_path = worktree.get("checkout_path") if isinstance(worktree, dict) else None
+                if not isinstance(observed_path, str):
+                    observed_path = pane.get("cwd") if isinstance(pane, dict) else None
+                    if not isinstance(observed_path, str) and isinstance(pane, dict):
+                        observed_path = pane.get("foreground_cwd")
                 mismatch = mismatch or not isinstance(observed_path, str) or str(Path(observed_path).resolve(strict=False)) != str(Path(row["worktree_path"]).resolve(strict=False))
             if mismatch:
                 with store.transaction():
@@ -331,11 +497,23 @@ class HerdrWorkspaceAdapter:
                     store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason=?,updated_at=? WHERE workstream_id=?", ("workspace identity does not match the durable binding", now, row["workstream_id"]))
                 missing += 1
                 continue
-            status = agent.get("agent_status", "unknown")
-            observed = status if status in {"idle", "working", "blocked", "done"} else "unknown"
+            runtime = self.observe_runtime(str(surface_id), str(row["policy_path"]))
+            if runtime.state != "live":
+                observed_state = "stopped" if runtime.state == "stopped" else "error"
+                reason = WORKSPACE_RUNTIME_MISSING if runtime.state == "stopped" else "workspace pane process identity is ambiguous"
+                with store.transaction():
+                    now = utc_now()
+                    store.conn.execute("UPDATE runtime_bindings SET observed_state=?,last_observed_at=?,updated_at=? WHERE workstream_id=?", (observed_state, now, now, row["workstream_id"]))
+                    store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason=?,updated_at=? WHERE workstream_id=?", (reason, now, row["workstream_id"]))
+                missing += 1
+                continue
+            # Runtime reports are authenticated and ordered; a workspace snapshot
+            # is only an identity/presence observation and must not overwrite the
+            # runtime activity state (for example, a stale "working" snapshot
+            # must not erase a just-reported "idle" state).
             with store.transaction():
                 now = utc_now()
-                store.conn.execute("UPDATE runtime_bindings SET workspace_id=?,workspace_view_id=?,workspace_surface_id=?,observed_state=?,last_observed_at=?,updated_at=? WHERE workstream_id=?", (agent["workspace_id"], agent["tab_id"], agent["pane_id"], observed, now, now, row["workstream_id"]))
+                store.conn.execute("UPDATE runtime_bindings SET last_observed_at=?,updated_at=? WHERE workstream_id=?", (now, now, row["workstream_id"]))
                 restored_state = "bound" if row["provisioning_state"] == "needs_attention" else row["provisioning_state"]
                 store.conn.execute("UPDATE workstreams SET provisioning_state=?,attention_reason=NULL,updated_at=? WHERE workstream_id=?", (restored_state, now, row["workstream_id"]))
             updated += 1
@@ -347,5 +525,3 @@ class HerdrWorkspaceAdapter:
             return (AdapterHealth("Herdr protocol", True, f"protocol={HERDR_PROTOCOL}"),)
         except Exception as error:
             return (AdapterHealth("Herdr protocol", False, str(error)[:256]),)
-
-

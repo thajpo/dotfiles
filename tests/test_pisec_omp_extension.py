@@ -9,6 +9,7 @@ EXTENSION = ROOT / "omp" / "extensions" / "pisec.ts"
 SECRETARY_TOOLS = [
     "pisec_project_status",
     "pisec_git_status",
+    "pisec_push_branch",
     "pisec_inspect_workstream_changes",
     "pisec_prepare_workstream_merge",
     "pisec_merge_workstream",

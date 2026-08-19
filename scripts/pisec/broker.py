@@ -1,24 +1,24 @@
 """Pisec broker dispatch and three-socket Unix service."""
 
 from __future__ import annotations
-
 import hashlib
+import logging
 import hmac
 import json
-import logging
 import queue
 import os
 from pathlib import Path
+import time
 import socket
 import socketserver
 import stat
 import threading
 from typing import Any, Callable, Mapping
-
 from .adapters import AdapterRegistry, HarnessAdapter, WorkspaceAdapter
 from .cleanup import cleanup_workstream
 from .decisions import list_decisions, record_decision, resolve_decision
-from .models import AuthorizationError, InvalidRequestError, NotFoundError, PisecError, UnsafeStateError, bounded_text, validate_id
+from .migration import migrate_legacy_bindings
+from .models import AuthorizationError, InvalidRequestError, NotFoundError, PisecError, UnsafeStateError, bounded_text, utc_now, validate_id
 from .pi_store import PiStore
 from .projects import list_projects, project_status, register_project, resolve_project
 from .protocol import MAX_MESSAGE_BYTES, decode_request, error_response, success_response
@@ -36,16 +36,17 @@ from .research import (
     request_research,
     request_research_context,
 )
-from .runtime import report_runtime, verify_runtime_binding
-from .secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge
+from .runtime import WORKSPACE_RUNTIME_MISSING, prepare_session_switch, report_runtime, start_bound_agent, verify_runtime_binding
+from .secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge, push_branch
 from .workstreams import authorize_apply_workstream, complete_workstream, focus_workstream, inspect_workstream, list_workstreams, prepare_workstream, retire_workstream, send_workstream
-ADMIN_OPERATIONS = frozenset({"project.register", "project.list", "secretary.ensure", "secretary.focus", "workstream.focus", "workstream.cleanup", "system.status", "system.reconcile", "system.doctor", "workspace.startup", "workspace.event"})
-SECRETARY_OPERATIONS = frozenset({"project.status", "git.status", "git.workstream_changes", "git.merge.prepare", "git.merge.apply", "workstream.list", "workstream.inspect", "workstream.prepare", "workstream.authorize_apply", "workstream.send", "workstream.focus", "workstream.complete", "workstream.retire", "decision.list", "decision.record", "decision.resolve", "research.list", "research.claim", "research.request_context", "research.answer", "research.decline"})
-
-logger = logging.getLogger(__name__)
-RUNTIME_OPERATIONS = frozenset({"runtime.report", "task.get", "research.request", "research.list", "research.add_context", "research.acknowledge"})
+ADMIN_OPERATIONS = frozenset({"project.register", "project.list", "project.open", "project.refresh", "secretary.ensure", "secretary.focus", "workstream.focus", "workstream.cleanup", "system.status", "system.reconcile", "system.doctor", "workspace.startup", "workspace.event", "presentation.snapshot"})
+SECRETARY_OPERATIONS = frozenset({"project.status", "git.status", "git.push", "git.workstream_changes", "git.merge.prepare", "git.merge.apply", "workstream.list", "workstream.inspect", "workstream.prepare", "workstream.authorize_apply", "workstream.send", "workstream.focus", "workstream.complete", "workstream.retire", "decision.list", "decision.record", "decision.resolve", "research.list", "research.claim", "research.request_context", "research.answer", "research.decline"})
+RUNTIME_OPERATIONS = frozenset({"runtime.report", "runtime.turn.prepare", "session.switch.prepare", "task.get", "research.request", "research.list", "research.add_context", "research.acknowledge"})
 WORKSPACE_STARTUP_GRACE_SECONDS = 2.0
+WORKSPACE_RECONCILE_INTERVAL_SECONDS = 5.0
+RUNTIME_RESTART_BACKOFF_SECONDS = 30.0
 RESEARCH_WAKE_DEBOUNCE_SECONDS = 0.1
+logger = logging.getLogger(__name__)
 
 
 def default_runtime_root() -> Path:
@@ -69,6 +70,7 @@ _PUBLIC_WORKSTREAM_FIELDS = (
     "execution_profile", "target_ref", "base_commit_oid", "branch_name",
     "desired_state", "provisioning_state", "created_at", "updated_at", "completed_at", "retired_at",
     "observed_state", "last_observed_at", "agent_name", "task_packet_id", "task_packet_sha256",
+    "desired_generation_sha256", "applied_generation_sha256", "runtime_stale",
 )
 _PUBLIC_BINDING_FIELDS = ("workstream_id", "workspace_adapter_id", "workspace_session_name", "harness_id", "agent_name", "observed_state", "runtime_instance_id", "last_observed_at", "updated_at")
 _PUBLIC_OPERATION_FIELDS = ("operation_id", "kind", "project_id", "workstream_id", "idempotency_key", "request_sha256", "state", "step", "error_code", "created_at", "updated_at")
@@ -111,6 +113,46 @@ def _public_project_status(value: Mapping[str, Any]) -> dict[str, Any]:
         "source": value.get("source", "pisec-sqlite"),
     }
 
+def _presentation_snapshot(store: PiStore) -> dict[str, Any]:
+    """Return local-only project/worktree identities for Collie mode filtering.
+
+    This projection intentionally includes repository and worktree paths because it is
+    consumed only over the owner-only admin socket by the local Collie bridge.  The
+    normal public project/workstream projections remain path-free.
+    """
+    projects = [
+        dict(row)
+        for row in store.conn.execute(
+            "SELECT project_id,display_name,repository_path,default_ref "
+            "FROM projects ORDER BY display_name,project_id"
+        )
+    ]
+    worktrees = [
+        dict(row)
+        for row in store.conn.execute(
+            """
+            SELECT
+                w.workstream_id,
+                w.project_id,
+                w.kind,
+                w.title,
+                w.branch_name,
+                w.worktree_path,
+                r.workspace_session_name,
+                r.workspace_id,
+                r.workspace_view_id
+            FROM workstreams AS w
+            JOIN runtime_bindings AS r USING(workstream_id)
+            WHERE w.desired_state='active'
+              AND w.provisioning_state='bound'
+              AND r.workspace_session_name <> ''
+              AND r.workspace_id IS NOT NULL
+              AND r.workspace_view_id IS NOT NULL
+            ORDER BY w.project_id,w.created_at,w.workstream_id
+            """
+        )
+    ]
+    return {"projects": projects, "worktrees": worktrees}
 class BrokerDispatcher:
     def __init__(
         self,
@@ -133,6 +175,119 @@ class BrokerDispatcher:
         self._reconcile_stop = threading.Event()
         self._reconcile_thread: threading.Thread | None = None
         self._wake_thread: threading.Thread | None = None
+        self._reconcile_lock = threading.Lock()
+        self._last_resume_attempt: dict[str, float] = {}
+
+    def wait_for_workspace(self, timeout: float = 30.0) -> None:
+        deadline = time.monotonic() + timeout
+        last_error: Exception | None = None
+        while True:
+            try:
+                self.workspace.snapshot()
+                return
+            except Exception as error:
+                last_error = error
+                if time.monotonic() >= deadline:
+                    raise PisecError("Herdr main workspace did not become ready") from last_error
+                time.sleep(0.25)
+
+    def startup_reconcile(self) -> dict[str, Any]:
+        with self.store_factory() as store:
+            return self._reconcile(store, {"event": "startup"})
+    def _resume_restored_agents(
+        self,
+        store: PiStore,
+        candidates: list[Mapping[str, Any]],
+        skipped: set[str],
+    ) -> list[dict[str, Any]]:
+        resumed: list[dict[str, Any]] = []
+        for candidate in candidates:
+            workstream_id = str(candidate["workstream_id"])
+            if workstream_id in skipped:
+                continue
+            last_attempt = self._last_resume_attempt.get(workstream_id)
+            if last_attempt is not None and time.monotonic() - last_attempt < RUNTIME_RESTART_BACKOFF_SECONDS:
+                continue
+            try:
+                current_row = store.conn.execute(
+                    "SELECT r.*,w.project_id,w.kind,w.worktree_path,w.desired_state,w.provisioning_state "
+                    "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?",
+                    (workstream_id,),
+                ).fetchone()
+                if current_row is None or current_row["desired_state"] != "active" or current_row["provisioning_state"] not in {"bound", "needs_attention"}:
+                    continue
+                binding = dict(current_row)
+                observation = self.workspace.observe_surface(
+                    workspace_id=str(current_row["workspace_id"]),
+                    view_id=str(current_row["workspace_view_id"]),
+                    surface_id=str(current_row["workspace_surface_id"]),
+                    cwd=str(current_row["worktree_path"]),
+                )
+                if observation is None:
+                    continue
+                if observation.agent is not None:
+                    expected_names = {str(current_row["agent_name"]), self.harness.manifest.agent_kind}
+                    if observation.agent.name not in expected_names:
+                        now = utc_now()
+                        with store.transaction():
+                            store.conn.execute(
+                                "UPDATE runtime_bindings SET observed_state='error',last_observed_at=?,updated_at=? WHERE workstream_id=?",
+                                (now, now, workstream_id),
+                            )
+                            store.conn.execute(
+                                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason=?,updated_at=? WHERE workstream_id=?",
+                                ("workspace pane has an unexpected agent identity", now, workstream_id),
+                            )
+                        continue
+                runtime = self.workspace.observe_runtime(str(current_row["workspace_surface_id"]), str(current_row["policy_path"]))
+                if runtime.state == "live":
+                    continue
+                if runtime.state != "stopped":
+                    now = utc_now()
+                    with store.transaction():
+                        store.conn.execute(
+                            "UPDATE runtime_bindings SET observed_state='error',last_observed_at=?,updated_at=? WHERE workstream_id=?",
+                            (now, now, workstream_id),
+                        )
+                        store.conn.execute(
+                            "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason=?,updated_at=? WHERE workstream_id=?",
+                            ("workspace pane process identity is ambiguous", now, workstream_id),
+                        )
+                    continue
+                self._last_resume_attempt[workstream_id] = time.monotonic()
+                now = utc_now()
+                with store.transaction():
+                    store.conn.execute(
+                        "UPDATE runtime_bindings SET observed_state='starting',launch_generation_sha256=applied_generation_sha256,last_observed_at=?,updated_at=? WHERE workstream_id=?",
+                        (now, now, workstream_id),
+                    )
+                    store.conn.execute(
+                        "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?",
+                        (now, workstream_id),
+                    )
+                result = start_bound_agent(
+                    store,
+                    self.workspace,
+                    self.harness,
+                    binding,
+                    workstream_id=workstream_id,
+                    project_id=str(current_row["project_id"]),
+                    cwd=str(current_row["worktree_path"]),
+                )
+                resumed.append({"workstreamId": workstream_id, "launched": bool(result.get("launched"))})
+            except BaseException as error:
+                now = utc_now()
+                with store.transaction():
+                    store.conn.execute(
+                        "UPDATE runtime_bindings SET observed_state='error',last_observed_at=?,updated_at=? WHERE workstream_id=?",
+                        (now, now, workstream_id),
+                    )
+                    store.conn.execute(
+                        "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason=?,updated_at=? WHERE workstream_id=?",
+                        (f"restored agent start failed: {error}"[:512], now, workstream_id),
+                    )
+                logger.exception("restored agent resume failed for %s", workstream_id)
+        return resumed
 
     def start_background(self) -> None:
         if self._reconcile_thread is not None and self._reconcile_thread.is_alive():
@@ -215,10 +370,18 @@ class BrokerDispatcher:
         return {"accepted": True, "reconcileQueued": True}
 
     def _run_reconcile_queue(self) -> None:
+        next_periodic = time.monotonic() + WORKSPACE_RECONCILE_INTERVAL_SECONDS
         while not self._reconcile_stop.is_set():
             try:
                 payload = self._reconcile_queue.get(timeout=0.2)
             except queue.Empty:
+                if time.monotonic() >= next_periodic:
+                    try:
+                        with self.store_factory() as store:
+                            self._reconcile(store, {"event": "periodic"})
+                    except BaseException:
+                        logger.exception("periodic workspace reconciliation failed")
+                    next_periodic = time.monotonic() + WORKSPACE_RECONCILE_INTERVAL_SECONDS
                 continue
             if set(payload) == {"adapterId", "socketPath"} and payload.get("adapterId") == self.workspace.manifest.adapter_id and self._reconcile_stop.wait(WORKSPACE_STARTUP_GRACE_SECONDS):
                 self._reconcile_queue.task_done()
@@ -230,6 +393,7 @@ class BrokerDispatcher:
                 logger.exception("deferred workspace reconciliation failed")
             finally:
                 self._reconcile_queue.task_done()
+            next_periodic = time.monotonic() + WORKSPACE_RECONCILE_INTERVAL_SECONDS
 
     def _secretary_binding(self, store: PiStore, payload: dict[str, Any]) -> dict[str, Any]:
         token = payload.pop("authToken", None)
@@ -261,10 +425,19 @@ class BrokerDispatcher:
             return self._runtime(store, operation, payload)
 
     def _runtime(self, store: PiStore, operation: str, payload: dict[str, Any]) -> Any:
+        auth_fields = {"workstreamId", "runtimeInstanceId", "surfaceId", "token"}
+        if operation == "runtime.turn.prepare":
+            _exact(payload, auth_fields)
+            binding = verify_runtime_binding(store, payload)
+            if binding["refresh_pending"]:
+                raise PisecError("runtime is reserved for a generation refresh")
+            return {"prepared": True}
+        if operation == "session.switch.prepare":
+            _exact(payload, auth_fields | {"reason", "targetSessionFile"})
+            return prepare_session_switch(store, payload, self.harness)
         binding = verify_runtime_binding(store, payload, worker_only=True)
         project_id = str(binding["project_id"])
         workstream_id = str(binding["workstream_id"])
-        auth_fields = {"workstreamId", "runtimeInstanceId", "surfaceId", "token"}
         if operation == "task.get":
             _exact(payload, auth_fields)
             return get_task_packet(store, project_id, workstream_id)
@@ -286,8 +459,38 @@ class BrokerDispatcher:
             return acknowledge_research(store, project_id=project_id, workstream_id=workstream_id, request_id=payload["requestId"])
         raise InvalidRequestError("unsupported runtime operation")
     def _reconcile(self, store: PiStore, payload: Mapping[str, Any]) -> dict[str, Any]:
+        with self._reconcile_lock:
+            return self._reconcile_locked(store, payload)
+
+    def _reconcile_locked(self, store: PiStore, payload: Mapping[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {"reconciled": False, "resumed": [], "errors": []}
-        result["workspace"] = self.workspace.reconcile(store, payload)
+        migration = migrate_legacy_bindings(store, self.harness, self.workspace)
+        result["migration"] = migration
+        result["errors"].extend({"workstreamId": item["workstreamId"], "code": "binding_migration_failed"} for item in migration["errors"])
+        from .refresh import mark_stale_bindings
+        result["generations"] = mark_stale_bindings(store, self.harness)
+        reconciler_payload = dict(payload)
+        reconciler_payload["skipWorkstreams"] = [item["workstreamId"] for item in migration["migrated"]]
+        resume_candidates = [
+            dict(row)
+            for row in store.conn.execute(
+                "SELECT r.*,w.project_id,w.kind,w.worktree_path,w.desired_state,w.provisioning_state,w.attention_reason "
+                "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) "
+                "WHERE w.desired_state='active' "
+                "AND (w.provisioning_state='bound' OR (w.provisioning_state='needs_attention' AND w.attention_reason=?)) "
+                "AND r.workspace_session_name=? AND r.workspace_id IS NOT NULL "
+                "AND r.workspace_view_id IS NOT NULL AND r.workspace_surface_id IS NOT NULL",
+                (WORKSPACE_RUNTIME_MISSING, self.workspace.manifest.session_name),
+            )
+        ]
+        result["workspace"] = self.workspace.reconcile(store, reconciler_payload)
+        result["resumed"].extend(
+            self._resume_restored_agents(
+                store,
+                resume_candidates,
+                set(reconciler_payload["skipWorkstreams"]),
+            )
+        )
         result["reconciled"] = True
         for wake in pending_research_wakes(store):
             self._queue_research_wake(wake["project_id"])
@@ -319,12 +522,35 @@ class BrokerDispatcher:
         if operation == "project.list":
             _exact(payload, set())
             return {"projects": [_public_project(row) for row in list_projects(store)]}
+        if operation == "presentation.snapshot":
+            _exact(payload, set())
+            return _presentation_snapshot(store)
         if operation == "system.status":
             _exact(payload, set(), {"project"})
             if payload.get("project"):
                 project = resolve_project(store, str(payload["project"]))
                 return _public_project_status(project_status(store, project["project_id"]))
-            return {"projects": [_public_project(row) for row in list_projects(store)], "schema": "pisec-core", "version": 3}
+            return {"projects": [_public_project(row) for row in list_projects(store)], "schema": "pisec-core", "version": 6}
+        if operation == "project.open":
+            _exact(payload, {"project"})
+            from .secretary import ensure_secretary, focus_secretary
+            result = ensure_secretary(store, str(payload["project"]), self.harness, self.workspace)
+            focus_secretary(store, str(payload["project"]), self.workspace)
+            return {
+                "project": _public_project(result["project"]),
+                "workstream": _public_workstream(result["workstream"]),
+                "binding": _public_binding(result.get("binding")),
+                "focused": True,
+                "reused": bool(result.get("reused", False)),
+            }
+        if operation == "project.refresh":
+            _exact(payload, {"all"}, {"waitSeconds"})
+            if payload["all"] is not True:
+                raise InvalidRequestError("project refresh currently requires --all")
+            wait_seconds = payload.get("waitSeconds", 300)
+            from .refresh import refresh_projects
+            with self._reconcile_lock:
+                return refresh_projects(store, self.harness, self.workspace, wait_seconds=wait_seconds)
         if operation == "secretary.ensure":
             _exact(payload, {"project"})
             from .secretary import ensure_secretary
@@ -377,6 +603,15 @@ class BrokerDispatcher:
         if operation == "git.status":
             _exact(payload, set())
             return git_status(store, project_id)
+        if operation == "git.push":
+            _exact(payload, {"branch", "expectedLocalOid", "expectedRemoteOid"})
+            return push_branch(
+                store,
+                project_id,
+                branch=payload["branch"],
+                expected_local_oid=payload["expectedLocalOid"],
+                expected_remote_oid=payload["expectedRemoteOid"],
+            )
         if operation == "git.workstream_changes":
             _exact(payload, {"workstreamId"})
             return inspect_workstream_changes(store, project_id, payload["workstreamId"])
@@ -544,5 +779,3 @@ class BrokerService:
         self.servers.clear()
         self.threads.clear()
         self.dispatcher.stop_background()
-
-

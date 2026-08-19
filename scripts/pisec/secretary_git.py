@@ -1,4 +1,4 @@
-"""Project-scoped Git inspection and fail-closed fast-forward merge operations."""
+"""Project-scoped Git inspection, fast-forward merge, and scoped push operations."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import tempfile
 from typing import Any, Mapping
 
 from .events import append_event_in_transaction
@@ -36,20 +37,28 @@ def _run_git(
     max_bytes: int = 128 * 1024,
     alternate_objects: tuple[Path, ...] = (),
     input_text: str | None = None,
+    authenticated: bool = False,
+    timeout: int = 30,
 ) -> tuple[int, str]:
     executable = shutil.which("git", path=os.defpath)
     if executable is None:
         raise InvalidRequestError("git is unavailable")
     environment = {
-        "HOME": "/nonexistent",
-        "PATH": os.defpath,
+        "HOME": str(Path.home()) if authenticated else "/nonexistent",
+        "PATH": os.environ.get("PATH", os.defpath) if authenticated else os.defpath,
         "LANG": "C",
         "LC_ALL": "C",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_TERMINAL_PROMPT": "0",
     }
+    if authenticated:
+        for name in ("DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR"):
+            value = os.environ.get(name)
+            if value:
+                environment[name] = value
+    else:
+        environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        environment["GIT_CONFIG_NOSYSTEM"] = "1"
     if alternate_objects:
         values = [str(item) for item in alternate_objects]
         if any(os.pathsep in value for value in values):
@@ -61,7 +70,7 @@ def _run_git(
         input=input_text,
         text=True,
         capture_output=True,
-        timeout=30,
+        timeout=timeout,
         check=False,
     )
     if result.returncode not in accepted:
@@ -130,6 +139,177 @@ def git_status(store: Any, project_id: str) -> dict[str, Any]:
         "commitOid": oid,
         "clean": not bool(porcelain),
         "changes": porcelain,
+    }
+
+
+def _push_oid(value: Any, *, field: str) -> str:
+    if not isinstance(value, str) or len(value) not in _OID_LENGTHS or any(char not in "0123456789abcdef" for char in value):
+        raise InvalidRequestError(f"{field} is not a full lowercase commit id")
+    return value
+
+
+def _push_branch_name(repository: Path, value: Any) -> str:
+    branch = bounded_text(value, name="branch", limit=512)
+    if branch.startswith("-") or any(ord(char) < 0x20 for char in branch):
+        raise InvalidRequestError("push branch is unsafe")
+    code, _output = _run_git(repository, "check-ref-format", "--branch", branch, accepted=frozenset({0, 1}))
+    if code != 0:
+        raise InvalidRequestError("push branch is invalid")
+    return branch
+
+
+def _remote_default_branch(staging: Path, remote_url: str) -> str:
+    _code, output = _run_git(
+        staging,
+        "ls-remote",
+        "--symref",
+        "--",
+        remote_url,
+        "HEAD",
+        authenticated=True,
+        timeout=120,
+    )
+    for line in output.splitlines():
+        if not line.startswith("ref: ") or not line.endswith("\tHEAD"):
+            continue
+        ref = line[5:-5]
+        if ref.startswith("refs/heads/") and len(ref) > len("refs/heads/"):
+            return ref[len("refs/heads/"):]
+    raise NeedsAttentionError("registered remote default branch could not be determined")
+
+
+def push_branch(
+    store: Any,
+    project_id: str,
+    *,
+    branch: Any,
+    expected_local_oid: Any,
+    expected_remote_oid: Any,
+) -> dict[str, Any]:
+    project = get_project(store, project_id)
+    repository = _repository(project)
+    branch_name = _push_branch_name(repository, branch)
+    local_oid = _push_oid(expected_local_oid, field="expected_local_oid")
+    remote_oid = _push_oid(expected_remote_oid, field="expected_remote_oid")
+    registered_remote = project.get("remote_url")
+    if (
+        not isinstance(registered_remote, str)
+        or not registered_remote
+        or len(registered_remote) > 2048
+        or registered_remote.startswith("-")
+        or any(ord(char) < 0x20 for char in registered_remote)
+    ):
+        raise NeedsAttentionError("registered project has no safe pinned origin remote")
+    _code, current_remote = _run_git(
+        repository,
+        "config",
+        "--local",
+        "--get",
+        "remote.origin.url",
+        accepted=frozenset({0, 1}),
+    )
+    if current_remote.strip() != registered_remote:
+        raise NeedsAttentionError("registered project origin remote drifted")
+    current_local_oid = _oid(repository, f"refs/heads/{branch_name}")
+    if current_local_oid != local_oid:
+        raise ConflictError("local branch moved after the push request was prepared")
+
+    common_objects = (Path(str(project["git_common_dir"])) / "objects").resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix="push-", dir=store.state_root) as temporary:
+        staging = Path(temporary)
+        _run_git(staging, "init", "--bare", "--quiet")
+        default_branch = _remote_default_branch(staging, registered_remote)
+        if branch_name == default_branch:
+            raise InvalidRequestError("autonomous push refuses the remote default branch")
+        _run_git(
+            staging,
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--",
+            registered_remote,
+            f"refs/heads/{branch_name}:refs/pisec/remote",
+            authenticated=True,
+            timeout=120,
+        )
+        observed_remote_oid = _oid(staging, "refs/pisec/remote", alternate_objects=(common_objects,))
+        if observed_remote_oid == local_oid:
+            return {
+                "projectId": project_id,
+                "branch": branch_name,
+                "previousRemoteOid": remote_oid,
+                "commitOid": local_oid,
+                "pushed": True,
+                "reused": True,
+            }
+        if observed_remote_oid != remote_oid:
+            raise ConflictError("remote branch moved after the push request was prepared")
+        ancestor_code, _output = _run_git(
+            staging,
+            "merge-base",
+            "--is-ancestor",
+            observed_remote_oid,
+            local_oid,
+            accepted=frozenset({0, 1}),
+            alternate_objects=(common_objects,),
+        )
+        if ancestor_code != 0:
+            raise ConflictError("local branch is not a fast-forward of the remote branch")
+        _run_git(
+            staging,
+            "update-ref",
+            "refs/pisec/local",
+            local_oid,
+            alternate_objects=(common_objects,),
+        )
+        _run_git(
+            staging,
+            "push",
+            "--porcelain",
+            f"--force-with-lease=refs/heads/{branch_name}:{remote_oid}",
+            "--",
+            registered_remote,
+            f"refs/pisec/local:refs/heads/{branch_name}",
+            authenticated=True,
+            alternate_objects=(common_objects,),
+            timeout=120,
+        )
+        _code, verification = _run_git(
+            staging,
+            "ls-remote",
+            "--heads",
+            "--",
+            registered_remote,
+            f"refs/heads/{branch_name}",
+            authenticated=True,
+            timeout=120,
+        )
+        expected_row = f"{local_oid}\trefs/heads/{branch_name}"
+        if verification.strip() != expected_row:
+            raise NeedsAttentionError("remote branch did not reach the expected commit")
+
+    with store.transaction():
+        append_event_in_transaction(
+            store.conn,
+            kind="project.git_pushed",
+            project_id=project_id,
+            payload={
+                "remote": "origin",
+                "branch": branch_name,
+                "previousRemoteOid": remote_oid,
+                "commitOid": local_oid,
+                "strategy": "ff-only",
+                "pushedAt": utc_now(),
+            },
+        )
+    return {
+        "projectId": project_id,
+        "branch": branch_name,
+        "previousRemoteOid": remote_oid,
+        "commitOid": local_oid,
+        "pushed": True,
+        "reused": False,
     }
 
 

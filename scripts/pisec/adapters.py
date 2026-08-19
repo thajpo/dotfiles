@@ -46,6 +46,7 @@ class HarnessArtifacts:
     policy_path: str
     policy_sha256: str
     runtime_token_sha256: str
+    generation_sha256: str
     adapter_data: Mapping[str, str] = field(default_factory=dict)
 
     def as_mapping(self) -> dict[str, Any]:
@@ -55,6 +56,7 @@ class HarnessArtifacts:
             "policyPath": self.policy_path,
             "policySha256": self.policy_sha256,
             "runtimeTokenSha256": self.runtime_token_sha256,
+            "generationSha256": self.generation_sha256,
             "adapterData": dict(self.adapter_data),
         }
 
@@ -65,7 +67,7 @@ def artifact_document(manifest: HarnessManifest, artifacts: HarnessArtifacts) ->
     if any(not isinstance(key, str) or not key or not isinstance(value, str) for key, value in values.items()):
         raise InvalidRequestError("harness adapter artifact values are invalid")
     return canonical_json(
-        {"schemaVersion": 1, "adapterId": manifest.adapter_id, "values": values},
+        {"schemaVersion": 2, "adapterId": manifest.adapter_id, "generationSha256": artifacts.generation_sha256, "values": values},
         max_bytes=64 * 1024,
         max_text=64 * 1024,
     )
@@ -77,6 +79,16 @@ class AgentObservation:
     surface_id: str
     interactive_ready: bool
     state: str
+
+
+@dataclass(frozen=True)
+class RuntimeProcessObservation:
+    state: str
+    detail: str
+
+    def __post_init__(self) -> None:
+        if self.state not in {"live", "stopped", "unknown"}:
+            raise ValueError("runtime process observation state is invalid")
 
 
 @dataclass(frozen=True)
@@ -109,9 +121,21 @@ class HarnessAdapter(Protocol):
 
     def profile_domains(self, profile: str, additional_domains: Sequence[str]) -> tuple[str, ...]: ...
 
-    def materialize_profile(self, scope: Mapping[str, Any]) -> HarnessArtifacts: ...
+    def desired_generation(self, scope: Mapping[str, Any]) -> str: ...
 
-    def commit_launch_binding(self, scope: Mapping[str, Any], artifacts: HarnessArtifacts) -> Path: ...
+    def commit_launch_binding(
+        self,
+        scope: Mapping[str, Any],
+        artifacts: HarnessArtifacts,
+        *,
+        workspace_session_name: str,
+        workspace_id: str,
+        workspace_view_id: str,
+        workspace_surface_id: str,
+        replace: bool = False,
+    ) -> Path: ...
+
+    def launch_binding_path(self, workstream_id: str) -> Path: ...
 
     def cleanup_binding(self, binding: Mapping[str, Any]) -> None: ...
 
@@ -125,17 +149,29 @@ class WorkspaceAdapter(Protocol):
 
     def create_workspace(self, cwd: str, label: str, focus: bool = False) -> WorkspaceObservation: ...
 
-    def create_worktree(self, *, cwd: str, branch: str, base: str, path: str, label: str, focus: bool = False) -> WorkspaceObservation: ...
+    def create_tab(self, *, workspace_id: str, cwd: str, label: str, focus: bool = False) -> WorkspaceObservation: ...
+    def rename_tab(self, view_id: str, label: str) -> Mapping[str, Any]: ...
+
+    def observe_tab(self, *, workspace_id: str, cwd: str) -> WorkspaceObservation | None: ...
+
 
     def observe_workstream(self, *, path: str, agent_name: str) -> WorkspaceObservation | None: ...
 
-    def start_agent(self, surface_id: str, name: str, agent_kind: str) -> Mapping[str, Any]: ...
+    def observe_surface(self, *, workspace_id: str, view_id: str, surface_id: str, cwd: str) -> WorkspaceObservation | None: ...
+
+    def observe_runtime(self, surface_id: str, process_identity: str) -> RuntimeProcessObservation: ...
+
+    def stop_runtime(self, surface_id: str) -> Mapping[str, Any]: ...
+
+    def run_command(self, surface_id: str, argv: Sequence[str], env: Mapping[str, str] | None = None) -> Mapping[str, Any]: ...
 
     def prompt_agent(self, surface_id: str, text: str, wait_until: tuple[str, ...], timeout_ms: int) -> Mapping[str, Any]: ...
 
     def prompt_agent_nowait(self, surface_id: str, text: str) -> Mapping[str, Any]: ...
 
-    def focus_agent(self, surface_id: str) -> Mapping[str, Any]: ...
+    def focus_pane(self, surface_id: str) -> Mapping[str, Any]: ...
+
+    def close_tab(self, view_id: str) -> Mapping[str, Any]: ...
 
     def close_workspace(self, workspace_id: str) -> Mapping[str, Any]: ...
 
@@ -148,6 +184,7 @@ class WorkspaceAdapter(Protocol):
     def reconcile(self, store: Any, event: Mapping[str, Any] | None = None) -> Mapping[str, Any]: ...
 
     def health_checks(self) -> Sequence[AdapterHealth]: ...
+
 
 
 class AdapterRegistry:

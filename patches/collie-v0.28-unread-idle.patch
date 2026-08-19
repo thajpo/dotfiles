@@ -1,0 +1,133 @@
+diff --git a/bridge/activity.test.ts b/bridge/activity.test.ts
+index 90a9da8..38ed0e6 100644
+--- a/bridge/activity.test.ts
++++ b/bridge/activity.test.ts
+@@ -2,11 +2,13 @@ import { describe, expect, test } from "bun:test";
+ import { mkdtempSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
++import type { AgentView } from "./types.ts";
+ 
+ import {
+   ActivityLedger,
+   coerceActivityFile,
+   meaningfulTabLabel,
++  presentActivity,
+   PRUNE_AFTER_MS,
+ } from "./activity.ts";
+ 
+@@ -32,6 +34,35 @@ function ledger(start = 1_000_000) {
+ const unseen = (a: { activeAt: number; seenAt: number } | undefined) =>
+   !!a && a.activeAt > a.seenAt;
+ 
++const pane: AgentView = {
++  paneId: "w0:p1",
++  workspaceId: "w0",
++  workspaceLabel: "Project",
++  workspaceNumber: 1,
++  tabId: "w0:t1",
++  agent: "omp",
++  status: "idle",
++  cwd: "/tmp/project",
++  focused: false,
++};
++
++describe("presentActivity", () => {
++  test("projects only an unread resting agent as done", () => {
++    expect(presentActivity(pane, { activeAt: 2, seenAt: 1 })).toMatchObject({
++      status: "done",
++      lastActiveAt: 2,
++      lastSeenAt: 1,
++    });
++    expect(presentActivity({ ...pane, status: "done" }, { activeAt: 1, seenAt: 2 }).status).toBe(
++      "idle",
++    );
++    expect(presentActivity({ ...pane, status: "working" }, { activeAt: 2, seenAt: 1 }).status).toBe(
++      "working",
++    );
++    expect(presentActivity(pane, undefined)).toBe(pane);
++  });
++});
++
+ describe("meaningfulTabLabel", () => {
+   test("keeps a real name", () => {
+     expect(meaningfulTabLabel("fix-auth", 1)).toBe("fix-auth");
+diff --git a/bridge/activity.ts b/bridge/activity.ts
+index 4c33c28..ee85807 100644
+--- a/bridge/activity.ts
++++ b/bridge/activity.ts
+@@ -1,6 +1,7 @@
+ import { mkdir, rename, writeFile } from "node:fs/promises";
+ import { join } from "node:path";
+ import type { Config } from "./config.ts";
++import type { AgentView } from "./types.ts";
+ 
+ // When did each pane last DO something, and when did you last LOOK at it? Herdr answers neither —
+ // its pane records carry no timestamps at all (HERDR_API.md) — so Collie derives and owns both.
+@@ -9,9 +10,9 @@ import type { Config } from "./config.ts";
+ //   • activeAt — the last agent status transition this bridge observed
+ //   • seenAt   — the last time you opened or drove the pane THROUGH COLLIE
+ //
+-// "Unseen" is then a comparison, not a stored fact: an agent is newly-finished-and-unread exactly
+-// when `status === "done" && activeAt > seenAt`. Opening the pane sets seenAt = now, and the row
+-// leaves the section on its own — nothing to mark read, nothing to keep in sync.
++// "Unseen" is then a comparison, not a stored fact. The bridge projects an idle completion to
++// `done` exactly while `activeAt > seenAt`; opening the pane advances `seenAt`, so the next snapshot
++// projects the same resting agent back to `idle`.
+ //
+ // Bridge-side and shared across devices on purpose, and deliberately blind to what you do at the
+ // desk in Herdr itself — see .adr/0003-one-shared-seen.md. Persisted to the state dir like Snooze
+@@ -25,6 +26,21 @@ export interface PaneActivity {
+   seenAt: number;
+ }
+ 
++/** Attach shared activity and derive `done` as the unread presentation of a resting agent. */
++export function presentActivity(pane: AgentView, activity: PaneActivity | undefined): AgentView {
++  if (!activity) return pane;
++  let status = pane.status;
++  if (status === "idle" || status === "done") {
++    status = activity.activeAt > activity.seenAt ? "done" : "idle";
++  }
++  return {
++    ...pane,
++    status,
++    lastActiveAt: activity.activeAt,
++    lastSeenAt: activity.seenAt,
++  };
++}
++
+ /** Disk shape: session name → pane id → activity. */
+ export type ActivityFile = Record<string, Record<string, PaneActivity>>;
+ 
+diff --git a/bridge/server.ts b/bridge/server.ts
+index 72297ac..8a59896 100644
+--- a/bridge/server.ts
++++ b/bridge/server.ts
+@@ -1,7 +1,7 @@
+ import { mkdir } from "node:fs/promises";
+ import { homedir } from "node:os";
+ import { extname, join, normalize, sep } from "node:path";
+-import type { ActivityLedger } from "./activity.ts";
++import { presentActivity, type ActivityLedger } from "./activity.ts";
+ import type { AuditLog } from "./audit.ts";
+ import type { Config } from "./config.ts";
+ import type { HerdrClient, PaneRead } from "./herdr-client.ts";
+@@ -181,13 +181,11 @@ export function startServer(opts: {
+         if (!rt) return unknownSession();
+         const { agents, shellPanes, workspaces, tabs, bridge } = rt.engine.current();
+         const device = deviceAuth(req, cfg);
+-        // Attach each pane's activity timestamps. Done here rather than in the state engine so the
+-        // engine stays a pure Herdr-poller with no knowledge of the ledger — and so the two numbers
+-        // are read at serialise time, i.e. as fresh as the request.
+-        const withActivity = (p: AgentView): AgentView => {
+-          const a = activity.get(rt.name, p.paneId);
+-          return a ? { ...p, lastActiveAt: a.activeAt, lastSeenAt: a.seenAt } : p;
+-        };
++        // Attach each pane's activity timestamps and derive `done` from Collie's shared unread
++        // ledger. Done here rather than in the state engine so Herdr's semantic `idle` remains raw
++        // lifecycle truth and the presentation is computed from the freshest seen timestamp.
++        const withActivity = (p: AgentView): AgentView =>
++          presentActivity(p, activity.get(rt.name, p.paneId));
+         // Tag every snapshot poll with the on-disk build id so an open client notices a live rebuild
+         // between polls — the no-service-worker self-update path (web/src/lib/self-update.ts).
+         return withBuildHeader(

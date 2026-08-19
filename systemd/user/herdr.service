@@ -1,0 +1,15 @@
+[Unit]
+Description=Herdr persistent main agent session
+
+[Service]
+Type=simple
+Environment=HERDR_SESSION=main
+Environment=HERDR_CONFIG_PATH=%h/.config/herdr/config.toml
+Environment=PATH=%h/.local/lib/pisec/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/lib/pisec/bin/herdr
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+
+[Install]
+WantedBy=default.target

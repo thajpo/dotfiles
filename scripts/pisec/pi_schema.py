@@ -1,13 +1,19 @@
-"""Fresh Pisec core epoch-three schema."""
+"""Fresh Pisec core epoch-six schema."""
 
 from __future__ import annotations
 
 import hashlib
+import os
+import shutil
 import sqlite3
+import subprocess
 
 SCHEMA_NAME = "pisec-core"
-SCHEMA_VERSION = 3
-MIGRATION_NAME = "pisec-core-epoch-3"
+SCHEMA_VERSION = 6
+MIGRATION_NAME = "pisec-core-epoch-6"
+PREVIOUS_SCHEMA_VERSION = 5
+PREVIOUS_MIGRATION_NAME = "pisec-core-epoch-5"
+PREVIOUS_SCHEMA_DIGEST = "sha256:e38d8d1f33e79fa188123c39236c3adf7a0157fe9cf26aef7edcfd6f0360b20a"
 
 SCHEMA_SQL = r'''
 CREATE TABLE control_meta (
@@ -25,6 +31,7 @@ CREATE TABLE projects (
     repository_path TEXT NOT NULL,
     git_common_dir TEXT NOT NULL UNIQUE,
     default_ref TEXT NOT NULL,
+    remote_url TEXT CHECK(remote_url IS NULL OR length(remote_url) BETWEEN 1 AND 2048),
     secretary_workstream_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -76,12 +83,25 @@ CREATE TABLE runtime_bindings (
     policy_path TEXT NOT NULL,
     policy_sha256 TEXT NOT NULL CHECK(length(policy_sha256) = 64),
     runtime_token_sha256 TEXT NOT NULL CHECK(length(runtime_token_sha256) = 64),
+    desired_generation_sha256 TEXT CHECK(desired_generation_sha256 IS NULL OR length(desired_generation_sha256) = 64),
+    applied_generation_sha256 TEXT CHECK(applied_generation_sha256 IS NULL OR length(applied_generation_sha256) = 64),
+    launch_generation_sha256 TEXT CHECK(launch_generation_sha256 IS NULL OR length(launch_generation_sha256) = 64),
+    refresh_pending INTEGER NOT NULL DEFAULT 0 CHECK(refresh_pending IN (0,1)),
     runtime_instance_id TEXT,
     observed_state TEXT NOT NULL CHECK(observed_state IN ('unknown','starting','working','blocked','idle','done','stopped','missing','error')),
     report_seq INTEGER NOT NULL DEFAULT 0 CHECK(report_seq >= 0),
     workspace_report_seq INTEGER NOT NULL DEFAULT 0 CHECK(workspace_report_seq >= 0),
     last_observed_at TEXT,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE retained_session_roots (
+    workstream_id TEXT PRIMARY KEY REFERENCES workstreams(workstream_id),
+    harness_id TEXT NOT NULL CHECK(length(harness_id) BETWEEN 1 AND 64),
+    harness_home TEXT NOT NULL,
+    native_session_kind TEXT CHECK(native_session_kind IS NULL OR native_session_kind IN ('path','id')),
+    native_session_value TEXT,
+    retained_at TEXT NOT NULL
 );
 
 CREATE TABLE task_packets (
@@ -213,3 +233,76 @@ def schema_digest() -> str:
 
 def apply_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA_SQL)
+
+def _registered_remote_url(repository_path: str) -> str | None:
+    executable = shutil.which("git", path=os.defpath)
+    if executable is None:
+        return None
+    result = subprocess.run(
+        [
+            executable,
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            repository_path,
+            "config",
+            "--local",
+            "--get",
+            "remote.origin.url",
+        ],
+        env={
+            "HOME": "/nonexistent",
+            "PATH": os.defpath,
+            "LANG": "C",
+            "LC_ALL": "C",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value or len(value) > 2048 or value.startswith("-") or any(ord(char) < 0x20 for char in value):
+        return None
+    return value
+
+
+def migrate_schema(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        "SELECT schema_name,schema_version,schema_sha256,migration_name FROM control_meta WHERE singleton=1"
+    ).fetchone()
+    if row is None:
+        raise sqlite3.DatabaseError("control metadata is missing")
+    actual = tuple(row)
+    expected = (SCHEMA_NAME, SCHEMA_VERSION, schema_digest(), MIGRATION_NAME)
+    if actual == expected:
+        return False
+    if actual != (SCHEMA_NAME, PREVIOUS_SCHEMA_VERSION, PREVIOUS_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME):
+        raise sqlite3.DatabaseError("unsupported Pisec schema migration")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            "ALTER TABLE runtime_bindings ADD COLUMN desired_generation_sha256 TEXT "
+            "CHECK(desired_generation_sha256 IS NULL OR length(desired_generation_sha256) = 64)"
+        )
+        connection.execute(
+            "ALTER TABLE runtime_bindings ADD COLUMN applied_generation_sha256 TEXT "
+            "CHECK(applied_generation_sha256 IS NULL OR length(applied_generation_sha256) = 64)"
+        )
+        connection.execute(
+            "ALTER TABLE runtime_bindings ADD COLUMN launch_generation_sha256 TEXT "
+            "CHECK(launch_generation_sha256 IS NULL OR length(launch_generation_sha256) = 64)"
+        )
+        connection.execute("ALTER TABLE runtime_bindings ADD COLUMN refresh_pending INTEGER NOT NULL DEFAULT 0 CHECK(refresh_pending IN (0,1))")
+        connection.execute(
+            "UPDATE control_meta SET schema_version=?,schema_sha256=?,migration_name=? WHERE singleton=1",
+            (SCHEMA_VERSION, schema_digest(), MIGRATION_NAME),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return True

@@ -116,6 +116,7 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
   assert.deepEqual(tools, [
     "pisec_project_status",
     "pisec_git_status",
+    "pisec_push_branch",
     "pisec_inspect_workstream_changes",
     "pisec_prepare_workstream_merge",
     "pisec_merge_workstream",
@@ -202,5 +203,99 @@ test("worker registers runtime handling without secretary tools", () => {
   assert.equal(labels[0], "Pisec Worker");
   assert.ok(events.includes("session_start"));
   assert.ok(events.includes("before_agent_start"));
+  assert.ok(events.includes("agent_start"));
   assert.ok(events.includes("session_shutdown"));
+});
+
+test("only the root UI session reports idle-working-idle lifecycle", () => {
+  const output = runProbe(`
+    // The extension must load after the probe-specific environment is installed.
+    const { rm } = await import("node:fs/promises");
+    const socketPath = "/tmp/pisec-extension-lifecycle-" + process.pid + "-" + Date.now() + ".sock";
+    await rm(socketPath, { force: true });
+    const reports = [];
+    const server = Bun.listen({
+      unix: socketPath,
+      socket: {
+        data(socket, data) {
+          const request = JSON.parse(data.toString().trim());
+          reports.push(request.payload);
+          socket.write(JSON.stringify({ requestId: request.requestId, ok: true, result: { accepted: true } }) + "\\n");
+          socket.end();
+        },
+      },
+    });
+    const handlers = {};
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
+    const zod = { string: chain, enum: chain, any: chain, object: value => value, literal: chain, array: chain, number: chain, boolean: chain };
+    Object.assign(process.env, {
+      PISEC_ROLE: "secretary",
+      PISEC_RUNTIME_SOCKET: socketPath,
+      PISEC_SECRETARY_SOCKET: socketPath,
+      PISEC_RUNTIME_TOKEN: "t".repeat(48),
+      PISEC_WORKSTREAM_ID: "ws_" + "a".repeat(32),
+      PISEC_RUNTIME_INSTANCE_ID: "instance",
+      PISEC_SURFACE_ID: "w1:p1",
+    });
+    const pi = {
+      zod,
+      registerTool() {},
+      on(name, handler) { (handlers[name] ??= []).push(handler); },
+      setLabel() {},
+      setActiveTools() { return Promise.resolve(); },
+    };
+    const module = await import(${JSON.stringify(EXTENSION)} + "?lifecycle=" + Date.now());
+    module.default(pi);
+    const child = { hasUI: false, sessionManager: { getSessionFile() {} }, ui: { notify() {} } };
+    await handlers.session_start[0]({}, child);
+    await handlers.agent_start[0]({}, child);
+    await handlers.agent_end[0]({}, child);
+    const root = { hasUI: true, sessionManager: { getSessionFile() {} }, ui: { notify() {} } };
+    await handlers.session_start[0]({}, root);
+    await handlers.agent_start[0]({}, root);
+    await handlers.agent_end[0]({}, root);
+    server.stop(true);
+    await rm(socketPath, { force: true });
+    console.log(JSON.stringify({ states: reports.map(report => report.state), events: reports.map(report => report.event) }));
+  `);
+  assert.deepEqual(output.states, ["idle", "working", "idle"]);
+  assert.deepEqual(output.events, ["session_start", "lifecycle", "lifecycle"]);
+});
+
+test("worker rejects a session resume target outside its owned session root", () => {
+  const output = runProbe(`
+    const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises");
+    const root = await mkdtemp("/tmp/pisec-owned-");
+    await mkdir(root + "/sessions");
+    const outside = root + "-outside.jsonl";
+    await writeFile(outside, "outside\\n");
+    const records = { events: [], handlers: {} };
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
+    const zod = { string: chain, enum: chain, any: chain, object: value => value, literal: chain, array: chain, number: chain, boolean: chain };
+    Object.assign(process.env, {
+      PISEC_ROLE: "worker",
+      PISEC_RUNTIME_SOCKET: "/tmp/runtime.sock",
+      PISEC_RUNTIME_TOKEN: "t".repeat(48),
+      PISEC_WORKSTREAM_ID: "ws_" + "a".repeat(32),
+      PISEC_RUNTIME_INSTANCE_ID: "instance",
+      PISEC_SURFACE_ID: "w1:p1",
+      PI_CODING_AGENT_DIR: root,
+    });
+    const pi = {
+      zod,
+      registerTool() {},
+      on(name, handler) { records.events.push(name); records.handlers[name] = handler; },
+      setLabel() {},
+      setActiveTools() { return Promise.resolve(); },
+    };
+    const module = await import(${JSON.stringify(EXTENSION)} + "?worker-target=" + Date.now());
+    module.default(pi);
+    const result = await records.handlers.session_before_switch(
+      { reason: "resume", targetSessionFile: outside },
+      { ui: { notify() {} } },
+    );
+    console.log(JSON.stringify({ rejected: result?.cancel === true, events: records.events }));
+  `);
+  assert.equal(output.rejected, true);
+  assert.ok(stringArray(output.events).includes("session_before_switch"));
 });

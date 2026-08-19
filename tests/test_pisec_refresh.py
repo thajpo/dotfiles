@@ -1,0 +1,70 @@
+from pathlib import Path
+import tempfile
+import unittest
+
+from scripts.pisec.adapters import AdapterRegistry
+from scripts.pisec.broker import BrokerDispatcher
+from scripts.pisec.pi_store import PiStore
+from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
+
+
+class RuntimeRefreshTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.repo = self.root / "repo"
+        make_repo(self.repo)
+        self.harness = FixtureHarness(self.root)
+        self.workspace = FixtureWorkspace(self.root)
+        registry = AdapterRegistry()
+        registry.register_harness(self.harness)
+        registry.register_workspace(self.workspace)
+        self.dispatcher = BrokerDispatcher(
+            lambda: PiStore(self.root / "state"),
+            registry=registry,
+            harness=self.harness,
+            workspace=self.workspace,
+            git_objects=FixtureGitObjects(),
+        )
+        project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "defaultRef": "main"})
+        opened = self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
+        self.workstream_id = opened["workstream"]["workstream_id"]
+        with PiStore(self.root / "state") as store:
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            session = Path(binding["harness_home"]) / "sessions" / "retained.jsonl"
+            session.write_text("retained session\n")
+            session.chmod(0o600)
+            store.conn.execute(
+                "UPDATE runtime_bindings SET native_session_kind='path',native_session_value=?,applied_generation_sha256=NULL,observed_state='idle' WHERE workstream_id=?",
+                (str(session), self.workstream_id),
+            )
+            self.identity = (binding["workspace_id"], binding["workspace_view_id"], binding["workspace_surface_id"], str(session))
+
+    def tearDown(self):
+        self.dispatcher.stop_background()
+        self.temp.cleanup()
+
+    def test_refresh_preserves_identity_and_session_then_is_idempotent(self):
+        first = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+        self.assertTrue(first["ok"])
+        self.assertEqual(len(first["upgraded"]), 1)
+        upgraded = first["upgraded"][0]
+        self.assertEqual((upgraded["workspaceId"], upgraded["viewId"], upgraded["surfaceId"], upgraded["nativeSessionValue"]), self.identity)
+        self.assertEqual(Path(self.identity[3]).read_text(), "retained session\n")
+        stop_count = len([call for call in self.workspace.calls if call[0] == "stop"])
+        second = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+        self.assertEqual(second["upgraded"], [])
+        self.assertEqual(len(second["skipped"]), 1)
+        self.assertEqual(len([call for call in self.workspace.calls if call[0] == "stop"]), stop_count)
+
+    def test_working_runtime_is_pending_and_not_interrupted(self):
+        with PiStore(self.root / "state") as store:
+            store.conn.execute("UPDATE runtime_bindings SET observed_state='working' WHERE workstream_id=?", (self.workstream_id,))
+        result = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+        self.assertEqual(result["upgraded"], [])
+        self.assertEqual(result["pending"][0]["state"], "working")
+        self.assertFalse(any(call[0] == "stop" for call in self.workspace.calls))
+
+
+if __name__ == "__main__":
+    unittest.main()

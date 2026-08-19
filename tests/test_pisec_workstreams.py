@@ -5,9 +5,15 @@ from unittest.mock import patch
 
 from scripts.pisec.models import IdempotencyConflictError, NeedsAttentionError, ScopeMismatchError
 from scripts.pisec.pi_store import PiStore
+from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.projects import register_project
 from scripts.pisec.workstreams import authorize_apply_workstream, complete_workstream, prepare_workstream, retire_workstream
 from tests.pisec_fixture import DelayedFixtureWorkspace, FixtureGitObjects, FixtureHarness, FixtureWorkspace, UnattestedFixtureWorkspace, make_repo
+
+
+class AmbiguousWorkspace(FixtureWorkspace):
+    def observe_workstream(self, *, path: str, agent_name: str):
+        return None
 
 
 class CrashOnce:
@@ -35,6 +41,7 @@ class WorkstreamTests(unittest.TestCase):
         project = register_project(store, repo, default_ref="main")
         harness = FixtureHarness(root)
         workspace = workspace_type(root, store)
+        ensure_secretary(store, project["project_id"], harness, workspace)
         git_objects = FixtureGitObjects()
         return temp, root, repo, store, project, harness, workspace, git_objects
 
@@ -53,7 +60,7 @@ class WorkstreamTests(unittest.TestCase):
         second = self.prepare(root, store, project, harness, workspace)
         self.assertEqual(first["approvalScope"], second["approvalScope"])
         self.assertFalse(Path(first["approvalScope"]["worktreePath"]).exists())
-        self.assertEqual(store.conn.execute("SELECT count(*) FROM workstreams").fetchone()[0], 1)
+        self.assertEqual(store.conn.execute("SELECT count(*) FROM workstreams").fetchone()[0], 2)
         with self.assertRaises(IdempotencyConflictError):
             prepare_workstream(store, project_id=project["project_id"], title="Different", purpose="Ship exact behavior", brief="Implement and verify the parser without unrelated changes.", task_packet={"schemaVersion": 1, "outcome": "Parser behavior is implemented and verified.", "boundaries": ["Change the parser only."], "acceptance": ["Parser tests pass."], "openQuestions": [], "evidence": ["Test output."]}, idempotency_key="create-1", harness=harness, workspace=workspace, work_root=root / "worktrees", object_root=root / "objects")
 
@@ -65,7 +72,7 @@ class WorkstreamTests(unittest.TestCase):
             self.prepare(root, store, project, harness, workspace, failpoint=CrashOnce("after_proposal_commit"))
         replay = self.prepare(root, store, project, harness, workspace)
         self.assertEqual(replay["operation"]["state"], "planned")
-        self.assertEqual(store.conn.execute("SELECT count(*) FROM workstreams").fetchone()[0], 1)
+        self.assertEqual(store.conn.execute("SELECT count(*) FROM workstreams").fetchone()[0], 2)
 
     def test_runtime_attestation_allows_launch_pending_surface(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
@@ -74,8 +81,15 @@ class WorkstreamTests(unittest.TestCase):
         prepared = self.prepare(root, store, project, harness, workspace, key="launch-pending-agent")
         result = self.apply(prepared, store, harness, workspace, git_objects)
         self.assertEqual(result["operation"]["state"], "succeeded")
-        self.assertEqual(len(workspace.prompts), 1)
-        self.assertEqual(workspace.prompts[0][0], "fixture-surface-1")
+        self.assertEqual(len(workspace.prompts), 2)
+        self.assertEqual(workspace.prompts[1][0], "fixture-surface-2")
+
+    def test_secretary_recovery_uses_binding_when_repository_path_is_ambiguous(self):
+        temp, _root, _repo, store, _project, _harness, _workspace, _git_objects = self.fixture(AmbiguousWorkspace)
+        self.addCleanup(temp.cleanup)
+        self.addCleanup(store.close)
+        row = store.conn.execute("SELECT provisioning_state FROM workstreams WHERE kind='secretary'").fetchone()
+        self.assertEqual(row["provisioning_state"], "bound")
 
     def test_waits_for_interactive_readiness_before_prompting(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture(DelayedFixtureWorkspace)
@@ -85,7 +99,7 @@ class WorkstreamTests(unittest.TestCase):
         result = self.apply(prepared, store, harness, workspace, git_objects)
         self.assertEqual(result["operation"]["state"], "succeeded")
         self.assertGreaterEqual(workspace.observations, 2)
-        self.assertEqual(len(workspace.prompts), 1)
+        self.assertEqual(len(workspace.prompts), 2)
 
     def test_rejects_agent_without_pisec_runtime_attestation(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture(UnattestedFixtureWorkspace)
@@ -95,7 +109,7 @@ class WorkstreamTests(unittest.TestCase):
         with patch("scripts.pisec.workstreams.time.monotonic", side_effect=[0.0, 6.0]):
             with self.assertRaisesRegex(NeedsAttentionError, "runtime attestation"):
                 self.apply(prepared, store, harness, workspace, git_objects)
-        self.assertEqual(workspace.prompts, [])
+        self.assertEqual(len(workspace.prompts), 1)
 
     def test_scope_mismatch_creates_no_effect(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
@@ -106,7 +120,7 @@ class WorkstreamTests(unittest.TestCase):
         bad["brief"] += " changed"
         with self.assertRaises(ScopeMismatchError):
             authorize_apply_workstream(store, scope=bad, harness=harness, workspace=workspace, git_objects=git_objects)
-        self.assertEqual(workspace.worktrees, {})
+        self.assertEqual(len(workspace.worktrees), 1)
         self.assertEqual(store.conn.execute("SELECT count(*) FROM authorizations").fetchone()[0], 0)
 
     def test_replay_converges_after_every_checkpoint(self):
@@ -120,9 +134,9 @@ class WorkstreamTests(unittest.TestCase):
                         self.apply(prepared, store, harness, workspace, git_objects, failpoint=CrashOnce(point))
                     result = self.apply(prepared, store, harness, workspace, git_objects)
                     self.assertEqual(result["operation"]["state"], "succeeded")
-                    self.assertEqual(len(workspace.worktrees), 1)
-                    self.assertEqual(len(workspace.agents), 1)
-                    self.assertEqual(len(workspace.prompts), 1)
+                    self.assertEqual(len(workspace.worktrees), 2)
+                    self.assertEqual(len(workspace.agents), 2)
+                    self.assertEqual(len(workspace.prompts), 2)
                     self.assertEqual(store.conn.execute("SELECT count(*) FROM authorizations").fetchone()[0], 1)
                     self.assertEqual(store.conn.execute("SELECT count(*) FROM events WHERE kind='workstream.created'").fetchone()[0], 1)
                 finally:
@@ -153,10 +167,10 @@ class WorkstreamTests(unittest.TestCase):
         prepared = self.prepare(root, store, project, harness, workspace)
         with self.assertRaises(RuntimeError):
             self.apply(prepared, store, harness, workspace, git_objects, failpoint=CrashOnce("after_workspace_creation"))
-        workspace.worktrees.clear()
+        workspace.project_workspace_id = "fixture-other-workspace"
         with self.assertRaises(NeedsAttentionError):
             self.apply(prepared, store, harness, workspace, git_objects)
-        row = store.conn.execute("SELECT provisioning_state FROM workstreams").fetchone()
+        row = store.conn.execute("SELECT provisioning_state FROM workstreams WHERE kind='worker'").fetchone()
         self.assertEqual(row[0], "needs_attention")
 
     def test_adapter_attention_after_workspace_effect_is_durable(self):
@@ -168,7 +182,7 @@ class WorkstreamTests(unittest.TestCase):
             self.apply(prepared, store, harness, workspace, AttentionGitObjects())
         operation = store.conn.execute("SELECT state,step FROM operations WHERE workstream_id=?", (prepared["workstream"]["workstream_id"],)).fetchone()
         workstream = store.conn.execute("SELECT provisioning_state,attention_reason FROM workstreams WHERE workstream_id=?", (prepared["workstream"]["workstream_id"],)).fetchone()
-        self.assertEqual(tuple(operation), ("needs_attention", "worktree_observed_or_created"))
+        self.assertEqual(tuple(operation), ("needs_attention", "workspace_tab_observed_or_created"))
         self.assertEqual(workstream[0], "needs_attention")
         self.assertIn("private Git object store", workstream[1])
 

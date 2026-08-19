@@ -10,7 +10,7 @@ import stat
 from typing import Iterator
 
 from .models import SchemaError, UnsafeStateError, utc_now
-from .pi_schema import MIGRATION_NAME, SCHEMA_NAME, SCHEMA_VERSION, apply_schema, schema_digest
+from .pi_schema import MIGRATION_NAME, SCHEMA_NAME, SCHEMA_VERSION, apply_schema, migrate_schema, schema_digest
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
@@ -69,6 +69,11 @@ class PiStore:
         _check_file(self.path, allow_missing=False)
         if initialize and not existed:
             self._initialize()
+        elif existed:
+            try:
+                migrate_schema(self.conn)
+            except sqlite3.DatabaseError as error:
+                raise SchemaError("Pisec schema migration is unsupported", detail={"error": str(error)}) from error
         self._verify_schema()
         for suffix in ("-wal", "-shm"):
             sidecar = Path(str(self.path) + suffix)

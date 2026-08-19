@@ -20,6 +20,6 @@
   "command": {
     "useDefaults": true,
     "runtimeExecPolicy": "argv",
-    "deny": ["git push", "git remote set-url", "git gc", "git pack-refs", "git maintenance", "gh api", "npm publish", "pnpm publish", "yarn npm publish", "cargo publish", "twine upload", "ssh", "scp", "sudo", "docker", "podman", "kubectl", "curl", "wget", "http", "httpie"]
+    "deny": ["git push", "git remote set-url", "git gc", "git pack-refs", "git maintenance", "gh api", "npm publish", "pnpm publish", "yarn npm publish", "cargo publish", "twine upload", "ssh", "scp", "sudo", "docker", "podman", "kubectl", "curl", "wget", "http", "httpie", "${DENIED_COMMANDS}"]
   }
 }

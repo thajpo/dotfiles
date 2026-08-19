@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SYNC_INSTALL = ROOT / "scripts" / "dotfiles-sync-install.sh"
 WORKFLOW_INSTALL = ROOT / "scripts" / "agent-workflow-install.sh"
 DOCTOR = ROOT / "scripts" / "agent-workflow-doctor.sh"
+SKILLS_DOCTOR = ROOT / "scripts" / "skills-doctor.sh"
 
 
 class MacOSWorkflowTests(unittest.TestCase):
@@ -62,6 +63,9 @@ class MacOSWorkflowTests(unittest.TestCase):
             fake_bin = root / "bin"
             repo = root / "dotfiles"
             (repo / "opencode").mkdir(parents=True)
+            (repo / "agent").mkdir()
+            (repo / "skills").mkdir()
+            (repo / "agent" / "AGENTS.md").write_text("shared\n")
             (repo / "opencode" / "opencode.jsonc").write_text("{}\n")
             (repo / "machines").mkdir()
             (repo / "machines" / "macos-arm64.env").write_text("DOTFILES_MACHINE_ID=macos-arm64\n")
@@ -69,6 +73,8 @@ class MacOSWorkflowTests(unittest.TestCase):
             (fake_bin / "uname").write_text(
                 "#!/bin/sh\nif [ \"${1:-}\" = \"-m\" ]; then printf 'arm64\\n'; else printf 'Darwin\\n'; fi\n"
             )
+            (fake_bin / "curl").write_text("#!/bin/sh\nprintf called > \"$HOME/curl.log\"\nexit 99\n")
+            (fake_bin / "curl").chmod(0o755)
             (fake_bin / "uname").chmod(0o755)
 
             environment = self.command_environment(home, fake_bin)
@@ -83,7 +89,38 @@ class MacOSWorkflowTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             profile = home / ".config" / "dotfiles" / "machine.env"
             self.assertEqual(profile.resolve(), (repo / "machines" / "macos-arm64.env").resolve())
+            self.assertEqual((home / ".omp" / "agent" / "AGENTS.md").resolve(), (repo / "agent" / "AGENTS.md").resolve())
+            self.assertEqual((home / ".codex" / "AGENTS.md").resolve(), (repo / "agent" / "AGENTS.md").resolve())
+            self.assertEqual((home / ".omp" / "agent" / "skills").resolve(), (repo / "skills").resolve())
+            self.assertEqual((home / ".codex" / "skills").resolve(), (repo / "skills").resolve())
+            self.assertEqual((home / ".config" / "opencode" / "skills").resolve(), (repo / "skills").resolve())
+            self.assertFalse((home / "curl.log").exists())
 
+    def test_skills_doctor_repairs_omp_skill_link(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            canonical = home / "dotfiles" / "skills" / "canonical"
+            canonical.mkdir(parents=True)
+            (canonical / "SKILL.md").write_text("canonical\n")
+            stale = home / ".omp" / "agent" / "skills" / "stale"
+            stale.mkdir(parents=True)
+            (stale / "SKILL.md").write_text("stale\n")
+            result = subprocess.run(
+                [str(SKILLS_DOCTOR)],
+                cwd=ROOT,
+                env=self.command_environment(home, root / "bin"),
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            shared = home / ".skills"
+            omp_skills = home / ".omp" / "agent" / "skills"
+            self.assertTrue(shared.is_symlink())
+            self.assertTrue(omp_skills.is_symlink())
+            self.assertEqual(omp_skills.resolve(), shared.resolve())
+            self.assertEqual((shared / "canonical" / "SKILL.md").read_text(), "canonical\n")
+            self.assertEqual((shared / "stale" / "SKILL.md").read_text(), "stale\n")
     def test_full_pisec_install_fails_closed_before_macos_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

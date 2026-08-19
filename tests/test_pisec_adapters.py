@@ -55,9 +55,14 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         self.assertEqual(set(project), {"project_id", "display_name", "default_ref", "secretary_workstream_id", "created_at", "updated_at"})
         self.assertNotIn("repository_path", project)
 
-        ensured = self.dispatcher.dispatch("admin", "secretary.ensure", {"project": project["project_id"]})
+        ensured = self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
+        self.assertTrue(ensured["focused"])
+        self.assertFalse(ensured["reused"])
         self.assertEqual(ensured["workstream"]["kind"], "secretary")
         self.assertNotIn("launch_secret_path", json.dumps(ensured))
+        reopened = self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
+        self.assertTrue(reopened["focused"])
+        self.assertTrue(reopened["reused"])
         secretary_id = str(ensured["workstream"]["workstream_id"])
         with PiStore(self.root / "state") as store:
             secretary_binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (secretary_id,)).fetchone())
@@ -103,13 +108,21 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
             "state": "working",
             "nativeSessionKind": "id",
             "nativeSessionValue": "fixture-session-id",
+            "reason": None,
             "startSource": "startup",
         }
         self.assertTrue(self.dispatcher.dispatch("runtime", "runtime.report", report_base)["accepted"])
-        self.assertTrue(self.dispatcher.dispatch("runtime", "runtime.report", {**report_base, "seq": 2, "event": "lifecycle", "nativeSessionKind": None, "nativeSessionValue": None})["accepted"])
-        self.assertTrue(self.dispatcher.dispatch("runtime", "runtime.report", {**report_base, "seq": 3, "event": "session_shutdown", "state": "stopped", "nativeSessionKind": None, "nativeSessionValue": None})["accepted"])
+        selected_session = self.root / "harness" / worker_id / "sessions" / "selected.jsonl"
+        selected_session.write_text("selected\n")
+        selected_session.chmod(0o600)
+        self.assertTrue(self.dispatcher.dispatch("runtime", "session.switch.prepare", {**worker_auth, "reason": "resume", "targetSessionFile": str(selected_session)})["prepared"])
+        with self.assertRaises((NeedsAttentionError, ValueError)):
+            self.dispatcher.dispatch("runtime", "session.switch.prepare", {**worker_auth, "reason": "resume", "targetSessionFile": str(self.root / "escape.jsonl")})
+        self.assertTrue(self.dispatcher.dispatch("runtime", "runtime.report", {**report_base, "seq": 2, "event": "lifecycle", "reason": "resume", "state": "idle", "nativeSessionKind": "path", "nativeSessionValue": str(selected_session)})["accepted"])
+        self.assertTrue(self.dispatcher.dispatch("runtime", "runtime.report", {**report_base, "seq": 3, "event": "lifecycle", "nativeSessionKind": None, "nativeSessionValue": None})["accepted"])
+        self.assertTrue(self.dispatcher.dispatch("runtime", "runtime.report", {**report_base, "seq": 4, "event": "session_shutdown", "state": "stopped", "nativeSessionKind": None, "nativeSessionValue": None})["accepted"])
         with self.assertRaises(ConflictError):
-            self.dispatcher.dispatch("runtime", "runtime.report", {**report_base, "seq": 2, "event": "lifecycle", "nativeSessionKind": None, "nativeSessionValue": None})
+            self.dispatcher.dispatch("runtime", "runtime.report", {**report_base, "seq": 3, "event": "lifecycle", "nativeSessionKind": None, "nativeSessionValue": None})
         with self.assertRaises(AuthorizationError):
             self.dispatcher.dispatch("runtime", "task.get", {**worker_auth, "token": "x" * 48})
 

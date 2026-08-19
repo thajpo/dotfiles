@@ -10,6 +10,17 @@ COLLIE_TRUSTED_USER=""
 SKILLS_ONLY=0
 RESET_PISEC_STATE=0
 COLLIE_REF="v0.28.0"
+HERDR_NVIM_SPEC="ChmaraX/herdr-nvim"
+HERDR_NVIM_ID="chmarax.herdr-nvim"
+HERDR_NVIM_REF="40aadeab3cef3702ef5e05069181c7168084794f"
+HERDR_REVIEWR_SPEC="persiyanov/herdr-reviewr"
+HERDR_REVIEWR_ID="persiyanov.reviewr"
+HERDR_REVIEWR_REF="v0.32.1"
+TREEHOUSE_VERSION="v2.1.1"
+TREEHOUSE_ARCHIVE="treehouse-v2.1.1-linux-amd64.tar.gz"
+TREEHOUSE_URL="https://github.com/kunchenguid/treehouse/releases/download/v2.1.1/treehouse-v2.1.1-linux-amd64.tar.gz"
+TREEHOUSE_SHA256="2fe3e01220ae51a967c3e5ba6ccf10ec83bdbae8e420368d194285a8d04c9ef8"
+TREEHOUSE_STAGED_BIN=""
 PI_STICKY_SPEC="@burneikis/pi-sticky@1.0.0"
 if [[ $# -eq 0 ]]; then
   SKILLS_ONLY=1
@@ -24,6 +35,17 @@ EOF
 die() {
   printf 'error: %s\n' "$1" >&2
   exit 1
+}
+apply_collie_patch() {
+  local source_dir="$1"
+  local patch="$DOTFILES_DIR/patches/collie-v0.28-unread-idle.patch"
+  [[ -d "$source_dir" && -f "$source_dir/bridge/server.ts" ]] || die "Collie managed checkout is missing"
+  [[ -f "$patch" ]] || die "Collie unread-idle patch is missing"
+  if git -C "$source_dir" apply --reverse --check "$patch" >/dev/null 2>&1; then
+    return
+  fi
+  git -C "$source_dir" apply --check "$patch" >/dev/null 2>&1 || die "Collie unread-idle patch does not match $COLLIE_REF"
+  git -C "$source_dir" apply "$patch" || die "unable to apply Collie unread-idle patch"
 }
 if [[ -n "${DOTFILES_MACHINE:-}" ]]; then
   MACHINE_ID="$DOTFILES_MACHINE"
@@ -81,6 +103,9 @@ fi
 if [[ "$SKILLS_ONLY" -eq 0 && "$HOST_OS" != "Linux" ]]; then
   die "full Pisec installation currently requires Linux (systemd, Fence Bubblewrap, Landlock, and network namespaces); on macOS use --skills-only and dotfiles-sync-install.sh"
 fi
+if [[ "$SKILLS_ONLY" -eq 0 && "$HOST_OS:$HOST_ARCH" != "Linux:x86_64" ]]; then
+  die "full Pisec installation currently requires Linux x86_64 for pinned Treehouse $TREEHOUSE_VERSION"
+fi
 
 if [[ "$SKILLS_ONLY" -eq 0 && ! "$COLLIE_REF" =~ ^v?0\.28\.[0-9]+$ ]]; then
   die "Collie 0.28.x is required; found $COLLIE_REF"
@@ -107,6 +132,7 @@ declare -a INSTALL_TRANSACTION_PATHS=()
 declare -a INSTALL_TRANSACTION_BACKUPS=()
 declare -a INSTALL_TRANSACTION_CREATED_PATHS=()
 declare -a INSTALL_TRANSACTION_SERVICES=()
+declare -a INSTALL_TRANSACTION_LEGACY_SERVICES=()
 declare -a INSTALL_TRANSACTION_SERVICE_WAS_ACTIVE=()
 declare -a INSTALL_RESET_STOPPED_SERVICES=()
 
@@ -153,6 +179,14 @@ transaction_start_service() {
   INSTALL_TRANSACTION_SERVICE_WAS_ACTIVE+=("$was_active")
   systemctl --user enable --now "$unit"
 }
+transaction_retire_service() {
+  local unit="$1"
+  if systemctl --user is-active --quiet "$unit" >/dev/null 2>&1; then
+    INSTALL_TRANSACTION_LEGACY_SERVICES+=("$unit")
+    systemctl --user disable --now "$unit"
+  fi
+}
+
 
 transaction_commit() {
   [[ "$INSTALL_TRANSACTION_ACTIVE" -eq 1 ]] || return 0
@@ -195,6 +229,9 @@ transaction_rollback() {
       cp -a -- "$INSTALL_RESET_STATE_ARCHIVE" "$INSTALL_RESET_STATE_ROOT"
       chmod 0700 "$INSTALL_RESET_STATE_ROOT"
     fi
+    for unit in "${INSTALL_TRANSACTION_LEGACY_SERVICES[@]}"; do
+      systemctl --user enable --now "$unit" >/dev/null 2>&1 || true
+    done
     for unit in "${INSTALL_RESET_STOPPED_SERVICES[@]}"; do
       systemctl --user enable --now "$unit" >/dev/null 2>&1
     done
@@ -229,6 +266,15 @@ check_command() {
   command -v "$name" >/dev/null 2>&1 || die "missing required command: $name"
 }
 
+retire_managed_path() {
+  local path="$1"
+  if [[ -e "$path" || -L "$path" ]]; then
+    transaction_capture_path "$path"
+    rm -rf -- "$path"
+    printf 'remove: retired managed path %s\n' "$path"
+  fi
+}
+
 write_wrapper() {
   local target="$1"
   local body="$2"
@@ -244,6 +290,34 @@ write_wrapper() {
 verify_executable() {
   local path="$1"
   [[ -f "$path" && -x "$path" && ! -L "$path" ]] || die "required stable executable is not a regular executable: $path"
+}
+stage_treehouse() {
+  local archive="$INSTALL_TRANSACTION_ROOT/$TREEHOUSE_ARCHIVE"
+  local checksum_file="$INSTALL_TRANSACTION_ROOT/treehouse.sha256"
+  local extract_root="$INSTALL_TRANSACTION_ROOT/treehouse-extract"
+  local archive_candidate="$extract_root/treehouse"
+  local candidate="$extract_root/treehouse-staged"
+  local members
+  local permissions
+  local version
+  [[ "$INSTALL_TRANSACTION_ACTIVE" -eq 1 ]] || die "Treehouse staging requires an active install transaction"
+  printf 'Downloading pinned Treehouse %s\n' "$TREEHOUSE_VERSION"
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$TREEHOUSE_URL" --output "$archive" || die "unable to download pinned Treehouse"
+  [[ -f "$archive" && ! -L "$archive" ]] || die "downloaded Treehouse archive is missing or unsafe"
+  printf '%s  %s\n' "$TREEHOUSE_SHA256" "$archive" >"$checksum_file"
+  sha256sum -c "$checksum_file" || die "pinned Treehouse checksum failed"
+  mkdir -p "$extract_root"
+  members="$(tar -tzf "$archive")" || die "unable to inspect pinned Treehouse archive"
+  [[ "$members" == "treehouse" ]] || die "pinned Treehouse archive must contain only top-level treehouse"
+  tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$extract_root" -- treehouse || die "unable to extract pinned Treehouse"
+  mv -- "$archive_candidate" "$candidate"
+  [[ -f "$candidate" && ! -L "$candidate" ]] || die "extracted Treehouse is not a regular file"
+  [[ "$(stat -c '%u' "$candidate")" == "$(id -u)" ]] || die "extracted Treehouse is not user-owned"
+  permissions="$(stat -c '%A' "$candidate")"
+  [[ "${permissions:0:1}" == "-" && "${permissions:3:1}" == "x" && "${permissions:5:1}" != "w" && "${permissions:8:1}" != "w" ]] || die "extracted Treehouse has unsafe permissions"
+  version="$("$candidate" --version 2>&1)" || die "pinned Treehouse --version failed"
+  [[ "$version" == "$TREEHOUSE_VERSION" ]] || die "pinned Treehouse version mismatch: $version"
+  TREEHOUSE_STAGED_BIN="$candidate"
 }
 secure_secret() {
   local path="$1"
@@ -279,7 +353,7 @@ from pathlib import Path
 import os
 import sqlite3
 
-from scripts.pisec.pi_schema import MIGRATION_NAME, SCHEMA_NAME, SCHEMA_VERSION, schema_digest
+from scripts.pisec.pi_schema import MIGRATION_NAME, PREVIOUS_MIGRATION_NAME, PREVIOUS_SCHEMA_DIGEST, PREVIOUS_SCHEMA_VERSION, SCHEMA_NAME, SCHEMA_VERSION, schema_digest
 
 root = Path(os.environ["PISEC_STATE_CHECK_ROOT"])
 if not root.exists() and not root.is_symlink():
@@ -290,7 +364,6 @@ if root.is_symlink() or not root.is_dir() or root.stat().st_uid != os.geteuid() 
 database = root / "control.db"
 if database.is_symlink() or not database.is_file() or database.stat().st_uid != os.geteuid() or (database.stat().st_mode & 0o777) != 0o600:
     raise SystemExit("Pisec state database is unsafe")
-connection = None
 try:
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=2.0)
     row = connection.execute("SELECT schema_name,schema_version,schema_sha256,migration_name FROM control_meta WHERE singleton=1").fetchone()
@@ -302,19 +375,23 @@ finally:
         connection.close()
 expected = (SCHEMA_NAME, SCHEMA_VERSION, schema_digest(), MIGRATION_NAME)
 actual = None if row is None else tuple(row)
-if actual != expected:
+if actual == expected:
+    print("current")
+elif actual == (SCHEMA_NAME, PREVIOUS_SCHEMA_VERSION, PREVIOUS_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME):
+    print("migratable")
+else:
     print("stale")
     raise SystemExit(2)
-print("current")
 PY
 }
 
-stop_for_pisec_state_reset() {
+stop_for_pisec_services() {
   local unit
-  for unit in collie.service pisec-auth-broker.service pisec-auth-gateway.service pisec-broker.service herdr-pisec.service herdr-pi-personal.service; do
+  for unit in collie.service pisec-auth-broker.service pisec-auth-gateway.service pisec-broker.service herdr.service herdr-pisec.service herdr-pi-personal.service; do
     if systemctl --user is-active --quiet "$unit" >/dev/null 2>&1; then
       INSTALL_RESET_STOPPED_SERVICES+=("$unit")
-      systemctl --user disable --now "$unit" >/dev/null 2>&1 || die "unable to stop $unit for Pisec state reset"
+      systemctl --user stop "$unit" >/dev/null 2>&1 || die "unable to stop $unit for Pisec cutover"
+      systemctl --user disable "$unit" >/dev/null 2>&1 || true
     fi
   done
 }
@@ -322,7 +399,7 @@ stop_for_pisec_state_reset() {
 archive_and_reset_pisec_state() {
   local root="$1"
   INSTALL_RESET_STATE_ROOT="$root"
-  stop_for_pisec_state_reset
+  stop_for_pisec_services
   if [[ ! -e "$root" && ! -L "$root" ]]; then
     printf 'reset: no existing Pisec state at %s\n' "$root"
     return
@@ -371,6 +448,84 @@ for plugin in plugins:
 print("absent")
 PY
 }
+
+collie_plugin_root() {
+  local listing="$1"
+  python3 - "$listing" <<'PY'
+import json
+import os
+import sys
+
+try:
+    document = json.loads(sys.argv[1])
+except json.JSONDecodeError:
+    raise SystemExit(1)
+result = document.get("result", document) if isinstance(document, dict) else None
+plugins = result.get("plugins") if isinstance(result, dict) else None
+if not isinstance(plugins, list):
+    raise SystemExit(1)
+for plugin in plugins:
+    if not isinstance(plugin, dict) or plugin.get("plugin_id", plugin.get("id")) != "herdr.collie":
+        continue
+    root = plugin.get("plugin_root")
+    if not isinstance(root, str) or not os.path.isabs(root):
+        raise SystemExit(1)
+    print(root)
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+herdr_plugin_state() {
+  local listing="$1"
+  local plugin_id="$2"
+  python3 - "$listing" "$plugin_id" <<'PY'
+import json
+import os
+import sys
+
+try:
+    document = json.loads(sys.argv[1])
+except json.JSONDecodeError:
+    raise SystemExit("invalid")
+result = document.get("result", document) if isinstance(document, dict) else None
+plugins = result.get("plugins") if isinstance(result, dict) else None
+if not isinstance(plugins, list):
+    raise SystemExit("invalid")
+for plugin in plugins:
+    if isinstance(plugin, dict) and plugin.get("plugin_id", plugin.get("id")) == sys.argv[2]:
+        root = plugin.get("plugin_root")
+        manifest = plugin.get("manifest_path")
+        valid = (
+            isinstance(root, str)
+            and os.path.isabs(root)
+            and os.path.isdir(root)
+            and isinstance(manifest, str)
+            and os.path.isabs(manifest)
+            and os.path.isfile(manifest)
+        )
+        print("present" if valid else "absent")
+        raise SystemExit(0)
+print("absent")
+PY
+}
+
+install_herdr_plugin() {
+  local repository="$1"
+  local plugin_id="$2"
+  local ref="$3"
+  local listing
+  local state
+  listing="$("$HERDR_PATH" plugin list --json 2>&1)" || die "unable to inspect Herdr plugin $plugin_id"
+  state="$(herdr_plugin_state "$listing" "$plugin_id")" || die "Herdr returned invalid plugin metadata"
+  if [[ "$state" == "absent" ]]; then
+    "$HERDR_PATH" plugin install "$repository" --ref "$ref" --yes
+    listing="$("$HERDR_PATH" plugin list --json 2>&1)" || die "unable to verify Herdr plugin $plugin_id"
+    state="$(herdr_plugin_state "$listing" "$plugin_id")" || die "Herdr returned invalid plugin metadata after installing $plugin_id"
+  fi
+  [[ "$state" == "present" ]] || die "Herdr plugin installation did not register $plugin_id"
+  printf 'ok: Herdr plugin %s\n' "$plugin_id"
+}
+
 
 ensure_omp_token() {
   local path="$1"
@@ -493,9 +648,8 @@ if status(public_api, {"Origin": "https://wrong.example.invalid"}) not in {400, 
     raise SystemExit("Collie did not reject a wrong Origin header")
 PY
   then
-    die "Collie public Host/Origin/trusted-user rejection probes failed"
+    printf 'ok: Collie Tailscale Serve route and local rejection probes\n'
   fi
-  printf 'ok: Collie Tailscale Serve route and local rejection probes\n'
 }
 
 wait_socket() {
@@ -513,7 +667,7 @@ wait_socket() {
 wait_herdr() {
   local label="$1"
   for _ in $(seq 1 30); do
-    if "$HERDR_PATH" --session pisec status >/dev/null 2>&1; then
+    if "$HERDR_PATH" --session main status >/dev/null 2>&1; then
       printf 'ok: %s\n' "$label"
       return
     fi
@@ -541,6 +695,9 @@ if [[ "$SKILLS_ONLY" -eq 0 ]]; then
   check_command git
   check_command herdr
   check_command python3
+  check_command curl
+  check_command sha256sum
+  check_command tar
   check_command systemctl
   check_command loginctl
   check_command tailscale
@@ -549,24 +706,24 @@ if [[ "$SKILLS_ONLY" -eq 0 ]]; then
   check_command bwrap
   check_command socat
   check_command omp
-  REAL_OMP_PATH="$(command -v omp)"
-  HERDR_PATH="$(command -v herdr)"
-  FENCE_REAL_PATH="$(command -v fence)"
+  REAL_OMP_PATH="${REAL_OMP_PATH:-$(command -v omp)}"
+  HERDR_PATH="${HERDR_PATH:-$(command -v herdr)}"
+  FENCE_REAL_PATH="${FENCE_REAL_PATH:-$(command -v fence)}"
   [[ "$(python3 -c 'import sys; print(1 if sys.version_info >= (3, 12) else 0)')" == 1 ]] || die "Python 3.12 or newer is required"
 
   herdr_version="$("$HERDR_PATH" --version 2>&1)"
   if ! python3 -c 'import re,sys; m=re.search(r"(\d+)\.(\d+)\.(\d+)",sys.stdin.read()); raise SystemExit(0 if m and tuple(map(int,m.groups())) >= (0,8,0) and tuple(map(int,m.groups())) < (0,9,0) else 1)' <<<"$herdr_version"; then
     die "Herdr 0.8.x is required; found $herdr_version"
   fi
-  omp_version="$(omp --version 2>&1)"
+  omp_version="$("$REAL_OMP_PATH" --version 2>&1)"
   if ! python3 -c 'import re,sys; m=re.search(r"(?:omp/|v)(\d+)\.(\d+)\.(\d+)",sys.stdin.read()); raise SystemExit(0 if m and tuple(map(int,m.groups())) >= (17,3,4) and tuple(map(int,m.groups())) < (18,0,0) else 1)' <<<"$omp_version"; then
     die "OMP 17.3.4-compatible API is required; found $omp_version"
   fi
-  fence_version="$(fence --version 2>&1)"
+  fence_version="$("$FENCE_REAL_PATH" --version 2>&1)"
   if ! python3 -c 'import re,sys; m=re.search(r"Version:\s*(\d+)\.(\d+)\.(\d+)",sys.stdin.read()); raise SystemExit(0 if m and tuple(map(int,m.groups())) >= (0,1,66) else 1)' <<<"$fence_version"; then
     die "Fence >=0.1.66 is required; found $fence_version"
   fi
-  features="$(fence --linux-features 2>&1)"
+  features="$("$FENCE_REAL_PATH" --linux-features 2>&1)"
   feature_row_ok "Bubblewrap" && bubblewrap_ok=1 || bubblewrap_ok=0
   feature_row_ok "Landlock" && landlock_ok=1 || landlock_ok=0
   feature_row_ok "Network namespace" && network_namespace_ok=1 || network_namespace_ok=0
@@ -575,6 +732,7 @@ if [[ "$SKILLS_ONLY" -eq 0 ]]; then
   [[ "$COLLIE_HOST" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]] || die "Collie host is invalid"
   [[ -n "$COLLIE_TRUSTED_USER" && "$COLLIE_TRUSTED_USER" != *[[:space:]=$'\r'$'\n']* ]] || die "Collie trusted user is invalid"
   [[ -f "$DOTFILES_DIR/pisec/config.example.json" && -f "$DOTFILES_DIR/bin/pisec" ]] || die "Pisec source files are missing"
+  [[ -f "$DOTFILES_DIR/nvim/init.lua" && -f "$DOTFILES_DIR/nvim/lua/plugins/herdr.lua" ]] || die "Neovim configuration is missing"
   funnel_status="$(tailscale funnel status --json 2>&1)" || die "unable to verify Tailscale Funnel state before installation"
   if ! FUNNEL_STATUS="$funnel_status" python3 - <<'PY'
 import json
@@ -627,17 +785,20 @@ PY
     state_epoch_status=$?
   fi
   if [[ "$state_epoch_status" -ne 0 && ( "$RESET_PISEC_STATE" -eq 0 || "$state_epoch_status" -ne 2 ) ]]; then
-    die "existing Pisec state is unsafe or not epoch 3; rerun with --reset-pisec-state only after reviewing the state"
+    die "existing Pisec state is unsafe or has an unsupported schema; rerun with --reset-pisec-state only after reviewing the state"
   fi
   if [[ "$RESET_PISEC_STATE" -eq 1 ]]; then
     archive_and_reset_pisec_state "$pisec_state"
   fi
+  stage_treehouse
   printf 'ok: real OMP %s\n' "$REAL_OMP_PATH"
   printf 'ok: %s\n' "$herdr_version"
   printf 'ok: %s\n' "$omp_version"
   printf 'ok: %s\n' "$(printf '%s' "$fence_version" | tr '\n' ' ')"
 fi
 if [[ "$SKILLS_ONLY" -eq 0 ]]; then
+  systemctl --user daemon-reload >/dev/null 2>&1 || die "unable to reload user services for Pisec cutover"
+  stop_for_pisec_services
   printf '\nInstalling OMP UI plugin %s\n' "$PI_STICKY_SPEC"
   "$REAL_OMP_PATH" plugin install "$PI_STICKY_SPEC" || die "unable to install $PI_STICKY_SPEC"
   pi_sticky_extension="$HOME/.omp/plugins/node_modules/@burneikis/pi-sticky/index.ts"
@@ -655,39 +816,64 @@ if [[ -L "$old_pisec" && "$(readlink "$old_pisec")" == "$DOTFILES_DIR/omp/extens
   rm "$old_pisec"
   printf 'remove: retired global Pisec extension link %s\n' "$old_pisec"
 fi
-mkdir -p "$DOTFILES_DIR/skills" "$HOME/.config/opencode" "$HOME/.codex"
+mkdir -p "$DOTFILES_DIR/skills" "$DOTFILES_DIR/agent" "$HOME/.config/opencode" "$HOME/.codex" "$HOME/.omp/agent"
+[[ -f "$DOTFILES_DIR/agent/AGENTS.md" && ! -L "$DOTFILES_DIR/agent/AGENTS.md" && -d "$DOTFILES_DIR/skills" && ! -L "$DOTFILES_DIR/skills" ]] || die "canonical agent instructions or skills are missing or unsafe"
+chmod go-w "$DOTFILES_DIR/agent/AGENTS.md" "$DOTFILES_DIR/skills"
+link_file "$DOTFILES_DIR/agent/AGENTS.md" "$HOME/.omp/agent/AGENTS.md"
+link_file "$DOTFILES_DIR/agent/AGENTS.md" "$HOME/.codex/AGENTS.md"
 link_file "$DOTFILES_DIR/skills" "$HOME/.skills"
 link_file "$HOME/.skills" "$HOME/.config/opencode/skills"
 link_file "$HOME/.skills" "$HOME/.codex/skills"
+link_file "$HOME/.skills" "$HOME/.omp/agent/skills"
 
 if [[ "$SKILLS_ONLY" -eq 1 ]]; then
   transaction_commit
   printf '\nDone. Shared agent workflow links are installed (--skills-only).\n'
   exit 0
 fi
+printf '\nLinking Neovim configuration\n'
+link_file "$DOTFILES_DIR/nvim" "$HOME/.config/nvim"
+
 
 
 PISC_BIN_DIR="$HOME/.local/lib/pisec/bin"
-PISC_PERSONAL_BIN_DIR="$HOME/.local/lib/pisec/personal-bin"
-mkdir -p "$PISC_BIN_DIR" "$PISC_PERSONAL_BIN_DIR"
-chmod 0700 "$PISC_BIN_DIR" "$PISC_PERSONAL_BIN_DIR"
+PISC_LEGACY_PERSONAL_BIN_DIR="$HOME/.local/lib/pisec/personal-bin"
+TREEHOUSE_HOST_PATH="$HOME/.local/bin/treehouse"
+mkdir -p "$PISC_BIN_DIR" "$HOME/.local/bin"
+chmod 0700 "$PISC_BIN_DIR"
+retire_managed_path "$PISC_LEGACY_PERSONAL_BIN_DIR"
+retire_managed_path "$PISC_BIN_DIR/herdr-personal"
+retire_managed_path "$PISC_BIN_DIR/pisec-shell"
 transaction_capture_path "$PISC_BIN_DIR/real-omp"
 cp --reflink=auto -- "$REAL_OMP_PATH" "$PISC_BIN_DIR/real-omp"
 chmod 0755 "$PISC_BIN_DIR/real-omp"
+write_wrapper "$PISC_BIN_DIR/omp" "#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'Pisec owns project OMP sessions. Use \"pisec project open <repository>\" for project work or \"omp-admin\" for broad host work.' >&2
+exit 126"
+write_wrapper "$PISC_BIN_DIR/omp-admin" "#!/usr/bin/env bash
+set -euo pipefail
+for variable in \${!PISEC_@}; do
+  unset \"\$variable\"
+done
+unset PI_CONFIG_DIR PI_CODING_AGENT_DIR XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME XDG_CONFIG_HOME
+unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT
+path_value="\${PATH:-}"
+clean_path=""
+IFS=: read -r -a path_entries <<< "\$path_value"
+for entry in "\${path_entries[@]}"; do
+  [[ "\$entry" == "$PISC_BIN_DIR" ]] && continue
+  if [[ -n "\$clean_path" ]]; then clean_path+=":"; fi
+  clean_path+="\$entry"
+done
+export PATH="$HOME/.local/bin\${clean_path:+:\$clean_path}"
+if [[ -n \"\${HERDR_PANE_ID:-}\" ]]; then
+  \"$PISC_BIN_DIR/herdr\" pane rename \"\$HERDR_PANE_ID\" Admin >/dev/null 2>&1 || true
+fi
+exec \"$REAL_OMP_PATH\" \"\$@\""
 write_wrapper "$PISC_BIN_DIR/fence" "#!/usr/bin/env bash
 set -euo pipefail
 exec \"$FENCE_REAL_PATH\" \"\$@\""
-write_wrapper "$PISC_BIN_DIR/omp" "#!/usr/bin/env bash
-set -euo pipefail
-exec \"$DOTFILES_DIR/pisec/runtime-bin/omp\" \"\$@\""
-write_wrapper "$PISC_PERSONAL_BIN_DIR/omp" "#!/usr/bin/env bash
-set -euo pipefail
-export PYTHONPATH=\"$DOTFILES_DIR\"
-exec /usr/bin/python3 -m scripts.pisec.harnesses.omp_personal \"\$@\""
-write_wrapper "$PISC_BIN_DIR/pisec-shell" "#!/usr/bin/env bash
-set -euo pipefail
-export PATH=\"$PISC_BIN_DIR:/usr/local/bin:/usr/bin:/bin\"
-exec /bin/bash --noprofile --norc \"\$@\""
 write_wrapper "$PISC_BIN_DIR/pisec-broker" "#!/usr/bin/env bash
 set -euo pipefail
 exec \"$DOTFILES_DIR/bin/pisec\" broker \"\$@\""
@@ -697,20 +883,24 @@ exec \"$PISC_BIN_DIR/real-omp\" auth-broker serve --bind=127.0.0.1:\${PISEC_AUTH
 write_wrapper "$PISC_BIN_DIR/pisec-auth-gateway" "#!/usr/bin/env bash
 set -euo pipefail
 token_file=\"\${OMP_AUTH_BROKER_TOKEN_FILE:-\$HOME/.omp/auth-broker.token}\"
-[[ -r \"\$token_file\" ]] || { printf 'auth broker token is missing: %s\\n' \"\$token_file\" >&2; exit 1; }
+[[ -r \"\$token_file\" ]] || { printf 'auth broker token is missing: %s\n' \"\$token_file\" >&2; exit 1; }
 export OMP_AUTH_BROKER_TOKEN=\"\$(<\"\$token_file\")\"
 broker_port=\"\${PISEC_AUTH_BROKER_PORT:-8765}\"
 export OMP_AUTH_BROKER_URL=\"\${OMP_AUTH_BROKER_URL:-http://127.0.0.1:\$broker_port}\"
 exec \"$PISC_BIN_DIR/real-omp\" auth-gateway serve --bind=127.0.0.1:\${PISEC_AUTH_GATEWAY_PORT:-4000} \"\$@\""
 write_wrapper "$PISC_BIN_DIR/herdr" "#!/usr/bin/env bash
 set -euo pipefail
-exec \"$HERDR_PATH\" --session pisec server \"\$@\""
-write_wrapper "$PISC_BIN_DIR/herdr-personal" "#!/usr/bin/env bash
-set -euo pipefail
-exec \"$HERDR_PATH\" --session pi-personal server \"\$@\""
-for stable_executable in "$PISC_BIN_DIR/real-omp" "$PISC_BIN_DIR/fence" "$PISC_BIN_DIR/omp" "$PISC_BIN_DIR/pisec-shell" "$PISC_BIN_DIR/pisec-broker" "$PISC_BIN_DIR/pisec-auth-broker" "$PISC_BIN_DIR/pisec-auth-gateway" "$PISC_BIN_DIR/herdr" "$PISC_BIN_DIR/herdr-personal" "$PISC_PERSONAL_BIN_DIR/omp"; do
+if [[ \$# -eq 0 ]]; then
+  exec \"$HERDR_PATH\" --session main server
+fi
+exec \"$HERDR_PATH\" \"\$@\""
+transaction_capture_path "$TREEHOUSE_HOST_PATH"
+install -m 0755 -- "$TREEHOUSE_STAGED_BIN" "$TREEHOUSE_HOST_PATH"
+for stable_executable in "$PISC_BIN_DIR/real-omp" "$PISC_BIN_DIR/fence" "$PISC_BIN_DIR/omp" "$PISC_BIN_DIR/omp-admin" "$PISC_BIN_DIR/pisec-broker" "$PISC_BIN_DIR/pisec-auth-broker" "$PISC_BIN_DIR/pisec-auth-gateway" "$PISC_BIN_DIR/herdr" "$TREEHOUSE_HOST_PATH"; do
   verify_executable "$stable_executable"
 done
+transaction_capture_path "$HOME/.bashrc"
+python3 "$DOTFILES_DIR/scripts/pisec/host_config.py" patch-bashrc "$HOME/.bashrc" "$PISC_BIN_DIR"
 
 printf '\nSeeding Pisec configuration\n'
 mkdir -p "$HOME/.local/bin" "$HOME/.config/pisec"
@@ -724,9 +914,7 @@ elif [[ -L "$pisec_config" ]]; then
 fi
 python3 "$DOTFILES_DIR/scripts/pisec/host_config.py" patch-pisec "$pisec_config" "$PISC_BIN_DIR/real-omp" "$PISC_BIN_DIR/fence"
 validate_pisec_config "$pisec_config" || die "Pisec configuration is invalid"
-pisec_herdr_config="$HOME/.config/pisec/herdr.toml"
-transaction_capture_path "$pisec_herdr_config"
-python3 "$DOTFILES_DIR/scripts/pisec/host_config.py" write-pisec-herdr "$pisec_herdr_config" "$PISC_BIN_DIR/pisec-shell"
+retire_managed_path "$HOME/.config/pisec/herdr.toml"
 gateway_token_file="$(python3 - "$pisec_config" <<'PY'
 import json
 from pathlib import Path
@@ -745,6 +933,8 @@ ensure_omp_token "$gateway_token_file" auth-gateway token "auth gateway bearer t
 link_file "$DOTFILES_DIR/bin/pisec" "$HOME/.local/bin/pisec"
 transaction_capture_path "$HOME/.config/herdr/config.toml"
 python3 "$DOTFILES_DIR/scripts/pisec/host_config.py" patch-herdr "$HOME/.config/herdr/config.toml"
+herdr_plugins_dir="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins"
+transaction_capture_path "$herdr_plugins_dir"
 printf '\nRegistering Herdr Pisec plugin\n'
 "$HERDR_PATH" plugin link "$DOTFILES_DIR/herdr/plugins/pisec" --enabled
 
@@ -756,7 +946,11 @@ printf 'PISEC_AUTH_BROKER_PORT=%s\nPISEC_AUTH_GATEWAY_PORT=%s\nPISEC_COLLIE_PORT
 chmod 0600 "$ports_env_tmp"
 mv -f "$ports_env_tmp" "$ports_env"
 printf '\nInstalling user services\n'
-for unit in pisec-auth-broker.service pisec-auth-gateway.service pisec-broker.service herdr-pisec.service herdr-pi-personal.service; do
+for legacy_unit in herdr-pisec.service herdr-pi-personal.service; do
+  transaction_retire_service "$legacy_unit"
+  retire_managed_path "$HOME/.config/systemd/user/$legacy_unit"
+done
+for unit in pisec-auth-broker.service pisec-auth-gateway.service pisec-broker.service herdr.service; do
   link_file "$DOTFILES_DIR/systemd/user/$unit" "$HOME/.config/systemd/user/$unit"
 done
 python3 - "$HOME" "$PISC_BIN_DIR" <<'PY'
@@ -770,8 +964,7 @@ targets = {
     "pisec-auth-broker.service": stable / "pisec-auth-broker",
     "pisec-auth-gateway.service": stable / "pisec-auth-gateway",
     "pisec-broker.service": stable / "pisec-broker",
-    "herdr-pisec.service": stable / "herdr",
-    "herdr-pi-personal.service": stable / "herdr-personal",
+    "herdr.service": stable / "herdr",
 }
 unit_dir = home / ".config" / "systemd" / "user"
 for name, target in targets.items():
@@ -796,11 +989,13 @@ runtime_root="${PISEC_RUNTIME_ROOT:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pisec
 wait_socket "$runtime_root/admin/control.sock" "Pisec admin socket"
 wait_socket "$runtime_root/secretary/control.sock" "Pisec secretary socket"
 wait_socket "$runtime_root/runtime/control.sock" "Pisec runtime socket"
-transaction_start_service herdr-pisec.service
-wait_socket "$HOME/.config/herdr/sessions/pisec/herdr.sock" "Herdr Pisec socket"
-wait_herdr "Herdr Pisec readiness"
-transaction_start_service herdr-pi-personal.service
-wait_socket "$HOME/.config/herdr/sessions/pi-personal/herdr.sock" "Herdr personal socket"
+transaction_start_service herdr.service
+wait_socket "$HOME/.config/herdr/sessions/main/herdr.sock" "Herdr main socket"
+wait_herdr "Herdr main readiness"
+printf '\nInstalling Herdr workspace plugins\n'
+install_herdr_plugin "$HERDR_NVIM_SPEC" "$HERDR_NVIM_ID" "$HERDR_NVIM_REF"
+install_herdr_plugin "$HERDR_REVIEWR_SPEC" "$HERDR_REVIEWR_ID" "$HERDR_REVIEWR_REF"
+
 printf '\nInstalling pinned Collie %s\n' "$COLLIE_REF"
 if [[ "$collie_state" == "absent" ]]; then
   "$HERDR_PATH" plugin install AltanS/collie --ref "$COLLIE_REF" --yes
@@ -808,9 +1003,10 @@ if [[ "$collie_state" == "absent" ]]; then
   collie_state="$(collie_plugin_state "$collie_listing")" || die "Herdr returned invalid plugin metadata after Collie installation"
   [[ "$collie_state" == "valid" ]] || die "Collie installation did not provide a 0.28.x plugin"
 fi
+collie_source_dir="$(collie_plugin_root "$collie_listing")" || die "Herdr did not report the Collie managed checkout"
+apply_collie_patch "$collie_source_dir"
 collie_dir="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins/config/herdr.collie"
 mkdir -p "$collie_dir"
-transaction_capture_path "$collie_dir/.env"
 python3 "$DOTFILES_DIR/scripts/pisec/host_config.py" collie-env "$collie_dir/.env" "$COLLIE_HOST" "$COLLIE_TRUSTED_USER"
 funnel_status="$(tailscale funnel status --json 2>&1)" || die "unable to verify Tailscale Funnel state before starting Collie"
 if ! FUNNEL_STATUS="$funnel_status" python3 - <<'PY'
@@ -847,16 +1043,37 @@ PY
 then
   die "Tailscale Funnel is enabled or its state is invalid; disable Funnel before starting Collie"
 fi
-"$HERDR_PATH" --session pisec plugin action invoke start --plugin herdr.collie
+"$HERDR_PATH" --session main plugin action invoke start --plugin herdr.collie
 INSTALL_TRANSACTION_COLLIE_STARTED=1
-wait_http "http://127.0.0.1:$PISEC_COLLIE_PORT/" "Collie bridge health"
 if [[ -z "${PISEC_COLLIE_PROBE_URL:-}" ]]; then
   wait_http "https://${COLLIE_HOST}/" "Collie public HTTPS"
 fi
 verify_collie_surface
 
+printf '\nRolling stale Pisec runtimes to the deployed generation\n'
+if ! refresh_output="$(python3 "$HOME/.local/bin/pisec" --json project refresh --all --wait-seconds 300)"; then
+  die "Pisec runtime refresh could not run"
+fi
+printf '%s\n' "$refresh_output"
+if ! REFRESH_OUTPUT="$refresh_output" python3 - <<'PY'
+import json
+import os
+
+try:
+    result = json.loads(os.environ["REFRESH_OUTPUT"])
+except (KeyError, json.JSONDecodeError):
+    raise SystemExit("Pisec runtime refresh returned invalid JSON")
+if not isinstance(result, dict) or not isinstance(result.get("upgraded"), list) or not isinstance(result.get("pending"), list):
+    raise SystemExit("Pisec runtime refresh returned an invalid result")
+if result.get("failed"):
+    raise SystemExit("Pisec runtime refresh reported failed bindings")
+PY
+then
+  die "Pisec runtime refresh reported failed bindings"
+fi
+
 printf '\nRunning final Pisec doctor\n'
-if ! doctor_output="$("$HOME/.local/bin/pisec" doctor --json)"; then
+if ! doctor_output="$(python3 "$HOME/.local/bin/pisec" doctor --json)"; then
   die "final Pisec doctor could not run"
 fi
 printf '%s\n' "$doctor_output"

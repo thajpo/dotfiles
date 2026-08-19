@@ -10,7 +10,7 @@ from .adapters import HarnessAdapter, WorkspaceAdapter, WorkspaceObservation, ar
 from .events import append_event_in_transaction
 from .models import NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
 from .projects import resolve_project
-from .runtime import WORKSPACE_RUNTIME_MISSING
+from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent
 from .workstreams import APPLY_LOCK, _wait_for_agent
 
 SECRETARY_CHECKPOINTS = (
@@ -68,8 +68,8 @@ def _scope(project: Mapping[str, Any], workstream: Mapping[str, Any], operation_
         "gitCommonObjectDir": str((Path(project["git_common_dir"]) / "objects").absolute()),
         "agentName": f"pisec-{workstream['workstream_id'][-12:]}",
         "externalDomains": list(external_domains),
-        "effects": ["create execution workspace", "start fenced harness agent", "read and write the registered project", "use the configured harness/plugin/MCP surface"],
-        "nonEffects": ["no cross-project access", "no host-secret access", "no push or publish through normal command policy", "no worker creation without exact approval"],
+        "effects": ["create execution workspace", "start fenced harness agent", "read and write the registered project", "use the configured harness/plugin/MCP surface", "fast-forward existing non-default origin branches through the authenticated Pisec broker"],
+        "nonEffects": ["no cross-project access", "no host-secret access", "no raw push or publish through normal command policy", "no force push, branch creation, branch deletion, or default-branch push", "no worker creation without exact approval"],
     }
 
 
@@ -98,51 +98,91 @@ def _observe(workspace: WorkspaceAdapter, project: Mapping[str, Any], scope: Map
     if observed is None:
         return None
     observed = _validate_workspace(observed, expected)
-    if observed.agent is not None and (observed.agent.name != scope["agentName"] or (expected is not None and expected.get("workspace_surface_id") not in {None, observed.agent.surface_id})):
+    if observed.agent is not None and expected is not None and expected.get("workspace_surface_id") not in {None, observed.agent.surface_id}:
         raise NeedsAttentionError("secretary agent identity mismatch")
     return observed
 
 
-def _recover_workspace(workspace: WorkspaceAdapter, project: Mapping[str, Any], scope: Mapping[str, Any], expected: Mapping[str, Any] | None) -> WorkspaceObservation:
+def _observe_binding(workspace: WorkspaceAdapter, project: Mapping[str, Any], binding: Mapping[str, Any]) -> WorkspaceObservation | None:
+    observed = workspace.observe_surface(
+        workspace_id=str(binding["workspace_id"]),
+        view_id=str(binding["workspace_view_id"]),
+        surface_id=str(binding["workspace_surface_id"]),
+        cwd=str(project["repository_path"]),
+    )
+    if observed is None:
+        return None
+    observed = _validate_workspace(observed, binding)
+    if observed.agent is not None and observed.agent.surface_id != binding["workspace_surface_id"]:
+        raise NeedsAttentionError("secretary agent identity mismatch")
+    return observed
+
+
+def _recover_workspace(
+    workspace: WorkspaceAdapter,
+    project: Mapping[str, Any],
+    scope: Mapping[str, Any],
+    expected: Mapping[str, Any] | None,
+) -> WorkspaceObservation:
+    def normalize(observed: WorkspaceObservation) -> WorkspaceObservation:
+        workspace.rename_tab(observed.view_id, "Project chat")
+        return observed
+
     observed = _observe(workspace, project, scope, expected)
     if observed is not None:
-        return observed
+        return normalize(observed)
+
+    def create() -> WorkspaceObservation:
+        observed = workspace.create_workspace(project["repository_path"], f"Project: {project['display_name']}", focus=False)
+        return normalize(observed)
+
     try:
-        return workspace.create_workspace(project["repository_path"], scope["title"], focus=False)
+        return create()
     except Exception as error:
         try:
             observed = _observe(workspace, project, scope, expected)
         except Exception as observe_error:
             raise NeedsAttentionError("secretary workspace effect is ambiguous") from observe_error
         if observed is not None:
-            return observed
+            return normalize(observed)
         try:
-            return workspace.create_workspace(project["repository_path"], scope["title"], focus=False)
+            return create()
         except Exception:
             raise RuntimeError("secretary workspace creation failed after retry") from error
 
 
 def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdapter, project: Mapping[str, Any], scope: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
-    observed = _observe(workspace, project, scope, binding)
+    observed = _observe_binding(workspace, project, binding)
+    if observed is not None:
+        workspace.rename_tab(observed.view_id, "Project chat")
     agent = observed.agent if observed is not None else None
-    ready = agent is not None and agent.name == scope["agentName"] and agent.surface_id == binding["workspace_surface_id"] and agent.interactive_ready is True
+    ready = agent is not None and agent.surface_id == binding["workspace_surface_id"] and agent.interactive_ready is True
     if not ready:
         with store.transaction():
-            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,observed_state='starting',updated_at=? WHERE workstream_id=?", (utc_now(), scope["workstreamId"]))
+            now = utc_now()
+            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=applied_generation_sha256,observed_state='starting',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
+            store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
         start_error: Exception | None = None
         try:
-            workspace.start_agent(binding["workspace_surface_id"], scope["agentName"], harness.manifest.agent_kind)
+            start_bound_agent(
+                store,
+                workspace,
+                harness,
+                binding,
+                workstream_id=str(scope["workstreamId"]),
+                project_id=str(scope["projectId"]),
+                cwd=str(project["repository_path"]),
+            )
         except Exception as error:
             start_error = error
         try:
-            _wait_for_agent(store, workspace, workstream_id=scope["workstreamId"], path=project["repository_path"], agent_name=scope["agentName"], workspace_id=binding["workspace_id"], surface_id=binding["workspace_surface_id"])
+            _wait_for_agent(store, workspace, workstream_id=scope["workstreamId"], path=project["repository_path"], agent_name=scope["agentName"], workspace_id=binding["workspace_id"], view_id=binding["workspace_view_id"], surface_id=binding["workspace_surface_id"])
         except NeedsAttentionError as wait_error:
             if start_error is not None:
                 raise wait_error from start_error
             raise
     else:
-        _wait_for_agent(store, workspace, workstream_id=scope["workstreamId"], path=project["repository_path"], agent_name=scope["agentName"], workspace_id=binding["workspace_id"], surface_id=binding["workspace_surface_id"])
-
+        _wait_for_agent(store, workspace, workstream_id=scope["workstreamId"], path=project["repository_path"], agent_name=scope["agentName"], workspace_id=binding["workspace_id"], view_id=binding["workspace_view_id"], surface_id=binding["workspace_surface_id"])
 
 def _recover_prompt(workspace: WorkspaceAdapter, project: Mapping[str, Any], scope: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
     try:
@@ -173,7 +213,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         with store.transaction():
             store.conn.execute(
                 "INSERT INTO workstreams(workstream_id,project_id,kind,title,purpose,brief,harness_id,workspace_adapter_id,execution_profile,target_ref,base_commit_oid,branch_name,worktree_path,desired_state,provisioning_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (workstream_id, project["project_id"], "secretary", f"Pisec secretary: {project['display_name']}", "Coordinate the registered project with durable Pisec workflows.", "You are the project secretary. You have project-scoped write access, normal local Git, broad public web access, the full configured harness/plugin/MCP surface, and Pisec coordination tools inside Fence. Use exact approval for worker creation and merge application; answer worker research only through durable Pisec packets.", harness.manifest.adapter_id, workspace.manifest.adapter_id, "secretary-project", project["default_ref"], "0" * 40, branch, project["repository_path"], "active", "creating", now, now),
+                (workstream_id, project["project_id"], "secretary", f"Project coordinator: {project['display_name']}", "Coordinate the registered project with durable Pisec workflows.", "You are the project coordinator. You have project-scoped write access, normal local Git, broad public web access, the full configured harness/plugin/MCP surface, and Pisec coordination tools inside Fence. Publish existing non-default branches only through pisec_push_branch; raw git push remains denied. Delegate bounded implementation to approved worker workstreams; use exact approval for worker creation and merge application; answer worker research only through durable Pisec packets.", harness.manifest.adapter_id, workspace.manifest.adapter_id, "secretary-project", project["default_ref"], "0" * 40, branch, project["repository_path"], "active", "creating", now, now),
             )
             created = dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone())
             scope = _scope(project, created, operation_id, external_domains)
@@ -203,12 +243,11 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         try:
             _recover_start(store, workspace, harness, project, scope, binding)
         except Exception as error:
-            _mark_attention(store, operation["operation_id"], existing["workstream_id"], "secretary runtime identity is missing or mismatched")
             raise NeedsAttentionError("secretary runtime identity is missing or mismatched") from error
         if recoverable_missing:
             with store.transaction():
                 store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (utc_now(), existing["workstream_id"]))
-        workspace.focus_agent(binding["workspace_surface_id"])
+        workspace.focus_pane(binding["workspace_surface_id"])
         return {"project": resolve_project(store, project["project_id"]), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "binding": _binding(store, existing["workstream_id"]), "reused": True}
     if operation["state"] == "needs_attention" or existing["provisioning_state"] == "needs_attention":
         raise NeedsAttentionError("secretary ensure requires attention")
@@ -224,7 +263,8 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         _hit(failpoint, "after_secretary_workspace_creation", scope)
         operation = _operation(store, existing["workstream_id"])
     else:
-        observed = _observe(workspace, project, scope, None)
+        binding = _binding(store, existing["workstream_id"])
+        observed = _observe_binding(workspace, project, binding) if binding is not None else _observe(workspace, project, scope, None)
         if observed is None:
             _mark_attention(store, operation["operation_id"], existing["workstream_id"], "secretary workspace is missing after checkpoint")
             raise NeedsAttentionError("secretary workspace is missing after checkpoint")
@@ -243,8 +283,8 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         now = utc_now()
         with store.transaction():
             store.conn.execute(
-                "INSERT INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (existing["workstream_id"], workspace.manifest.adapter_id, workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), None, None, artifacts.launch_secret_path, None, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, None, "starting", 0, 0, None, now),
+                "INSERT INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (existing["workstream_id"], workspace.manifest.adapter_id, workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), None, None, artifacts.launch_secret_path, None, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
             )
             _checkpoint(store, operation["operation_id"], "binding_committed")
         _hit(failpoint, "after_secretary_binding_commit", scope)
@@ -255,7 +295,14 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
     if _rank(operation["step"]) < _rank("map_committed"):
         if artifacts is None:
             artifacts = harness.materialize_profile(scope)
-        harness.commit_launch_binding(scope, artifacts)
+        harness.commit_launch_binding(
+            scope,
+            artifacts,
+            workspace_session_name=workspace.manifest.session_name,
+            workspace_id=observed.workspace_id,
+            workspace_view_id=observed.view_id,
+            workspace_surface_id=observed.surface_id,
+        )
         with store.transaction():
             _checkpoint(store, operation["operation_id"], "map_committed")
         _hit(failpoint, "after_secretary_policy_map_materialization", scope)
@@ -273,7 +320,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         _hit(failpoint, "after_secretary_brief_delivery", scope)
         operation = _operation(store, existing["workstream_id"])
     if _rank(operation["step"]) < _rank("observed"):
-        exact = _observe(workspace, project, scope, binding)
+        exact = _observe_binding(workspace, project, binding)
         if exact is None:
             raise NeedsAttentionError("secretary workspace is missing")
         with store.transaction():
@@ -317,5 +364,5 @@ def focus_secretary(store: Any, project_selector: str, workspace: WorkspaceAdapt
     binding = _binding(store, secretary["workstream_id"])
     if binding is None:
         raise NeedsAttentionError("secretary has no runtime binding")
-    workspace.focus_agent(binding["workspace_surface_id"])
+    workspace.focus_pane(binding["workspace_surface_id"])
     return {"projectId": project["project_id"], "workstreamId": secretary["workstream_id"], "focused": True}

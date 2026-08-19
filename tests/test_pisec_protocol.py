@@ -7,7 +7,7 @@ import tempfile
 import threading
 import unittest
 
-from scripts.pisec.adapters import AdapterRegistry
+from scripts.pisec.adapters import AdapterRegistry, AgentObservation, WorkspaceObservation
 from scripts.pisec.broker import BrokerDispatcher, BrokerService
 from scripts.pisec.models import InvalidRequestError, PisecError, new_id
 from scripts.pisec.pi_store import PiStore
@@ -86,7 +86,7 @@ class BrokerSocketTests(unittest.TestCase):
     def test_runtime_handler_is_only_on_runtime_socket(self):
         session = Path(self.binding["harness_home"]) / "sessions" / "one.jsonl"
         session.write_text("session\n")
-        payload = {"workstreamId": self.binding["workstream_id"], "runtimeInstanceId": "protocol-runtime", "seq": 1, "event": "session_start", "state": "starting", "nativeSessionKind": "path", "nativeSessionValue": str(session), "startSource": "startup", "surfaceId": self.binding["workspace_surface_id"], "token": self.token}
+        payload = {"workstreamId": self.binding["workstream_id"], "runtimeInstanceId": "protocol-runtime", "seq": 1, "event": "session_start", "reason": None, "state": "starting", "nativeSessionKind": "path", "nativeSessionValue": str(session), "startSource": "startup", "surfaceId": self.binding["workspace_surface_id"], "token": self.token}
         result = request(self.service.paths["runtime"], "runtime.report", payload)
         self.assertTrue(result["accepted"])
         with self.assertRaises(PisecError):
@@ -139,6 +139,64 @@ class BrokerSocketTests(unittest.TestCase):
         finally:
             release.set()
             service.stop()
+    def test_startup_reconcile_relaunches_shell_with_stale_agent_metadata(self):
+        repo_path = str(self.repo)
+        self.workspace.worktrees[repo_path] = WorkspaceObservation(
+            workspace_id=self.binding["workspace_id"],
+            view_id=self.binding["workspace_view_id"],
+            surface_id=self.binding["workspace_surface_id"],
+            worktree_path=repo_path,
+            branch_name=None,
+            agent=None,
+        )
+        self.workspace.agents[self.binding["agent_name"]] = AgentObservation(
+            self.binding["agent_name"],
+            self.binding["workspace_surface_id"],
+            True,
+            "idle",
+        )
+        self.workspace.runtime_states[self.binding["workspace_surface_id"]] = "stopped"
+        with PiStore(self.state) as store:
+            store.conn.execute(
+                "UPDATE runtime_bindings SET observed_state='idle',runtime_instance_id=NULL,report_seq=0 WHERE workstream_id=?",
+                (self.binding["workstream_id"],),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL WHERE workstream_id=?",
+                (self.binding["workstream_id"],),
+            )
+        result = self.service.dispatcher.startup_reconcile()
+        self.assertIn(
+            {"workstreamId": self.binding["workstream_id"], "launched": True},
+            result["resumed"],
+        )
+        self.assertIn(self.binding["agent_name"], self.workspace.agents)
+        self.assertTrue(any(call[0] == "run" for call in self.workspace.calls))
+
+    def test_startup_reconcile_does_not_duplicate_live_runtime_without_agent_metadata(self):
+        repo_path = str(self.repo)
+        self.workspace.worktrees[repo_path] = WorkspaceObservation(
+            workspace_id=self.binding["workspace_id"],
+            view_id=self.binding["workspace_view_id"],
+            surface_id=self.binding["workspace_surface_id"],
+            worktree_path=repo_path,
+            branch_name=None,
+            agent=None,
+        )
+        self.workspace.runtime_states[self.binding["workspace_surface_id"]] = "live"
+        with PiStore(self.state) as store:
+            store.conn.execute(
+                "UPDATE runtime_bindings SET observed_state='missing' WHERE workstream_id=?",
+                (self.binding["workstream_id"],),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL WHERE workstream_id=?",
+                (self.binding["workstream_id"],),
+            )
+        result = self.service.dispatcher.startup_reconcile()
+        self.assertEqual(result["resumed"], [])
+        self.assertFalse(any(call[0] == "run" for call in self.workspace.calls))
+
 
     def test_secretary_projection_omits_binding_material(self):
         status = request(self.service.paths["secretary"], "project.status", {"authToken": self.token})

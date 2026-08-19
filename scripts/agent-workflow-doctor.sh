@@ -45,7 +45,7 @@ check_path "$HOME/.codex/skills" "$HOME/.skills"
 
 printf '\nCore commands\n'
 check_cmd git "required"
-check_cmd tmux "terminal session management"
+check_cmd herdr "Herdr persistent terminal session manager"
 check_cmd gh "GitHub auth and PR workflow"
 check_cmd omp "oh-my-pi coding agent"
 check_cmd pi "oh-my-pi compatibility launcher"
@@ -61,7 +61,7 @@ if [[ "$HOST_OS" == "Darwin" ]]; then
   printf 'info:    full Pisec stack is Linux-only; shared OMP/skills checks remain active\n'
 elif command -v pisec >/dev/null 2>&1; then
   check_path "$HOME/.local/bin/pisec" "$HOME/dotfiles/bin/pisec"
-  for unit in pisec-auth-broker.service pisec-auth-gateway.service pisec-broker.service herdr-pisec.service; do
+  for unit in pisec-auth-broker.service pisec-auth-gateway.service pisec-broker.service herdr.service; do
     check_path "$HOME/.config/systemd/user/$unit" "$HOME/dotfiles/systemd/user/$unit"
   done
   doctor_output="$(pisec doctor --json 2>&1 || true)"

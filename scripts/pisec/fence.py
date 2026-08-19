@@ -112,6 +112,24 @@ def render_policy(
         "${WORKSPACE_CONFIG}": str(Path(supplied.pop("WORKSPACE_CONFIG", harness_home / "workspace-config")).absolute()),
         "${GATEWAY_PORT}": [gateway_port],
         "${EXTERNAL_DOMAINS}": [],
+        "${DENIED_COMMANDS}": [
+            "omp",
+            "omp-admin",
+            "treehouse",
+            "herdr",
+            "pisec",
+            "pisec-broker",
+            "pisec-auth-broker",
+            "pisec-auth-gateway",
+            str(Path.home() / ".local" / "bin" / "omp"),
+            str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "omp"),
+            str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "omp-admin"),
+            str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "herdr"),
+            str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "pisec"),
+            str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "pisec-broker"),
+            str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "pisec-auth-broker"),
+            str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "pisec-auth-gateway"),
+        ],
     }
     replacements.update(supplied)
     if profile == "secretary-project":
@@ -155,39 +173,3 @@ def render_policy(
     _atomic_write(output, text)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return output, digest
-
-
-def render_personal_policy(
-    state_root: Path,
-    profile_id: str,
-    cwd: Path,
-    personal_home: Path,
-    config: Mapping[str, Any],
-    *,
-    harness_home: Path | None = None,
-    adapter_replacements: Mapping[str, Any] | None = None,
-) -> tuple[Path, str]:
-    if re.fullmatch(r"[0-9a-f]{32}", profile_id) is None:
-        raise InvalidRequestError("personal profile id is invalid")
-    template_path = _repo_root() / "pisec" / "fence" / "personal-cwd.jsonc"
-    template = json.loads(template_path.read_text())
-    supplied = dict(adapter_replacements or {})
-    home = harness_home or personal_home
-    policy = _substitute(
-        template,
-        {
-            "${CWD}": str(cwd.resolve(strict=True)),
-            "${PERSONAL_HOME}": str(personal_home.absolute()),
-            "${REAL_HOME}": str(Path.home()),
-            "${HARNESS_EXECUTABLE}": str(Path(supplied.pop("HARNESS_EXECUTABLE", config["harness"]["config"]["executablePath"])).absolute()),
-            "${HARNESS_NATIVES}": str(Path(supplied.pop("HARNESS_NATIVES", home / "natives")).absolute()),
-            "${WORKSPACE_CONFIG}": str(Path(supplied.pop("WORKSPACE_CONFIG", home / "workspace-config")).absolute()),
-            "${GATEWAY_PORT}": [_gateway_port(config)],
-            **supplied,
-        },
-    )
-    text = canonical_json(policy, max_bytes=256 * 1024, max_text=8192) + "\n"
-    output = Path(state_root) / "fence" / f"personal-{profile_id}.json"
-    _secure_tree(Path(state_root), output.parent)
-    _atomic_write(output, text)
-    return output, hashlib.sha256(text.encode("utf-8")).hexdigest()

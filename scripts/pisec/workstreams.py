@@ -16,11 +16,12 @@ from .git_objects import GitObjectManager
 from .models import AuthorizationError, ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id
 from .projects import _git, get_project
 from .research import issue_task_packet_in_transaction, validate_task_packet
-
+from .runtime import start_bound_agent
 APPLY_LOCK = threading.RLock()
 CHECKPOINTS = (
     "authorized",
     "worktree_observed_or_created",
+    "workspace_tab_observed_or_created",
     "git_objects_materialized",
     "profile_materialized",
     "agent_started",
@@ -201,6 +202,7 @@ def _wait_for_agent(
     path: str,
     agent_name: str,
     workspace_id: str,
+    view_id: str,
     surface_id: str,
     timeout: float = 5.0,
 ) -> WorkspaceObservation:
@@ -211,12 +213,21 @@ def _wait_for_agent(
         try:
             if matched_observation is None:
                 observed = workspace.observe_workstream(path=path, agent_name=agent_name)
+                if observed is None:
+                    # A repository can have several Herdr panes with the same cwd. Once the
+                    # binding is committed, its workspace identity is the authoritative lookup.
+                    observed = workspace.observe_surface(
+                        workspace_id=workspace_id,
+                        view_id=view_id,
+                        surface_id=surface_id,
+                        cwd=path,
+                    )
                 if observed is not None:
                     if observed.workspace_id != workspace_id or observed.surface_id != surface_id:
                         raise NeedsAttentionError("workspace identity does not match the durable binding")
                     agent = observed.agent
                     if agent is not None:
-                        if agent.name != agent_name or agent.surface_id != surface_id:
+                        if agent.surface_id != surface_id:
                             raise NeedsAttentionError("workspace agent identity does not match the durable binding")
                         if agent.interactive_ready is True:
                             matched_observation = observed
@@ -242,6 +253,52 @@ def _wait_for_agent(
 
 def _prompt_agent(workspace: WorkspaceAdapter, target: str, text: str) -> Mapping[str, Any]:
     return workspace.prompt_agent_nowait(target, text)
+def _coordinator_binding(store: Any, project_id: str, workspace: WorkspaceAdapter) -> dict[str, Any]:
+    rows = store.conn.execute(
+        "SELECT w.workstream_id,w.project_id,w.worktree_path,w.provisioning_state,r.* "
+        "FROM workstreams w JOIN runtime_bindings r USING(workstream_id) "
+        "WHERE w.project_id=? AND w.kind='secretary' AND w.desired_state <> 'retired'",
+        (project_id,),
+    ).fetchall()
+    if len(rows) != 1:
+        raise NeedsAttentionError("project coordinator binding is missing or duplicated")
+    binding = dict(rows[0])
+    if binding["provisioning_state"] != "bound":
+        raise NeedsAttentionError("project coordinator binding is not bound")
+    if binding.get("workspace_adapter_id") != workspace.manifest.adapter_id or binding.get("workspace_session_name") != workspace.manifest.session_name:
+        raise NeedsAttentionError("project coordinator binding does not match the configured Herdr session")
+    if not binding.get("workspace_id") or not binding.get("workspace_view_id") or not binding.get("workspace_surface_id"):
+        raise NeedsAttentionError("project coordinator binding has incomplete workspace identity")
+    return binding
+
+
+def _git_worktree_identity(project_root: Path, worktree_path: str, branch_name: str) -> bool:
+    output = _git(project_root, "worktree", "list", "--porcelain")
+    target = str(Path(worktree_path).resolve(strict=False))
+    for block in output.split("\n\n"):
+        values = {}
+        for line in block.splitlines():
+            key, _, value = line.partition(" ")
+            if key:
+                values[key] = value
+        if str(Path(values.get("worktree", "")).resolve(strict=False)) == target and values.get("branch", "").removeprefix("refs/heads/") == branch_name:
+            return True
+    return False
+
+
+def _ensure_git_worktree(project: Mapping[str, Any], scope: Mapping[str, Any]) -> None:
+    project_root = Path(str(project["repository_path"]))
+    worktree_path = Path(str(scope["worktreePath"]))
+    if worktree_path.exists():
+        if not worktree_path.is_dir() or worktree_path.is_symlink():
+            raise NeedsAttentionError("approved worktree path is unsafe")
+        if not _git_worktree_identity(project_root, str(worktree_path), str(scope["branchName"])):
+            raise NeedsAttentionError("existing path is not the approved Git worktree")
+        return
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    _git(project_root, "worktree", "add", "-q", "-b", str(scope["branchName"]), str(worktree_path), str(scope["baseCommitOid"]))
+    if not _git_worktree_identity(project_root, str(worktree_path), str(scope["branchName"])):
+        raise NeedsAttentionError("created Git worktree is not the approved worktree")
 
 
 def _authorize_apply_workstream(
@@ -302,45 +359,97 @@ def _authorize_apply_workstream(
     if current_oid != scope["baseCommitOid"]:
         _mark_attention(store, operation_id, workstream_id, "approved target ref moved")
         raise NeedsAttentionError("approved target ref moved")
-    observation = workspace.observe_workstream(path=scope["worktreePath"], agent_name=scope["agentName"])
+    try:
+        coordinator = _coordinator_binding(store, scope["projectId"], workspace)
+        coordinator_observation = workspace.observe_surface(
+            workspace_id=str(coordinator["workspace_id"]),
+            view_id=str(coordinator["workspace_view_id"]),
+            surface_id=str(coordinator["workspace_surface_id"]),
+            cwd=str(project["repository_path"]),
+        )
+    except Exception as error:
+        _mark_attention(store, operation_id, workstream_id, "project coordinator workspace could not be corroborated")
+        raise NeedsAttentionError("project coordinator workspace could not be corroborated") from error
+    if coordinator_observation is None:
+        _mark_attention(store, operation_id, workstream_id, "project coordinator workspace is missing")
+        raise NeedsAttentionError("project coordinator workspace is missing")
+    coordinator_workspace_id = str(coordinator["workspace_id"])
+
+    def observe_worker() -> WorkspaceObservation | None:
+        return workspace.observe_tab(workspace_id=coordinator_workspace_id, cwd=scope["worktreePath"])
+
+    def create_worker_tab() -> WorkspaceObservation:
+        created = workspace.create_tab(
+            workspace_id=coordinator_workspace_id,
+            cwd=scope["worktreePath"],
+            label=f"Task: {scope['title']}",
+            focus=False,
+        )
+        if created.workspace_id != coordinator_workspace_id:
+            raise NeedsAttentionError("worker tab create response escaped the project workspace")
+        observed = observe_worker()
+        if observed is None:
+            raise NeedsAttentionError("created worker tab could not be corroborated")
+        return observed
+
+    observation = observe_worker()
     if _rank(operation["step"]) < _rank("worktree_observed_or_created"):
-        if observation is None:
-            try:
-                observation = workspace.create_worktree(cwd=project["repository_path"], branch=scope["branchName"], base=scope["baseCommitOid"], path=scope["worktreePath"], label=scope["title"], focus=False)
-            except Exception as error:
-                try:
-                    observation = workspace.observe_workstream(path=scope["worktreePath"], agent_name=scope["agentName"])
-                except Exception as observe_error:
-                    _mark_attention(store, operation_id, workstream_id, "workspace effect could not be re-observed")
-                    raise NeedsAttentionError("workspace effect is ambiguous") from observe_error
-                if observation is None:
-                    try:
-                        observation = workspace.create_worktree(cwd=project["repository_path"], branch=scope["branchName"], base=scope["baseCommitOid"], path=scope["worktreePath"], label=scope["title"], focus=False)
-                    except Exception:
-                        try:
-                            observation = workspace.observe_workstream(path=scope["worktreePath"], agent_name=scope["agentName"])
-                        except Exception as observe_error:
-                            _mark_attention(store, operation_id, workstream_id, "workspace retry could not be observed")
-                            raise NeedsAttentionError("workspace effect is ambiguous") from observe_error
-                        if observation is None:
-                            _mark_attention(store, operation_id, workstream_id, "workspace effect is missing after retry")
-                            raise NeedsAttentionError("workspace effect is ambiguous") from error
+        try:
+            _ensure_git_worktree(project, scope)
+        except Exception as error:
+            _mark_attention(store, operation_id, workstream_id, f"Git worktree could not be prepared: {error}")
+            raise NeedsAttentionError("Git worktree could not be prepared") from error
         with store.transaction():
             _checkpoint(store, operation_id, "worktree_observed_or_created")
         _hit(failpoint, "after_workspace_creation", scope)
         operation = _operation(store, operation_id)
+    if _rank(operation["step"]) < _rank("workspace_tab_observed_or_created"):
+        if observation is None:
+            try:
+                observation = create_worker_tab()
+            except Exception as error:
+                try:
+                    observation = observe_worker()
+                except Exception as observe_error:
+                    _mark_attention(store, operation_id, workstream_id, "workspace tab effect could not be re-observed")
+                    raise NeedsAttentionError("workspace tab effect is ambiguous") from observe_error
+                if observation is None:
+                    try:
+                        observation = create_worker_tab()
+                    except Exception:
+                        try:
+                            observation = observe_worker()
+                        except Exception as observe_error:
+                            _mark_attention(store, operation_id, workstream_id, "workspace tab retry could not be observed")
+                            raise NeedsAttentionError("workspace tab effect is ambiguous") from observe_error
+                        if observation is None:
+                            _mark_attention(store, operation_id, workstream_id, "workspace tab effect is missing after retry")
+                            raise NeedsAttentionError("workspace tab effect is ambiguous") from error
+        with store.transaction():
+            _checkpoint(store, operation_id, "workspace_tab_observed_or_created")
+        _hit(failpoint, "after_tab_creation", scope)
+        operation = _operation(store, operation_id)
     if observation is None:
-        _mark_attention(store, operation_id, workstream_id, "workspace effect is missing")
-        raise NeedsAttentionError("workspace effect is missing")
+        try:
+            observation = observe_worker()
+        except Exception as error:
+            _mark_attention(store, operation_id, workstream_id, "workspace tab observation failed")
+            raise NeedsAttentionError("workspace tab observation failed") from error
+    if observation is None:
+        _mark_attention(store, operation_id, workstream_id, "workspace tab effect is missing")
+        raise NeedsAttentionError("workspace tab effect is missing")
+    if observation.workspace_id != coordinator_workspace_id:
+        _mark_attention(store, operation_id, workstream_id, "worker tab is outside the project workspace")
+        raise NeedsAttentionError("worker tab workspace identity does not match the project workspace")
     if observation.worktree_path is not None and str(Path(observation.worktree_path).resolve(strict=False)) != str(Path(scope["worktreePath"]).resolve(strict=False)):
-        _mark_attention(store, operation_id, workstream_id, "workspace worktree differs from the approved scope")
-        raise NeedsAttentionError("workspace worktree identity does not match the approved scope")
+        _mark_attention(store, operation_id, workstream_id, "worker tab cwd differs from the approved worktree")
+        raise NeedsAttentionError("worker tab cwd does not match the approved worktree")
     if observation.branch_name is not None and observation.branch_name not in {scope["branchName"], f"refs/heads/{scope['branchName']}"}:
-        _mark_attention(store, operation_id, workstream_id, "workspace branch differs from the approved scope")
-        raise NeedsAttentionError("workspace branch identity does not match the approved scope")
-    if not observation.workspace_id or not observation.view_id or not observation.surface_id:
-        _mark_attention(store, operation_id, workstream_id, "workspace observation is incomplete")
-        raise NeedsAttentionError("workspace observation is incomplete")
+        _mark_attention(store, operation_id, workstream_id, "worker tab branch differs from the approved scope")
+        raise NeedsAttentionError("worker tab branch does not match the approved scope")
+    if not observation.view_id or not observation.surface_id:
+        _mark_attention(store, operation_id, workstream_id, "worker tab observation is incomplete")
+        raise NeedsAttentionError("worker tab observation is incomplete")
 
     if _rank(operation["step"]) < _rank("git_objects_materialized"):
         git_objects.materialize(scope)
@@ -355,10 +464,17 @@ def _authorize_apply_workstream(
         now = utc_now()
         with store.transaction():
             store.conn.execute(
-                "INSERT OR REPLACE INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (workstream_id, workspace.manifest.adapter_id, workspace.manifest.session_name, observation.workspace_id, observation.view_id, observation.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_json, None, None, artifacts.launch_secret_path, scope["privateGitObjectDir"], artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, None, "starting", 0, 0, None, now),
+                "INSERT OR REPLACE INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (workstream_id, workspace.manifest.adapter_id, workspace.manifest.session_name, observation.workspace_id, observation.view_id, observation.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_json, None, None, artifacts.launch_secret_path, scope["privateGitObjectDir"], artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
             )
-        harness.commit_launch_binding(scope, artifacts)
+        harness.commit_launch_binding(
+            scope,
+            artifacts,
+            workspace_session_name=workspace.manifest.session_name,
+            workspace_id=observation.workspace_id,
+            workspace_view_id=observation.view_id,
+            workspace_surface_id=observation.surface_id,
+        )
         with store.transaction():
             _checkpoint(store, operation_id, "profile_materialized")
         _hit(failpoint, "after_policy_map_materialization", scope)
@@ -370,21 +486,21 @@ def _authorize_apply_workstream(
         raise NeedsAttentionError("runtime binding is missing")
     binding = dict(binding_row)
     if _rank(operation["step"]) < _rank("agent_started"):
-        agent_observation = workspace.observe_workstream(path=scope["worktreePath"], agent_name=scope["agentName"])
-        agent = agent_observation.agent if agent_observation is not None else None
-        if agent is not None and (agent.name != scope["agentName"] or agent.surface_id != binding["workspace_surface_id"]):
-            _mark_attention(store, operation_id, workstream_id, "workspace agent identity does not match the binding")
-            raise NeedsAttentionError("workspace agent identity does not match the binding")
         start_error: Exception | None = None
-        if agent is None or agent.name != scope["agentName"] or agent.surface_id != binding["workspace_surface_id"]:
-            with store.transaction():
-                store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,observed_state='starting',updated_at=? WHERE workstream_id=?", (utc_now(), workstream_id))
-            try:
-                workspace.start_agent(binding["workspace_surface_id"], scope["agentName"], harness.manifest.agent_kind)
-            except Exception as error:
-                start_error = error
         try:
-            _wait_for_agent(store, workspace, workstream_id=workstream_id, path=scope["worktreePath"], agent_name=scope["agentName"], workspace_id=binding["workspace_id"], surface_id=binding["workspace_surface_id"])
+            start_bound_agent(
+                store,
+                workspace,
+                harness,
+                binding,
+                workstream_id=workstream_id,
+                project_id=str(scope["projectId"]),
+                cwd=str(scope["worktreePath"]),
+            )
+        except Exception as error:
+            start_error = error
+        try:
+            _wait_for_agent(store, workspace, workstream_id=workstream_id, path=scope["worktreePath"], agent_name=scope["agentName"], workspace_id=binding["workspace_id"], view_id=binding["workspace_view_id"], surface_id=binding["workspace_surface_id"])
         except NeedsAttentionError as wait_error:
             _mark_attention(store, operation_id, workstream_id, str(wait_error))
             if start_error is not None:
@@ -402,7 +518,7 @@ def _authorize_apply_workstream(
                 after_prompt = workspace.observe_workstream(path=scope["worktreePath"], agent_name=scope["agentName"])
             except Exception as observe_error:
                 raise RuntimeError("brief delivery is ambiguous") from observe_error
-            if after_prompt is not None and (after_prompt.workspace_id != binding["workspace_id"] or after_prompt.surface_id != binding["workspace_surface_id"] or (after_prompt.agent is not None and (after_prompt.agent.name != scope["agentName"] or after_prompt.agent.surface_id != binding["workspace_surface_id"]))):
+            if after_prompt is not None and (after_prompt.workspace_id != binding["workspace_id"] or after_prompt.surface_id != binding["workspace_surface_id"] or (after_prompt.agent is not None and after_prompt.agent.surface_id != binding["workspace_surface_id"])):
                 _mark_attention(store, operation_id, workstream_id, "brief target identity does not match the binding")
                 raise NeedsAttentionError("brief target identity does not match the binding")
             try:
@@ -416,7 +532,7 @@ def _authorize_apply_workstream(
 
     if _rank(operation["step"]) < _rank("observed"):
         exact = workspace.observe_workstream(path=scope["worktreePath"], agent_name=scope["agentName"])
-        agent_mismatch = exact is not None and exact.agent is not None and (exact.agent.name != scope["agentName"] or exact.agent.surface_id != binding["workspace_surface_id"])
+        agent_mismatch = exact is not None and exact.agent is not None and exact.agent.surface_id != binding["workspace_surface_id"]
         if exact is None or exact.workspace_id != binding["workspace_id"] or exact.surface_id != binding["workspace_surface_id"] or agent_mismatch:
             _mark_attention(store, operation_id, workstream_id, "workspace identity does not match the durable binding")
             raise NeedsAttentionError("workspace identity does not match the durable binding")
@@ -497,7 +613,7 @@ def _lifecycle_operation(store: Any, *, kind: str, project_id: str, workstream_i
 
 def list_workstreams(store: Any, project_id: str) -> list[dict[str, Any]]:
     get_project(store, project_id)
-    return [dict(row) for row in store.conn.execute("SELECT w.*,r.observed_state,r.last_observed_at,r.agent_name,t.task_packet_id,t.packet_sha256 AS task_packet_sha256 FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) LEFT JOIN task_packets t USING(workstream_id) WHERE w.project_id=? ORDER BY w.created_at,w.workstream_id", (project_id,))]
+    return [dict(row) for row in store.conn.execute("SELECT w.*,r.observed_state,r.last_observed_at,r.agent_name,r.desired_generation_sha256,r.applied_generation_sha256,CASE WHEN r.desired_generation_sha256 IS NOT NULL AND r.desired_generation_sha256 IS NOT r.applied_generation_sha256 THEN 1 ELSE 0 END AS runtime_stale,t.task_packet_id,t.packet_sha256 AS task_packet_sha256 FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) LEFT JOIN task_packets t USING(workstream_id) WHERE w.project_id=? ORDER BY w.created_at,w.workstream_id", (project_id,))]
 
 
 def inspect_workstream(store: Any, project_id: str, workstream_id: str) -> dict[str, Any]:
@@ -526,7 +642,7 @@ def focus_workstream(store: Any, project_id: str, workstream_id: str, workspace:
     row = inspect_workstream(store, project_id, workstream_id)
     if row["binding"] is None or row["workstream"]["provisioning_state"] != "bound":
         raise ConflictError("workstream is not bound")
-    workspace.focus_agent(row["binding"]["workspace_surface_id"])
+    workspace.focus_pane(row["binding"]["workspace_surface_id"])
     return {"workstreamId": workstream_id, "focused": True}
 
 
@@ -582,8 +698,8 @@ def retire_workstream(store: Any, project_id: str, workstream_id: str, workspace
     if binding is not None and binding["observed_state"] in {"starting", "working", "blocked"}:
         raise ConflictError("workstream runtime is still active")
     try:
-        if binding is not None and binding["workspace_id"]:
-            workspace.close_workspace(binding["workspace_id"])
+        if binding is not None and binding["workspace_view_id"]:
+            workspace.close_tab(binding["workspace_view_id"])
         now = utc_now()
         with store.transaction():
             result = {"workstreamId": workstream_id, "branchRetained": row["branch_name"], "checkoutRetained": row["worktree_path"]}

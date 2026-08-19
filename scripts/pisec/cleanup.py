@@ -34,6 +34,26 @@ def _safe_owned_tree(path: Path) -> None:
                 raise NeedsAttentionError("cleanup tree crosses a filesystem boundary")
 
 
+
+def _validate_retained_session_root(binding: Mapping[str, Any], harness: HarnessAdapter) -> Path:
+    harness_home = Path(str(binding["harness_home"])).absolute()
+    session_root = harness_home / "sessions"
+    for path, expected_mode in ((harness_home, 0o700), (session_root, 0o700)):
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise NeedsAttentionError("retained OMP session root is unavailable") from error
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != expected_mode:
+            raise NeedsAttentionError("retained OMP session root is unsafe")
+    for directory, names, files in os.walk(session_root, topdown=True, followlinks=False):
+        for name in [*names, *files]:
+            child = Path(directory) / name
+            info = child.lstat()
+            if info.st_uid != os.geteuid() or stat.S_ISLNK(info.st_mode) or info.st_mode & 0o022:
+                raise NeedsAttentionError("retained OMP session tree is unsafe")
+    harness.validate_native_session(binding, binding.get("native_session_kind"), binding.get("native_session_value"))
+    return session_root
+
 def cleanup_workstream(store: Any, payload: Mapping[str, Any], workspace: WorkspaceAdapter, harness: HarnessAdapter) -> dict[str, Any]:
     required = {"workstreamId", "confirm"}
     optional = {"project", "forceDirty"}
@@ -92,8 +112,8 @@ def cleanup_workstream(store: Any, payload: Mapping[str, Any], workspace: Worksp
             raise NeedsAttentionError("managed worktree path is not canonical")
         if worktree.exists() and worktree.name != workstream_id:
             raise NeedsAttentionError("managed worktree basename does not match workstream")
-        if binding is not None and binding["workspace_id"]:
-            workspace.close_workspace(binding["workspace_id"])
+        if binding is not None and binding["workspace_view_id"]:
+            workspace.close_tab(binding["workspace_view_id"])
         branch_before = _git(Path(project["repository_path"]), "for-each-ref", "--format=%(refname:short)", f"refs/heads/{row['branch_name']}")
         if branch_before.strip() != row["branch_name"]:
             raise NeedsAttentionError("retired workstream branch is missing before cleanup")
@@ -108,13 +128,32 @@ def cleanup_workstream(store: Any, payload: Mapping[str, Any], workspace: Worksp
         branch_after = _git(Path(project["repository_path"]), "for-each-ref", "--format=%(refname:short)", f"refs/heads/{row['branch_name']}")
         if branch_after.strip() != row["branch_name"]:
             raise NeedsAttentionError("cleanup unexpectedly removed the retained branch")
+        retained_root: Path | None = None
+        if binding is not None:
+            retained_root = _validate_retained_session_root(binding, harness)
+            existing_root = store.conn.execute("SELECT * FROM retained_session_roots WHERE workstream_id=?", (workstream_id,)).fetchone()
+            if existing_root is not None and (
+                existing_root["harness_id"] != binding["harness_id"]
+                or existing_root["harness_home"] != binding["harness_home"]
+                or existing_root["native_session_kind"] != binding["native_session_kind"]
+                or existing_root["native_session_value"] != binding["native_session_value"]
+            ):
+                raise NeedsAttentionError("retained session root identity drifted")
+            if existing_root is None:
+                with store.transaction():
+                    store.conn.execute(
+                        "INSERT INTO retained_session_roots(workstream_id,harness_id,harness_home,native_session_kind,native_session_value,retained_at) VALUES(?,?,?,?,?,?)",
+                        (workstream_id, binding["harness_id"], binding["harness_home"], binding["native_session_kind"], binding["native_session_value"], utc_now()),
+                    )
+                    store.conn.execute("UPDATE operations SET step='retention_recorded',updated_at=? WHERE operation_id=?", (utc_now(), operation_id))
         if binding is not None:
             harness.cleanup_binding(binding)
         now = utc_now()
         with store.transaction():
-            store.conn.execute("UPDATE runtime_bindings SET observed_state='stopped',workspace_id=NULL,workspace_view_id=NULL,workspace_surface_id=NULL,updated_at=? WHERE workstream_id=?", (now, workstream_id))
-            store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?", (canonical_json({"workstreamId": workstream_id, "branchRetained": True}), now, operation_id))
-            append_event_in_transaction(store.conn, kind="workstream.cleaned", project_id=project["project_id"], workstream_id=workstream_id, operation_id=operation_id, payload={"workstreamId": workstream_id, "branchRetained": True})
+            store.conn.execute("DELETE FROM runtime_bindings WHERE workstream_id=?", (workstream_id,))
+            result = {"workstreamId": workstream_id, "branchRetained": True, "retainedSessionRoot": None if retained_root is None else str(retained_root)}
+            store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?", (canonical_json(result), now, operation_id))
+            append_event_in_transaction(store.conn, kind="workstream.cleaned", project_id=project["project_id"], workstream_id=workstream_id, operation_id=operation_id, payload=result)
         return {"operation": dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation_id,)).fetchone()), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone()), "reused": False}
     except ConflictError:
         raise
