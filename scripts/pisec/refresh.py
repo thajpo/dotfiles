@@ -8,6 +8,7 @@ import time
 from typing import Any, Mapping
 
 from .adapters import HarnessAdapter, WorkspaceAdapter, artifact_document
+from .fence import resolve_data_dirs
 from .models import NeedsAttentionError, PisecError, utc_now
 from .runtime import start_bound_agent
 
@@ -26,6 +27,14 @@ def _binding_scope(store: Any, binding: Mapping[str, Any]) -> dict[str, Any]:
         raise NeedsAttentionError("runtime generation scope is invalid") from error
     if not isinstance(scope, dict) or scope.get("workstreamId") != binding["workstream_id"] or scope.get("projectId") != binding["project_id"]:
         raise NeedsAttentionError("runtime generation scope does not match the binding")
+    project = store.conn.execute("SELECT repository_path,data_dirs FROM projects WHERE project_id=?", (binding["project_id"],)).fetchone()
+    if project is not None:
+        try:
+            data_dirs = json.loads(str(project["data_dirs"])) if project["data_dirs"] else []
+        except (TypeError, json.JSONDecodeError):
+            data_dirs = []
+        scope = dict(scope)
+        scope["dataDirs"] = resolve_data_dirs(data_dirs, Path(project["repository_path"]))
     return scope
 
 

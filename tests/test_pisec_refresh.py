@@ -5,6 +5,7 @@ import unittest
 from scripts.pisec.adapters import AdapterRegistry
 from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.pi_store import PiStore
+from scripts.pisec.refresh import _binding_scope
 from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
 
 
@@ -83,6 +84,15 @@ class RuntimeRefreshTests(unittest.TestCase):
             workstream = store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (self.workstream_id,)).fetchone()
             self.assertEqual(binding["applied_generation_sha256"], binding["desired_generation_sha256"])
             self.assertEqual(workstream["provisioning_state"], "bound")
+
+    def test_binding_scope_injects_project_data_dirs(self):
+        data = self.repo / "data"
+        data.mkdir()
+        self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "dataDirs": [str(data)]})
+        with PiStore(self.root / "state") as store:
+            binding = store.conn.execute("SELECT r.*,w.kind,w.project_id FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?", (self.workstream_id,)).fetchone()
+            scope = _binding_scope(store, binding)
+            self.assertIn(str(data.resolve()), scope["dataDirs"])
 
     def test_working_runtime_is_pending_and_not_interrupted(self):
         with PiStore(self.root / "state") as store:

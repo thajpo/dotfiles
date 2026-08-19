@@ -434,14 +434,17 @@ class OmpHarnessAdapter:
                 copied_surface_digest = _tree_digest(snapshot)
             self._surface_digest_cache = (time.monotonic(), copied_surface_digest)
         policy_sources = repository / "pisec" / "fence"
+        scope_dict = {
+            key: scope.get(key)
+            for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "externalDomains")
+        }
+        if scope.get("dataDirs"):
+            scope_dict["dataDirs"] = scope["dataDirs"]
         manifest = {
             "schemaVersion": 1,
             "adapter": self.manifest.adapter_id,
             "adapterVersion": self.manifest.version_label,
-            "scope": {
-                key: scope.get(key)
-                for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "externalDomains")
-            },
+            "scope": scope_dict,
             "config": self.config,
             "copiedSurfaceSha256": copied_surface_digest,
             "pisecExtensionSha256": _file_digest(repository / "omp" / "extensions" / "pisec.ts"),
