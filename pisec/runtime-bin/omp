@@ -290,8 +290,8 @@ def validate_durable_binding(descriptor: dict[str, object]) -> sqlite3.Row:
         or row["execution_profile"] != descriptor["executionProfile"]
         or row["worktree_path"] != descriptor["canonicalRoot"]
         or row["desired_state"] != "active"
-        or row["provisioning_state"] not in {"creating", "bound"}
-        or row["observed_state"] in {"stopped", "missing", "error"}
+        or row["provisioning_state"] not in {"creating", "bound", "needs_attention"}
+        or row["observed_state"] in {"working", "blocked"}
     ):
         fail("durable binding identity or lifecycle state does not match")
     if descriptor["role"] == "worker" and row["private_git_object_dir"] != descriptor["privateGitObjectDir"]:

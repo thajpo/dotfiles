@@ -54,10 +54,8 @@ def start_bound_agent(
                 raise NeedsAttentionError("runtime binding cwd does not match the approved root")
         elif row[key] != value:
             raise NeedsAttentionError("runtime binding identity does not match durable state")
-    if row["desired_state"] != "active" or row["provisioning_state"] not in {"creating", "bound"}:
+    if row["desired_state"] != "active" or row["provisioning_state"] not in {"creating", "bound", "needs_attention"}:
         raise NeedsAttentionError("runtime binding is not active")
-    if row["observed_state"] in {"missing", "error"}:
-        raise NeedsAttentionError("runtime binding is not runnable")
     harness.validate_native_session(dict(row), row["native_session_kind"], row["native_session_value"])
     observation = workspace.observe_surface(
         workspace_id=str(row["workspace_id"]),

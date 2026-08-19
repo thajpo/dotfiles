@@ -565,6 +565,31 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("durable binding identity", result.stderr)
 
+    def test_private_binding_recovers_from_needs_attention_error_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested, entry, launcher = self.make_shim_binding(root, role="secretary", selected=True)
+            connection = sqlite3.connect(root / "state" / "control.db")
+            connection.execute("UPDATE workstreams SET provisioning_state='needs_attention'")
+            connection.execute("UPDATE runtime_bindings SET observed_state='error'")
+            connection.commit()
+            connection.close()
+            environment = os.environ.copy()
+            environment.update({"HOME": str(root / "home"), "HERDR_SESSION": "main", "HERDR_PANE_ID": "w1:p1"})
+            result = subprocess.run([str(launcher), f"--resume={root / 'state' / 'agent' / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            captured = json.loads(result.stdout)
+            self.assertIn("--approval-mode=yolo", captured["argv"])
+            # busy runtimes remain refused
+            connection = sqlite3.connect(root / "state" / "control.db")
+            connection.execute("UPDATE workstreams SET provisioning_state='bound'")
+            connection.execute("UPDATE runtime_bindings SET observed_state='blocked'")
+            connection.commit()
+            connection.close()
+            busy = subprocess.run([str(launcher), f"--resume={root / 'state' / 'agent' / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)
+            self.assertNotEqual(busy.returncode, 0)
+            self.assertIn("durable binding identity", busy.stderr)
+
     def test_worker_binding_sets_private_git_capabilities(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
