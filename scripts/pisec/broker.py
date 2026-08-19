@@ -29,6 +29,7 @@ from .research import (
     claim_research,
     decline_research,
     get_task_packet,
+    inspect_research,
     list_research_requests,
     list_unacknowledged_research,
     mark_research_wake_notified,
@@ -40,8 +41,8 @@ from .runtime import WORKSPACE_RUNTIME_MISSING, prepare_session_switch, report_r
 from .secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge, push_branch
 from .workstreams import authorize_apply_workstream, complete_workstream, focus_workstream, inspect_workstream, list_workstreams, prepare_workstream, retire_workstream, send_workstream
 ADMIN_OPERATIONS = frozenset({"project.register", "project.list", "project.open", "project.refresh", "secretary.ensure", "secretary.focus", "workstream.focus", "workstream.cleanup", "system.status", "system.reconcile", "system.doctor", "workspace.startup", "workspace.event", "presentation.snapshot"})
-SECRETARY_OPERATIONS = frozenset({"project.status", "git.status", "git.push", "git.workstream_changes", "git.merge.prepare", "git.merge.apply", "workstream.list", "workstream.inspect", "workstream.prepare", "workstream.authorize_apply", "workstream.send", "workstream.focus", "workstream.complete", "workstream.retire", "decision.list", "decision.record", "decision.resolve", "research.list", "research.claim", "research.request_context", "research.answer", "research.decline"})
-RUNTIME_OPERATIONS = frozenset({"runtime.report", "runtime.turn.prepare", "session.switch.prepare", "task.get", "research.request", "research.list", "research.add_context", "research.acknowledge"})
+SECRETARY_OPERATIONS = frozenset({"project.status", "git.status", "git.push", "git.workstream_changes", "git.merge.prepare", "git.merge.apply", "workstream.list", "workstream.inspect", "workstream.prepare", "workstream.authorize_apply", "workstream.send", "workstream.focus", "workstream.complete", "workstream.retire", "decision.list", "decision.record", "decision.resolve", "research.list", "research.inspect", "research.claim", "research.request_context", "research.answer", "research.decline"})
+RUNTIME_OPERATIONS = frozenset({"runtime.report", "runtime.turn.prepare", "session.switch.prepare", "task.get", "research.request", "research.list", "research.inspect", "research.add_context", "research.acknowledge"})
 WORKSPACE_STARTUP_GRACE_SECONDS = 2.0
 WORKSPACE_RECONCILE_INTERVAL_SECONDS = 5.0
 RUNTIME_RESTART_BACKOFF_SECONDS = 30.0
@@ -447,8 +448,12 @@ class BrokerDispatcher:
             self._queue_research_wake(project_id)
             return result
         if operation == "research.list":
-            _exact(payload, auth_fields)
-            return {"requests": list_research_requests(store, project_id=project_id, workstream_id=workstream_id)}
+            _exact(payload, auth_fields, {"state", "limit"})
+            states = None if payload.get("state") is None else {payload["state"]}
+            return {"requests": list_research_requests(store, project_id=project_id, workstream_id=workstream_id, states=states, limit=int(payload.get("limit", 32)))}
+        if operation == "research.inspect":
+            _exact(payload, auth_fields | {"requestId"})
+            return inspect_research(store, project_id=project_id, workstream_id=workstream_id, request_id=payload["requestId"])
         if operation == "research.add_context":
             _exact(payload, auth_fields | {"requestId", "idempotencyKey", "context"})
             result = add_research_context(store, project_id=project_id, workstream_id=workstream_id, request_id=payload["requestId"], idempotency_key=payload["idempotencyKey"], context=payload["context"])
@@ -662,6 +667,9 @@ class BrokerDispatcher:
             _exact(payload, set(), {"state", "limit", "workstreamId"})
             states = None if payload.get("state") is None else {payload["state"]}
             return {"requests": list_research_requests(store, project_id=project_id, workstream_id=payload.get("workstreamId"), states=states, limit=int(payload.get("limit", 32)))}
+        if operation == "research.inspect":
+            _exact(payload, {"requestId"}, {"workstreamId"})
+            return inspect_research(store, project_id=project_id, request_id=payload["requestId"], workstream_id=payload.get("workstreamId"))
         if operation == "research.claim":
             _exact(payload, {"requestId"})
             return claim_research(store, project_id=project_id, secretary_workstream_id=secretary_workstream_id, request_id=payload["requestId"])

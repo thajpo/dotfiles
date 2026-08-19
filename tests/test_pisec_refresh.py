@@ -57,6 +57,33 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.assertEqual(len(second["skipped"]), 1)
         self.assertEqual(len([call for call in self.workspace.calls if call[0] == "stop"]), stop_count)
 
+    def test_refresh_recovers_stopped_stale_needs_attention_binding(self):
+        with PiStore(self.root / "state") as store:
+            row = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            store.conn.execute(
+                "UPDATE runtime_bindings SET observed_state='stopped',applied_generation_sha256=? WHERE workstream_id=?",
+                ("a" * 64, self.workstream_id),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='workspace runtime is missing' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+            self.assertNotEqual("a" * 64, row["desired_generation_sha256"])
+        self.workspace.stop_runtime(self.identity[2])
+        first = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+        self.assertTrue(first["ok"])
+        self.assertEqual(len(first["upgraded"]), 1)
+        upgraded = first["upgraded"][0]
+        self.assertEqual(
+            (upgraded["workspaceId"], upgraded["viewId"], upgraded["surfaceId"], upgraded["nativeSessionValue"]),
+            self.identity,
+        )
+        with PiStore(self.root / "state") as store:
+            binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            workstream = store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            self.assertEqual(binding["applied_generation_sha256"], binding["desired_generation_sha256"])
+            self.assertEqual(workstream["provisioning_state"], "bound")
+
     def test_working_runtime_is_pending_and_not_interrupted(self):
         with PiStore(self.root / "state") as store:
             store.conn.execute("UPDATE runtime_bindings SET observed_state='working' WHERE workstream_id=?", (self.workstream_id,))

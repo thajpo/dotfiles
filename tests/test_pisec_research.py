@@ -7,10 +7,10 @@ import unittest
 
 from scripts.pisec.adapters import AdapterRegistry
 from scripts.pisec.broker import BrokerDispatcher
-from scripts.pisec.models import AuthorizationError, IdempotencyConflictError, InvalidRequestError
+from scripts.pisec.models import AuthorizationError, IdempotencyConflictError, InvalidRequestError, NotFoundError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
-from scripts.pisec.research import list_unacknowledged_research, research_counts, validate_research_request
+from scripts.pisec.research import inspect_research, list_research_requests, list_unacknowledged_research, research_counts, validate_research_request
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
 from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
@@ -114,6 +114,22 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(answered_replay["state"], "answered")
         packet_count = store.conn.execute("SELECT count(*) FROM research_packets WHERE request_id=?", (first["request_id"],)).fetchone()[0]
         self.assertEqual(packet_count, 4)
+        listed = dispatcher.dispatch("runtime", "research.list", auth)
+        listed_requests = [r for r in listed["requests"] if r["request_id"] == first["request_id"]]
+        self.assertEqual(len(listed_requests), 1)
+        self.assertEqual(listed_requests[0]["state"], "answered")
+        self.assertEqual(listed_requests[0]["packetCount"], 4)
+        self.assertNotIn("payload", listed_requests[0]["packets"][0])
+        inspected = dispatcher.dispatch("runtime", "research.inspect", {**auth, "requestId": first["request_id"]})
+        self.assertEqual(inspected["state"], "answered")
+        self.assertEqual(len(inspected["packets"]), 4)
+        result_packet = next(p for p in inspected["packets"] if p["kind"] == "result")
+        self.assertEqual(result_packet["payload"], result_payload)
+        with self.assertRaises(NotFoundError):
+            dispatcher.dispatch("runtime", "research.inspect", {**auth, "requestId": "wrq_" + "a" * 32})
+        secretary_inspect = dispatcher.dispatch("secretary", "research.inspect", {**secretary_auth, "requestId": first["request_id"]})
+        self.assertEqual(secretary_inspect["state"], "answered")
+        self.assertEqual(len(secretary_inspect["packets"]), 4)
         unack = list_unacknowledged_research(store, project_id=str(project_a["project_id"]), workstream_id=str(worker_a["workstream_id"]))
         self.assertEqual(unack[0]["state"], "answered")
         dispatcher.dispatch("runtime", "research.acknowledge", {**auth, "requestId": first["request_id"]})

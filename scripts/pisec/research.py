@@ -274,13 +274,16 @@ def _increment_inbox(connection: Any, project_id: str) -> int:
 
 def _request_projection(store: Any, row: Mapping[str, Any], *, include_packets: bool = True) -> dict[str, Any]:
     result = {key: row[key] for key in ("request_id", "project_id", "workstream_id", "task_packet_id", "idempotency_key", "request_sha256", "state", "claimed_by_secretary_workstream_id", "created_at", "updated_at", "answered_at", "acknowledged_at")}
-    if include_packets:
-        packets = []
-        for packet in store.conn.execute("SELECT packet_id,request_id,actor,kind,idempotency_key,payload_json,payload_sha256,created_at FROM research_packets WHERE request_id=? ORDER BY sequence", (row["request_id"],)):
-            item = dict(packet)
+    packets = []
+    for packet in store.conn.execute("SELECT packet_id,request_id,actor,kind,idempotency_key,payload_json,payload_sha256,created_at FROM research_packets WHERE request_id=? ORDER BY sequence", (row["request_id"],)):
+        item = dict(packet)
+        if include_packets:
             item["payload"] = json.loads(item.pop("payload_json"))
-            packets.append(item)
-        result["packets"] = packets
+        else:
+            item.pop("payload_json", None)
+        packets.append(item)
+    result["packets"] = packets
+    result["packetCount"] = len(packets)
     return result
 
 
@@ -364,13 +367,27 @@ def list_research_requests(store: Any, *, project_id: str, workstream_id: str | 
         clauses.append("state IN (" + ",".join("?" for _ in states) + ")")
         args.extend(sorted(states))
     rows = store.conn.execute("SELECT * FROM research_requests WHERE " + " AND ".join(clauses) + " ORDER BY created_at,request_id LIMIT ?", (*args, limit)).fetchall()
-    return [_request_projection(store, row) for row in rows]
+    return [_request_projection(store, row, include_packets=False) for row in rows]
 
 
 def list_unacknowledged_research(store: Any, *, project_id: str, workstream_id: str) -> list[dict[str, Any]]:
     _workstream(store, project_id, workstream_id, worker_only=True)
     rows = store.conn.execute("SELECT * FROM research_requests WHERE project_id=? AND workstream_id=? AND state IN ('needs_context','answered','declined') ORDER BY created_at,request_id", (project_id, workstream_id)).fetchall()
     return [_request_projection(store, row) for row in rows]
+
+
+def inspect_research(store: Any, *, project_id: str, request_id: str, workstream_id: str | None = None) -> dict[str, Any]:
+    validate_id(request_id, prefix="wrq")
+    clauses = ["project_id=?"]
+    args: list[Any] = [project_id]
+    if workstream_id is not None:
+        _workstream(store, project_id, workstream_id, worker_only=True)
+        clauses.append("workstream_id=?")
+        args.append(workstream_id)
+    row = store.conn.execute("SELECT * FROM research_requests WHERE " + " AND ".join(clauses) + " AND request_id=?", (*args, request_id)).fetchone()
+    if row is None:
+        raise NotFoundError("research request was not found")
+    return _request_projection(store, row)
 
 
 def claim_research(store: Any, *, project_id: str, secretary_workstream_id: str, request_id: str) -> dict[str, Any]:

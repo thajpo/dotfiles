@@ -35,7 +35,7 @@ def _active_bindings(store: Any) -> list[dict[str, Any]]:
         for row in store.conn.execute(
             "SELECT r.*,w.project_id,w.kind,w.execution_profile,w.worktree_path,w.desired_state,w.provisioning_state,p.display_name "
             "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) JOIN projects p USING(project_id) "
-            "WHERE w.desired_state='active' AND w.provisioning_state='bound' "
+            "WHERE w.desired_state='active' AND w.provisioning_state IN ('bound','needs_attention') "
             "ORDER BY p.display_name,w.kind,w.created_at,w.workstream_id"
         )
     ]
@@ -213,6 +213,10 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
                 workstream_id,
             ),
         )
+        store.conn.execute(
+            "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?",
+            (now, workstream_id),
+        )
     refreshed = _runtime_state(store, workstream_id)
     start_bound_agent(
         store,
@@ -245,6 +249,16 @@ def refresh_projects(
     for item in marked["current"]:
         result["skipped"].append({**item, "reason": "current generation"})
     stale_ids = [str(item["workstreamId"]) for item in marked["stale"]]
+    if stale_ids:
+        placeholders = ",".join("?" for _ in stale_ids)
+        recoverable = {
+            str(row[0])
+            for row in store.conn.execute(
+                "SELECT workstream_id FROM runtime_bindings WHERE workstream_id IN (" + placeholders + ") AND observed_state <> 'missing'",
+                stale_ids,
+            )
+        }
+        stale_ids = [workstream_id for workstream_id in stale_ids if workstream_id in recoverable]
     if marked["stale"]:
         generations = {str(item["generation"]) for item in marked["stale"]}
         result["generation"] = next(iter(generations)) if len(generations) == 1 else "per-binding"

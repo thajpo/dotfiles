@@ -25,6 +25,7 @@ SECRETARY_TOOLS = [
     "pisec_record_decision",
     "pisec_resolve_decision",
     "pisec_list_worker_research_requests",
+    "pisec_inspect_worker_research",
     "pisec_claim_worker_research",
     "pisec_request_worker_research_context",
     "pisec_answer_worker_research",
@@ -34,6 +35,7 @@ WORKER_TOOLS = [
     "pisec_show_task_packet",
     "pisec_request_secretary_research",
     "pisec_check_secretary_research",
+    "pisec_inspect_secretary_research",
     "pisec_add_secretary_research_context",
     "pisec_acknowledge_secretary_research",
 ]
