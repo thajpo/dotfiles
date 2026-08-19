@@ -213,6 +213,19 @@ def render_policy(
             raise NeedsAttentionError("approved data dir is a symlink or resolves elsewhere")
         rendered_data.append(str(resolved))
     replacements["${DATA_DIRS}"] = rendered_data
+    python_env = scope.get("pythonEnv")
+    rendered_env: list[str] = []
+    if python_env is not None:
+        if not isinstance(python_env, str) or not python_env or len(python_env) > 4096 or "\x00" in python_env:
+            raise InvalidRequestError("approved python env is invalid")
+        env_path = Path(python_env)
+        if not env_path.is_absolute():
+            raise InvalidRequestError("approved python env must be absolute")
+        resolved_env = env_path.resolve(strict=False)
+        if resolved_env != env_path:
+            raise NeedsAttentionError("approved python env is a symlink or resolves elsewhere")
+        rendered_env.append(str(resolved_env))
+    replacements["${PYTHON_ENV}"] = rendered_env
     policy = _substitute(template, replacements)
     text = canonical_json(policy, max_bytes=256 * 1024, max_text=8192) + "\n"
     output = Path(state_root) / "fence" / f"{workstream_id}.json"

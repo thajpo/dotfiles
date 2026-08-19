@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.pisec.models import IdempotencyConflictError, NeedsAttentionError, ScopeMismatchError
+from scripts.pisec.models import IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, ScopeMismatchError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.projects import register_project
@@ -63,6 +63,33 @@ class WorkstreamTests(unittest.TestCase):
         self.assertEqual(store.conn.execute("SELECT count(*) FROM workstreams").fetchone()[0], 2)
         with self.assertRaises(IdempotencyConflictError):
             prepare_workstream(store, project_id=project["project_id"], title="Different", purpose="Ship exact behavior", brief="Implement and verify the parser without unrelated changes.", task_packet={"schemaVersion": 1, "outcome": "Parser behavior is implemented and verified.", "boundaries": ["Change the parser only."], "acceptance": ["Parser tests pass."], "openQuestions": [], "evidence": ["Test output."]}, idempotency_key="create-1", harness=harness, workspace=workspace, work_root=root / "worktrees", object_root=root / "objects")
+
+    def test_prepare_carries_python_env_into_scope(self):
+        temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
+        self.addCleanup(temp.cleanup)
+        self.addCleanup(store.close)
+        env_dir = root / "venv"
+        env_dir.mkdir()
+        task_packet = {"schemaVersion": 1, "outcome": "Parser behavior is implemented and verified.", "boundaries": ["Change the parser only."], "acceptance": ["Parser tests pass."], "openQuestions": [], "evidence": ["Test output."]}
+        prepared = prepare_workstream(store, project_id=project["project_id"], title="Implement parser", purpose="Ship exact behavior", brief="Implement and verify the parser without unrelated changes.", task_packet=task_packet, idempotency_key="create-env", harness=harness, workspace=workspace, work_root=root / "worktrees", object_root=root / "objects", python_env=str(env_dir))
+        self.assertEqual(prepared["approvalScope"]["pythonEnv"], str(env_dir.resolve()))
+        plain = self.prepare(root, store, project, harness, workspace, key="create-plain")
+        self.assertIn("pythonEnv", plain["approvalScope"])
+        self.assertIsNone(plain["approvalScope"]["pythonEnv"])
+
+    def test_prepare_rejects_invalid_python_env(self):
+        temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
+        self.addCleanup(temp.cleanup)
+        self.addCleanup(store.close)
+        task_packet = {"schemaVersion": 1, "outcome": "Parser behavior is implemented and verified.", "boundaries": ["Change the parser only."], "acceptance": ["Parser tests pass."], "openQuestions": [], "evidence": ["Test output."]}
+        with self.assertRaises(InvalidRequestError):
+            prepare_workstream(store, project_id=project["project_id"], title="Implement parser", purpose="Ship exact behavior", brief="Implement and verify the parser without unrelated changes.", task_packet=task_packet, idempotency_key="create-rel", harness=harness, workspace=workspace, work_root=root / "worktrees", object_root=root / "objects", python_env="relative/venv")
+        real_env = root / "real-venv"
+        real_env.mkdir()
+        env_link = root / "venv-link"
+        env_link.symlink_to(real_env, target_is_directory=True)
+        with self.assertRaises(NeedsAttentionError):
+            prepare_workstream(store, project_id=project["project_id"], title="Implement parser", purpose="Ship exact behavior", brief="Implement and verify the parser without unrelated changes.", task_packet=task_packet, idempotency_key="create-link", harness=harness, workspace=workspace, work_root=root / "worktrees", object_root=root / "objects", python_env=str(env_link))
 
     def test_proposal_commit_replays_after_crash(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()

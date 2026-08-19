@@ -633,9 +633,9 @@ class BrokerDispatcher:
             _exact(payload, {"workstreamId"})
             return _public_inspect(inspect_workstream(store, project_id, payload["workstreamId"]))
         if operation == "workstream.prepare":
-            _exact(payload, {"title", "purpose", "brief", "taskPacket", "idempotencyKey"}, {"targetRef", "executionProfile", "externalDomains"})
+            _exact(payload, {"title", "purpose", "brief", "taskPacket", "idempotencyKey"}, {"targetRef", "executionProfile", "externalDomains", "pythonEnv"})
             profile = payload.get("executionProfile", "worker-default")
-            prepared = prepare_workstream(store, project_id=project_id, title=payload["title"], purpose=payload["purpose"], brief=payload["brief"], task_packet=payload["taskPacket"], idempotency_key=payload["idempotencyKey"], harness=self.harness, workspace=self.workspace, target_ref=payload.get("targetRef"), execution_profile=profile, external_domains=payload.get("externalDomains", []))
+            prepared = prepare_workstream(store, project_id=project_id, title=payload["title"], purpose=payload["purpose"], brief=payload["brief"], task_packet=payload["taskPacket"], idempotency_key=payload["idempotencyKey"], harness=self.harness, workspace=self.workspace, target_ref=payload.get("targetRef"), execution_profile=profile, external_domains=payload.get("externalDomains", []), python_env=payload.get("pythonEnv"))
             return {"operation": _public_operation(prepared["operation"]), "workstream": _public_workstream(prepared["workstream"]), "approvalScope": prepared["approvalScope"]}
         if operation == "workstream.authorize_apply":
             _exact(payload, {"approvalScope"})

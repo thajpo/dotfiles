@@ -34,13 +34,13 @@ _FULL_SCOPE_FIELDS = frozenset({
     "operationId", "workstreamId", "projectId", "title", "purpose", "brief",
     "harnessId", "workspaceAdapterId", "executionProfile", "targetRef", "baseCommitOid", "branchName",
     "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "agentName",
-    "externalDomains", "dataDirs", "effects", "nonEffects", "taskPacket",
+    "externalDomains", "dataDirs", "pythonEnv", "effects", "nonEffects", "taskPacket",
 })
 _PUBLIC_SCOPE_FIELDS = _FULL_SCOPE_FIELDS - {"privateGitObjectDir", "gitCommonObjectDir"}
 
 
 def _public_scope(scope: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: scope[key] for key in sorted(_PUBLIC_SCOPE_FIELDS)}
+    return {key: scope[key] for key in sorted(_PUBLIC_SCOPE_FIELDS) if key in scope}
 
 
 def _resolve_scope(store: Any, operation: Mapping[str, Any], supplied: Mapping[str, Any]) -> dict[str, Any]:
@@ -48,12 +48,12 @@ def _resolve_scope(store: Any, operation: Mapping[str, Any], supplied: Mapping[s
         proposal = json.loads(str(operation["result_json"]))
     except (TypeError, json.JSONDecodeError) as error:
         raise ScopeMismatchError("workstream proposal is invalid") from error
-    if not isinstance(proposal, dict) or set(proposal) != _FULL_SCOPE_FIELDS:
+    if not isinstance(proposal, dict) or set(proposal) - {"pythonEnv"} != _FULL_SCOPE_FIELDS - {"pythonEnv"}:
         raise ScopeMismatchError("workstream proposal fields are invalid")
-    if set(supplied) == _FULL_SCOPE_FIELDS:
+    if set(supplied) == _FULL_SCOPE_FIELDS or set(supplied) == _FULL_SCOPE_FIELDS - {"pythonEnv"}:
         if canonical_json(supplied) != canonical_json(proposal):
             raise ScopeMismatchError("approval scope differs from the immutable proposal")
-    elif set(supplied) == _PUBLIC_SCOPE_FIELDS:
+    elif set(supplied) == _PUBLIC_SCOPE_FIELDS or set(supplied) == _PUBLIC_SCOPE_FIELDS - {"pythonEnv"}:
         if canonical_json(supplied) != canonical_json(_public_scope(proposal)):
             raise ScopeMismatchError("approval scope differs from the immutable proposal")
     else:
@@ -103,6 +103,7 @@ def prepare_workstream(
     execution_profile: str = "worker-default",
     target_ref: str | None = None,
     external_domains: tuple[str, ...] | list[str] = (),
+    python_env: str | None = None,
     work_root: Path | None = None,
     object_root: Path | None = None,
     failpoint: Failpoint | None = None,
@@ -117,6 +118,18 @@ def prepare_workstream(
     if not isinstance(external_domains, (list, tuple)):
         raise InvalidRequestError("external domains must be a list")
     domains = list(harness.profile_domains(execution_profile, external_domains))
+    if python_env is None:
+        normalized_python_env = None
+    else:
+        if not isinstance(python_env, str) or not python_env or len(python_env) > 4096 or "\x00" in python_env:
+            raise InvalidRequestError("python env must be an absolute path")
+        env_path = Path(python_env)
+        if not env_path.is_absolute():
+            raise InvalidRequestError("python env must be an absolute path")
+        resolved_env = env_path.resolve(strict=False)
+        if resolved_env != env_path:
+            raise NeedsAttentionError("python env is a symlink or resolves elsewhere")
+        normalized_python_env = str(resolved_env)
     selected_ref = bounded_text(target_ref or project["default_ref"], name="target_ref", limit=512)
     if selected_ref.startswith("-") or any(ord(char) < 0x20 for char in selected_ref):
         raise InvalidRequestError("target_ref contains unsafe characters")
@@ -131,6 +144,7 @@ def prepare_workstream(
         "executionProfile": execution_profile,
         "targetRef": selected_ref,
         "externalDomains": domains,
+        "pythonEnv": normalized_python_env,
     }
     request_sha = json_digest(caller_request)
     existing = store.conn.execute("SELECT * FROM operations WHERE idempotency_key=?", (idempotency_key,)).fetchone()
@@ -138,7 +152,7 @@ def prepare_workstream(
         if existing["kind"] != "workstream.create" or existing["request_sha256"] != request_sha:
             raise IdempotencyConflictError("idempotency key is already bound to another request")
         scope = json.loads(existing["result_json"])
-        if not isinstance(scope, dict) or set(scope) != _FULL_SCOPE_FIELDS:
+        if not isinstance(scope, dict) or set(scope) - {"pythonEnv"} != _FULL_SCOPE_FIELDS - {"pythonEnv"}:
             raise ScopeMismatchError("stored workstream proposal is invalid")
         return {"operation": dict(existing), "workstream": _workstream(store, scope["workstreamId"]), "approvalScope": _public_scope(scope)}
 
@@ -171,6 +185,7 @@ def prepare_workstream(
         "agentName": agent_name,
         "externalDomains": domains,
         "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),
+        "pythonEnv": normalized_python_env,
         "effects": ["create branch and execution workspace", "register private Git object store", "start fenced harness agent", "deliver full brief"],
         "nonEffects": ["no push", "no merge", "no cleanup", "no branch deletion"],
         "taskPacket": normalized_task_packet,

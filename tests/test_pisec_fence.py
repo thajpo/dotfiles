@@ -256,6 +256,63 @@ class FencePolicyAndShimTests(unittest.TestCase):
             checked = subprocess.run(["fence", "config", "show", "--settings", str(policy_path)], text=True, capture_output=True)
             self.assertEqual(checked.returncode, 0, checked.stderr)
 
+    def test_rendered_worker_policy_exposes_approved_python_env_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree, common, workstream_id, branch = self.make_linked_repo(root)
+            state = root / "state"
+            project_id = new_id("prj")
+            private = state / "git-objects" / project_id / workstream_id / "objects"
+            (private / "info").mkdir(parents=True)
+            (private / "pack").mkdir()
+            agent = state / "omp" / workstream_id
+            agent.mkdir(parents=True)
+            env_dir = root / "shared-venv"
+            env_dir.mkdir()
+            (env_dir / "pyvenv.cfg").write_text("home = /usr/bin\n")
+            scope = {"projectId": project_id, "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS), "pythonEnv": str(env_dir)}
+            policy_path, digest = render(scope, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
+            policy = json.loads(policy_path.read_text())
+            self.assertIn(str(env_dir.resolve()), policy["filesystem"]["allowRead"])
+            self.assertNotIn(str(env_dir.resolve()), policy["filesystem"]["allowWrite"])
+            self.assertEqual(hashlib.sha256(policy_path.read_bytes()).hexdigest(), digest)
+
+    def test_rendered_worker_policy_omits_python_env_when_unset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree, common, workstream_id, branch = self.make_linked_repo(root)
+            state = root / "state"
+            project_id = new_id("prj")
+            private = state / "git-objects" / project_id / workstream_id / "objects"
+            (private / "info").mkdir(parents=True)
+            (private / "pack").mkdir()
+            agent = state / "omp" / workstream_id
+            agent.mkdir(parents=True)
+            scope = {"projectId": project_id, "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS)}
+            policy_path, _ = render(scope, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
+            policy = json.loads(policy_path.read_text())
+            for entry in policy["filesystem"]["allowRead"]:
+                self.assertNotIn("venv", entry)
+
+    def test_rendered_worker_policy_rejects_symlinked_python_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree, common, workstream_id, branch = self.make_linked_repo(root)
+            state = root / "state"
+            project_id = new_id("prj")
+            private = state / "git-objects" / project_id / workstream_id / "objects"
+            (private / "info").mkdir(parents=True)
+            (private / "pack").mkdir()
+            agent = state / "omp" / workstream_id
+            agent.mkdir(parents=True)
+            real_env = root / "real-venv"
+            real_env.mkdir()
+            env_link = root / "venv-link"
+            env_link.symlink_to(real_env, target_is_directory=True)
+            scope = {"projectId": project_id, "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS), "pythonEnv": str(env_link)}
+            with self.assertRaises(NeedsAttentionError):
+                render(scope, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
+
     def test_all_profiles_are_gateway_only_and_schema_valid(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

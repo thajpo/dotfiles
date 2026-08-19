@@ -207,6 +207,7 @@ function renderExactScope(value: unknown): string {
     `checkout path: ${String(scope.worktreePath ?? "")}`,
     `agent name: ${String(scope.agentName ?? "")}`,
     `exact external domains: ${externalDomains}`,
+    `python env (read-only): ${scope.pythonEnv ? String(scope.pythonEnv) : "(none)"}`,
     `effects: ${effects}`,
     `non-effects: ${nonEffects}`,
     `immutable task packet: ${renderTaskPacket(scope.taskPacket)}`,
@@ -403,7 +404,7 @@ function secretaryTools(pi: ExtensionAPI): void {
   semantic("pisec_list_workstreams", "List Pisec workstreams", "workstream.list", z.object({}), "read");
   semantic("pisec_inspect_workstream", "Inspect Pisec workstream", "workstream.inspect", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }));
   const taskPacketSchema = z.object({ schemaVersion: z.literal(1), outcome: z.string().min(1).max(4096), boundaries: z.array(z.string().min(1).max(4096)).max(16), acceptance: z.array(z.string().min(1).max(4096)).max(16), openQuestions: z.array(z.string().min(1).max(4096)).max(16), evidence: z.array(z.string().min(1).max(4096)).max(16) });
-  semantic("pisec_prepare_workstream", "Prepare Pisec workstream", "workstream.prepare", z.object({ title: z.string().min(1).max(512), purpose: z.string().min(1).max(4096), brief: z.string().min(1).max(4096), task_packet: taskPacketSchema, idempotency_key: z.string().min(1).max(256), target_ref: z.string().min(1).max(512).optional(), execution_profile: z.enum(["worker-default", "worker-networked"]).optional() }), "read", params => ({ title: params.title, purpose: params.purpose, brief: params.brief, taskPacket: params.task_packet, idempotencyKey: params.idempotency_key, ...(params.target_ref ? { targetRef: params.target_ref } : {}), ...(params.execution_profile ? { executionProfile: params.execution_profile } : {}) }));
+  semantic("pisec_prepare_workstream", "Prepare Pisec workstream", "workstream.prepare", z.object({ title: z.string().min(1).max(512), purpose: z.string().min(1).max(4096), brief: z.string().min(1).max(4096), task_packet: taskPacketSchema, idempotency_key: z.string().min(1).max(256), target_ref: z.string().min(1).max(512).optional(), execution_profile: z.enum(["worker-default", "worker-networked"]).optional(), python_env: z.string().min(1).max(4096).optional() }), "read", params => ({ title: params.title, purpose: params.purpose, brief: params.brief, taskPacket: params.task_packet, idempotencyKey: params.idempotency_key, ...(params.target_ref ? { targetRef: params.target_ref } : {}), ...(params.execution_profile ? { executionProfile: params.execution_profile } : {}), ...(params.python_env ? { pythonEnv: params.python_env } : {}) }));
   pi.registerTool({
     name: "pisec_create_workstream",
     label: "Create Pisec workstream",
