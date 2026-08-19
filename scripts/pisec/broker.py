@@ -65,7 +65,7 @@ def _exact(payload: Mapping[str, Any], required: set[str], optional: set[str] = 
         raise InvalidRequestError("payload fields do not match the operation contract")
 
 
-_PUBLIC_PROJECT_FIELDS = ("project_id", "display_name", "default_ref", "secretary_workstream_id", "created_at", "updated_at")
+_PUBLIC_PROJECT_FIELDS = ("project_id", "display_name", "default_ref", "data_dirs", "secretary_workstream_id", "created_at", "updated_at")
 _PUBLIC_WORKSTREAM_FIELDS = (
     "workstream_id", "project_id", "kind", "title", "purpose", "brief", "harness_id", "workspace_adapter_id",
     "execution_profile", "target_ref", "base_commit_oid", "branch_name",
@@ -522,8 +522,8 @@ class BrokerDispatcher:
 
     def _admin(self, store: PiStore, operation: str, payload: dict[str, Any]) -> Any:
         if operation == "project.register":
-            _exact(payload, {"path"}, {"displayName", "defaultRef"})
-            return _public_project(register_project(store, payload["path"], display_name=payload.get("displayName"), default_ref=payload.get("defaultRef")))
+            _exact(payload, {"path"}, {"displayName", "defaultRef", "dataDirs"})
+            return _public_project(register_project(store, payload["path"], display_name=payload.get("displayName"), default_ref=payload.get("defaultRef"), data_dirs=payload.get("dataDirs")))
         if operation == "project.list":
             _exact(payload, set())
             return {"projects": [_public_project(row) for row in list_projects(store)]}

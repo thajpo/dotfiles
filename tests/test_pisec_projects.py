@@ -1,9 +1,11 @@
 from pathlib import Path
+import json
 import subprocess
 import tempfile
 import unittest
 
 from scripts.pisec.decisions import list_decisions, record_decision, resolve_decision
+from scripts.pisec.models import InvalidRequestError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import observe_project, register_project
 
@@ -31,6 +33,20 @@ class ProjectTests(unittest.TestCase):
                 self.assertEqual(first["project_id"], second["project_id"])
                 self.assertEqual(first["git_common_dir"], observe_project(repo)["git_common_dir"])
                 self.assertEqual(store.conn.execute("SELECT count(*) FROM projects").fetchone()[0], 1)
+
+    def test_register_persists_data_dirs_within_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            data = repo / "data"
+            data.mkdir()
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo, default_ref="main", data_dirs=[str(data)])
+                self.assertEqual(project["data_dirs"], [str(data.resolve())])
+                self.assertEqual(store.conn.execute("SELECT data_dirs FROM projects WHERE project_id=?", (project["project_id"],)).fetchone()[0], json.dumps([str(data.resolve())], sort_keys=True))
+                with self.assertRaises(InvalidRequestError):
+                    register_project(store, repo, default_ref="main", data_dirs=[str(root / "outside")])
 
     def test_linked_worktree_observes_same_common_directory(self):
         with tempfile.TemporaryDirectory() as tmp:

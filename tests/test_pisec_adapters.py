@@ -52,7 +52,7 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         self.assertEqual(self.registry.resolve_workspace("fixture-workspace"), self.workspace)
 
         project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "defaultRef": "main"})
-        self.assertEqual(set(project), {"project_id", "display_name", "default_ref", "secretary_workstream_id", "created_at", "updated_at"})
+        self.assertEqual(set(project), {"project_id", "display_name", "default_ref", "data_dirs", "secretary_workstream_id", "created_at", "updated_at"})
         self.assertNotIn("repository_path", project)
 
         ensured = self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})

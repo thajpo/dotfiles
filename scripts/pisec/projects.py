@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 from typing import Any
 
 from .events import append_event_in_transaction
+from .fence import resolve_data_dirs
 from .models import InvalidRequestError, NotFoundError, bounded_text, new_id, utc_now, validate_id
 from .research import research_counts
 
@@ -60,7 +62,10 @@ def get_project(store: Any, project_id: str) -> dict[str, Any]:
     row = store.conn.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone()
     if row is None:
         raise NotFoundError("project was not found")
-    return dict(row)
+    value = dict(row)
+    raw_data = value.get("data_dirs")
+    value["data_dirs"] = json.loads(raw_data) if raw_data else []
+    return value
 
 
 def resolve_project(store: Any, selector: str) -> dict[str, Any]:
@@ -79,8 +84,10 @@ def resolve_project(store: Any, selector: str) -> dict[str, Any]:
     return dict(row)
 
 
-def register_project(store: Any, path: str | Path, *, display_name: str | None = None, default_ref: str | None = None) -> dict[str, Any]:
+def register_project(store: Any, path: str | Path, *, display_name: str | None = None, default_ref: str | None = None, data_dirs: Any = None) -> dict[str, Any]:
     observed = observe_project(path, default_ref)
+    resolved_data = resolve_data_dirs(data_dirs, Path(observed["repository_path"]))
+    data_json = json.dumps(resolved_data, sort_keys=True) if resolved_data else None
     existing = store.conn.execute("SELECT * FROM projects WHERE git_common_dir=?", (observed["git_common_dir"],)).fetchone()
     if existing is not None:
         value = dict(existing)
@@ -95,14 +102,21 @@ def register_project(store: Any, path: str | Path, *, display_name: str | None =
             return get_project(store, value["project_id"])
         if registered_remote != observed_remote:
             raise InvalidRequestError("registered project origin remote drifted")
+        if data_dirs is not None and value.get("data_dirs") != data_json:
+            with store.transaction():
+                store.conn.execute(
+                    "UPDATE projects SET data_dirs=?,updated_at=? WHERE project_id=?",
+                    (data_json, utc_now(), value["project_id"]),
+                )
+            return get_project(store, value["project_id"])
         return value
     project_id = new_id("prj")
     name = bounded_text(display_name or Path(observed["repository_path"]).name, name="display_name", limit=512)
     now = utc_now()
     with store.transaction():
         store.conn.execute(
-            "INSERT INTO projects(project_id,display_name,repository_path,git_common_dir,default_ref,remote_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-            (project_id, name, observed["repository_path"], observed["git_common_dir"], observed["default_ref"], observed["remote_url"], now, now),
+            "INSERT INTO projects(project_id,display_name,repository_path,git_common_dir,default_ref,remote_url,data_dirs,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (project_id, name, observed["repository_path"], observed["git_common_dir"], observed["default_ref"], observed["remote_url"], data_json, now, now),
         )
         append_event_in_transaction(store.conn, kind="project.registered", project_id=project_id, payload={"displayName": name, "repositoryPath": observed["repository_path"], "gitCommonDir": observed["git_common_dir"], "defaultRef": observed["default_ref"]})
     return get_project(store, project_id)

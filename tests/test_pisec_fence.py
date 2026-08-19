@@ -233,6 +233,29 @@ class FencePolicyAndShimTests(unittest.TestCase):
             checked = subprocess.run(["fence", "config", "show", "--settings", str(policy_path)], text=True, capture_output=True)
             self.assertEqual(checked.returncode, 0, checked.stderr)
 
+    def test_rendered_worker_policy_exposes_approved_data_dirs_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree, common, workstream_id, branch = self.make_linked_repo(root)
+            state = root / "state"
+            project_id = new_id("prj")
+            private = state / "git-objects" / project_id / workstream_id / "objects"
+            (private / "info").mkdir(parents=True)
+            (private / "pack").mkdir()
+            agent = state / "omp" / workstream_id
+            agent.mkdir(parents=True)
+            data_dir = worktree / "data"
+            data_dir.mkdir()
+            (data_dir / "jobos.db").write_text("x")
+            scope = {"projectId": project_id, "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS), "dataDirs": [str(data_dir)]}
+            policy_path, digest = render(scope, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
+            policy = json.loads(policy_path.read_text())
+            self.assertIn(str(data_dir.resolve()), policy["filesystem"]["allowRead"])
+            self.assertNotIn(str(data_dir.resolve()), policy["filesystem"]["allowWrite"])
+            self.assertEqual(hashlib.sha256(policy_path.read_bytes()).hexdigest(), digest)
+            checked = subprocess.run(["fence", "config", "show", "--settings", str(policy_path)], text=True, capture_output=True)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+
     def test_all_profiles_are_gateway_only_and_schema_valid(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

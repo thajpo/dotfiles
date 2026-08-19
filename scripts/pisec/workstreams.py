@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from .adapters import HarnessAdapter, WorkspaceAdapter, WorkspaceObservation, artifact_document
 from .events import append_event_in_transaction
+from .fence import resolve_data_dirs
 from .git_objects import GitObjectManager
 from .models import AuthorizationError, ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id
 from .projects import _git, get_project
@@ -33,7 +34,7 @@ _FULL_SCOPE_FIELDS = frozenset({
     "operationId", "workstreamId", "projectId", "title", "purpose", "brief",
     "harnessId", "workspaceAdapterId", "executionProfile", "targetRef", "baseCommitOid", "branchName",
     "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "agentName",
-    "externalDomains", "effects", "nonEffects", "taskPacket",
+    "externalDomains", "dataDirs", "effects", "nonEffects", "taskPacket",
 })
 _PUBLIC_SCOPE_FIELDS = _FULL_SCOPE_FIELDS - {"privateGitObjectDir", "gitCommonObjectDir"}
 
@@ -169,6 +170,7 @@ def prepare_workstream(
         "gitCommonObjectDir": str((Path(project["git_common_dir"]) / "objects").absolute()),
         "agentName": agent_name,
         "externalDomains": domains,
+        "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),
         "effects": ["create branch and execution workspace", "register private Git object store", "start fenced harness agent", "deliver full brief"],
         "nonEffects": ["no push", "no merge", "no cleanup", "no branch deletion"],
         "taskPacket": normalized_task_packet,

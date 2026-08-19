@@ -85,6 +85,7 @@ def parser() -> argparse.ArgumentParser:
     register.add_argument("--path", required=True, metavar="PATH", help="path to a Git repository")
     register.add_argument("--name", metavar="NAME", help="display name; defaults to the repository name")
     register.add_argument("--default-ref", metavar="REF", help="Git ref used as the project base; defaults to HEAD")
+    register.add_argument("--data-dir", action="append", default=None, metavar="DIR", help="host directory to expose read-only to this project's workers; repeatable")
     project_list = project_commands.add_parser(
         "list",
         **_parser_kwargs(
@@ -479,6 +480,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload["displayName"] = args.name
             if args.default_ref is not None:
                 payload["defaultRef"] = args.default_ref
+            if args.data_dir is not None:
+                payload["dataDirs"] = [str(Path(d).expanduser()) for d in args.data_dir]
             result = _call("project.register", payload)
         elif args.command == "project" and args.project_command == "list":
             result = _call("project.list", {})

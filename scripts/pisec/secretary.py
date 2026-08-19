@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from .adapters import HarnessAdapter, WorkspaceAdapter, WorkspaceObservation, artifact_document
 from .events import append_event_in_transaction
+from .fence import resolve_data_dirs
 from .models import NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
 from .projects import resolve_project
 from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent
@@ -68,6 +69,7 @@ def _scope(project: Mapping[str, Any], workstream: Mapping[str, Any], operation_
         "gitCommonObjectDir": str((Path(project["git_common_dir"]) / "objects").absolute()),
         "agentName": f"pisec-{workstream['workstream_id'][-12:]}",
         "externalDomains": list(external_domains),
+        "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),
         "effects": ["create execution workspace", "start fenced harness agent", "read and write the registered project", "use the configured harness/plugin/MCP surface", "fast-forward existing non-default origin branches through the authenticated Pisec broker"],
         "nonEffects": ["no cross-project access", "no host-secret access", "no raw push or publish through normal command policy", "no force push, branch creation, branch deletion, or default-branch push", "no worker creation without exact approval"],
     }

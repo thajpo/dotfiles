@@ -12,7 +12,7 @@
   },
   "filesystem": {
     "defaultDenyRead": true,
-    "allowRead": ["${WORKTREE}", "${GIT_WORKTREE_DIR}", "${COMMON_OBJECTS}", "${PRIVATE_OBJECTS}", "${AGENT_DIR}", "${HARNESS_EXECUTABLE}", "${HARNESS_EXTENSION}", "${HARNESS_NATIVES}"],
+    "allowRead": ["${WORKTREE}", "${GIT_WORKTREE_DIR}", "${COMMON_OBJECTS}", "${PRIVATE_OBJECTS}", "${AGENT_DIR}", "${HARNESS_EXECUTABLE}", "${HARNESS_EXTENSION}", "${HARNESS_NATIVES}", "${DATA_DIRS}"],
     "allowWrite": ["${WORKTREE}", "${GIT_WORKTREE_DIR}", "${REF_NAMESPACE}", "${LOG_NAMESPACE}", "${PRIVATE_OBJECTS}", "${AGENT_DIR}", "${HARNESS_RUN}", "/tmp", "${RUNTIME_SOCKET_DIR}"],
     "denyRead": ["${HOME}/.ssh", "${HOME}/.aws", "${HOME}/.gnupg", "${HOME}/.kube", "${HOME}/.docker", "${HOME}/.omp/agent", "${WORKSPACE_CONFIG}"]
   },

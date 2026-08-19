@@ -9,11 +9,11 @@ import sqlite3
 import subprocess
 
 SCHEMA_NAME = "pisec-core"
-SCHEMA_VERSION = 6
-MIGRATION_NAME = "pisec-core-epoch-6"
-PREVIOUS_SCHEMA_VERSION = 5
-PREVIOUS_MIGRATION_NAME = "pisec-core-epoch-5"
-PREVIOUS_SCHEMA_DIGEST = "sha256:e38d8d1f33e79fa188123c39236c3adf7a0157fe9cf26aef7edcfd6f0360b20a"
+SCHEMA_VERSION = 7
+MIGRATION_NAME = "pisec-core-epoch-7"
+PREVIOUS_SCHEMA_VERSION = 6
+PREVIOUS_MIGRATION_NAME = "pisec-core-epoch-6"
+PREVIOUS_SCHEMA_DIGEST = "sha256:c00cd142b2cd4dd775c3d7878820c4fd69f945e9e4254cfd18414bc82877ca59"
 
 SCHEMA_SQL = r'''
 CREATE TABLE control_meta (
@@ -32,6 +32,7 @@ CREATE TABLE projects (
     git_common_dir TEXT NOT NULL UNIQUE,
     default_ref TEXT NOT NULL,
     remote_url TEXT CHECK(remote_url IS NULL OR length(remote_url) BETWEEN 1 AND 2048),
+    data_dirs TEXT,
     secretary_workstream_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -284,19 +285,7 @@ def migrate_schema(connection: sqlite3.Connection) -> bool:
         raise sqlite3.DatabaseError("unsupported Pisec schema migration")
     connection.execute("BEGIN IMMEDIATE")
     try:
-        connection.execute(
-            "ALTER TABLE runtime_bindings ADD COLUMN desired_generation_sha256 TEXT "
-            "CHECK(desired_generation_sha256 IS NULL OR length(desired_generation_sha256) = 64)"
-        )
-        connection.execute(
-            "ALTER TABLE runtime_bindings ADD COLUMN applied_generation_sha256 TEXT "
-            "CHECK(applied_generation_sha256 IS NULL OR length(applied_generation_sha256) = 64)"
-        )
-        connection.execute(
-            "ALTER TABLE runtime_bindings ADD COLUMN launch_generation_sha256 TEXT "
-            "CHECK(launch_generation_sha256 IS NULL OR length(launch_generation_sha256) = 64)"
-        )
-        connection.execute("ALTER TABLE runtime_bindings ADD COLUMN refresh_pending INTEGER NOT NULL DEFAULT 0 CHECK(refresh_pending IN (0,1))")
+        connection.execute("ALTER TABLE projects ADD COLUMN data_dirs TEXT")
         connection.execute(
             "UPDATE control_meta SET schema_version=?,schema_sha256=?,migration_name=? WHERE singleton=1",
             (SCHEMA_VERSION, schema_digest(), MIGRATION_NAME),

@@ -39,6 +39,36 @@ def _linked_git_dir(worktree: Path, common_git: Path) -> Path:
     return linked
 
 
+def resolve_data_dirs(data_dirs: Any, repository: Path, *, data_root: Path | None = None) -> list[str]:
+    """Resolve and validate a project's approved read-only data directories.
+
+    Each entry must be an absolute path contained within the project repository
+    (or an explicit shared data root). The returned list holds canonical,
+    resolved absolute paths used to render the Fence ``allowRead`` entries.
+    """
+    if data_dirs is None:
+        data_dirs = []
+    if not isinstance(data_dirs, list):
+        raise InvalidRequestError("data dirs must be a list")
+    if len(data_dirs) != len(set(data_dirs)):
+        raise InvalidRequestError("data dirs contain duplicates")
+    allowed_roots = [Path(repository).resolve(strict=False)]
+    if data_root is not None:
+        allowed_roots.append(Path(data_root).resolve(strict=False))
+    resolved_list: list[str] = []
+    for entry in data_dirs:
+        if not isinstance(entry, str) or not entry or len(entry) > 4096 or "\x00" in entry:
+            raise InvalidRequestError("data dir is invalid")
+        path = Path(entry)
+        if not path.is_absolute():
+            raise InvalidRequestError("data dir must be absolute")
+        resolved = path.resolve(strict=False)
+        if not any(resolved == root or resolved.is_relative_to(root) for root in allowed_roots):
+            raise InvalidRequestError("data dir is outside the approved project data root")
+        resolved_list.append(str(resolved))
+    return resolved_list
+
+
 def _substitute(value: Any, replacements: Mapping[str, Any]) -> Any:
     if isinstance(value, str):
         if value in replacements:
@@ -166,6 +196,23 @@ def render_policy(
         })
         if profile == "worker-default" and baseline_domains and domains != sorted(set(baseline_domains)):
             raise InvalidRequestError("default worker has unapproved additional external domains")
+    data_dirs = scope.get("dataDirs")
+    if data_dirs is None:
+        data_dirs = []
+    if not isinstance(data_dirs, list):
+        raise InvalidRequestError("approved data dirs are invalid")
+    rendered_data: list[str] = []
+    for entry in data_dirs:
+        if not isinstance(entry, str) or not entry or len(entry) > 4096 or "\x00" in entry:
+            raise InvalidRequestError("approved data dir is invalid")
+        path = Path(entry)
+        if not path.is_absolute():
+            raise InvalidRequestError("approved data dir must be absolute")
+        resolved = path.resolve(strict=False)
+        if resolved != path:
+            raise NeedsAttentionError("approved data dir is a symlink or resolves elsewhere")
+        rendered_data.append(str(resolved))
+    replacements["${DATA_DIRS}"] = rendered_data
     policy = _substitute(template, replacements)
     text = canonical_json(policy, max_bytes=256 * 1024, max_text=8192) + "\n"
     output = Path(state_root) / "fence" / f"{workstream_id}.json"
