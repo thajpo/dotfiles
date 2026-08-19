@@ -28,8 +28,13 @@ class GitObjectManager:
             raw_info = raw_common_objects.lstat()
         except OSError as error:
             raise NeedsAttentionError("approved common Git object directory is invalid") from error
-        if stat.S_ISLNK(raw_info.st_mode) or not stat.S_ISDIR(raw_info.st_mode) or raw_info.st_uid != os.geteuid() or raw_info.st_mode & 0o022:
+        if stat.S_ISLNK(raw_info.st_mode) or not stat.S_ISDIR(raw_info.st_mode) or raw_info.st_uid != os.geteuid():
             raise NeedsAttentionError("approved common Git object directory is unsafe")
+        # A group/other-writable object store is a host umask condition, not an ownership
+        # decision: tighten it so every secretary heals the same repository instead of
+        # rejecting the spawn.
+        if raw_info.st_mode & 0o022:
+            os.chmod(raw_common_objects, raw_info.st_mode & ~0o022)
         try:
             common_objects = raw_common_objects.resolve(strict=True)
         except OSError as error:
@@ -40,8 +45,10 @@ class GitObjectManager:
         if not common_info.exists():
             common_info.mkdir(mode=0o700)
         common_info_info = common_info.lstat()
-        if not stat.S_ISDIR(common_info_info.st_mode) or common_info_info.st_uid != os.geteuid() or common_info_info.st_mode & 0o022:
+        if not stat.S_ISDIR(common_info_info.st_mode) or common_info_info.st_uid != os.geteuid():
             raise NeedsAttentionError("common Git object info directory is unsafe")
+        if common_info_info.st_mode & 0o022:
+            os.chmod(common_info, common_info_info.st_mode & ~0o022)
         _secure_tree(self.state_root, object_dir / "info")
         _secure_tree(self.state_root, object_dir / "pack")
         _atomic_write(object_dir / "info" / "alternates", str(common_objects) + "\n", mode=0o600)
@@ -73,10 +80,14 @@ class GitObjectManager:
             raise NeedsAttentionError("Git object promotion source and destination are identical")
         source_info = source_objects.lstat()
         target_info = target_objects.lstat()
-        if not stat.S_ISDIR(source_info.st_mode) or source_info.st_uid != os.geteuid() or source_info.st_mode & 0o022:
+        if not stat.S_ISDIR(source_info.st_mode) or source_info.st_uid != os.geteuid():
             raise NeedsAttentionError("private Git object directory is unsafe")
-        if not stat.S_ISDIR(target_info.st_mode) or target_info.st_uid != os.geteuid() or target_info.st_mode & 0o022:
+        if source_info.st_mode & 0o022:
+            os.chmod(source_objects, source_info.st_mode & ~0o022)
+        if not stat.S_ISDIR(target_info.st_mode) or target_info.st_uid != os.geteuid():
             raise NeedsAttentionError("common Git object directory is unsafe")
+        if target_info.st_mode & 0o022:
+            os.chmod(target_objects, target_info.st_mode & ~0o022)
         environment = os.environ.copy()
         environment.update({"GIT_OBJECT_DIRECTORY": str(target_objects), "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(source_objects)})
         result = subprocess.run(

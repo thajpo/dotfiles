@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from scripts.pisec.fence import render_policy
 from scripts.pisec.git_objects import GitObjectManager
-from scripts.pisec.models import AuthorizationError, ConflictError, new_id
+from scripts.pisec.models import AuthorizationError, ConflictError, NeedsAttentionError, new_id
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
 from scripts.pisec.runtime import report_runtime
@@ -138,6 +138,43 @@ class RuntimeMaterializationTests(unittest.TestCase):
             self.assertEqual(first["object_dir"], str(private))
             self.assertEqual((private / "info" / "alternates").read_text(), str(common.resolve()) + "\n")
             self.assertEqual((common / "info" / "alternates").read_text().splitlines(), [str(external)])
+
+    def test_common_object_directory_group_write_is_tightened_not_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            common = root / "repo.git" / "objects"
+            (common / "info").mkdir(parents=True)
+            os.chmod(common, 0o775)
+            os.chmod(common / "info", 0o775)
+            project_id = new_id("prj")
+            workstream_id = new_id("ws")
+            private = state / "git-objects" / project_id / workstream_id / "objects"
+            scope = {"projectId": project_id, "workstreamId": workstream_id, "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common)}
+            manager = GitObjectManager(state_root=state)
+            first = manager.materialize(scope)
+            self.assertEqual(first["object_dir"], str(private))
+            self.assertFalse((common / "info" / "alternates").exists())
+            self.assertEqual(os.stat(common).st_mode & 0o022, 0)
+            self.assertEqual(os.stat(common / "info").st_mode & 0o022, 0)
+            self.assertEqual((private / "info" / "alternates").read_text().strip(), str(common.resolve()))
+
+    def test_common_object_directory_symlink_is_still_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            real = root / "real-objects"
+            real.mkdir()
+            common = root / "repo.git" / "objects"
+            common.parent.mkdir()
+            common.symlink_to(real, target_is_directory=True)
+            project_id = new_id("prj")
+            workstream_id = new_id("ws")
+            private = state / "git-objects" / project_id / workstream_id / "objects"
+            scope = {"projectId": project_id, "workstreamId": workstream_id, "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common)}
+            manager = GitObjectManager(state_root=state)
+            with self.assertRaises(NeedsAttentionError):
+                manager.materialize(scope)
 
     def test_private_binding_descriptor_is_atomic_and_contains_no_runtime_token(self):
         with tempfile.TemporaryDirectory() as tmp:
