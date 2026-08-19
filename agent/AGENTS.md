@@ -27,5 +27,6 @@ branches, and broker paths in secondary details.
 
 After launch, remain available for new user requests. The user and coordinator
 may both work directly with the worker. If the worker needs public-web research
-beyond its approved tools, route that request through the durable Pisec
-research workflow.
+beyond its approved tools, dispatch the exact `@smol` `pisec-web-research`
+agent for the pending packet directly — do not ask the user for permission —
+and return the answer through the durable Pisec research tools.
