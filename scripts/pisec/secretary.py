@@ -67,6 +67,8 @@ def _scope(project: Mapping[str, Any], workstream: Mapping[str, Any], operation_
         "worktreePath": workstream["worktree_path"],
         "privateGitObjectDir": None,
         "gitCommonObjectDir": str((Path(project["git_common_dir"]) / "objects").absolute()),
+        "projectWorktreesDir": str((Path.home() / ".local" / "share" / "pisec" / "worktrees" / project["project_id"]).absolute()),
+        "projectGitObjectsDir": str((Path.home() / ".local" / "state" / "pisec" / "git-objects" / project["project_id"]).absolute()),
         "agentName": f"pisec-{workstream['workstream_id'][-12:]}",
         "externalDomains": list(external_domains),
         "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),
@@ -233,7 +235,10 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         scope = json.loads(operation["result_json"])
     except (TypeError, json.JSONDecodeError) as error:
         raise NeedsAttentionError("secretary ensure scope is missing or invalid") from error
-    if not isinstance(scope, dict) or set(scope) != set(_scope(project, existing, operation["operation_id"], external_domains)):
+    if not isinstance(scope, dict) or not set(scope).issubset(set(_scope(project, existing, operation["operation_id"], external_domains))):
+        raise NeedsAttentionError("secretary ensure scope is missing or invalid")
+    optional = frozenset({"projectWorktreesDir", "projectGitObjectsDir"})
+    if set(scope) - optional != set(_scope(project, existing, operation["operation_id"], external_domains)) - optional:
         raise NeedsAttentionError("secretary ensure scope is missing or invalid")
     if scope["harnessId"] != harness.manifest.adapter_id or scope["workspaceAdapterId"] != workspace.manifest.adapter_id:
         raise NeedsAttentionError("configured adapter does not match the approved secretary scope")

@@ -357,7 +357,81 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertNotIn(str(interpreter.resolve()), policy["filesystem"]["allowWrite"])
             self.assertEqual(hashlib.sha256(policy_path.read_bytes()).hexdigest(), digest)
 
-    def test_rendered_worker_policy_rejects_missing_interpreter_home(self):
+    def test_rendered_secretary_policy_exposes_project_worktrees_and_git_objects_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent = root / "state" / "omp" / new_id("ws")
+            agent.mkdir(parents=True)
+            assigned = root / "assigned"
+            assigned.mkdir()
+            worktrees = root / "worktrees" / "prj_0123456789abcdef0123456789abcdef"
+            git_objects = root / "state" / "git-objects" / "prj_0123456789abcdef0123456789abcdef"
+            worktrees.mkdir(parents=True)
+            git_objects.mkdir(parents=True)
+            scope = {
+                "projectId": "prj_0123456789abcdef0123456789abcdef",
+                "workstreamId": new_id("ws"),
+                "executionProfile": "secretary-project",
+                "worktreePath": str(assigned),
+                "projectWorktreesDir": str(worktrees),
+                "projectGitObjectsDir": str(git_objects),
+            }
+            policy_path, digest = render(scope, root, agent, make_config(root))
+            policy = json.loads(policy_path.read_text())
+            self.assertIn(str(worktrees.resolve()), policy["filesystem"]["allowRead"])
+            self.assertIn(str(git_objects.resolve()), policy["filesystem"]["allowRead"])
+            self.assertNotIn(str(worktrees.resolve()), policy["filesystem"]["allowWrite"])
+            self.assertNotIn(str(git_objects.resolve()), policy["filesystem"]["allowWrite"])
+            self.assertEqual(hashlib.sha256(policy_path.read_bytes()).hexdigest(), digest)
+
+    def test_rendered_secretary_policy_omits_project_stores_when_unset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent = root / "state" / "omp" / new_id("ws")
+            agent.mkdir(parents=True)
+            assigned = root / "assigned"
+            assigned.mkdir()
+            scope = {"projectId": new_id("prj"), "workstreamId": new_id("ws"), "executionProfile": "secretary-project", "worktreePath": str(assigned)}
+            policy_path, _ = render(scope, root, agent, make_config(root))
+            policy = json.loads(policy_path.read_text())
+            for entry in policy["filesystem"]["allowRead"]:
+                self.assertNotIn("worktrees", entry)
+                self.assertNotIn("git-objects", entry)
+
+    def test_rendered_secretary_policy_rejects_relative_project_store_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent = root / "state" / "omp" / new_id("ws")
+            agent.mkdir(parents=True)
+            assigned = root / "assigned"
+            assigned.mkdir()
+            scope = {"projectId": new_id("prj"), "workstreamId": new_id("ws"), "executionProfile": "secretary-project", "worktreePath": str(assigned), "projectWorktreesDir": "worktrees/prj_x"}
+            with self.assertRaises(Exception):
+                render(scope, root, agent, make_config(root))
+
+    def test_rendered_worker_policy_omits_project_stores(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            worktree = root / "worktree"
+            workstream_id = new_id("ws")
+            branch = f"pisec/{workstream_id}/work"
+            subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", branch, str(worktree), "main"], check=True)
+            common = (repo / ".git").resolve()
+            private = root / "state" / "git-objects" / new_id("prj") / workstream_id / "objects"
+            (private / "info").mkdir(parents=True)
+            (private / "pack").mkdir()
+            stores = root / "stores"
+            stores.mkdir()
+            agent = root / "state" / "omp" / workstream_id
+            agent.mkdir(parents=True)
+            scope = {"projectId": new_id("prj"), "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS), "projectWorktreesDir": str(stores / "worktrees"), "projectGitObjectsDir": str(stores / "objects")}
+            policy_path, _ = render(scope, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
+            policy = json.loads(policy_path.read_text())
+            for entry in policy["filesystem"]["allowRead"]:
+                self.assertNotIn(str(stores), entry)
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo, worktree, common, workstream_id, branch = self.make_linked_repo(root)

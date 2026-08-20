@@ -34,9 +34,13 @@ _FULL_SCOPE_FIELDS = frozenset({
     "operationId", "workstreamId", "projectId", "title", "purpose", "brief",
     "harnessId", "workspaceAdapterId", "executionProfile", "targetRef", "baseCommitOid", "branchName",
     "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "agentName",
+    "projectWorktreesDir", "projectGitObjectsDir",
     "externalDomains", "dataDirs", "pythonEnv", "effects", "nonEffects", "taskPacket",
 })
 _PUBLIC_SCOPE_FIELDS = _FULL_SCOPE_FIELDS - {"privateGitObjectDir", "gitCommonObjectDir"}
+# Optional fields may be absent from proposals created by older broker code.
+_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "projectWorktreesDir", "projectGitObjectsDir"})
+_SCOPE_REQUIRED = _FULL_SCOPE_FIELDS - _OPTIONAL_SCOPE_FIELDS
 
 
 def _public_scope(scope: Mapping[str, Any]) -> dict[str, Any]:
@@ -48,13 +52,15 @@ def _resolve_scope(store: Any, operation: Mapping[str, Any], supplied: Mapping[s
         proposal = json.loads(str(operation["result_json"]))
     except (TypeError, json.JSONDecodeError) as error:
         raise ScopeMismatchError("workstream proposal is invalid") from error
-    if not isinstance(proposal, dict) or set(proposal) - {"pythonEnv"} != _FULL_SCOPE_FIELDS - {"pythonEnv"}:
+    if not isinstance(proposal, dict) or not _SCOPE_REQUIRED.issubset(proposal) or not set(proposal).issubset(_FULL_SCOPE_FIELDS):
         raise ScopeMismatchError("workstream proposal fields are invalid")
-    if set(supplied) == _FULL_SCOPE_FIELDS or set(supplied) == _FULL_SCOPE_FIELDS - {"pythonEnv"}:
-        if canonical_json(supplied) != canonical_json(proposal):
+    def _non_optional(mapping: Mapping[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in mapping.items() if key not in _OPTIONAL_SCOPE_FIELDS}
+    if set(supplied).issubset(_FULL_SCOPE_FIELDS) and _SCOPE_REQUIRED.issubset(supplied):
+        if canonical_json(_non_optional(supplied)) != canonical_json(_non_optional(proposal)):
             raise ScopeMismatchError("approval scope differs from the immutable proposal")
-    elif set(supplied) == _PUBLIC_SCOPE_FIELDS or set(supplied) == _PUBLIC_SCOPE_FIELDS - {"pythonEnv"}:
-        if canonical_json(supplied) != canonical_json(_public_scope(proposal)):
+    elif set(supplied).issubset(_PUBLIC_SCOPE_FIELDS) and _SCOPE_REQUIRED.issubset(set(supplied) | (_FULL_SCOPE_FIELDS - _PUBLIC_SCOPE_FIELDS)):
+        if canonical_json(_non_optional(supplied)) != canonical_json(_non_optional(_public_scope(proposal))):
             raise ScopeMismatchError("approval scope differs from the immutable proposal")
     else:
         raise ScopeMismatchError("approval scope fields do not match the proposal contract")
@@ -155,7 +161,7 @@ def prepare_workstream(
         if existing["kind"] != "workstream.create" or existing["request_sha256"] != request_sha:
             raise IdempotencyConflictError("idempotency key is already bound to another request")
         scope = json.loads(existing["result_json"])
-        if not isinstance(scope, dict) or set(scope) - {"pythonEnv"} != _FULL_SCOPE_FIELDS - {"pythonEnv"}:
+        if not isinstance(scope, dict) or not _SCOPE_REQUIRED.issubset(scope) or not set(scope).issubset(_FULL_SCOPE_FIELDS):
             raise ScopeMismatchError("stored workstream proposal is invalid")
         return {"operation": dict(existing), "workstream": _workstream(store, scope["workstreamId"]), "approvalScope": _public_scope(scope)}
 
@@ -166,8 +172,10 @@ def prepare_workstream(
     workstream_id = new_id("ws")
     branch = f"pisec/{workstream_id}/work"
     home = Path.home()
-    checkout = (work_root or home / ".local" / "share" / "pisec" / "worktrees") / project_id / workstream_id
-    object_dir = (object_root or home / ".local" / "state" / "pisec" / "git-objects") / project_id / workstream_id / "objects"
+    worktrees_root = work_root or home / ".local" / "share" / "pisec" / "worktrees"
+    objects_root = object_root or home / ".local" / "state" / "pisec" / "git-objects"
+    checkout = worktrees_root / project_id / workstream_id
+    object_dir = objects_root / project_id / workstream_id / "objects"
     agent_name = f"pisec-{workstream_id[-12:]}"
     scope = {
         "operationId": operation_id,
@@ -185,6 +193,8 @@ def prepare_workstream(
         "worktreePath": str(checkout.absolute()),
         "privateGitObjectDir": str(object_dir.absolute()),
         "gitCommonObjectDir": str((Path(project["git_common_dir"]) / "objects").absolute()),
+        "projectWorktreesDir": str((worktrees_root / project_id).absolute()),
+        "projectGitObjectsDir": str((objects_root / project_id).absolute()),
         "agentName": agent_name,
         "externalDomains": domains,
         "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),

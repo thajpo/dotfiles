@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import tempfile
 import unittest
 
@@ -50,6 +51,26 @@ class SecretaryTests(unittest.TestCase):
                 self.assertEqual(store.conn.execute("SELECT workspace_report_seq FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()[0], 9)
                 self.assertEqual(third["workstream"]["provisioning_state"], "bound")
                 self.assertIsNone(third["workstream"]["attention_reason"])
+
+    def test_ensure_replays_legacy_scope_without_project_store_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                first = ensure_secretary(store, project["project_id"], harness, workspace)
+                workstream_id = first["workstream"]["workstream_id"]
+                row = store.conn.execute("SELECT result_json FROM operations WHERE kind='secretary.ensure' AND workstream_id=?", (workstream_id,)).fetchone()
+                legacy = json.loads(row["result_json"])
+                legacy.pop("projectWorktreesDir")
+                legacy.pop("projectGitObjectsDir")
+                store.conn.execute("UPDATE operations SET result_json=? WHERE kind='secretary.ensure' AND workstream_id=?", (json.dumps(legacy), workstream_id))
+                second = ensure_secretary(store, project["project_id"], harness, workspace)
+                self.assertTrue(second["reused"])
+                self.assertEqual(second["workstream"]["provisioning_state"], "bound")
 
     def test_replay_converges_after_each_secretary_checkpoint(self):
         failpoints = [

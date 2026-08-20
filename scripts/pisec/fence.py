@@ -267,6 +267,23 @@ def render_policy(
     if python_env is not None:
         rendered_env = resolve_python_env_paths(python_env)
     replacements["${PYTHON_ENV}"] = rendered_env
+
+    def _resolve_project_store(key: str, label: str) -> list[str]:
+        raw = scope.get(key)
+        if raw is None:
+            return []
+        if not isinstance(raw, str) or not raw or len(raw) > 4096 or "\x00" in raw:
+            raise InvalidRequestError(f"approved {label} is invalid")
+        path = Path(raw)
+        if not path.is_absolute():
+            raise InvalidRequestError(f"approved {label} must be absolute")
+        resolved = path.resolve(strict=False)
+        if resolved != path:
+            raise NeedsAttentionError(f"approved {label} is a symlink or resolves elsewhere")
+        return [str(resolved)]
+
+    replacements["${PROJECT_WORKTREES}"] = _resolve_project_store("projectWorktreesDir", "project worktrees dir")
+    replacements["${PROJECT_GIT_OBJECTS}"] = _resolve_project_store("projectGitObjectsDir", "project git objects dir")
     policy = _substitute(template, replacements)
     text = canonical_json(policy, max_bytes=256 * 1024, max_text=8192) + "\n"
     output = Path(state_root) / "fence" / f"{workstream_id}.json"

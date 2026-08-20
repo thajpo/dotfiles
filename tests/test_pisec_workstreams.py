@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -76,6 +77,28 @@ class WorkstreamTests(unittest.TestCase):
         plain = self.prepare(root, store, project, harness, workspace, key="create-plain")
         self.assertIn("pythonEnv", plain["approvalScope"])
         self.assertIsNone(plain["approvalScope"]["pythonEnv"])
+
+    def test_prepare_carries_project_store_dirs_into_scope(self):
+        temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
+        self.addCleanup(temp.cleanup)
+        self.addCleanup(store.close)
+        prepared = self.prepare(root, store, project, harness, workspace)
+        self.assertEqual(prepared["approvalScope"]["projectWorktreesDir"], str((root / "worktrees" / project["project_id"]).resolve()))
+        self.assertEqual(prepared["approvalScope"]["projectGitObjectsDir"], str((root / "objects" / project["project_id"]).resolve()))
+
+    def test_stored_legacy_proposal_replays_without_project_store_dirs(self):
+        temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
+        self.addCleanup(temp.cleanup)
+        self.addCleanup(store.close)
+        prepared = self.prepare(root, store, project, harness, workspace)
+        row = store.conn.execute("SELECT result_json FROM operations WHERE kind='workstream.create' AND workstream_id=?", (prepared["approvalScope"]["workstreamId"],)).fetchone()
+        legacy = json.loads(row["result_json"])
+        legacy.pop("projectWorktreesDir")
+        legacy.pop("projectGitObjectsDir")
+        store.conn.execute("UPDATE operations SET result_json=? WHERE kind='workstream.create' AND workstream_id=?", (json.dumps(legacy), prepared["approvalScope"]["workstreamId"]))
+        replayed = self.prepare(root, store, project, harness, workspace)
+        self.assertEqual(replayed["approvalScope"]["workstreamId"], prepared["approvalScope"]["workstreamId"])
+        self.assertNotIn("projectWorktreesDir", replayed["approvalScope"])
 
     def test_prepare_auto_discovers_repo_venv(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
