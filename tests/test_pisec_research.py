@@ -80,6 +80,18 @@ class ResearchTests(unittest.TestCase):
         registry.register_workspace(workspace)
         return BrokerDispatcher(lambda: PiStore(root / "state"), registry=registry, harness=harness, workspace=workspace, git_objects=FixtureGitObjects())
 
+    def test_task_get_exposes_approved_python_env(self):
+        temp, root, store, harness, workspace, project_a, project_b, secretary_binding, worker_a, worker_b = self.fixture()
+        self.addCleanup(store.close)
+        self.addCleanup(temp.cleanup)
+        env_dir = root / "venv"
+        env_dir.mkdir()
+        prepared = prepare_workstream(store, project_id=project_a["project_id"], title="Worker", purpose="Research", brief="Bounded fixture", task_packet=task_packet(), idempotency_key="worker-env", harness=harness, workspace=workspace, work_root=root / "worktrees", object_root=root / "objects", python_env=str(env_dir))
+        worker = dict(authorize_apply_workstream(store, scope=prepared["approvalScope"], harness=harness, workspace=workspace, git_objects=FixtureGitObjects())["workstream"])
+        dispatcher = self.dispatcher(root, harness, workspace)
+        packet = dispatcher.dispatch("runtime", "task.get", self.runtime_auth(store, worker))
+        self.assertEqual(packet["pythonEnv"], str(env_dir.resolve()))
+
     def test_authenticated_runtime_research_lifecycle_is_durable_and_isolated(self):
         temp, root, store, harness, workspace, project_a, project_b, secretary_binding, worker_a, worker_b = self.fixture()
         self.addCleanup(store.close)
@@ -88,6 +100,8 @@ class ResearchTests(unittest.TestCase):
         auth = self.runtime_auth(store, worker_a)
         packet = dispatcher.dispatch("runtime", "task.get", auth)
         self.assertEqual(packet["taskPacketId"], store.conn.execute("SELECT task_packet_id FROM task_packets WHERE workstream_id=?", (worker_a["workstream_id"],)).fetchone()[0])
+        self.assertIn("pythonEnv", packet)
+        self.assertIsNone(packet["pythonEnv"])
         request_payload = {"kind": "research", "summary": "Need public documentation", "question": "What is the documented behavior?", "context": "The worker checked its local sources.", "attempted": ["Local source search"], "candidateSources": ["https://example.com/docs"], "blocking": True}
         first = dispatcher.dispatch("runtime", "research.request", {**auth, "idempotencyKey": "research-1", "request": request_payload})
         replay = dispatcher.dispatch("runtime", "research.request", {**auth, "idempotencyKey": "research-1", "request": request_payload})

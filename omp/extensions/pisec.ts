@@ -317,11 +317,18 @@ function registerRuntime(pi: ExtensionAPI): void {
       const requests = research && typeof research === "object" && Array.isArray((research as JsonObject).requests)
         ? ((research as JsonObject).requests as unknown[]).filter(item => item && typeof item === "object" && (item as JsonObject).state !== "acknowledged")
         : [];
+      const pythonEnv = taskPacket && typeof taskPacket === "object" && typeof (taskPacket as JsonObject).pythonEnv === "string"
+        ? String((taskPacket as JsonObject).pythonEnv)
+        : "";
+      const pythonContract = pythonEnv
+        ? `PYTHON_ENVIRONMENT\nAn approved python environment is exposed read-only inside this Fence at: ${pythonEnv}\nRun the project interpreter directly, e.g. ${pythonEnv}/bin/python -m pytest, ${pythonEnv}/bin/python -m ruff check, ${pythonEnv}/bin/python -c "import numpy". Never run uv sync, uv add, uv pip install, or any other package-management write: the env is shared and read-only, and wheel downloads are blocked. If the task needs packages the approved env lacks, persist a bounded secretary research request instead of trying to widen the environment.`
+        : "PYTHON_ENVIRONMENT\nNo python environment was approved for this workstream; the Fence exposes none. Do not attempt pip/uv installs inside the sandbox.";
       return {
         systemPrompt: [
           ...event.systemPrompt,
           "Pisec worker contract: the following broker-authenticated immutable task packet is authoritative for this workstream. Do not edit or reinterpret its execution identity. Built-in web search is available only within the approved Fence domains. If information is unavailable, persist a bounded secretary research request instead of trying to widen Fence, and do not block synchronously waiting for a response. On resume, consume replayed secretary packets and acknowledge them only after using their contents. The research index below is metadata only; fetch each answered/declined request's full packet with pisec_inspect_secretary_research by request_id, then acknowledge it.",
           `IMMUTABLE_TASK_PACKET\n${renderTaskPacket(taskPacket)}`,
+          pythonContract,
           `UNACKNOWLEDGED_SECRETARY_RESEARCH_INDEX\n${renderTaskPacket(requests)}`,
         ],
       };

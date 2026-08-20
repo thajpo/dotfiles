@@ -441,7 +441,21 @@ class BrokerDispatcher:
         workstream_id = str(binding["workstream_id"])
         if operation == "task.get":
             _exact(payload, auth_fields)
-            return get_task_packet(store, project_id, workstream_id)
+            result = get_task_packet(store, project_id, workstream_id)
+            scope_row = store.conn.execute(
+                "SELECT result_json FROM operations WHERE workstream_id=? AND kind='workstream.create' ORDER BY created_at LIMIT 1",
+                (workstream_id,),
+            ).fetchone()
+            python_env: str | None = None
+            if scope_row is not None:
+                try:
+                    parsed_scope = json.loads(str(scope_row["result_json"]))
+                except ValueError:
+                    parsed_scope = None
+                if isinstance(parsed_scope, dict) and isinstance(parsed_scope.get("pythonEnv"), str):
+                    python_env = parsed_scope["pythonEnv"]
+            result["pythonEnv"] = python_env
+            return result
         if operation == "research.request":
             _exact(payload, auth_fields | {"idempotencyKey", "request"})
             result = request_research(store, project_id=project_id, workstream_id=workstream_id, idempotency_key=payload["idempotencyKey"], request=payload["request"])
