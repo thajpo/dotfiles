@@ -15,6 +15,55 @@ from .models import InvalidRequestError, NeedsAttentionError, canonical_json, va
 
 DOMAIN_RE = re.compile(r"^(?:\*\.)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 PROFILES = frozenset({"secretary-project", "worker-default", "worker-networked"})
+_PYVENV_HOME_RE = re.compile(r"^\s*home\s*=\s*(.+?)\s*$")
+
+
+def _read_pyvenv_home(venv: Path) -> Path | None:
+    cfg = venv / "pyvenv.cfg"
+    if not cfg.is_file():
+        return None
+    try:
+        text = cfg.read_text(encoding="utf-8")
+    except OSError as error:
+        raise NeedsAttentionError("python env venv config is unreadable") from error
+    if len(text) > 4096:
+        raise NeedsAttentionError("python env venv config is too large")
+    for line in text.splitlines():
+        match = _PYVENV_HOME_RE.match(line)
+        if match is not None:
+            value = match.group(1)
+            if not value or len(value) > 4096 or "\x00" in value:
+                raise NeedsAttentionError("python env venv config home is invalid")
+            return Path(value)
+    raise NeedsAttentionError("python env venv config lacks a home interpreter")
+
+
+def _validate_python_env_path(python_env: str) -> Path:
+    if not isinstance(python_env, str) or not python_env or len(python_env) > 4096 or "\x00" in python_env:
+        raise InvalidRequestError("approved python env is invalid")
+    env_path = Path(python_env)
+    if not env_path.is_absolute():
+        raise InvalidRequestError("approved python env must be absolute")
+    resolved_env = env_path.resolve(strict=False)
+    if resolved_env != env_path:
+        raise NeedsAttentionError("approved python env is a symlink or resolves elsewhere")
+    return resolved_env
+
+
+def resolve_python_env_paths(python_env: str) -> list[str]:
+    resolved_env = _validate_python_env_path(python_env)
+    home = _read_pyvenv_home(resolved_env)
+    if home is None:
+        return [str(resolved_env)]
+    if not home.is_absolute() or len(str(home)) > 4096:
+        raise NeedsAttentionError("python env venv config home must be an absolute path")
+    interpreter_root = home.parent if home.name == "bin" else home
+    resolved_home = interpreter_root.resolve(strict=False)
+    if resolved_home != interpreter_root:
+        raise NeedsAttentionError("python env interpreter home is a symlink or resolves elsewhere")
+    if not resolved_home.is_dir():
+        raise NeedsAttentionError("python env interpreter home does not exist")
+    return [str(resolved_env), str(resolved_home)]
 
 
 def _repo_root() -> Path:
@@ -216,15 +265,7 @@ def render_policy(
     python_env = scope.get("pythonEnv")
     rendered_env: list[str] = []
     if python_env is not None:
-        if not isinstance(python_env, str) or not python_env or len(python_env) > 4096 or "\x00" in python_env:
-            raise InvalidRequestError("approved python env is invalid")
-        env_path = Path(python_env)
-        if not env_path.is_absolute():
-            raise InvalidRequestError("approved python env must be absolute")
-        resolved_env = env_path.resolve(strict=False)
-        if resolved_env != env_path:
-            raise NeedsAttentionError("approved python env is a symlink or resolves elsewhere")
-        rendered_env.append(str(resolved_env))
+        rendered_env = resolve_python_env_paths(python_env)
     replacements["${PYTHON_ENV}"] = rendered_env
     policy = _substitute(template, replacements)
     text = canonical_json(policy, max_bytes=256 * 1024, max_text=8192) + "\n"

@@ -119,6 +119,9 @@ def prepare_workstream(
         raise InvalidRequestError("external domains must be a list")
     domains = list(harness.profile_domains(execution_profile, external_domains))
     if python_env is None:
+        candidate = Path(project["repository_path"]) / ".venv"
+        python_env = str(candidate) if (candidate / "pyvenv.cfg").is_file() else None
+    if python_env is None:
         normalized_python_env = None
     else:
         if not isinstance(python_env, str) or not python_env or len(python_env) > 4096 or "\x00" in python_env:

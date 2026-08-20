@@ -85,6 +85,25 @@ class RuntimeMaterializationTests(unittest.TestCase):
             self.assertFalse((destination / "extensions" / "herdr-omp-agent-state.ts").exists())
             self.assertEqual((destination / "extensions" / "custom.ts").read_text(), "custom extension\n")
 
+    def test_desired_generation_reflects_python_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            worktree = root / "worktree"
+            workstream_id = new_id("ws")
+            branch = f"pisec/{workstream_id}/work"
+            subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", branch, str(worktree), "main"], check=True)
+            common = (repo / ".git").resolve()
+            private = root / "state" / "git-objects" / new_id("prj") / workstream_id / "objects"
+            (private / "info").mkdir(parents=True)
+            (private / "pack").mkdir()
+            adapter = OmpHarnessAdapter(state_root=root / "state", config=make_config(root))
+            scope = {"projectId": new_id("prj"), "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS)}
+            env_dir = root / "venv"
+            env_dir.mkdir()
+            self.assertNotEqual(adapter.desired_generation(scope), adapter.desired_generation({**scope, "pythonEnv": str(env_dir)}))
+
     def test_profile_replay_reuses_runtime_token_and_agent_surface(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -310,6 +329,71 @@ class FencePolicyAndShimTests(unittest.TestCase):
             env_link = root / "venv-link"
             env_link.symlink_to(real_env, target_is_directory=True)
             scope = {"projectId": project_id, "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS), "pythonEnv": str(env_link)}
+            with self.assertRaises(NeedsAttentionError):
+                render(scope, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
+
+    def test_rendered_worker_policy_expands_venv_interpreter_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree, common, workstream_id, branch = self.make_linked_repo(root)
+            state = root / "state"
+            project_id = new_id("prj")
+            private = state / "git-objects" / project_id / workstream_id / "objects"
+            (private / "info").mkdir(parents=True)
+            (private / "pack").mkdir()
+            agent = state / "omp" / workstream_id
+            agent.mkdir(parents=True)
+            interpreter = root / "interpreter"
+            (interpreter / "bin").mkdir(parents=True)
+            env_dir = root / "venv"
+            env_dir.mkdir()
+            (env_dir / "pyvenv.cfg").write_text(f"home = {interpreter / 'bin'}\n")
+            scope = {"projectId": project_id, "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS), "pythonEnv": str(env_dir)}
+            policy_path, digest = render(scope, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
+            policy = json.loads(policy_path.read_text())
+            self.assertIn(str(env_dir.resolve()), policy["filesystem"]["allowRead"])
+            self.assertIn(str(interpreter.resolve()), policy["filesystem"]["allowRead"])
+            self.assertNotIn(str(env_dir.resolve()), policy["filesystem"]["allowWrite"])
+            self.assertNotIn(str(interpreter.resolve()), policy["filesystem"]["allowWrite"])
+            self.assertEqual(hashlib.sha256(policy_path.read_bytes()).hexdigest(), digest)
+
+    def test_rendered_worker_policy_rejects_missing_interpreter_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree, common, workstream_id, branch = self.make_linked_repo(root)
+            state = root / "state"
+            project_id = new_id("prj")
+            private = state / "git-objects" / project_id / workstream_id / "objects"
+            (private / "info").mkdir(parents=True)
+            (private / "pack").mkdir()
+            agent = state / "omp" / workstream_id
+            agent.mkdir(parents=True)
+            env_dir = root / "venv"
+            env_dir.mkdir()
+            (env_dir / "pyvenv.cfg").write_text("home = /nonexistent/interpreter/bin\n")
+            scope = {"projectId": project_id, "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS), "pythonEnv": str(env_dir)}
+            with self.assertRaises(NeedsAttentionError):
+                render(scope, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
+
+    def test_rendered_worker_policy_rejects_symlinked_interpreter_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree, common, workstream_id, branch = self.make_linked_repo(root)
+            state = root / "state"
+            project_id = new_id("prj")
+            private = state / "git-objects" / project_id / workstream_id / "objects"
+            (private / "info").mkdir(parents=True)
+            (private / "pack").mkdir()
+            agent = state / "omp" / workstream_id
+            agent.mkdir(parents=True)
+            real_interpreter = root / "real-interpreter"
+            (real_interpreter / "bin").mkdir(parents=True)
+            interpreter_link = root / "interpreter-link"
+            interpreter_link.symlink_to(real_interpreter, target_is_directory=True)
+            env_dir = root / "venv"
+            env_dir.mkdir()
+            (env_dir / "pyvenv.cfg").write_text(f"home = {interpreter_link / 'bin'}\n")
+            scope = {"projectId": project_id, "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS), "pythonEnv": str(env_dir)}
             with self.assertRaises(NeedsAttentionError):
                 render(scope, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
 

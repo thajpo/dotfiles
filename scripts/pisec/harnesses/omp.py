@@ -440,6 +440,8 @@ class OmpHarnessAdapter:
         }
         if scope.get("dataDirs"):
             scope_dict["dataDirs"] = scope["dataDirs"]
+        if scope.get("pythonEnv"):
+            scope_dict["pythonEnv"] = scope["pythonEnv"]
         manifest = {
             "schemaVersion": 1,
             "adapter": self.manifest.adapter_id,

@@ -77,6 +77,21 @@ class WorkstreamTests(unittest.TestCase):
         self.assertIn("pythonEnv", plain["approvalScope"])
         self.assertIsNone(plain["approvalScope"]["pythonEnv"])
 
+    def test_prepare_auto_discovers_repo_venv(self):
+        temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
+        self.addCleanup(temp.cleanup)
+        self.addCleanup(store.close)
+        venv = repo / ".venv"
+        venv.mkdir()
+        (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        prepared = self.prepare(root, store, project, harness, workspace, key="create-auto")
+        self.assertEqual(prepared["approvalScope"]["pythonEnv"], str(venv.resolve()))
+        other = root / "other-venv"
+        other.mkdir()
+        task_packet = {"schemaVersion": 1, "outcome": "Parser behavior is implemented and verified.", "boundaries": ["Change the parser only."], "acceptance": ["Parser tests pass."], "openQuestions": [], "evidence": ["Test output."]}
+        explicit = prepare_workstream(store, project_id=project["project_id"], title="Implement parser", purpose="Ship exact behavior", brief="Implement and verify the parser without unrelated changes.", task_packet=task_packet, idempotency_key="create-explicit", harness=harness, workspace=workspace, work_root=root / "worktrees", object_root=root / "objects", python_env=str(other))
+        self.assertEqual(explicit["approvalScope"]["pythonEnv"], str(other.resolve()))
+
     def test_prepare_rejects_invalid_python_env(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
         self.addCleanup(temp.cleanup)
