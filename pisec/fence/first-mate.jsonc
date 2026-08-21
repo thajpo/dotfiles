@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fencesandbox/fence/v0.1.66/docs/schema/fence.schema.json",
+  "allowPty": true,
+  "forceNewSession": true,
+  "network": {
+    "defaultAction": "deny",
+    "allowedDomains": ["*"],
+    "deniedDomains": ["169.254.169.254"],
+    "allowLocalBinding": false,
+    "allowLocalOutbound": true,
+    "allowLocalOutboundPorts": ["${GATEWAY_PORT}"]
+  },
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": ["${ASSIGNED_ROOT}", "${AGENT_DIR}", "${HARNESS_EXECUTABLE}", "${HARNESS_EXTENSION}", "${HARNESS_NATIVES}", "${DATA_DIRS}", "${FLEET_WORKTREES}", "${FLEET_GIT_OBJECTS}"],
+    "allowWrite": ["${ASSIGNED_ROOT}", "${AGENT_DIR}", "${AGENT_DIR}/run", "${HARNESS_RUN}", "/tmp", "${RUNTIME_SOCKET_DIR}", "${FLEET_SOCKET_DIR}"],
+    "denyRead": ["${HOME}/.ssh", "${HOME}/.aws", "${HOME}/.gnupg", "${HOME}/.kube", "${HOME}/.docker", "${HOME}/.omp/agent", "${HOME}/.omp/plugins", "${WORKSPACE_CONFIG}"],
+    "denyWrite": ["${HOME}/.ssh", "${HOME}/.aws", "${HOME}/.gnupg", "${HOME}/.kube", "${HOME}/.docker", "${HOME}/.omp/agent", "${HOME}/.omp/plugins", "${WORKSPACE_CONFIG}"]
+  },
+  "devices": {"mode": "minimal"},
+  "command": {
+    "useDefaults": true,
+    "runtimeExecPolicy": "argv",
+    "deny": ["git push", "git remote set-url", "git remote add", "git remote remove", "git fetch --upload-pack", "git gc", "git pack-refs", "git maintenance", "gh api", "gh pr create", "gh release", "npm publish", "pnpm publish", "yarn npm publish", "cargo publish", "twine upload", "ssh", "scp", "sudo", "doas", "docker", "podman", "kubectl", "${DENIED_COMMANDS}"]
+  }
+}

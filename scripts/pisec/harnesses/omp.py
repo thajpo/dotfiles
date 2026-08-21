@@ -22,7 +22,15 @@ from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canon
 
 DOMAIN_RE = re.compile(r"^(?:\*\.)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 OMP_BASELINE_DOMAINS = ("html.duckduckgo.com",)
-OMP_PROFILE_IDS = frozenset({"secretary-project", "worker-default", "worker-networked"})
+OMP_PROFILE_IDS = frozenset({"secretary-project", "first-mate", "worker-default", "worker-networked"})
+
+
+def _profile_role(profile: str) -> str:
+    if profile == "secretary-project":
+        return "secretary"
+    if profile == "first-mate":
+        return "first_mate"
+    return "worker"
 COPY_NAMES = ("extensions", "skills", "rules", "commands", "themes", "agents")
 COPY_FILES = ("AGENTS.md",)
 PLUGIN_FILES = ("package.json", "bun.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "omp-plugins.lock.json")
@@ -394,13 +402,13 @@ class OmpHarnessAdapter:
     def validate_execution_profile(self, profile: str, role: str) -> None:
         if profile not in OMP_PROFILE_IDS:
             raise InvalidRequestError("unknown OMP execution profile")
-        expected_role = "secretary" if profile == "secretary-project" else "worker"
+        expected_role = _profile_role(profile)
         if role != expected_role:
             raise InvalidRequestError("OMP execution profile does not match the workstream role")
 
     def profile_domains(self, profile: str, additional_domains: Sequence[str]) -> tuple[str, ...]:
-        self.validate_execution_profile(profile, "secretary" if profile == "secretary-project" else "worker")
-        if profile == "secretary-project":
+        self.validate_execution_profile(profile, _profile_role(profile))
+        if profile in {"secretary-project", "first-mate"}:
             return ("*",)
         values = list(OMP_BASELINE_DOMAINS) + list(additional_domains)
         if any(not isinstance(item, str) or DOMAIN_RE.fullmatch(item) is None for item in values):
@@ -411,7 +419,7 @@ class OmpHarnessAdapter:
 
     def desired_generation(self, scope: Mapping[str, Any]) -> str:
         profile = scope.get("executionProfile")
-        role = "secretary" if profile == "secretary-project" else "worker"
+        role = _profile_role(str(profile))
         self.validate_execution_profile(str(profile), role)
         repository = _repo_root()
         cached = self._surface_digest_cache
@@ -436,12 +444,13 @@ class OmpHarnessAdapter:
         policy_sources = repository / "pisec" / "fence"
         scope_dict = {
             key: scope.get(key)
-            for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "externalDomains")
+            for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "fleetWorktreesDir", "fleetGitObjectsDir", "externalDomains")
         }
         if scope.get("dataDirs"):
             scope_dict["dataDirs"] = scope["dataDirs"]
         if scope.get("pythonEnv"):
             scope_dict["pythonEnv"] = scope["pythonEnv"]
+        extension_name = "first-mate.ts" if profile == "first-mate" else "pisec.ts"
         manifest = {
             "schemaVersion": 1,
             "adapter": self.manifest.adapter_id,
@@ -449,7 +458,7 @@ class OmpHarnessAdapter:
             "scope": scope_dict,
             "config": self.config,
             "copiedSurfaceSha256": copied_surface_digest,
-            "pisecExtensionSha256": _file_digest(repository / "omp" / "extensions" / "pisec.ts"),
+            "pisecExtensionSha256": _file_digest(repository / "omp" / "extensions" / extension_name),
             "runtimeLauncherSha256": _file_digest(repository / "pisec" / "runtime-bin" / "omp"),
             "fencePoliciesSha256": _tree_digest(policy_sources),
             "harnessExecutableSha256": _file_digest(Path(self.harness_config["executablePath"])),
@@ -460,7 +469,7 @@ class OmpHarnessAdapter:
     def materialize_profile(self, scope: Mapping[str, Any]) -> HarnessArtifacts:
         workstream_id = validate_id(scope["workstreamId"], prefix="ws")
         profile = scope.get("executionProfile")
-        role = "secretary" if profile == "secretary-project" else "worker"
+        role = _profile_role(str(profile))
         self.validate_execution_profile(profile, role)
         generation_sha256 = self.desired_generation(scope)
         agent_dir = self.state_root / "omp" / workstream_id
@@ -469,7 +478,7 @@ class OmpHarnessAdapter:
         _copy_user_surface(agent_dir)
         _copy_user_config(agent_dir)
         discovery_agent_dir = agent_dir / "agent"
-        _secure_tree(agent_dir, discovery_agent_dir)
+        _secure_tree(self.state_root, discovery_agent_dir)
         _copy_user_surface(discovery_agent_dir)
         plugin_info = _copy_plugin_snapshot(agent_dir)
         managed_agent = _repo_root() / "omp" / "agents" / "pisec-web-research.md"
@@ -521,13 +530,14 @@ class OmpHarnessAdapter:
             harness_home=agent_dir,
             adapter_replacements={
                 "HARNESS_EXECUTABLE": self.harness_config["executablePath"],
-                "HARNESS_EXTENSION": _repo_root() / "omp" / "extensions" / "pisec.ts",
+                "HARNESS_EXTENSION": _repo_root() / "omp" / "extensions" / ("first-mate.ts" if profile == "first-mate" else "pisec.ts"),
                 "HARNESS_NATIVES": Path.home() / ".omp" / "natives",
                 "HARNESS_RUN": Path.home() / ".omp" / "run",
                 "WORKSPACE_CONFIG": Path.home() / ".config" / "herdr",
             },
             baseline_domains=OMP_BASELINE_DOMAINS,
         )
+        extension_path = _repo_root() / "omp" / "extensions" / ("first-mate.ts" if profile == "first-mate" else "pisec.ts")
         adapter_data = {
             "overlayPath": str(overlay_path),
             "xdgDataHome": plugin_info["xdg_data_home"],
@@ -535,7 +545,7 @@ class OmpHarnessAdapter:
             "xdgCacheHome": plugin_info["xdg_cache_home"],
             "xdgConfigHome": plugin_info["xdg_config_home"],
             "pluginRoot": plugin_info["plugin_root"],
-            "extensionPath": str((_repo_root() / "omp" / "extensions" / "pisec.ts").absolute()),
+            "extensionPath": str(extension_path.absolute()),
         }
         return HarnessArtifacts(
             harness_home=str(agent_dir),
@@ -566,8 +576,8 @@ class OmpHarnessAdapter:
     ) -> Path:
         workstream_id = validate_id(scope["workstreamId"], prefix="ws")
         project_id = validate_id(scope["projectId"], prefix="prj")
-        role = "secretary" if scope.get("executionProfile") == "secretary-project" else "worker"
         profile = scope.get("executionProfile")
+        role = _profile_role(str(profile))
         self.validate_execution_profile(profile, role)
         if not isinstance(workspace_session_name, str) or not workspace_session_name or len(workspace_session_name) > 128 or "\x00" in workspace_session_name:
             raise InvalidRequestError("workspace session name is invalid")
@@ -584,7 +594,7 @@ class OmpHarnessAdapter:
         if stat.S_ISLNK(control_info.st_mode) or not stat.S_ISREG(control_info.st_mode) or control_info.st_uid != os.geteuid() or stat.S_IMODE(control_info.st_mode) != 0o600:
             raise NeedsAttentionError("Pisec control database is unsafe")
         descriptor: dict[str, Any] = {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "harnessId": self.manifest.adapter_id,
             "stateRoot": str(self.state_root.absolute()),
             "controlDbPath": str(control_db.absolute()),
@@ -612,6 +622,7 @@ class OmpHarnessAdapter:
             "pluginRoot": str(Path(_artifact_value(artifacts, "pluginRoot")).absolute()),
             "runtimeSocketPath": str(runtime_root / "runtime" / "control.sock"),
             "secretarySocketPath": str(runtime_root / "secretary" / "control.sock") if role == "secretary" else None,
+            "fleetSocketPath": str(runtime_root / "fleet" / "control.sock") if role == "first_mate" else None,
             "launchSecretPath": str(Path(artifacts.launch_secret_path).absolute()),
             "privateGitObjectDir": None if scope.get("privateGitObjectDir") is None else str(Path(scope["privateGitObjectDir"]).absolute()),
             "gitCommonObjectDir": None if scope.get("gitCommonObjectDir") is None else str(Path(scope["gitCommonObjectDir"]).absolute()),

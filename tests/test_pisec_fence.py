@@ -210,7 +210,7 @@ class RuntimeMaterializationTests(unittest.TestCase):
             launcher = adapter.commit_launch_binding(scope, artifacts, workspace_session_name="main", workspace_id="w1", workspace_view_id="w1:t1", workspace_surface_id="w1:p1")
             descriptor_path = launcher.parent / "binding.json"
             document = json.loads(descriptor_path.read_text())
-            self.assertEqual(document["schemaVersion"], 2)
+            self.assertEqual(document["schemaVersion"], 3)
             self.assertEqual(document["harnessId"], "omp")
             self.assertEqual(document["canonicalRoot"], str(managed.resolve()))
             self.assertEqual(document["workspaceSessionName"], "main")
@@ -613,6 +613,8 @@ class FencePolicyAndShimTests(unittest.TestCase):
                 policy_path TEXT,
                 policy_sha256 TEXT,
                 desired_generation_sha256 TEXT,
+                applied_generation_sha256 TEXT,
+                launch_generation_sha256 TEXT,
                 private_git_object_dir TEXT,
                 native_session_kind TEXT,
                 native_session_value TEXT,
@@ -628,13 +630,13 @@ class FencePolicyAndShimTests(unittest.TestCase):
             (workstream_id, project_id, role, "secretary-project" if role == "secretary" else "worker-default", str(managed.resolve()), "active", "bound"),
         )
         connection.execute(
-            "INSERT INTO runtime_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (workstream_id, "main", workspace_id, view_id, surface_id, "omp", str(agent), str(secret), str(policy), hashlib.sha256(policy.read_bytes()).hexdigest(), "a" * 64, None if private is None else str(private), session_kind, session_value, "starting"),
+            "INSERT INTO runtime_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (workstream_id, "main", workspace_id, view_id, surface_id, "omp", str(agent), str(secret), str(policy), hashlib.sha256(policy.read_bytes()).hexdigest(), "a" * 64, "a" * 64, "a" * 64, None if private is None else str(private), session_kind, session_value, "starting"),
         )
         connection.commit()
         connection.close()
         descriptor = {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "harnessId": "omp",
             "stateRoot": str(state.resolve()),
             "controlDbPath": str(control_db.resolve()),
@@ -662,7 +664,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             "pluginRoot": str(plugin_root),
             "runtimeSocketPath": str(root / "runtime.sock"),
             "secretarySocketPath": str(root / "secretary.sock") if role == "secretary" else None,
-            "launchSecretPath": str(secret),
+            "fleetSocketPath": None,
             "privateGitObjectDir": None if private is None else str(private),
             "gitCommonObjectDir": None if common is None else str(common),
         }
@@ -722,6 +724,42 @@ class FencePolicyAndShimTests(unittest.TestCase):
             result = subprocess.run([str(launcher)], cwd=nested, env=environment, text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("durable binding identity", result.stderr)
+
+    def test_private_binding_allows_selected_applied_generation_while_desired_is_newer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested, entry, launcher = self.make_shim_binding(root, role="secretary")
+            connection = sqlite3.connect(root / "state" / "control.db")
+            connection.execute(
+                "UPDATE runtime_bindings SET desired_generation_sha256=?,applied_generation_sha256=?,launch_generation_sha256=?",
+                ("b" * 64, "a" * 64, "a" * 64),
+            )
+            connection.commit()
+            connection.close()
+            environment = os.environ.copy()
+            environment.update({"HOME": str(root / "home"), "HERDR_SESSION": "main", "HERDR_PANE_ID": "w1:p1"})
+            result = subprocess.run([str(launcher)], cwd=nested, env=environment, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            captured = json.loads(result.stdout)
+            self.assertEqual(captured["env"]["PISEC_RUNTIME_GENERATION"], "a" * 64)
+
+    def test_private_binding_falls_back_to_applied_generation_after_session_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested, entry, launcher = self.make_shim_binding(root, role="secretary")
+            connection = sqlite3.connect(root / "state" / "control.db")
+            connection.execute(
+                "UPDATE runtime_bindings SET desired_generation_sha256=?,applied_generation_sha256=?,launch_generation_sha256=NULL",
+                ("b" * 64, "a" * 64),
+            )
+            connection.commit()
+            connection.close()
+            environment = os.environ.copy()
+            environment.update({"HOME": str(root / "home"), "HERDR_SESSION": "main", "HERDR_PANE_ID": "w1:p1"})
+            result = subprocess.run([str(launcher)], cwd=nested, env=environment, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            captured = json.loads(result.stdout)
+            self.assertEqual(captured["env"]["PISEC_RUNTIME_GENERATION"], "a" * 64)
 
     def test_private_binding_recovers_from_needs_attention_error_state(self):
         with tempfile.TemporaryDirectory() as tmp:

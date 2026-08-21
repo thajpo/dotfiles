@@ -1,4 +1,4 @@
-"""Pisec broker dispatch and three-socket Unix service."""
+"""Pisec broker dispatch and four-socket Unix service."""
 
 from __future__ import annotations
 import hashlib
@@ -17,10 +17,11 @@ from typing import Any, Callable, Mapping
 from .adapters import AdapterRegistry, HarnessAdapter, WorkspaceAdapter
 from .cleanup import cleanup_workstream
 from .decisions import list_decisions, record_decision, resolve_decision
+from .events import list_events
 from .migration import migrate_legacy_bindings
 from .models import AuthorizationError, InvalidRequestError, NotFoundError, PisecError, UnsafeStateError, bounded_text, utc_now, validate_id
 from .pi_store import PiStore
-from .projects import list_projects, project_status, register_project, resolve_project
+from .projects import get_project, list_projects, project_status, register_project, resolve_project
 from .protocol import MAX_MESSAGE_BYTES, decode_request, error_response, success_response
 from .research import (
     acknowledge_research,
@@ -38,10 +39,12 @@ from .research import (
     request_research_context,
 )
 from .runtime import WORKSPACE_RUNTIME_MISSING, prepare_session_switch, report_runtime, start_bound_agent, verify_runtime_binding
+from .first_mate import ensure_first_mate, focus_first_mate
 from .secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge, push_branch
 from .workstreams import authorize_apply_workstream, complete_workstream, focus_workstream, inspect_workstream, list_workstreams, prepare_workstream, retire_workstream, send_workstream
-ADMIN_OPERATIONS = frozenset({"project.register", "project.list", "project.open", "project.refresh", "secretary.ensure", "secretary.focus", "workstream.focus", "workstream.cleanup", "system.status", "system.reconcile", "system.doctor", "workspace.startup", "workspace.event", "presentation.snapshot"})
+ADMIN_OPERATIONS = frozenset({"project.register", "project.list", "project.open", "project.refresh", "secretary.ensure", "secretary.focus", "first_mate.ensure", "first_mate.focus", "workstream.focus", "workstream.cleanup", "system.status", "system.reconcile", "system.doctor", "workspace.startup", "workspace.event", "presentation.snapshot"})
 SECRETARY_OPERATIONS = frozenset({"project.status", "git.status", "git.push", "git.workstream_changes", "git.merge.prepare", "git.merge.apply", "workstream.list", "workstream.inspect", "workstream.prepare", "workstream.authorize_apply", "workstream.send", "workstream.focus", "workstream.complete", "workstream.retire", "decision.list", "decision.record", "decision.resolve", "research.list", "research.inspect", "research.claim", "research.request_context", "research.answer", "research.decline"})
+FLEET_OPERATIONS = frozenset({"fleet.status", "fleet.events", "fleet.secretary.send", "fleet.workstream.list", "fleet.workstream.inspect", "fleet.git.workstream_changes", "fleet.workstream.prepare", "fleet.workstream.authorize_apply", "fleet.git.merge.prepare", "fleet.git.merge.apply"})
 RUNTIME_OPERATIONS = frozenset({"runtime.report", "runtime.turn.prepare", "session.switch.prepare", "task.get", "research.request", "research.list", "research.inspect", "research.add_context", "research.acknowledge"})
 WORKSPACE_STARTUP_GRACE_SECONDS = 2.0
 WORKSPACE_RECONCILE_INTERVAL_SECONDS = 5.0
@@ -57,7 +60,7 @@ def default_runtime_root() -> Path:
 
 def socket_paths(root: Path | None = None) -> dict[str, Path]:
     base = root or default_runtime_root()
-    return {kind: base / kind / "control.sock" for kind in ("admin", "secretary", "runtime")}
+    return {kind: base / kind / "control.sock" for kind in ("admin", "secretary", "fleet", "runtime")}
 
 
 def _exact(payload: Mapping[str, Any], required: set[str], optional: set[str] = set()) -> None:
@@ -406,12 +409,23 @@ class BrokerDispatcher:
             if hmac.compare_digest(row["runtime_token_sha256"], digest):
                 return dict(row)
         raise AuthorizationError("secretary binding token is invalid")
+    def _first_mate_binding(self, store: PiStore, payload: dict[str, Any]) -> dict[str, Any]:
+        token = payload.pop("authToken", None)
+        if not isinstance(token, str) or len(token) < 32 or len(token) > 512:
+            raise AuthorizationError("First Mate binding token is required")
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        rows = store.conn.execute(
+            "SELECT w.project_id,w.workstream_id,r.runtime_token_sha256 FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE w.kind='first_mate' AND w.desired_state='active'"
+        ).fetchall()
+        matches = [dict(row) for row in rows if hmac.compare_digest(row["runtime_token_sha256"], digest)]
+        if len(matches) != 1:
+            raise AuthorizationError("First Mate binding token is invalid")
+        return matches[0]
 
     def _secretary_project(self, store: PiStore, payload: dict[str, Any]) -> str:
         return str(self._secretary_binding(store, payload)["project_id"])
-
     def dispatch(self, socket_kind: str, operation: str, payload_value: Mapping[str, Any]) -> Any:
-        allowlist = {"admin": ADMIN_OPERATIONS, "secretary": SECRETARY_OPERATIONS, "runtime": RUNTIME_OPERATIONS}.get(socket_kind)
+        allowlist = {"admin": ADMIN_OPERATIONS, "secretary": SECRETARY_OPERATIONS, "fleet": FLEET_OPERATIONS, "runtime": RUNTIME_OPERATIONS}.get(socket_kind)
         if allowlist is None or operation not in allowlist:
             raise AuthorizationError("operation is not allowed on this socket")
         payload = dict(payload_value)
@@ -421,6 +435,9 @@ class BrokerDispatcher:
             if socket_kind == "secretary":
                 binding = self._secretary_binding(store, payload)
                 return self._secretary(store, operation, str(binding["project_id"]), str(binding["workstream_id"]), payload)
+            if socket_kind == "fleet":
+                binding = self._first_mate_binding(store, payload)
+                return self._fleet(store, operation, str(binding["workstream_id"]), payload)
             if operation == "runtime.report":
                 return report_runtime(store, payload, self.harness, self.workspace)
             return self._runtime(store, operation, payload)
@@ -530,6 +547,9 @@ class BrokerDispatcher:
                     from .secretary import ensure_secretary
                     resumed = ensure_secretary(store, str(operation["project_id"]), self.harness, self.workspace)
                     result["resumed"].append({"operationId": operation["operation_id"], "reused": resumed.get("reused", False)})
+                elif operation["kind"] == "first_mate.ensure":
+                    resumed = ensure_first_mate(store, str(operation["project_id"]), self.harness, self.workspace)
+                    result["resumed"].append({"operationId": operation["operation_id"], "reused": resumed.get("reused", False)})
             except BaseException as error:
                 result["errors"].append({"operationId": operation["operation_id"], "code": getattr(error, "code", "internal_error")})
         return result
@@ -549,7 +569,7 @@ class BrokerDispatcher:
             if payload.get("project"):
                 project = resolve_project(store, str(payload["project"]))
                 return _public_project_status(project_status(store, project["project_id"]))
-            return {"projects": [_public_project(row) for row in list_projects(store)], "schema": "pisec-core", "version": 6}
+            return {"projects": [_public_project(row) for row in list_projects(store)], "schema": "pisec-core", "version": 8}
         if operation == "project.open":
             _exact(payload, {"project"})
             from .secretary import ensure_secretary, focus_secretary
@@ -580,6 +600,18 @@ class BrokerDispatcher:
                 "binding": _public_binding(result.get("binding")),
                 "reused": bool(result.get("reused", False)),
             }
+        if operation == "first_mate.ensure":
+            _exact(payload, {"project"})
+            result = ensure_first_mate(store, str(payload["project"]), self.harness, self.workspace)
+            return {
+                "project": _public_project(result["project"]),
+                "workstream": _public_workstream(result["workstream"]),
+                "binding": _public_binding(result.get("binding")),
+                "reused": bool(result.get("reused", False)),
+            }
+        if operation == "first_mate.focus":
+            _exact(payload, set())
+            return focus_first_mate(store, self.workspace)
         if operation == "secretary.focus":
             _exact(payload, {"project"})
             from .secretary import focus_secretary
@@ -703,6 +735,71 @@ class BrokerDispatcher:
             self._notify_worker_research(store, result, "declined")
             return result
         raise InvalidRequestError("unsupported secretary operation")
+    def _fleet_project(self, store: PiStore, payload: Mapping[str, Any]) -> str:
+        project_id = payload.get("projectId")
+        if not isinstance(project_id, str):
+            raise InvalidRequestError("fleet projectId is required")
+        return str(get_project(store, project_id)["project_id"])
+
+    def _fleet(self, store: PiStore, operation: str, first_mate_workstream_id: str, payload: dict[str, Any]) -> Any:
+        if operation == "fleet.status":
+            _exact(payload, set(), {"projectId"})
+            if payload.get("projectId") is not None:
+                project_id = self._fleet_project(store, payload)
+                return _public_project_status(project_status(store, project_id))
+            statuses = [_public_project_status(project_status(store, project["project_id"])) for project in list_projects(store)]
+            return {"projects": statuses, "source": "pisec-sqlite", "firstMateWorkstreamId": first_mate_workstream_id}
+        if operation == "fleet.events":
+            _exact(payload, set(), {"after", "limit"})
+            rows = list_events(store, after=int(payload.get("after", 0)), limit=int(payload.get("limit", 256)))
+            return {"events": [{"sequence": row["sequence"], "eventId": row["event_id"], "kind": row["kind"], "projectId": row["project_id"], "workstreamId": row["workstream_id"], "operationId": row["operation_id"], "createdAt": row["created_at"]} for row in rows]}
+        if operation == "fleet.secretary.send":
+            _exact(payload, {"projectId", "text"}, {"workstreamId"})
+            project_id = self._fleet_project(store, payload)
+            project = get_project(store, project_id)
+            workstream_id = payload.get("workstreamId") or project.get("secretary_workstream_id")
+            if not isinstance(workstream_id, str):
+                raise NotFoundError("project has no secretary")
+            secretary = store.conn.execute("SELECT kind,desired_state FROM workstreams WHERE project_id=? AND workstream_id=?", (project_id, workstream_id)).fetchone()
+            if secretary is None or secretary["kind"] != "secretary" or secretary["desired_state"] == "retired":
+                raise NotFoundError("project secretary was not found")
+            result = send_workstream(store, project_id, workstream_id, payload["text"], self.workspace)
+            return {"projectId": project_id, "workstreamId": result["workstreamId"], "delivered": result["delivered"]}
+        if operation == "fleet.workstream.list":
+            _exact(payload, {"projectId"})
+            return {"workstreams": [_public_workstream(row) for row in list_workstreams(store, self._fleet_project(store, payload))]}
+        if operation == "fleet.workstream.inspect":
+            _exact(payload, {"projectId", "workstreamId"})
+            return _public_inspect(inspect_workstream(store, self._fleet_project(store, payload), payload["workstreamId"]))
+        if operation == "fleet.git.workstream_changes":
+            _exact(payload, {"projectId", "workstreamId"})
+            return inspect_workstream_changes(store, self._fleet_project(store, payload), payload["workstreamId"])
+        if operation == "fleet.workstream.prepare":
+            _exact(payload, {"projectId", "title", "purpose", "brief", "taskPacket", "idempotencyKey"}, {"targetRef", "executionProfile", "externalDomains", "pythonEnv"})
+            project_id = self._fleet_project(store, payload)
+            profile = payload.get("executionProfile", "worker-default")
+            prepared = prepare_workstream(store, project_id=project_id, title=payload["title"], purpose=payload["purpose"], brief=payload["brief"], task_packet=payload["taskPacket"], idempotency_key=payload["idempotencyKey"], harness=self.harness, workspace=self.workspace, target_ref=payload.get("targetRef"), execution_profile=profile, external_domains=payload.get("externalDomains", []), python_env=payload.get("pythonEnv"))
+            return {"operation": _public_operation(prepared["operation"]), "workstream": _public_workstream(prepared["workstream"]), "approvalScope": prepared["approvalScope"]}
+        if operation == "fleet.workstream.authorize_apply":
+            _exact(payload, {"projectId", "approvalScope"})
+            project_id = self._fleet_project(store, payload)
+            scope = payload["approvalScope"]
+            if not isinstance(scope, Mapping) or scope.get("projectId") != project_id:
+                raise InvalidRequestError("fleet approval scope project does not match projectId")
+            applied = authorize_apply_workstream(store, scope=scope, harness=self.harness, workspace=self.workspace, git_objects=self.git_objects, actor="first_mate")
+            return {"operation": _public_operation(applied["operation"]), "workstream": _public_workstream(applied["workstream"])}
+        if operation == "fleet.git.merge.prepare":
+            _exact(payload, {"projectId", "workstreamId"})
+            return {"approvalScope": prepare_workstream_merge(store, self._fleet_project(store, payload), payload["workstreamId"])}
+        if operation == "fleet.git.merge.apply":
+            _exact(payload, {"projectId", "approvalScope"})
+            project_id = self._fleet_project(store, payload)
+            scope = payload["approvalScope"]
+            if not isinstance(scope, Mapping) or scope.get("projectId") != project_id:
+                raise InvalidRequestError("fleet merge scope project does not match projectId")
+            return apply_workstream_merge(store, project_id, scope)
+        raise InvalidRequestError("unsupported fleet operation")
+
     def _notify_worker_research(self, store: PiStore, result: Mapping[str, Any], disposition: str) -> None:
         workstream_id = result.get("workstream_id")
         request_id = result.get("request_id")

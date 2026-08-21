@@ -76,7 +76,7 @@ class StoreTests(unittest.TestCase):
     def test_epoch_seven_adds_runtime_generations_and_project_data_dirs(self):
         with tempfile.TemporaryDirectory() as tmp, PiStore(Path(tmp) / "state") as store:
             metadata = store.conn.execute("SELECT schema_name,schema_version,migration_name FROM control_meta").fetchone()
-            self.assertEqual(tuple(metadata), ("pisec-core", 7, "pisec-core-epoch-7"))
+            self.assertEqual(tuple(metadata), ("pisec-core", 8, "pisec-core-epoch-8"))
             columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(authorizations)")}
             self.assertNotIn("state", columns)
             self.assertNotIn("expires_at", columns)
@@ -103,7 +103,7 @@ class StoreTests(unittest.TestCase):
             with PiStore(root) as migrated:
                 project = migrated.conn.execute("SELECT display_name,remote_url,data_dirs FROM projects WHERE project_id=?", (project_id,)).fetchone()
                 self.assertEqual(tuple(project), ("Project", None, None))
-                self.assertEqual(tuple(migrated.conn.execute("SELECT schema_version,migration_name FROM control_meta").fetchone()), (7, "pisec-core-epoch-7"))
+                self.assertEqual(tuple(migrated.conn.execute("SELECT schema_version,migration_name FROM control_meta").fetchone()), (8, "pisec-core-epoch-8"))
 class OperationEventTests(unittest.TestCase):
     def test_idempotency_binds_key_to_request_forever(self):
         with tempfile.TemporaryDirectory() as tmp, PiStore(Path(tmp) / "state") as store:

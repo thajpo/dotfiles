@@ -12,14 +12,15 @@ type RuntimeContext = { hasUI: boolean; sessionManager: { getSessionFile?: () =>
 const ROLE = process.env.PISEC_ROLE;
 const RUNTIME_SOCKET = process.env.PISEC_RUNTIME_SOCKET;
 const SECRETARY_SOCKET = process.env.PISEC_SECRETARY_SOCKET;
+const FLEET_SOCKET = process.env.PISEC_FLEET_SOCKET;
 const RUNTIME_TOKEN = process.env.PISEC_RUNTIME_TOKEN;
 const WORKSTREAM_ID = process.env.PISEC_WORKSTREAM_ID;
 const INSTANCE_ID = process.env.PISEC_RUNTIME_INSTANCE_ID;
 const START_SOURCE = process.env.PISEC_SESSION_START_SOURCE === "resume" ? "resume" : "startup";
 const SURFACE_ID = process.env.PISEC_SURFACE_ID;
 const HARNESS_HOME = process.env.PI_CODING_AGENT_DIR;
-function isPisecRole(value: string | undefined): value is "secretary" | "worker" {
-  return value === "secretary" || value === "worker";
+function isPisecRole(value: string | undefined): value is "secretary" | "first_mate" | "worker" {
+  return value === "secretary" || value === "first_mate" || value === "worker";
 }
 
 function textResult(value: unknown, isError = false) {
@@ -170,10 +171,10 @@ async function runtimeOperation(operation: string, payload: JsonObject = {}, sig
   if (!RUNTIME_SOCKET || !RUNTIME_TOKEN || !WORKSTREAM_ID || !INSTANCE_ID || !SURFACE_ID) throw new Error("Pisec runtime binding is incomplete");
   return socketRequest(RUNTIME_SOCKET, operation, { ...runtimeAuth(), ...payload }, signal);
 }
-
 async function semanticRequest(operation: string, payload: JsonObject, signal?: AbortSignal): Promise<unknown> {
-  if (!SECRETARY_SOCKET || !RUNTIME_TOKEN) throw new Error("Pisec secretary binding is incomplete");
-  return socketRequest(SECRETARY_SOCKET, operation, { ...payload, authToken: RUNTIME_TOKEN }, signal);
+  const socket = ROLE === "first_mate" ? FLEET_SOCKET : SECRETARY_SOCKET;
+  if (!socket || !RUNTIME_TOKEN) throw new Error("Pisec control binding is incomplete");
+  return socketRequest(socket, operation, { ...payload, authToken: RUNTIME_TOKEN }, signal);
 }
 
 function renderTaskPacket(value: unknown): string {
@@ -303,6 +304,14 @@ function registerRuntime(pi: ExtensionAPI): void {
   });
   pi.on("before_agent_start", async (event, ctx) => {
     await runtimeOperation("runtime.turn.prepare");
+    if (ROLE === "first_mate") {
+      return {
+        systemPrompt: [
+          ...event.systemPrompt,
+          "Pisec First Mate contract: you are the global coordinator for every registered Pisec project. Use explicit projectId on every fleet operation. You may inspect fleet status, project secretaries, worker worktrees, Git objects, and durable research metadata through the authenticated fleet broker. Read-only filesystem access covers Pisec-managed project worktrees and Git objects only. Never write project files, worktrees, or Git objects; never raw-push; never register projects, refresh runtimes, administer the host, read host secrets, or self-approve worker creation or merges. Worker creation and merge application require exact interactive user approval in this surface.",
+        ],
+      };
+    }
     if (ROLE === "secretary") {
       return {
         systemPrompt: [
@@ -441,6 +450,59 @@ function secretaryTools(pi: ExtensionAPI): void {
   semantic("pisec_answer_worker_research", "Answer worker research", "research.answer", z.object({ request_id: z.string().min(1).max(128), idempotency_key: z.string().min(1).max(256), result: z.any() }), "read", params => ({ requestId: params.request_id, idempotencyKey: params.idempotency_key, result: params.result }));
   semantic("pisec_decline_worker_research", "Decline worker research", "research.decline", z.object({ request_id: z.string().min(1).max(128), idempotency_key: z.string().min(1).max(256), decline: z.any() }), "read", params => ({ requestId: params.request_id, idempotencyKey: params.idempotency_key, decline: params.decline }));
 }
+function fleetTools(pi: ExtensionAPI): void {
+  const z = pi.zod;
+  const fleet = (name: string, label: string, operation: string, parameters: unknown, approval: "read" | "exec", map?: (params: JsonObject) => JsonObject) => {
+    pi.registerTool({
+      name,
+      label,
+      description: `Use the Pisec fleet broker operation ${operation}.`,
+      approval,
+      parameters,
+      async execute(_id, params, signal) {
+        try {
+          return textResult(await semanticRequest(operation, map ? map(params as JsonObject) : (params as JsonObject), signal));
+        } catch (error) {
+          return textResult(error instanceof Error ? error.message : String(error), true);
+        }
+      },
+    });
+  };
+  const projectId = z.string().min(1).max(128);
+  fleet("pisec_fleet_status", "Fleet status", "fleet.status", z.object({ project_id: projectId.optional() }), "read", params => params.project_id ? { projectId: params.project_id } : {});
+  fleet("pisec_fleet_events", "Fleet events", "fleet.events", z.object({ after: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(1000).optional() }), "read", params => ({ ...(params.after !== undefined ? { after: params.after } : {}), ...(params.limit !== undefined ? { limit: params.limit } : {}) }));
+  fleet("pisec_fleet_send_secretary", "Message project secretary", "fleet.secretary.send", z.object({ project_id: projectId, message: z.string().min(1).max(4096), workstream_id: z.string().min(1).max(128).optional() }), "exec", params => ({ projectId: params.project_id, text: params.message, ...(params.workstream_id ? { workstreamId: params.workstream_id } : {}) }));
+  fleet("pisec_fleet_list_workstreams", "List project workstreams", "fleet.workstream.list", z.object({ project_id: projectId }), "read", params => ({ projectId: params.project_id }));
+  fleet("pisec_fleet_inspect_workstream", "Inspect project workstream", "fleet.workstream.inspect", z.object({ project_id: projectId, workstream_id: z.string().min(1).max(128) }), "read", params => ({ projectId: params.project_id, workstreamId: params.workstream_id }));
+  fleet("pisec_fleet_git_changes", "Inspect project workstream changes", "fleet.git.workstream_changes", z.object({ project_id: projectId, workstream_id: z.string().min(1).max(128) }), "read", params => ({ projectId: params.project_id, workstreamId: params.workstream_id }));
+  const taskPacketSchema = z.object({ schemaVersion: z.literal(1), outcome: z.string().min(1).max(4096), boundaries: z.array(z.string().min(1).max(4096)).max(16), acceptance: z.array(z.string().min(1).max(4096)).max(16), openQuestions: z.array(z.string().min(1).max(4096)).max(16), evidence: z.array(z.string().min(1).max(4096)).max(16) });
+  fleet("pisec_fleet_prepare_workstream", "Prepare project worker", "fleet.workstream.prepare", z.object({ project_id: projectId, title: z.string().min(1).max(512), purpose: z.string().min(1).max(4096), brief: z.string().min(1).max(4096), task_packet: taskPacketSchema, idempotency_key: z.string().min(1).max(256), target_ref: z.string().min(1).max(512).optional(), execution_profile: z.enum(["worker-default", "worker-networked"]).optional(), python_env: z.string().min(1).max(4096).optional() }), "read", params => ({ projectId: params.project_id, title: params.title, purpose: params.purpose, brief: params.brief, taskPacket: params.task_packet, idempotencyKey: params.idempotency_key, ...(params.target_ref ? { targetRef: params.target_ref } : {}), ...(params.execution_profile ? { executionProfile: params.execution_profile } : {}), ...(params.python_env ? { pythonEnv: params.python_env } : {}) }));
+  pi.registerTool({
+    name: "pisec_fleet_create_worker",
+    label: "Create project worker",
+    description: "Apply one exact prepared worker scope after interactive user approval.",
+    approval: scope => ({ tier: "exec", policy: "prompt", reason: renderExactScope(scope) }),
+    parameters: z.object({ project_id: projectId, approval_scope: z.any() }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (!ctx.hasUI) return textResult("Pisec refused worker creation because interactive approval is unavailable.", true);
+      try { return textResult(await semanticRequest("fleet.workstream.authorize_apply", { projectId: params.project_id, approvalScope: params.approval_scope as JsonObject })); }
+      catch (error) { return textResult(error instanceof Error ? error.message : String(error), true); }
+    },
+  });
+  fleet("pisec_fleet_prepare_merge", "Prepare project merge", "fleet.git.merge.prepare", z.object({ project_id: projectId, workstream_id: z.string().min(1).max(128) }), "read", params => ({ projectId: params.project_id, workstreamId: params.workstream_id }));
+  pi.registerTool({
+    name: "pisec_fleet_merge_workstream",
+    label: "Merge project workstream",
+    description: "Apply one exact prepared fast-forward merge after interactive user approval.",
+    approval: scope => ({ tier: "exec", policy: "prompt", reason: renderMergeScope(scope) }),
+    parameters: z.object({ project_id: projectId, approval_scope: z.any() }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (!ctx.hasUI) return textResult("Pisec refused Git merge because interactive approval is unavailable.", true);
+      try { return textResult(await semanticRequest("fleet.git.merge.apply", { projectId: params.project_id, approvalScope: params.approval_scope as JsonObject })); }
+      catch (error) { return textResult(error instanceof Error ? error.message : String(error), true); }
+    },
+  });
+}
 
 function workerTools(pi: ExtensionAPI): void {
   const z = pi.zod;
@@ -470,9 +532,10 @@ function workerTools(pi: ExtensionAPI): void {
 
 export default function pisec(pi: ExtensionAPI): void {
   if (!isPisecRole(ROLE) || !RUNTIME_SOCKET || !RUNTIME_TOKEN || !WORKSTREAM_ID || !INSTANCE_ID || !SURFACE_ID) return;
-  if (ROLE === "secretary" && !SECRETARY_SOCKET) return;
-  pi.setLabel(ROLE === "secretary" ? "Pisec Secretary" : "Pisec Worker");
+  if ((ROLE === "secretary" && !SECRETARY_SOCKET) || (ROLE === "first_mate" && !FLEET_SOCKET)) return;
+  pi.setLabel(ROLE === "secretary" ? "Pisec Secretary" : ROLE === "first_mate" ? "Pisec First Mate" : "Pisec Worker");
   registerRuntime(pi);
   if (ROLE === "secretary") secretaryTools(pi);
+  else if (ROLE === "first_mate") fleetTools(pi);
   else workerTools(pi);
 }

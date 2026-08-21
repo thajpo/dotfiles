@@ -36,7 +36,7 @@ def start_bound_agent(
     ).fetchone()
     if row is None:
         raise ConflictError("runtime binding is missing")
-    expected_role = "secretary" if row["kind"] == "secretary" else "worker"
+    expected_role = "secretary" if row["kind"] == "secretary" else "first_mate" if row["kind"] == "first_mate" else "worker"
     harness.validate_execution_profile(row["execution_profile"], expected_role)
     expected = {
         "workstream_id": workstream_id,
@@ -100,12 +100,12 @@ def verify_runtime_binding(store: Any, payload: Mapping[str, Any], *, worker_onl
     if not isinstance(token, str) or len(token) < 32 or len(token) > 512 or "\x00" in token:
         raise AuthorizationError("runtime token is invalid")
     row = store.conn.execute(
-        "SELECT r.*,w.project_id,w.kind,w.desired_state,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?",
+        "SELECT r.*,w.project_id,w.kind,w.execution_profile,w.desired_state,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?",
         (workstream_id,),
     ).fetchone()
     if row is None or row["desired_state"] == "retired" or row["provisioning_state"] not in {"bound", "creating"}:
         raise AuthorizationError("runtime binding is inactive")
-    if worker_only and row["kind"] != "worker":
+    if worker_only and (row["kind"] != "worker" or row["execution_profile"] in {"first-mate", "secretary-project"}):
         raise AuthorizationError("runtime operation requires a worker binding")
     if not hmac.compare_digest(row["runtime_token_sha256"], hashlib.sha256(token.encode("utf-8")).hexdigest()):
         raise AuthorizationError("runtime token is invalid")

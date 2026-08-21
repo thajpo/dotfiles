@@ -14,7 +14,7 @@ from .fsutil import _atomic_write, _secure_tree
 from .models import InvalidRequestError, NeedsAttentionError, canonical_json, validate_id
 
 DOMAIN_RE = re.compile(r"^(?:\*\.)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
-PROFILES = frozenset({"secretary-project", "worker-default", "worker-networked"})
+PROFILES = frozenset({"secretary-project", "first-mate", "worker-default", "worker-networked"})
 _PYVENV_HOME_RE = re.compile(r"^\s*home\s*=\s*(.+?)\s*$")
 
 
@@ -211,9 +211,25 @@ def render_policy(
         ],
     }
     replacements.update(supplied)
+    def _resolve_scope_dir(raw: Any, label: str) -> str:
+        if not isinstance(raw, str) or not raw or len(raw) > 4096 or "\x00" in raw:
+            raise InvalidRequestError(f"approved {label} is invalid")
+        path = Path(raw)
+        if not path.is_absolute():
+            raise InvalidRequestError(f"approved {label} must be absolute")
+        resolved = path.resolve(strict=False)
+        if resolved != path:
+            raise NeedsAttentionError(f"approved {label} is a symlink or resolves elsewhere")
+        return str(resolved)
     if profile == "secretary-project":
         assigned = Path(scope["worktreePath"]).resolve(strict=True)
         replacements["${ASSIGNED_ROOT}"] = str(assigned)
+    elif profile == "first-mate":
+        assigned = Path(scope["worktreePath"]).resolve(strict=True)
+        replacements["${ASSIGNED_ROOT}"] = str(assigned)
+        replacements["${FLEET_WORKTREES}"] = _resolve_scope_dir(scope.get("fleetWorktreesDir"), "fleet worktrees dir")
+        replacements["${FLEET_GIT_OBJECTS}"] = _resolve_scope_dir(scope.get("fleetGitObjectsDir"), "fleet git objects dir")
+        replacements["${FLEET_SOCKET_DIR}"] = str((runtime_base / "fleet").absolute())
     else:
         worktree = Path(scope["worktreePath"]).resolve(strict=True)
         common_objects = Path(scope["gitCommonObjectDir"]).resolve(strict=True)

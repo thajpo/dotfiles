@@ -339,7 +339,10 @@ def _authorize_apply_workstream(
     workspace: WorkspaceAdapter,
     git_objects: GitObjectManager,
     failpoint: Failpoint | None = None,
+    actor: str = "secretary",
 ) -> dict[str, Any]:
+    if actor not in {"secretary", "first_mate"}:
+        raise InvalidRequestError("authorization actor is invalid")
     operation_id = validate_id(scope["operationId"], prefix="op") if isinstance(scope, Mapping) and isinstance(scope.get("operationId"), str) else None
     if operation_id is None:
         raise ScopeMismatchError("approval scope fields do not match the proposal contract")
@@ -373,8 +376,8 @@ def _authorize_apply_workstream(
             existing_receipt = store.conn.execute("SELECT * FROM authorizations WHERE operation_id=?", (operation_id,)).fetchone()
             if existing_receipt is None:
                 store.conn.execute(
-                    "INSERT INTO authorizations(authorization_id,operation_id,kind,scope_json,scope_sha256,actor,consumed_at) VALUES(?,?,'workstream.create',?,?,'secretary',?)",
-                    (new_id("az"), operation_id, canonical_json(scope), json_digest(scope), now),
+                    "INSERT INTO authorizations(authorization_id,operation_id,kind,scope_json,scope_sha256,actor,consumed_at) VALUES(?,?,'workstream.create',?,?,?,?)",
+                    (new_id("az"), operation_id, canonical_json(scope), json_digest(scope), actor, now),
                 )
             issue_task_packet_in_transaction(store.conn, scope=scope)
             _checkpoint(store, operation_id, "authorized")
@@ -594,10 +597,11 @@ def authorize_apply_workstream(
     workspace: WorkspaceAdapter,
     git_objects: GitObjectManager,
     failpoint: Failpoint | None = None,
+    actor: str = "secretary",
 ) -> dict[str, Any]:
     with APPLY_LOCK:
         try:
-            return _authorize_apply_workstream(store, scope=scope, harness=harness, workspace=workspace, git_objects=git_objects, failpoint=failpoint)
+            return _authorize_apply_workstream(store, scope=scope, harness=harness, workspace=workspace, git_objects=git_objects, failpoint=failpoint, actor=actor)
         except NeedsAttentionError as error:
             operation_id = scope.get("operationId") if isinstance(scope, Mapping) else None
             if isinstance(operation_id, str):

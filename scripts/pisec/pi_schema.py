@@ -1,4 +1,4 @@
-"""Fresh Pisec core epoch-six schema."""
+"""Fresh Pisec core epoch-eight schema."""
 
 from __future__ import annotations
 
@@ -9,11 +9,15 @@ import sqlite3
 import subprocess
 
 SCHEMA_NAME = "pisec-core"
-SCHEMA_VERSION = 7
-MIGRATION_NAME = "pisec-core-epoch-7"
-PREVIOUS_SCHEMA_VERSION = 6
-PREVIOUS_MIGRATION_NAME = "pisec-core-epoch-6"
-PREVIOUS_SCHEMA_DIGEST = "sha256:c00cd142b2cd4dd775c3d7878820c4fd69f945e9e4254cfd18414bc82877ca59"
+SCHEMA_VERSION = 8
+MIGRATION_NAME = "pisec-core-epoch-8"
+PREVIOUS_SCHEMA_VERSION = 7
+PREVIOUS_SCHEMA_NAME = "pisec-core-epoch-7"
+PREVIOUS_MIGRATION_NAME = "pisec-core-epoch-7"
+PREVIOUS_SCHEMA_DIGEST = "sha256:35e63da90e5a851e2f57d7cddf21db58ace28471aa5b3af5cb73363165729c95"
+EPOCH_SIX_SCHEMA_VERSION = 6
+EPOCH_SIX_MIGRATION_NAME = "pisec-core-epoch-6"
+EPOCH_SIX_SCHEMA_DIGEST = "sha256:c00cd142b2cd4dd775c3d7878820c4fd69f945e9e4254cfd18414bc82877ca59"
 
 SCHEMA_SQL = r'''
 CREATE TABLE control_meta (
@@ -42,7 +46,7 @@ CREATE TABLE projects (
 CREATE TABLE workstreams (
     workstream_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(project_id),
-    kind TEXT NOT NULL CHECK(kind IN ('secretary','worker')),
+    kind TEXT NOT NULL CHECK(kind IN ('secretary','worker','first_mate')),
     title TEXT NOT NULL CHECK(length(title) <= 512),
     purpose TEXT NOT NULL CHECK(length(purpose) <= 4096),
     brief TEXT NOT NULL CHECK(length(brief) <= 4096),
@@ -63,6 +67,8 @@ CREATE TABLE workstreams (
     UNIQUE(project_id, branch_name),
     UNIQUE(project_id, worktree_path)
 );
+CREATE UNIQUE INDEX one_active_first_mate
+ON workstreams(kind) WHERE kind='first_mate' AND desired_state <> 'retired';
 CREATE UNIQUE INDEX one_active_secretary_per_project
 ON workstreams(project_id) WHERE kind='secretary' AND desired_state <> 'retired';
 
@@ -182,7 +188,7 @@ CREATE TABLE decisions (
 
 CREATE TABLE operations (
     operation_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL CHECK(kind IN ('project.register','secretary.ensure','workstream.create','workstream.complete','workstream.retire','workstream.cleanup')),
+    kind TEXT NOT NULL CHECK(kind IN ('project.register','secretary.ensure','first_mate.ensure','workstream.create','workstream.complete','workstream.retire','workstream.cleanup')),
     project_id TEXT REFERENCES projects(project_id),
     workstream_id TEXT REFERENCES workstreams(workstream_id),
     idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key) BETWEEN 1 AND 256),
@@ -200,10 +206,10 @@ CREATE TABLE operations (
 CREATE TABLE authorizations (
     authorization_id TEXT PRIMARY KEY,
     operation_id TEXT NOT NULL UNIQUE REFERENCES operations(operation_id),
+    scope_sha256 TEXT NOT NULL,
     kind TEXT NOT NULL CHECK(kind = 'workstream.create'),
     scope_json TEXT NOT NULL,
-    scope_sha256 TEXT NOT NULL,
-    actor TEXT NOT NULL CHECK(actor = 'secretary'),
+    actor TEXT NOT NULL CHECK(actor IN ('secretary','first_mate')),
     consumed_at TEXT NOT NULL
 );
 
@@ -281,17 +287,99 @@ def migrate_schema(connection: sqlite3.Connection) -> bool:
     expected = (SCHEMA_NAME, SCHEMA_VERSION, schema_digest(), MIGRATION_NAME)
     if actual == expected:
         return False
-    if actual != (SCHEMA_NAME, PREVIOUS_SCHEMA_VERSION, PREVIOUS_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME):
+    epoch_seven = (SCHEMA_NAME, PREVIOUS_SCHEMA_VERSION, PREVIOUS_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME)
+    epoch_six = (SCHEMA_NAME, EPOCH_SIX_SCHEMA_VERSION, EPOCH_SIX_SCHEMA_DIGEST, EPOCH_SIX_MIGRATION_NAME)
+    if actual not in {epoch_six, epoch_seven}:
         raise sqlite3.DatabaseError("unsupported Pisec schema migration")
+    connection.execute("PRAGMA foreign_keys=OFF")
     connection.execute("BEGIN IMMEDIATE")
     try:
-        connection.execute("ALTER TABLE projects ADD COLUMN data_dirs TEXT")
+        if actual == epoch_six:
+            connection.execute("ALTER TABLE projects ADD COLUMN data_dirs TEXT")
+        connection.execute(
+            """
+            CREATE TABLE authorizations_epoch8 (
+                authorization_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL UNIQUE REFERENCES operations(operation_id),
+                kind TEXT NOT NULL CHECK(kind = 'workstream.create'),
+                scope_json TEXT NOT NULL,
+                scope_sha256 TEXT NOT NULL,
+                actor TEXT NOT NULL CHECK(actor IN ('secretary','first_mate')),
+                consumed_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("INSERT INTO authorizations_epoch8 SELECT authorization_id,operation_id,kind,scope_json,scope_sha256,actor,consumed_at FROM authorizations")
+        connection.execute("DROP TABLE authorizations")
+        connection.execute("ALTER TABLE authorizations_epoch8 RENAME TO authorizations")
+
+        connection.execute(
+            """
+            CREATE TABLE operations_epoch8 (
+                operation_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL CHECK(kind IN ('project.register','secretary.ensure','first_mate.ensure','workstream.create','workstream.complete','workstream.retire','workstream.cleanup')),
+                project_id TEXT REFERENCES projects(project_id),
+                workstream_id TEXT REFERENCES workstreams(workstream_id),
+                idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key) BETWEEN 1 AND 256),
+                request_json TEXT NOT NULL,
+                request_sha256 TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('planned','applying','succeeded','failed','needs_attention','cancelled')),
+                step TEXT NOT NULL,
+                result_json TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("INSERT INTO operations_epoch8 SELECT operation_id,kind,project_id,workstream_id,idempotency_key,request_json,request_sha256,state,step,result_json,error_code,error_message,created_at,updated_at FROM operations")
+        connection.execute("DROP TABLE operations")
+        connection.execute("ALTER TABLE operations_epoch8 RENAME TO operations")
+
+        connection.execute(
+            """
+            CREATE TABLE workstreams_epoch8 (
+                workstream_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(project_id),
+                kind TEXT NOT NULL CHECK(kind IN ('secretary','worker','first_mate')),
+                title TEXT NOT NULL CHECK(length(title) <= 512),
+                purpose TEXT NOT NULL CHECK(length(purpose) <= 4096),
+                brief TEXT NOT NULL CHECK(length(brief) <= 4096),
+                harness_id TEXT NOT NULL CHECK(length(harness_id) BETWEEN 1 AND 64),
+                workspace_adapter_id TEXT NOT NULL CHECK(length(workspace_adapter_id) BETWEEN 1 AND 64),
+                execution_profile TEXT NOT NULL CHECK(length(execution_profile) BETWEEN 1 AND 128),
+                target_ref TEXT NOT NULL,
+                base_commit_oid TEXT NOT NULL,
+                branch_name TEXT NOT NULL,
+                worktree_path TEXT NOT NULL,
+                desired_state TEXT NOT NULL CHECK(desired_state IN ('active','completed','retired')),
+                provisioning_state TEXT NOT NULL CHECK(provisioning_state IN ('proposed','creating','bound','needs_attention')),
+                attention_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                retired_at TEXT,
+                UNIQUE(project_id, branch_name),
+                UNIQUE(project_id, worktree_path)
+            )
+            """
+        )
+        connection.execute("INSERT INTO workstreams_epoch8 SELECT workstream_id,project_id,kind,title,purpose,brief,harness_id,workspace_adapter_id,execution_profile,target_ref,base_commit_oid,branch_name,worktree_path,desired_state,provisioning_state,attention_reason,created_at,updated_at,completed_at,retired_at FROM workstreams")
+        connection.execute("DROP TABLE workstreams")
+        connection.execute("ALTER TABLE workstreams_epoch8 RENAME TO workstreams")
+        connection.execute("CREATE UNIQUE INDEX one_active_secretary_per_project ON workstreams(project_id) WHERE kind='secretary' AND desired_state <> 'retired'")
+        connection.execute("CREATE UNIQUE INDEX one_active_first_mate ON workstreams(kind) WHERE kind='first_mate' AND desired_state <> 'retired'")
         connection.execute(
             "UPDATE control_meta SET schema_version=?,schema_sha256=?,migration_name=? WHERE singleton=1",
             (SCHEMA_VERSION, schema_digest(), MIGRATION_NAME),
         )
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise sqlite3.DatabaseError("foreign key check failed after Pisec schema migration")
         connection.commit()
     except Exception:
         connection.rollback()
         raise
+    finally:
+        connection.execute("PRAGMA foreign_keys=ON")
     return True
