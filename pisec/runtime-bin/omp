@@ -281,9 +281,10 @@ def validate_durable_binding(descriptor: dict[str, object]) -> sqlite3.Row:
     # generation.  Once a runtime has attested its session start, launch is
     # cleared and applied is the durable authorization for subsequent starts.
     # The desired generation may legitimately be newer while refresh is pending.
-    expected_role = "secretary" if row["kind"] == "secretary" else "first_mate" if row["kind"] == "first_mate" else "worker"
+    selected_generation = row["launch_generation_sha256"] or row["applied_generation_sha256"]
     if not isinstance(selected_generation, str) or not selected_generation:
         fail("durable binding has no selected launch generation")
+    expected_role = "secretary" if row["kind"] == "secretary" else "first_mate" if row["kind"] == "first_mate" else "worker"
     if (
         row["project_id"] != descriptor["projectId"]
         or row["workspace_session_name"] != descriptor["workspaceSessionName"]

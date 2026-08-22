@@ -15,7 +15,7 @@ from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .git_objects import GitObjectManager
 from .models import AuthorizationError, ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id
-from .projects import _git, get_project
+from .projects import _git, assert_project_writable, get_project
 from .research import issue_task_packet_in_transaction, validate_task_packet
 from .runtime import start_bound_agent
 APPLY_LOCK = threading.RLock()
@@ -32,14 +32,14 @@ CHECKPOINTS = (
 )
 _FULL_SCOPE_FIELDS = frozenset({
     "operationId", "workstreamId", "projectId", "title", "purpose", "brief",
-    "harnessId", "workspaceAdapterId", "executionProfile", "targetRef", "baseCommitOid", "branchName",
+    "harnessId", "workspaceAdapterId", "executionProfile", "workMode", "learningOverlay", "learningSeam", "decisionIds",
+    "targetRef", "baseCommitOid", "branchName",
     "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "agentName",
     "projectWorktreesDir", "projectGitObjectsDir",
     "externalDomains", "dataDirs", "pythonEnv", "effects", "nonEffects", "taskPacket",
 })
 _PUBLIC_SCOPE_FIELDS = _FULL_SCOPE_FIELDS - {"privateGitObjectDir", "gitCommonObjectDir"}
-# Optional fields may be absent from proposals created by older broker code.
-_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "projectWorktreesDir", "projectGitObjectsDir"})
+_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "projectWorktreesDir", "projectGitObjectsDir", "learningSeam", "decisionIds"})
 _SCOPE_REQUIRED = _FULL_SCOPE_FIELDS - _OPTIONAL_SCOPE_FIELDS
 
 
@@ -107,6 +107,10 @@ def prepare_workstream(
     harness: HarnessAdapter,
     workspace: WorkspaceAdapter,
     execution_profile: str = "worker-default",
+    work_mode: str = "BUILD",
+    learning_overlay: str = "LIGHT",
+    learning_seam: str | None = None,
+    decision_ids: list[str] | tuple[str, ...] = (),
     target_ref: str | None = None,
     external_domains: tuple[str, ...] | list[str] = (),
     python_env: str | None = None,
@@ -114,6 +118,7 @@ def prepare_workstream(
     object_root: Path | None = None,
     failpoint: Failpoint | None = None,
 ) -> dict[str, Any]:
+    assert_project_writable(store, project_id)
     project = get_project(store, project_id)
     idempotency_key = bounded_text(idempotency_key, name="idempotency_key", limit=256)
     title = bounded_text(title, name="title", limit=512)
@@ -142,6 +147,12 @@ def prepare_workstream(
     selected_ref = bounded_text(target_ref or project["default_ref"], name="target_ref", limit=512)
     if selected_ref.startswith("-") or any(ord(char) < 0x20 for char in selected_ref):
         raise InvalidRequestError("target_ref contains unsafe characters")
+    if work_mode not in {"FAST", "RIP", "BUILD", "MAJOR"} or learning_overlay not in {"OFF", "LIGHT", "DEEP"}:
+        raise InvalidRequestError("work mode or learning overlay is invalid")
+    if learning_overlay == "DEEP" and learning_seam is None:
+        raise InvalidRequestError("DEEP learning requires a seam")
+    if not isinstance(decision_ids, (list, tuple)) or any(not isinstance(item, str) or not item for item in decision_ids):
+        raise InvalidRequestError("decision ids are invalid")
     caller_request = {
         "projectId": project_id,
         "title": title,
@@ -151,6 +162,10 @@ def prepare_workstream(
         "harnessId": harness.manifest.adapter_id,
         "workspaceAdapterId": workspace.manifest.adapter_id,
         "executionProfile": execution_profile,
+        "workMode": work_mode,
+        "learningOverlay": learning_overlay,
+        "learningSeam": learning_seam,
+        "decisionIds": list(decision_ids),
         "targetRef": selected_ref,
         "externalDomains": domains,
         "pythonEnv": normalized_python_env,
@@ -187,6 +202,10 @@ def prepare_workstream(
         "harnessId": harness.manifest.adapter_id,
         "workspaceAdapterId": workspace.manifest.adapter_id,
         "executionProfile": execution_profile,
+        "workMode": work_mode,
+        "learningOverlay": learning_overlay,
+        "learningSeam": learning_seam,
+        "decisionIds": list(decision_ids),
         "targetRef": selected_ref,
         "baseCommitOid": base_oid,
         "branchName": branch,
@@ -407,7 +426,6 @@ def _authorize_apply_workstream(
         _mark_attention(store, operation_id, workstream_id, "project coordinator workspace is missing")
         raise NeedsAttentionError("project coordinator workspace is missing")
     coordinator_workspace_id = str(coordinator["workspace_id"])
-
     def observe_worker() -> WorkspaceObservation | None:
         return workspace.observe_tab(workspace_id=coordinator_workspace_id, cwd=scope["worktreePath"])
 
@@ -599,6 +617,7 @@ def authorize_apply_workstream(
     failpoint: Failpoint | None = None,
     actor: str = "secretary",
 ) -> dict[str, Any]:
+    assert_project_writable(store, str(scope["projectId"]))
     with APPLY_LOCK:
         try:
             return _authorize_apply_workstream(store, scope=scope, harness=harness, workspace=workspace, git_objects=git_objects, failpoint=failpoint, actor=actor)
@@ -680,32 +699,70 @@ def focus_workstream(store: Any, project_id: str, workstream_id: str, workspace:
     return {"workstreamId": workstream_id, "focused": True}
 
 
-def complete_workstream(store: Any, project_id: str, workstream_id: str) -> dict[str, Any]:
-    row = inspect_workstream(store, project_id, workstream_id)["workstream"]
+def complete_workstream(
+    store: Any,
+    project_id: str,
+    workstream_id: str,
+    completion_packet_sha256: str | None = None,
+    workspace: WorkspaceAdapter | None = None,
+) -> dict[str, Any]:
+    from .projects import assert_project_writable
+    assert_project_writable(store, project_id)
+    inspected = inspect_workstream(store, project_id, workstream_id)
+    row = inspected["workstream"]
     if row["kind"] != "worker":
         raise ConflictError("secretary workstreams cannot be completed")
-    if row["provisioning_state"] != "bound":
-        raise ConflictError("workstream is not bound")
+    if completion_packet_sha256 is None:
+        raise InvalidRequestError("completion packet digest is required")
+    packet = store.conn.execute("SELECT * FROM completion_packets WHERE workstream_id=? AND packet_sha256=?", (workstream_id, completion_packet_sha256)).fetchone()
+    if packet is None:
+        raise ConflictError("accepted completion packet was not found")
+    blockers = store.conn.execute(
+        "SELECT 1 FROM coordination_requests WHERE workstream_id=? AND blocking=1 AND state <> 'acknowledged' LIMIT 1",
+        (workstream_id,),
+    ).fetchone()
+    if blockers is not None:
+        raise ConflictError("workstream has unresolved blocking coordination")
+    latest_checkpoint = store.conn.execute(
+        "SELECT phase FROM workstream_checkpoints WHERE workstream_id=? ORDER BY sequence DESC LIMIT 1",
+        (workstream_id,),
+    ).fetchone()
+    if latest_checkpoint is not None and latest_checkpoint["phase"] == "needs_input":
+        raise ConflictError("workstream has an unresolved checkpoint blocker")
     if row["desired_state"] == "retired":
         raise ConflictError("retired workstream cannot be completed")
     operation_id, existing = _lifecycle_operation(store, kind="workstream.complete", project_id=project_id, workstream_id=workstream_id)
-    if existing is not None:
-        if existing["state"] == "succeeded":
-            return row
-        if existing["state"] in {"failed", "cancelled", "needs_attention"}:
-            raise NeedsAttentionError("workstream completion operation cannot be applied")
-    if row["desired_state"] == "completed":
+    if existing is not None and existing["state"] == "succeeded":
+        return _workstream(store, workstream_id)
+    binding = inspected["binding"]
+    if binding is None or workspace is None:
+        raise ConflictError("completion requires a bound runtime workspace")
+    try:
+        observed = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+        if observed.state != "stopped":
+            workspace.stop_runtime(str(binding["workspace_surface_id"]))
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                observed = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+                if observed.state == "stopped":
+                    break
+                time.sleep(0.05)
+        if observed.state != "stopped":
+            raise NeedsAttentionError("workstream runtime did not stop after completion request")
         now = utc_now()
         with store.transaction():
-            store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(row), now, operation_id))
-        return row
-    now = utc_now()
-    with store.transaction():
-        store.conn.execute("UPDATE workstreams SET desired_state='completed',completed_at=?,updated_at=? WHERE workstream_id=?", (now, now, workstream_id))
-        result = {"workstreamId": workstream_id}
-        store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(result), now, operation_id))
-        append_event_in_transaction(store.conn, kind="workstream.completed", project_id=project_id, workstream_id=workstream_id, operation_id=operation_id, payload=result)
-    return _workstream(store, workstream_id)
+            store.conn.execute("UPDATE runtime_bindings SET observed_state='stopped',updated_at=? WHERE workstream_id=?", (now, workstream_id))
+            store.conn.execute("UPDATE workstreams SET desired_state='completed',completed_at=?,updated_at=? WHERE workstream_id=?", (now, now, workstream_id))
+            result = {"workstreamId": workstream_id, "completionPacketSha256": completion_packet_sha256, "sourceCommit": packet["source_commit_oid"]}
+            store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(result), now, operation_id))
+            append_event_in_transaction(store.conn, kind="workstream.completed", project_id=project_id, workstream_id=workstream_id, operation_id=operation_id, payload=result)
+        return _workstream(store, workstream_id)
+    except (ConflictError, InvalidRequestError, NeedsAttentionError):
+        raise
+    except Exception as error:
+        with store.transaction():
+            store.conn.execute("UPDATE operations SET state='needs_attention',error_code='completion_failed',error_message=?,updated_at=? WHERE operation_id=?", (str(error)[:512], utc_now(), operation_id))
+        raise NeedsAttentionError("workstream completion requires attention") from error
 
 
 def retire_workstream(store: Any, project_id: str, workstream_id: str, workspace: WorkspaceAdapter) -> dict[str, Any]:

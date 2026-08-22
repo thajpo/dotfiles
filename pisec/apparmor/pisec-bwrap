@@ -1,0 +1,40 @@
+# Pisec-only variant of Ubuntu's bwrap-userns-restrict profile. The executable
+# path is root-owned and only prepended to PATH by Pisec's Fence wrapper.
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile pisec_bwrap /usr/lib/pisec/bwrap flags=(attach_disconnected) {
+  allow capability,
+  allow file rwlkm /{**,},
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+  allow px /** -> pisec_bwrap//&pisec_unpriv_bwrap,
+}
+
+profile pisec_unpriv_bwrap flags=(attach_disconnected) {
+  allow file rwlkm /{**,},
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+  allow pix /** -> &pisec_unpriv_bwrap,
+  audit deny capability,
+}

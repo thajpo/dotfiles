@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -52,7 +53,7 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         self.assertEqual(self.registry.resolve_workspace("fixture-workspace"), self.workspace)
 
         project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "defaultRef": "main"})
-        self.assertEqual(set(project), {"project_id", "display_name", "default_ref", "data_dirs", "secretary_workstream_id", "created_at", "updated_at"})
+        self.assertEqual(set(project), {"project_id", "display_name", "default_ref", "data_dirs", "secretary_workstream_id", "active", "deactivated_at", "created_at", "updated_at"})
         self.assertNotIn("repository_path", project)
 
         ensured = self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
@@ -147,7 +148,39 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         self.assertTrue(request["request_id"])
         self.dispatcher.dispatch("admin", "system.reconcile", {"event": "fixture", "payload": {"ok": True}})
 
-        self.dispatcher.dispatch("secretary", "workstream.complete", {"authToken": secretary_token, "workstreamId": worker_id})
+        with PiStore(self.root / "state") as store:
+            task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (worker_id,)).fetchone()
+            workstream = store.conn.execute("SELECT worktree_path FROM workstreams WHERE workstream_id=?", (worker_id,)).fetchone()
+        source_commit = subprocess.run(
+            ["git", "-C", str(workstream["worktree_path"]), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        completion = self.dispatcher.dispatch(
+            "runtime",
+            "workstream.completion.submit",
+            {
+                **worker_auth,
+                "completionPacket": {
+                    "acceptance": [{"criterion": "The broker routes through adapters.", "status": "passed", "evidence": ["Fixture boundary test passed."]}],
+                    "verification": [{"command": "python3 -m unittest tests.test_pisec_adapters", "result": "passed"}],
+                    "sourceCommit": source_commit,
+                    "taskPacketSha256": task["packet_sha256"],
+                    "changedSurfaces": ["fixture adapters"],
+                    "residualRisk": "none",
+                },
+            },
+        )
+        self.dispatcher.dispatch(
+            "secretary",
+            "workstream.complete",
+            {
+                "authToken": secretary_token,
+                "workstreamId": worker_id,
+                "completionPacketSha256": completion["completionPacket"]["packet_sha256"],
+            },
+        )
         retired = self.dispatcher.dispatch("secretary", "workstream.retire", {"authToken": secretary_token, "workstreamId": worker_id})
         self.assertEqual(retired["desired_state"], "retired")
         cleaned = self.dispatcher.dispatch("admin", "workstream.cleanup", {"workstreamId": worker_id, "confirm": worker_id})

@@ -45,7 +45,9 @@ check_path "$HOME/.codex/skills" "$HOME/.skills"
 
 printf '\nCore commands\n'
 check_cmd git "required"
-check_cmd herdr "Herdr persistent terminal session manager"
+if [[ "$HOST_OS" != "Darwin" ]]; then
+  check_cmd herdr "Herdr persistent terminal session manager"
+fi
 check_cmd gh "GitHub auth and PR workflow"
 check_cmd omp "oh-my-pi coding agent"
 check_cmd pi "oh-my-pi compatibility launcher"

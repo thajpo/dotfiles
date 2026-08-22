@@ -5,8 +5,9 @@ import unittest
 
 from scripts.pisec.cleanup import cleanup_workstream
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.projects import register_project
+from scripts.pisec.projects import _git, register_project
 from scripts.pisec.secretary import ensure_secretary
+from scripts.pisec.workflow import submit_completion
 from scripts.pisec.workstreams import authorize_apply_workstream, complete_workstream, prepare_workstream, retire_workstream
 from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
 
@@ -30,12 +31,27 @@ class CleanupTests(unittest.TestCase):
         result = authorize_apply_workstream(store, scope=prepared["approvalScope"], harness=harness, workspace=workspace, git_objects=FixtureGitObjects())
         return store, project, harness, workspace, result["workstream"]
 
+    def submit_completion(self, store, workstream):
+        binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()
+        task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()
+        source = _git(Path(workstream["worktree_path"]), "rev-parse", "HEAD").lower()
+        packet = {
+            "acceptance": [{"criterion": "Cleanup completes.", "status": "passed", "evidence": ["Fixture."]}],
+            "verification": [{"command": "fixture cleanup", "result": "passed"}],
+            "sourceCommit": source,
+            "taskPacketSha256": task["packet_sha256"],
+            "changedSurfaces": ["fixture"],
+            "residualRisk": "none",
+        }
+        return submit_completion(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], packet=packet)
+
     def test_cleanup_removes_checkout_and_retains_branch_and_objects(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store, project, harness, workspace, workstream = self.setup_bound_worker(root)
             self.addCleanup(store.close)
-            complete_workstream(store, project["project_id"], workstream["workstream_id"])
+            completion = self.submit_completion(store, workstream)
+            complete_workstream(store, project["project_id"], workstream["workstream_id"], completion["packet_sha256"], workspace)
             store.conn.execute("UPDATE runtime_bindings SET observed_state='idle' WHERE workstream_id=?", (workstream["workstream_id"],))
             retire_workstream(store, project["project_id"], workstream["workstream_id"], workspace)
             worktree = Path(workstream["worktree_path"])
@@ -63,7 +79,8 @@ class CleanupTests(unittest.TestCase):
             root = Path(tmp)
             store, project, harness, workspace, workstream = self.setup_bound_worker(root)
             self.addCleanup(store.close)
-            complete_workstream(store, project["project_id"], workstream["workstream_id"])
+            completion = self.submit_completion(store, workstream)
+            complete_workstream(store, project["project_id"], workstream["workstream_id"], completion["packet_sha256"], workspace)
             store.conn.execute("UPDATE runtime_bindings SET observed_state='idle' WHERE workstream_id=?", (workstream["workstream_id"],))
             retire_workstream(store, project["project_id"], workstream["workstream_id"], workspace)
             failing = FailingWorkspace(root, store)

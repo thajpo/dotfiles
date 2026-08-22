@@ -22,6 +22,9 @@ TREEHOUSE_URL="https://github.com/kunchenguid/treehouse/releases/download/v2.1.1
 TREEHOUSE_SHA256="2fe3e01220ae51a967c3e5ba6ccf10ec83bdbae8e420368d194285a8d04c9ef8"
 TREEHOUSE_STAGED_BIN=""
 PI_STICKY_SPEC="@burneikis/pi-sticky@1.0.0"
+BWRAP_APPARMOR_PROFILE="${PISEC_BWRAP_APPARMOR_PROFILE:-/etc/apparmor.d/pisec-bwrap}"
+APPARMOR_USERNS_RESTRICT_PATH="${PISEC_APPARMOR_RESTRICT_PATH:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}"
+PISEC_BWRAP_DIR="${PISEC_BWRAP_DIR:-/usr/lib/pisec}"
 if [[ $# -eq 0 ]]; then
   SKILLS_ONLY=1
 fi
@@ -95,13 +98,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$SKILLS_ONLY" -eq 0 && "$HOST_OS" == "Darwin" ]]; then
+  if [[ ! -f "$DOTFILES_DIR/scripts/pisec-macos-install.sh" ]]; then
+    die "full Pisec installation currently requires Linux; macOS installer is unavailable"
+  fi
+  echo "Darwin host: delegating to the macOS Pisec installer (Treehouse/Collie remain Linux-only)"
+  exec bash "$DOTFILES_DIR/scripts/pisec-macos-install.sh"
+fi
 if [[ "$SKILLS_ONLY" -eq 0 && ( -z "$COLLIE_HOST" || -z "$COLLIE_TRUSTED_USER" ) ]]; then
   usage
   printf 'error: full installation requires --collie-host and --collie-trusted-user\n' >&2
   exit 2
 fi
 if [[ "$SKILLS_ONLY" -eq 0 && "$HOST_OS" != "Linux" ]]; then
-  die "full Pisec installation currently requires Linux (systemd, Fence Bubblewrap, Landlock, and network namespaces); on macOS use --skills-only and dotfiles-sync-install.sh"
+  die "full Pisec installation currently requires Linux or macOS; on other platforms use --skills-only"
 fi
 if [[ "$SKILLS_ONLY" -eq 0 && "$HOST_OS:$HOST_ARCH" != "Linux:x86_64" ]]; then
   die "full Pisec installation currently requires Linux x86_64 for pinned Treehouse $TREEHOUSE_VERSION"
@@ -264,6 +274,20 @@ link_file() {
 check_command() {
   local name="$1"
   command -v "$name" >/dev/null 2>&1 || die "missing required command: $name"
+}
+
+probe_bwrap_sandbox() {
+  local executable="$PISEC_BWRAP_DIR/bwrap"
+  [[ -x "$executable" ]] || executable="$(command -v bwrap)"
+  "$executable" --unshare-all --ro-bind / / --dev /dev --proc /proc -- /bin/true >/dev/null 2>&1
+}
+
+require_bwrap_sandbox() {
+  probe_bwrap_sandbox && return
+  if [[ -r "$APPARMOR_USERNS_RESTRICT_PATH" && "$(<"$APPARMOR_USERNS_RESTRICT_PATH")" == "1" ]]; then
+    die "Bubblewrap cannot create a sandbox under Ubuntu's AppArmor user-namespace restriction; run: sudo $DOTFILES_DIR/scripts/pisec-linux-prereqs-install.sh"
+  fi
+  die "Bubblewrap cannot create the required user, mount, PID, and network namespaces"
 }
 
 retire_managed_path() {
@@ -706,6 +730,7 @@ if [[ "$SKILLS_ONLY" -eq 0 ]]; then
   check_command bwrap
   check_command socat
   check_command omp
+  require_bwrap_sandbox
   REAL_OMP_PATH="${REAL_OMP_PATH:-$(command -v omp)}"
   HERDR_PATH="${HERDR_PATH:-$(command -v herdr)}"
   FENCE_REAL_PATH="${FENCE_REAL_PATH:-$(command -v fence)}"
@@ -723,7 +748,7 @@ if [[ "$SKILLS_ONLY" -eq 0 ]]; then
   if ! python3 -c 'import re,sys; m=re.search(r"Version:\s*(\d+)\.(\d+)\.(\d+)",sys.stdin.read()); raise SystemExit(0 if m and tuple(map(int,m.groups())) >= (0,1,66) else 1)' <<<"$fence_version"; then
     die "Fence >=0.1.66 is required; found $fence_version"
   fi
-  features="$("$FENCE_REAL_PATH" --linux-features 2>&1)"
+  features="$(PATH="$PISEC_BWRAP_DIR:$PATH" "$FENCE_REAL_PATH" --linux-features 2>&1)"
   feature_row_ok "Bubblewrap" && bubblewrap_ok=1 || bubblewrap_ok=0
   feature_row_ok "Landlock" && landlock_ok=1 || landlock_ok=0
   feature_row_ok "Network namespace" && network_namespace_ok=1 || network_namespace_ok=0
@@ -871,8 +896,9 @@ if [[ -n \"\${HERDR_PANE_ID:-}\" ]]; then
   \"$PISC_BIN_DIR/herdr\" pane rename \"\$HERDR_PANE_ID\" Admin >/dev/null 2>&1 || true
 fi
 exec \"$REAL_OMP_PATH\" \"\$@\""
-write_wrapper "$PISC_BIN_DIR/fence" "#!/usr/bin/env bash
+  write_wrapper "$PISC_BIN_DIR/fence" "#!/usr/bin/env bash
 set -euo pipefail
+export PATH="$PISEC_BWRAP_DIR:/usr/local/bin:/usr/bin:/bin"
 exec \"$FENCE_REAL_PATH\" \"\$@\""
 write_wrapper "$PISC_BIN_DIR/pisec-broker" "#!/usr/bin/env bash
 set -euo pipefail

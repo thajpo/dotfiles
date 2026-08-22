@@ -66,9 +66,9 @@ def parser() -> argparse.ArgumentParser:
     project = commands.add_parser(
         "project",
         **_parser_kwargs(
-            help="register, list, open, or refresh Git projects",
+            help="register, list, open, refresh, deactivate, or reactivate Git projects",
             description="Manage the projects known to the Pisec broker.",
-            epilog="Examples:\n  pisec project register --path ~/src/project\n  pisec project list\n  pisec project open ~/src/project",
+            epilog="Examples:\n  pisec project register --path ~/src/project\n  pisec project list\n  pisec project open ~/src/project\n  pisec project deactivate ~/src/project --confirm ~/src/project\n  pisec project activate ~/src/project",
         ),
     )
     _add_json_argument(project)
@@ -90,11 +90,12 @@ def parser() -> argparse.ArgumentParser:
         "list",
         **_parser_kwargs(
             help="list registered projects",
-            description="List projects in display-name order.",
-            epilog="Example:\n  pisec project list",
+            description="List active projects in display-name order; pass --all to include inactive projects.",
+            epilog="Examples:\n  pisec project list\n  pisec project list --all",
         ),
     )
     _add_json_argument(project_list)
+    project_list.add_argument("--all", action="store_true", help="include inactive projects")
     project_open = project_commands.add_parser(
         "open",
         **_parser_kwargs(
@@ -116,6 +117,27 @@ def parser() -> argparse.ArgumentParser:
     _add_json_argument(project_refresh)
     project_refresh.add_argument("--all", action="store_true", required=True, help="refresh all stale active Pisec runtime bindings")
     project_refresh.add_argument("--wait-seconds", type=float, default=300.0, metavar="SECONDS", help="maximum time to wait for busy runtimes to become idle (default: 300)")
+    project_deactivate = project_commands.add_parser(
+        "deactivate",
+        **_parser_kwargs(
+            help="mark a project inactive and retire its coordinator",
+            description="Retire the project's coordinator workstream, close its Herdr surfaces, and mark the project inactive without deleting its registration or history.",
+            epilog="Example:\n  pisec project deactivate ~/src/project --confirm ~/src/project",
+        ),
+    )
+    _add_json_argument(project_deactivate)
+    project_deactivate.add_argument("project", metavar="PROJECT", help="repository path, display name, or project id")
+    project_deactivate.add_argument("--confirm", required=True, metavar="PROJECT", help="repeat the exact PROJECT selector")
+    project_activate = project_commands.add_parser(
+        "activate",
+        **_parser_kwargs(
+            help="reactivate an inactive project",
+            description="Mark a previously deactivated project active again; open a fresh coordinator with `pisec project open`.",
+            epilog="Example:\n  pisec project activate ~/src/project",
+        ),
+    )
+    _add_json_argument(project_activate)
+    project_activate.add_argument("project", metavar="PROJECT", help="repository path, display name, or project id")
 
 
     status = commands.add_parser(
@@ -142,8 +164,8 @@ def parser() -> argparse.ArgumentParser:
     board = commands.add_parser(
         "board",
         **_parser_kwargs(
-            help="show a compact project board",
-            description="Show the same durable project state as status in board-oriented formatting.",
+            help="show the compact task activity board",
+            description="Show task cards, latest checkpoints, next actions, and blockers.",
             epilog="Example:\n  pisec board",
         ),
     )
@@ -162,12 +184,12 @@ def parser() -> argparse.ArgumentParser:
         "doctor",
         **_parser_kwargs(
             help="check installation and adapter health",
-            description="Run fail-closed checks for state, configuration, adapters, services, and deployment policy.",
-            epilog="Examples:\n  pisec doctor\n  pisec doctor --json > doctor.json",
+            description="Run fail-closed checks for state, configuration, adapters, and deployment policy.",
+            epilog="Examples:\n  pisec doctor\n  pisec doctor --live-search-workstream ws_<id>",
         ),
     )
     _add_json_argument(doctor)
-
+    doctor.add_argument("--live-search-workstream", metavar="WORKSTREAM", help="exercise live fenced search in an existing approved idle worker")
     workstream = commands.add_parser(
         "workstream",
         **_parser_kwargs(
@@ -297,19 +319,35 @@ def _project_lines(project: Any, heading: str = "Project") -> list[str]:
     return lines
 
 
-def _project_table(projects: Any) -> list[str]:
+def _project_table(projects: Any, *, show_state: bool = False) -> list[str]:
     if not isinstance(projects, list):
         return _render_value(projects, 2)
-    rows = [
-        (
+    rows = []
+    for item in projects:
+        if not isinstance(item, Mapping):
+            continue
+        row = [
             item.get("display_name", "-"),
             item.get("project_id", "-"),
             item.get("default_ref", "-"),
-        )
-        for item in projects
-        if isinstance(item, Mapping)
+        ]
+        if show_state:
+            row.append("inactive" if not item.get("active") else "active")
+        rows.append(tuple(row))
+    headers = ("NAME", "ID", "DEFAULT REF") + (("STATE",) if show_state else ())
+    return _table(headers, rows)
+
+
+def _first_mate_lines(first_mate: Any) -> list[str]:
+    if not isinstance(first_mate, Mapping):
+        return [f"First Mate: {_scalar_text(first_mate)}"]
+    if not first_mate.get("present"):
+        return ["First Mate: not provisioned (`pisec` admin first_mate.ensure can create it)"]
+    return [
+        "First Mate: present",
+        f"  Workstream: {_scalar_text(first_mate.get('workstreamId'))}",
+        f"  State: {_scalar_text(first_mate.get('provisioningState'))} / {_scalar_text(first_mate.get('observedState'))}",
     ]
-    return _table(("NAME", "ID", "DEFAULT REF"), rows)
 
 
 def _workstream_table(workstreams: Any) -> list[str]:
@@ -350,8 +388,14 @@ def _status_lines(result: Any, heading: str) -> list[str]:
         if "schema" in result:
             lines.append(f"Schema: {_scalar_text(result.get('schema'))} v{_scalar_text(result.get('version'))}")
         projects = result.get("projects", [])
-        lines.append(f"Projects ({len(projects) if isinstance(projects, list) else 0})")
+        lines.append(f"Active Projects ({len(projects) if isinstance(projects, list) else 0})")
         lines.extend(_project_table(projects))
+        inactive = result.get("inactiveProjects", [])
+        if isinstance(inactive, list) and inactive:
+            lines.append(f"Inactive Projects ({len(inactive)})")
+            lines.extend(_project_table(inactive, show_state=True))
+        if "firstMate" in result:
+            lines.extend(_first_mate_lines(result.get("firstMate")))
         return lines
 
     project = result.get("project")
@@ -381,7 +425,33 @@ def _human_result(command: tuple[str, ...], result: Any) -> str:
         return "\n".join(_project_lines(result, "Project registered"))
     if command == ("project", "list") and isinstance(result, Mapping):
         projects = result.get("projects", [])
-        return "\n".join([f"Projects ({len(projects) if isinstance(projects, list) else 0})", *_project_table(projects)])
+        lines = [f"{'All Projects' if result.get('includeInactive') else 'Active Projects'} ({len(projects) if isinstance(projects, list) else 0})"]
+        lines.extend(_project_table(projects, show_state=bool(result.get("includeInactive"))))
+        inactive = result.get("inactiveProjects", [])
+        if isinstance(inactive, list) and inactive:
+            lines.append(f"Inactive Projects ({len(inactive)})")
+            lines.extend(_project_table(inactive, show_state=True))
+        return "\n".join(lines)
+    if command == ("project", "deactivate") and isinstance(result, Mapping):
+        project = result.get("project")
+        heading = "Project already inactive" if result.get("reused") else "Project deactivated"
+        lines = [heading]
+        if isinstance(project, Mapping):
+            lines.append(f"Project: {_scalar_text(project.get('display_name'))} ({_scalar_text(project.get('project_id'))})")
+        if result.get("workstreamId"):
+            lines.append(f"Retired coordinator: {_scalar_text(result.get('workstreamId'))}")
+        if result.get("retainedSessionRoot"):
+            lines.append(f"Retained session root: {_scalar_text(result.get('retainedSessionRoot'))}")
+        lines.append("Registration: retained (reactivate with `pisec project activate`)")
+        return "\n".join(lines)
+    if command == ("project", "activate") and isinstance(result, Mapping):
+        project = result.get("project")
+        heading = "Project already active" if result.get("reused") else "Project activated"
+        lines = [heading]
+        if isinstance(project, Mapping):
+            lines.append(f"Project: {_scalar_text(project.get('display_name'))} ({_scalar_text(project.get('project_id'))})")
+        lines.append("Open a fresh coordinator with `pisec project open`.")
+        return "\n".join(lines)
     if command == ("status",):
         return "\n".join(_status_lines(result, "Pisec status"))
     if command == ("board",):
@@ -484,9 +554,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload["dataDirs"] = [str(Path(d).expanduser()) for d in args.data_dir]
             result = _call("project.register", payload)
         elif args.command == "project" and args.project_command == "list":
-            result = _call("project.list", {})
+            result = _call("project.list", {"includeInactive": bool(args.all)})
         elif args.command == "project" and args.project_command == "open":
             result = _call("project.open", {"project": args.project})
+        elif args.command == "project" and args.project_command == "deactivate":
+            result = _call("project.deactivate", {"project": args.project, "confirm": args.confirm})
+        elif args.command == "project" and args.project_command == "activate":
+            result = _call("project.activate", {"project": args.project})
         elif args.command == "project" and args.project_command == "refresh":
             result = _call("project.refresh", {"all": bool(args.all), "waitSeconds": args.wait_seconds}, timeout=max(30.0, args.wait_seconds + 120.0))
         elif args.command == "status":
@@ -494,9 +568,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "reconcile":
             result = _call("system.reconcile", {})
         elif args.command == "board":
-            result = _call("system.status", {})
+            result = _call("fleet.activity", {})
         elif args.command == "doctor":
-            result = _call("system.doctor", {})
+            result = _call("system.doctor", {} if args.live_search_workstream is None else {"liveSearchWorkstream": args.live_search_workstream})
         elif args.command == "workstream" and args.workstream_command == "cleanup":
             result = _call("workstream.cleanup", {"workstreamId": args.workstream, "confirm": args.confirm, "forceDirty": bool(args.force_dirty)})
         else:

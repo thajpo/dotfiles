@@ -7,6 +7,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = ROOT / "omp" / "extensions" / "pisec.ts"
 SECRETARY_TOOLS = [
+    "pisec_project_activity",
+    "pisec_report_secretary_issue",
     "pisec_project_status",
     "pisec_git_status",
     "pisec_push_branch",
@@ -23,6 +25,9 @@ SECRETARY_TOOLS = [
     "pisec_retire_workstream",
     "pisec_list_decisions",
     "pisec_record_decision",
+    "pisec_list_coordination_requests",
+    "pisec_inspect_coordination_request",
+    "pisec_answer_coordination_request",
     "pisec_resolve_decision",
     "pisec_list_worker_research_requests",
     "pisec_inspect_worker_research",
@@ -32,6 +37,12 @@ SECRETARY_TOOLS = [
     "pisec_decline_worker_research",
 ]
 WORKER_TOOLS = [
+    "pisec_checkpoint_workstream",
+    "pisec_submit_completion",
+    "pisec_request_coordination",
+    "pisec_list_coordination",
+    "pisec_inspect_coordination",
+    "pisec_acknowledge_coordination",
     "pisec_show_task_packet",
     "pisec_request_secretary_research",
     "pisec_check_secretary_research",

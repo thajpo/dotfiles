@@ -68,6 +68,17 @@ class BrokerSocketTests(unittest.TestCase):
         self.assertEqual(projects["projects"][0]["project_id"], self.project_id)
         status = request(self.service.paths["secretary"], "project.status", {"authToken": self.token})
         self.assertEqual(status["project"]["project_id"], self.project_id)
+    def test_secretary_issue_report_is_durable_and_idempotent(self):
+        payload = {"authToken": self.token, "category": "permission", "severity": "blocking", "summary": "Worker cannot read approved source", "details": "The fenced worker received permission denied for the approved Herdr excerpt.", "requestedAction": "Review the minimum read-only source scope.", "evidence": ["PermissionError: denied"], "idempotencyKey": "source-read-1"}
+        first = request(self.service.paths["secretary"], "secretary.issue.report", payload)
+        replay = request(self.service.paths["secretary"], "secretary.issue.report", payload)
+        self.assertEqual(first["issue_id"], replay["issue_id"])
+        with PiStore(self.state) as store:
+            row = store.conn.execute("SELECT category,severity,state FROM secretary_issue_reports WHERE issue_id=?", (first["issue_id"],)).fetchone()
+            self.assertEqual(tuple(row), ("permission", "blocking", "open"))
+        with self.assertRaises(PisecError) as denied:
+            request(self.service.paths["admin"], "secretary.issue.report", {key: value for key, value in payload.items() if key != "authToken"})
+        self.assertEqual(denied.exception.code, "authorization_denied")
 
     def test_cross_socket_operations_and_bad_token_fail(self):
         with self.assertRaises(PisecError) as secretary_error:
@@ -158,8 +169,8 @@ class BrokerSocketTests(unittest.TestCase):
         self.workspace.runtime_states[self.binding["workspace_surface_id"]] = "stopped"
         with PiStore(self.state) as store:
             store.conn.execute(
-                "UPDATE runtime_bindings SET observed_state='idle',runtime_instance_id=NULL,report_seq=0 WHERE workstream_id=?",
-                (self.binding["workstream_id"],),
+                "UPDATE runtime_bindings SET observed_state='idle',runtime_instance_id=NULL,report_seq=0,applied_generation_sha256=? WHERE workstream_id=?",
+                ("a" * 64, self.binding["workstream_id"]),
             )
             store.conn.execute(
                 "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL WHERE workstream_id=?",
@@ -172,6 +183,16 @@ class BrokerSocketTests(unittest.TestCase):
         )
         self.assertIn(self.binding["agent_name"], self.workspace.agents)
         self.assertTrue(any(call[0] == "run" for call in self.workspace.calls))
+        with PiStore(self.state) as store:
+            restored = store.conn.execute(
+                "SELECT desired_generation_sha256,applied_generation_sha256,launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?",
+                (self.binding["workstream_id"],),
+            ).fetchone()
+            # Startup restores the applied generation and leaves it stale until
+            # an explicit refresh upgrades the descriptor and artifacts.
+            self.assertNotEqual(restored["desired_generation_sha256"], restored["applied_generation_sha256"])
+            self.assertEqual(restored["applied_generation_sha256"], "a" * 64)
+            self.assertIsNone(restored["launch_generation_sha256"])
 
     def test_startup_reconcile_does_not_duplicate_live_runtime_without_agent_metadata(self):
         repo_path = str(self.repo)

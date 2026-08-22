@@ -125,7 +125,15 @@ def _deployment_checks(checks: list[dict[str, Any]]) -> None:
         _check(checks, "Tailscale Funnel disabled", status == 0 and _funnel_is_disabled(output), output[:256])
 
 
-def run_doctor(store: Any = None, config: Mapping[str, Any] | None = None, registry: AdapterRegistry | None = None) -> dict[str, Any]:
+def run_doctor(
+    store: Any = None,
+    config: Mapping[str, Any] | None = None,
+    registry: AdapterRegistry | None = None,
+    *,
+    live_search_workstream: str | None = None,
+    workspace: Any = None,
+    harness: Any = None,
+) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     selected = dict(config or {})
     root = Path(getattr(store, "state_root", default_state_root())) if store is not None else default_state_root()
@@ -135,25 +143,25 @@ def run_doctor(store: Any = None, config: Mapping[str, Any] | None = None, regis
     if isinstance(selected, Mapping):
         _check(checks, "Configuration schema", selected.get("schemaVersion") == 3, f"schemaVersion={selected.get('schemaVersion')}")
         _path(checks, "Fence configuration", selected.get("fencePath", ""))
-        harness = selected.get("harness", {})
-        workspace = selected.get("workspace", {})
-        if isinstance(harness, Mapping):
-            selected_harness_id = harness.get("id") if isinstance(harness.get("id"), str) else None
-            _check(checks, "Configured harness", selected_harness_id is not None, str(harness.get("id", "missing")))
-            harness_config = harness.get("config")
-            if isinstance(harness_config, Mapping):
-                _path(checks, "Harness executable", harness_config.get("executablePath", ""))
-                gateway = harness_config.get("gateway")
+        harness_config = selected.get("harness", {})
+        workspace_config = selected.get("workspace", {})
+        if isinstance(harness_config, Mapping):
+            selected_harness_id = harness_config.get("id") if isinstance(harness_config.get("id"), str) else None
+            _check(checks, "Configured harness", selected_harness_id is not None, str(harness_config.get("id", "missing")))
+            nested = harness_config.get("config")
+            if isinstance(nested, Mapping):
+                _path(checks, "Harness executable", nested.get("executablePath", ""))
+                gateway = nested.get("gateway")
                 if isinstance(gateway, Mapping):
                     _path(checks, "Harness gateway token", gateway.get("tokenFile", ""), 0o600)
         else:
             _check(checks, "Configured harness", False, "invalid")
-        if isinstance(workspace, Mapping):
-            selected_workspace_id = workspace.get("id") if isinstance(workspace.get("id"), str) else None
-            _check(checks, "Configured workspace", selected_workspace_id is not None, str(workspace.get("id", "missing")))
-            workspace_config = workspace.get("config")
-            if isinstance(workspace_config, Mapping):
-                _path(checks, "Workspace socket", workspace_config.get("socketPath", ""), 0o600)
+        if isinstance(workspace_config, Mapping):
+            selected_workspace_id = workspace_config.get("id") if isinstance(workspace_config.get("id"), str) else None
+            _check(checks, "Configured workspace", selected_workspace_id is not None, str(workspace_config.get("id", "missing")))
+            nested = workspace_config.get("config")
+            if isinstance(nested, Mapping):
+                _path(checks, "Workspace socket", nested.get("socketPath", ""), 0o600)
         else:
             _check(checks, "Configured workspace", False, "invalid")
     else:
@@ -194,87 +202,36 @@ def run_doctor(store: Any = None, config: Mapping[str, Any] | None = None, regis
             "SELECT r.*,w.kind AS workstream_kind,w.desired_state AS workstream_desired_state,w.provisioning_state AS workstream_provisioning_state,w.execution_profile AS workstream_execution_profile,w.worktree_path AS workstream_worktree_path,w.harness_id AS workstream_harness_id,w.workspace_adapter_id AS workstream_workspace_adapter_id "
             "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) ORDER BY r.workstream_id"
         ):
-            ids_ok = (
-                registry is not None
-                and row["harness_id"] in harness_ids
-                and row["workspace_adapter_id"] in workspace_ids
-                and row["harness_id"] == selected_harness_id
-                and row["workspace_adapter_id"] == selected_workspace_id
-                and row["harness_id"] == row["workstream_harness_id"]
-                and row["workspace_adapter_id"] == row["workstream_workspace_adapter_id"]
-            )
+            ids_ok = registry is not None and row["harness_id"] in harness_ids and row["workspace_adapter_id"] in workspace_ids and row["harness_id"] == selected_harness_id and row["workspace_adapter_id"] == selected_workspace_id and row["harness_id"] == row["workstream_harness_id"] and row["workspace_adapter_id"] == row["workstream_workspace_adapter_id"]
             _check(checks, f"Binding {row['workstream_id']}", ids_ok, f"harness={row['harness_id']} workspace={row['workspace_adapter_id']} state={row['observed_state']}")
-            generation_ok = (
-                row["workstream_desired_state"] != "active"
-                or row["workstream_provisioning_state"] != "bound"
-                or (
-                    isinstance(row["desired_generation_sha256"], str)
-                    and len(row["desired_generation_sha256"]) == 64
-                    and row["applied_generation_sha256"] == row["desired_generation_sha256"]
-                )
-            )
-            _check(
-                checks,
-                f"Binding generation {row['workstream_id']}",
-                generation_ok,
-                "current" if generation_ok else "stale; run pisec project refresh --all",
-            )
-            cleaned = row["workstream_desired_state"] == "retired" and row["observed_state"] == "stopped" and row["workspace_id"] is None and row["workspace_view_id"] is None and row["workspace_surface_id"] is None
-            if ids_ok and registry is not None and not cleaned and row["workstream_desired_state"] == "active" and row["workstream_provisioning_state"] == "bound":
+            generation_ok = row["workstream_desired_state"] != "active" or row["workstream_provisioning_state"] != "bound" or (isinstance(row["desired_generation_sha256"], str) and len(row["desired_generation_sha256"]) == 64 and row["applied_generation_sha256"] == row["desired_generation_sha256"])
+            _check(checks, f"Binding generation {row['workstream_id']}", generation_ok, "current" if generation_ok else "stale; run pisec project refresh --all")
+            if ids_ok and registry is not None and row["workstream_desired_state"] == "active" and row["workstream_provisioning_state"] == "bound":
                 binding = dict(row)
-                workstream = {
-                    "kind": row["workstream_kind"],
-                    "worktree_path": row["workstream_worktree_path"],
-                    "desired_state": row["workstream_desired_state"],
-                    "execution_profile": row["workstream_execution_profile"],
-                }
+                workstream = {"kind": row["workstream_kind"], "worktree_path": row["workstream_worktree_path"], "desired_state": row["workstream_desired_state"], "execution_profile": row["workstream_execution_profile"]}
                 try:
                     for health in registry.resolve_harness(str(row["harness_id"])).health_checks(binding, workstream):
                         _check(checks, f"Harness {row['harness_id']} {row['workstream_id']}: {health.name}", health.ok, health.detail)
                 except Exception as error:
                     _check(checks, f"Harness {row['harness_id']} {row['workstream_id']}: health", False, str(error)[:256])
-        for retained in store.conn.execute("SELECT * FROM retained_session_roots ORDER BY workstream_id"):
-            retained_path = Path(str(retained["harness_home"])).absolute()
-            session_root = retained_path / "sessions"
-            ok = False
-            detail = str(session_root)
-            try:
-                state_root = root.absolute().resolve(strict=False)
-                if not retained_path.resolve(strict=False).is_relative_to(state_root):
-                    raise OSError("retained root escapes Pisec state")
-                home_info = retained_path.lstat()
-                session_info = session_root.lstat()
-                ok = (
-                    stat.S_ISDIR(home_info.st_mode)
-                    and stat.S_IMODE(home_info.st_mode) == 0o700
-                    and home_info.st_uid == os.geteuid()
-                    and stat.S_ISDIR(session_info.st_mode)
-                    and stat.S_IMODE(session_info.st_mode) == 0o700
-                    and session_info.st_uid == os.geteuid()
-                    and not stat.S_ISLNK(home_info.st_mode)
-                    and not stat.S_ISLNK(session_info.st_mode)
-                )
-                for directory, names, files in os.walk(session_root, topdown=True, followlinks=False):
-                    for name in [*names, *files]:
-                        child = Path(directory) / name
-                        child_info = child.lstat()
-                        if child_info.st_uid != os.geteuid() or stat.S_ISLNK(child_info.st_mode) or child_info.st_mode & 0o022:
-                            ok = False
-                if ok and registry is not None and retained["harness_id"] in harness_ids:
-                    registry.resolve_harness(str(retained["harness_id"])).validate_native_session(
-                        {"harness_home": str(retained_path)},
-                        retained["native_session_kind"],
-                        retained["native_session_value"],
-                    )
-            except Exception as error:
-                ok = False
-                detail = str(error)[:256]
-            _check(checks, f"Retained session root {retained['workstream_id']}", ok, detail)
-    _deployment_checks(checks)
-    ok = all(item["status"] == "ok" for item in checks)
-    return {
-        "ok": ok,
+        if live_search_workstream:
+            row = store.conn.execute("SELECT r.*,w.project_id,w.desired_state,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?", (live_search_workstream,)).fetchone()
+            if row is None or row["desired_state"] != "active" or row["provisioning_state"] != "bound" or row["observed_state"] != "idle" or workspace is None:
+                _check(checks, "Live fenced search", False, "live search not exercised: no approved idle worker")
+            else:
+                try:
+                    result = workspace.run_command(str(row["workspace_surface_id"]), ["real-omp", "search", "Pisec benign health query"])
+                    exit_code = result.get("exitCode", result.get("returncode", 1)) if isinstance(result, Mapping) else 1
+                    output = result.get("output", result.get("stdout", "")) if isinstance(result, Mapping) else ""
+                    _check(checks, "Live fenced search", exit_code == 0 and bool(str(output).strip()), "provider returned non-empty output" if exit_code == 0 and str(output).strip() else "live search not exercised")
+                except Exception as error:
+                    _check(checks, "Live fenced search", False, f"live search not exercised: {error}")
+    result = {
+        "ok": all(item["status"] == "ok" for item in checks),
         "checks": checks,
-        "schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION, "migration": MIGRATION_NAME, "digest": schema_digest(), "actual": schema_identity},
-        "adapters": {"harness": harness_ids, "workspace": workspace_ids},
+        "schema": schema_identity,
+        "adapters": {"harness": selected_harness_id, "workspace": selected_workspace_id},
     }
+    _deployment_checks(checks)
+    result["ok"] = all(item["status"] == "ok" for item in checks)
+    return result

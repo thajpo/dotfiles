@@ -14,28 +14,8 @@ from .runtime import start_bound_agent
 
 
 def _binding_scope(store: Any, binding: Mapping[str, Any]) -> dict[str, Any]:
-    operation_kind = "secretary.ensure" if binding["kind"] == "secretary" else "workstream.create"
-    row = store.conn.execute(
-        "SELECT result_json FROM operations WHERE workstream_id=? AND kind=? ORDER BY created_at LIMIT 1",
-        (binding["workstream_id"], operation_kind),
-    ).fetchone()
-    if row is None:
-        raise NeedsAttentionError("runtime generation scope is missing")
-    try:
-        scope = json.loads(str(row["result_json"]))
-    except (TypeError, json.JSONDecodeError) as error:
-        raise NeedsAttentionError("runtime generation scope is invalid") from error
-    if not isinstance(scope, dict) or scope.get("workstreamId") != binding["workstream_id"] or scope.get("projectId") != binding["project_id"]:
-        raise NeedsAttentionError("runtime generation scope does not match the binding")
-    project = store.conn.execute("SELECT repository_path,data_dirs FROM projects WHERE project_id=?", (binding["project_id"],)).fetchone()
-    if project is not None:
-        try:
-            data_dirs = json.loads(str(project["data_dirs"])) if project["data_dirs"] else []
-        except (TypeError, json.JSONDecodeError):
-            data_dirs = []
-        scope = dict(scope)
-        scope["dataDirs"] = resolve_data_dirs(data_dirs, Path(project["repository_path"]))
-    return scope
+    from .access import effective_runtime_scope
+    return effective_runtime_scope(store, binding)
 
 
 def _active_bindings(store: Any) -> list[dict[str, Any]]:
@@ -44,7 +24,7 @@ def _active_bindings(store: Any) -> list[dict[str, Any]]:
         for row in store.conn.execute(
             "SELECT r.*,w.project_id,w.kind,w.execution_profile,w.worktree_path,w.desired_state,w.provisioning_state,p.display_name "
             "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) JOIN projects p USING(project_id) "
-            "WHERE w.desired_state='active' AND w.provisioning_state IN ('bound','needs_attention') "
+            "WHERE p.active=1 AND w.desired_state='active' AND w.provisioning_state IN ('bound','needs_attention') "
             "ORDER BY p.display_name,w.kind,w.created_at,w.workstream_id"
         )
     ]
@@ -78,7 +58,7 @@ def mark_stale_bindings(store: Any, harness: HarnessAdapter) -> dict[str, Any]:
                         and artifact_value.get("schemaVersion") == 2
                         and artifact_value.get("generationSha256") == desired
                         and isinstance(descriptor_value, dict)
-                        and descriptor_value.get("schemaVersion") == 2
+                        and descriptor_value.get("schemaVersion") == 3
                         and descriptor_value.get("generationSha256") == desired
                         and not (home / "extensions" / "herdr-omp-agent-state.ts").exists()
                         and not (home / "agent" / "extensions" / "herdr-omp-agent-state.ts").exists()
@@ -148,27 +128,6 @@ def _wait_for_start(
         time.sleep(0.05)
 
 
-def _verify_lifecycle(store: Any, workspace: WorkspaceAdapter, binding: Mapping[str, Any], timeout: float = 45.0) -> None:
-    if workspace.manifest.adapter_id != "herdr":
-        return
-    surface_id = str(binding["workspace_surface_id"])
-    workspace.prompt_agent_nowait(
-        surface_id,
-        "Pisec runtime refresh verification only: run the Bash command sleep 2, then reply exactly PISEC_REFRESH_VERIFIED. Do not modify files.",
-    )
-    deadline = time.monotonic() + timeout
-    saw_working = False
-    while True:
-        runtime = _runtime_state(store, str(binding["workstream_id"]))
-        herdr_state = _agent_state(workspace, surface_id)
-        if runtime["observed_state"] == "working" and herdr_state == "working":
-            saw_working = True
-        if saw_working and runtime["observed_state"] == "idle" and herdr_state in {"idle", "done"}:
-            return
-        if time.monotonic() >= deadline:
-            boundary = "working" if not saw_working else "idle/done completion"
-            raise NeedsAttentionError(f"Herdr did not expose the refreshed runtime {boundary} transition")
-        time.sleep(0.05)
 
 
 def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, binding: Mapping[str, Any]) -> dict[str, Any]:
@@ -240,7 +199,6 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
     with store.transaction():
         store.conn.execute("UPDATE runtime_bindings SET refresh_pending=0,updated_at=? WHERE workstream_id=?", (utc_now(), workstream_id))
     attested = _runtime_state(store, workstream_id)
-    _verify_lifecycle(store, workspace, attested)
     return {"pending": False, "binding": _runtime_state(store, workstream_id)}
 
 
@@ -308,11 +266,10 @@ def refresh_projects(
                 recovery = "runtime remained live"
                 try:
                     current = _runtime_state(store, workstream_id)
-                    with store.transaction():
-                        store.conn.execute("UPDATE runtime_bindings SET refresh_pending=0,updated_at=? WHERE workstream_id=?", (utc_now(), workstream_id))
-                    current = _runtime_state(store, workstream_id)
                     process = workspace.observe_runtime(str(current["workspace_surface_id"]), str(current["policy_path"]))
                     if process.state == "stopped":
+                        with store.transaction():
+                            store.conn.execute("UPDATE runtime_bindings SET refresh_pending=0,updated_at=? WHERE workstream_id=?", (utc_now(), workstream_id))
                         now = utc_now()
                         with store.transaction():
                             store.conn.execute(
@@ -342,9 +299,43 @@ def refresh_projects(
     for workstream_id in remaining:
         binding = _runtime_state(store, workstream_id)
         result["pending"].append({"project": binding["display_name"], "workstreamId": workstream_id, "state": binding["observed_state"], "generation": binding["desired_generation_sha256"]})
-    if remaining:
-        now = utc_now()
-        with store.transaction():
-            store.conn.executemany("UPDATE runtime_bindings SET refresh_pending=0,updated_at=? WHERE workstream_id=?", ((now, workstream_id) for workstream_id in remaining))
+    for workstream_id in remaining:
+        binding = _runtime_state(store, workstream_id)
+        process = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+        if process.state == "stopped":
+            with store.transaction():
+                store.conn.execute("UPDATE runtime_bindings SET refresh_pending=0,updated_at=? WHERE workstream_id=?", (utc_now(), workstream_id))
+    result["ok"] = not result["failed"]
+    return result
+
+def refresh_bindings(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, workstream_ids: list[str] | tuple[str, ...] | set[str], *, wait_seconds: float = 300.0) -> dict[str, Any]:
+    selected = {str(value) for value in workstream_ids}
+    if not selected:
+        return {"upgraded": [], "pending": [], "failed": [], "skipped": [], "ok": True}
+    marked = mark_stale_bindings(store, harness)
+    selected_marked = [item for item in marked["stale"] if str(item["workstreamId"]) in selected]
+    result = {"generation": None, "upgraded": [], "pending": [], "skipped": [item for item in marked["current"] if str(item["workstreamId"]) in selected], "failed": [], "ok": True}
+    deadline = time.monotonic() + float(wait_seconds)
+    remaining = [str(item["workstreamId"]) for item in selected_marked]
+    while remaining and time.monotonic() <= deadline:
+        next_remaining: list[str] = []
+        for workstream_id in remaining:
+            binding = _runtime_state(store, workstream_id)
+            if binding["observed_state"] not in {"idle", "stopped"}:
+                next_remaining.append(workstream_id)
+                continue
+            try:
+                refreshed = _refresh_one(store, harness, workspace, binding)
+                if refreshed.get("pending"):
+                    next_remaining.append(workstream_id)
+                else:
+                    current = refreshed["binding"]
+                    result["upgraded"].append({"workstreamId": workstream_id, "generation": current["applied_generation_sha256"]})
+            except Exception as error:
+                result["failed"].append({"workstreamId": workstream_id, "reason": str(error)[:512]})
+        if next_remaining == remaining:
+            time.sleep(0.05)
+        remaining = next_remaining
+    result["pending"] = [{"workstreamId": workstream_id, "state": _runtime_state(store, workstream_id)["observed_state"]} for workstream_id in remaining]
     result["ok"] = not result["failed"]
     return result

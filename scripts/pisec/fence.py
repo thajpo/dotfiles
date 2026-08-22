@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from .fsutil import _atomic_write, _secure_tree
 from .models import InvalidRequestError, NeedsAttentionError, canonical_json, validate_id
+from .platform import is_macos, runtime_root
 
 DOMAIN_RE = re.compile(r"^(?:\*\.)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 PROFILES = frozenset({"secretary-project", "first-mate", "worker-default", "worker-networked"})
@@ -176,7 +177,7 @@ def render_policy(
         raise InvalidRequestError("Fence execution profile is unavailable")
     template = json.loads(template_path.read_text())
     gateway_port = _gateway_port(config)
-    runtime_base = Path(os.environ.get("PISEC_RUNTIME_ROOT", Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "pisec"))
+    runtime_base = runtime_root()
     supplied = dict(adapter_replacements or {})
     replacements: dict[str, Any] = {
         "${HOME}": str(Path.home()),
@@ -301,6 +302,11 @@ def render_policy(
     replacements["${PROJECT_WORKTREES}"] = _resolve_project_store("projectWorktreesDir", "project worktrees dir")
     replacements["${PROJECT_GIT_OBJECTS}"] = _resolve_project_store("projectGitObjectsDir", "project git objects dir")
     policy = _substitute(template, replacements)
+    if is_macos():
+        policy.pop("devices", None)
+        network_policy = policy.get("network")
+        if isinstance(network_policy, dict):
+            network_policy.pop("allowLocalOutboundPorts", None)
     text = canonical_json(policy, max_bytes=256 * 1024, max_text=8192) + "\n"
     output = Path(state_root) / "fence" / f"{workstream_id}.json"
     _secure_tree(Path(state_root), output.parent)

@@ -22,6 +22,7 @@ from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canon
 
 DOMAIN_RE = re.compile(r"^(?:\*\.)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 OMP_BASELINE_DOMAINS = ("html.duckduckgo.com",)
+OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1"
 OMP_PROFILE_IDS = frozenset({"secretary-project", "first-mate", "worker-default", "worker-networked"})
 
 
@@ -450,7 +451,7 @@ class OmpHarnessAdapter:
             scope_dict["dataDirs"] = scope["dataDirs"]
         if scope.get("pythonEnv"):
             scope_dict["pythonEnv"] = scope["pythonEnv"]
-        extension_name = "first-mate.ts" if profile == "first-mate" else "pisec.ts"
+        extension_name = "pisec.ts"
         manifest = {
             "schemaVersion": 1,
             "adapter": self.manifest.adapter_id,
@@ -458,6 +459,7 @@ class OmpHarnessAdapter:
             "scope": scope_dict,
             "config": self.config,
             "copiedSurfaceSha256": copied_surface_digest,
+            "modelProvidersSha256": hashlib.sha256(canonical_json(self._model_providers(str(profile), scope.get("externalDomains") if isinstance(scope.get("externalDomains"), list) else []), max_bytes=64 * 1024, max_text=8 * 1024).encode("utf-8")).hexdigest(),
             "pisecExtensionSha256": _file_digest(repository / "omp" / "extensions" / extension_name),
             "runtimeLauncherSha256": _file_digest(repository / "pisec" / "runtime-bin" / "omp"),
             "fencePoliciesSha256": _tree_digest(policy_sources),
@@ -465,6 +467,16 @@ class OmpHarnessAdapter:
             "fenceExecutableSha256": _file_digest(Path(str(self.config["fencePath"]))),
         }
         return hashlib.sha256(canonical_json(manifest, max_bytes=256 * 1024, max_text=64 * 1024).encode("utf-8")).hexdigest()
+
+    def _model_providers(self, profile: str, external_domains: Sequence[str] | None = None) -> dict[str, dict[str, str]]:
+        del profile, external_domains
+        gateway = self.harness_config["gateway"]
+        gateway_token = _secure_secret(Path(gateway["tokenFile"]))
+        roles = self.harness_config["modelRoles"]
+        return {
+            provider: {"baseUrl": gateway["baseUrl"], "apiKey": gateway_token, "transport": "pi-native"}
+            for provider in _provider_ids(roles)
+        }
 
     def materialize_profile(self, scope: Mapping[str, Any]) -> HarnessArtifacts:
         workstream_id = validate_id(scope["workstreamId"], prefix="ws")
@@ -494,10 +506,8 @@ class OmpHarnessAdapter:
         else:
             token = secrets.token_urlsafe(48)
             _atomic_write(secret_path, token + "\n")
-        gateway = self.harness_config["gateway"]
-        gateway_token = _secure_secret(Path(gateway["tokenFile"]))
         roles = self.harness_config["modelRoles"]
-        providers = {provider: {"baseUrl": gateway["baseUrl"], "apiKey": gateway_token, "transport": "pi-native"} for provider in _provider_ids(roles)}
+        providers = self._model_providers(str(profile), scope.get("externalDomains") if isinstance(scope.get("externalDomains"), list) else [])
         _atomic_write(agent_dir / "models.yml", json.dumps({"providers": providers}, indent=2, sort_keys=True) + "\n")
         overlay: dict[str, Any] = {
             "setupVersion": 2,
@@ -530,14 +540,14 @@ class OmpHarnessAdapter:
             harness_home=agent_dir,
             adapter_replacements={
                 "HARNESS_EXECUTABLE": self.harness_config["executablePath"],
-                "HARNESS_EXTENSION": _repo_root() / "omp" / "extensions" / ("first-mate.ts" if profile == "first-mate" else "pisec.ts"),
+                "HARNESS_EXTENSION": _repo_root() / "omp" / "extensions" / "pisec.ts",
                 "HARNESS_NATIVES": Path.home() / ".omp" / "natives",
                 "HARNESS_RUN": Path.home() / ".omp" / "run",
                 "WORKSPACE_CONFIG": Path.home() / ".config" / "herdr",
             },
             baseline_domains=OMP_BASELINE_DOMAINS,
         )
-        extension_path = _repo_root() / "omp" / "extensions" / ("first-mate.ts" if profile == "first-mate" else "pisec.ts")
+        extension_path = _repo_root() / "omp" / "extensions" / "pisec.ts"
         adapter_data = {
             "overlayPath": str(overlay_path),
             "xdgDataHome": plugin_info["xdg_data_home"],
@@ -585,7 +595,9 @@ class OmpHarnessAdapter:
             if not isinstance(value, str) or not value or len(value) > limit or "\x00" in value:
                 raise InvalidRequestError(f"{name} is invalid")
         canonical_root = str(Path(scope["worktreePath"]).resolve(strict=True))
-        runtime_root = Path(os.environ.get("PISEC_RUNTIME_ROOT", Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "pisec")).absolute()
+        from ..platform import runtime_root
+
+        runtime_root_path = runtime_root().absolute()
         control_db = self.state_root / "control.db"
         try:
             control_info = control_db.lstat()
@@ -620,9 +632,9 @@ class OmpHarnessAdapter:
             "xdgCacheHome": str(Path(_artifact_value(artifacts, "xdgCacheHome")).absolute()),
             "xdgConfigHome": str(Path(_artifact_value(artifacts, "xdgConfigHome")).absolute()),
             "pluginRoot": str(Path(_artifact_value(artifacts, "pluginRoot")).absolute()),
-            "runtimeSocketPath": str(runtime_root / "runtime" / "control.sock"),
-            "secretarySocketPath": str(runtime_root / "secretary" / "control.sock") if role == "secretary" else None,
-            "fleetSocketPath": str(runtime_root / "fleet" / "control.sock") if role == "first_mate" else None,
+            "runtimeSocketPath": str(runtime_root_path / "runtime" / "control.sock"),
+            "secretarySocketPath": str(runtime_root_path / "secretary" / "control.sock") if role == "secretary" else None,
+            "fleetSocketPath": str(runtime_root_path / "fleet" / "control.sock") if role == "first_mate" else None,
             "launchSecretPath": str(Path(artifacts.launch_secret_path).absolute()),
             "privateGitObjectDir": None if scope.get("privateGitObjectDir") is None else str(Path(scope["privateGitObjectDir"]).absolute()),
             "gitCommonObjectDir": None if scope.get("gitCommonObjectDir") is None else str(Path(scope["gitCommonObjectDir"]).absolute()),
@@ -842,7 +854,7 @@ class OmpHarnessAdapter:
                 identity_payload = {key: value for key, value in descriptor.items() if key != "identitySha256"}
                 descriptor_ok = (
                     isinstance(descriptor, Mapping)
-                    and descriptor.get("schemaVersion") == 2
+                    and descriptor.get("schemaVersion") == 3
                     and descriptor.get("harnessId") == self.manifest.adapter_id
                     and descriptor.get("workstreamId") == workstream_id
                     and descriptor.get("workspaceSessionName") == binding.get("workspace_session_name")

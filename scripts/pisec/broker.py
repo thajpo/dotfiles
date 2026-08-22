@@ -19,9 +19,9 @@ from .cleanup import cleanup_workstream
 from .decisions import list_decisions, record_decision, resolve_decision
 from .events import list_events
 from .migration import migrate_legacy_bindings
-from .models import AuthorizationError, InvalidRequestError, NotFoundError, PisecError, UnsafeStateError, bounded_text, utc_now, validate_id
+from .models import AuthorizationError, ConflictError, InvalidRequestError, NotFoundError, PisecError, UnsafeStateError, bounded_text, utc_now, validate_id
 from .pi_store import PiStore
-from .projects import get_project, list_projects, project_status, register_project, resolve_project
+from .projects import assert_project_writable, fleet_activity, get_project, list_projects, project_activity, project_status, register_project, resolve_project
 from .protocol import MAX_MESSAGE_BYTES, decode_request, error_response, success_response
 from .research import (
     acknowledge_research,
@@ -41,12 +41,14 @@ from .research import (
 from .runtime import WORKSPACE_RUNTIME_MISSING, prepare_session_switch, report_runtime, start_bound_agent, verify_runtime_binding
 from .first_mate import ensure_first_mate, focus_first_mate
 from .secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge, push_branch
+from .workflow import acknowledge_coordination, acknowledge_issue, add_issue_context, answer_coordination, checkpoint, inspect_issue, link_issue_remediation, list_issues, request_coordination, request_issue_verification, report_issue, resolve_issue, submit_completion, verify_issue
 from .workstreams import authorize_apply_workstream, complete_workstream, focus_workstream, inspect_workstream, list_workstreams, prepare_workstream, retire_workstream, send_workstream
-ADMIN_OPERATIONS = frozenset({"project.register", "project.list", "project.open", "project.refresh", "secretary.ensure", "secretary.focus", "first_mate.ensure", "first_mate.focus", "workstream.focus", "workstream.cleanup", "system.status", "system.reconcile", "system.doctor", "workspace.startup", "workspace.event", "presentation.snapshot"})
-SECRETARY_OPERATIONS = frozenset({"project.status", "git.status", "git.push", "git.workstream_changes", "git.merge.prepare", "git.merge.apply", "workstream.list", "workstream.inspect", "workstream.prepare", "workstream.authorize_apply", "workstream.send", "workstream.focus", "workstream.complete", "workstream.retire", "decision.list", "decision.record", "decision.resolve", "research.list", "research.inspect", "research.claim", "research.request_context", "research.answer", "research.decline"})
-FLEET_OPERATIONS = frozenset({"fleet.status", "fleet.events", "fleet.secretary.send", "fleet.workstream.list", "fleet.workstream.inspect", "fleet.git.workstream_changes", "fleet.workstream.prepare", "fleet.workstream.authorize_apply", "fleet.git.merge.prepare", "fleet.git.merge.apply"})
-RUNTIME_OPERATIONS = frozenset({"runtime.report", "runtime.turn.prepare", "session.switch.prepare", "task.get", "research.request", "research.list", "research.inspect", "research.add_context", "research.acknowledge"})
-WORKSPACE_STARTUP_GRACE_SECONDS = 2.0
+from .operation_contracts import SOCKET_OPERATIONS
+ADMIN_OPERATIONS = SOCKET_OPERATIONS["admin"]
+SECRETARY_OPERATIONS = SOCKET_OPERATIONS["secretary"]
+FLEET_OPERATIONS = SOCKET_OPERATIONS["fleet"]
+RUNTIME_OPERATIONS = SOCKET_OPERATIONS["runtime"]
+from .operation_contracts import operation_manifest
 WORKSPACE_RECONCILE_INTERVAL_SECONDS = 5.0
 RUNTIME_RESTART_BACKOFF_SECONDS = 30.0
 RESEARCH_WAKE_DEBOUNCE_SECONDS = 0.1
@@ -54,8 +56,9 @@ logger = logging.getLogger(__name__)
 
 
 def default_runtime_root() -> Path:
-    base = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
-    return Path(os.environ.get("PISEC_RUNTIME_ROOT", base / "pisec"))
+    from .platform import runtime_root
+
+    return runtime_root()
 
 
 def socket_paths(root: Path | None = None) -> dict[str, Path]:
@@ -68,7 +71,7 @@ def _exact(payload: Mapping[str, Any], required: set[str], optional: set[str] = 
         raise InvalidRequestError("payload fields do not match the operation contract")
 
 
-_PUBLIC_PROJECT_FIELDS = ("project_id", "display_name", "default_ref", "data_dirs", "secretary_workstream_id", "created_at", "updated_at")
+_PUBLIC_PROJECT_FIELDS = ("project_id", "display_name", "default_ref", "data_dirs", "secretary_workstream_id", "active", "created_at", "updated_at", "deactivated_at")
 _PUBLIC_WORKSTREAM_FIELDS = (
     "workstream_id", "project_id", "kind", "title", "purpose", "brief", "harness_id", "workspace_adapter_id",
     "execution_profile", "target_ref", "base_commit_oid", "branch_name",
@@ -117,6 +120,22 @@ def _public_project_status(value: Mapping[str, Any]) -> dict[str, Any]:
         "source": value.get("source", "pisec-sqlite"),
     }
 
+def _first_mate_summary(store: PiStore) -> dict[str, Any]:
+    row = store.conn.execute(
+        "SELECT w.workstream_id,w.provisioning_state,r.observed_state "
+        "FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) "
+        "WHERE w.kind='first_mate' AND w.desired_state <> 'retired' ORDER BY w.created_at LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return {"present": False}
+    return {
+        "present": True,
+        "workstreamId": row["workstream_id"],
+        "provisioningState": row["provisioning_state"],
+        "observedState": row["observed_state"],
+    }
+
+
 def _presentation_snapshot(store: PiStore) -> dict[str, Any]:
     """Return local-only project/worktree identities for Collie mode filtering.
 
@@ -128,7 +147,7 @@ def _presentation_snapshot(store: PiStore) -> dict[str, Any]:
         dict(row)
         for row in store.conn.execute(
             "SELECT project_id,display_name,repository_path,default_ref "
-            "FROM projects ORDER BY display_name,project_id"
+            "FROM projects WHERE active=1 ORDER BY display_name,project_id"
         )
     ]
     worktrees = [
@@ -262,7 +281,7 @@ class BrokerDispatcher:
                 now = utc_now()
                 with store.transaction():
                     store.conn.execute(
-                        "UPDATE runtime_bindings SET observed_state='starting',launch_generation_sha256=applied_generation_sha256,last_observed_at=?,updated_at=? WHERE workstream_id=?",
+                        "UPDATE runtime_bindings SET observed_state='starting',launch_generation_sha256=IFNULL(applied_generation_sha256,launch_generation_sha256),last_observed_at=?,updated_at=? WHERE workstream_id=?",
                         (now, now, workstream_id),
                     )
                     store.conn.execute(
@@ -316,8 +335,12 @@ class BrokerDispatcher:
             with self.store_factory() as store:
                 for row in pending_research_wakes(store):
                     self._queue_research_wake(row["project_id"])
+                for row in store.conn.execute(
+                    "SELECT DISTINCT w.project_id FROM issue_inbox i JOIN workstreams w ON w.workstream_id=i.workstream_id WHERE i.generation>i.notified_generation"
+                ):
+                    self._queue_research_wake(row["project_id"])
         except BaseException:
-            logger.exception("could not queue durable research wakes")
+            logger.exception("could not queue durable notification wakes")
 
     def _queue_research_wake(self, project_id: str) -> None:
         try:
@@ -350,6 +373,15 @@ class BrokerDispatcher:
 
     def _wake_project(self, project_id: str) -> None:
         with self.store_factory() as store:
+            issue = store.conn.execute(
+                "SELECT i.workstream_id,i.generation,r.workspace_surface_id FROM issue_inbox i JOIN workstreams w ON w.workstream_id=i.workstream_id JOIN runtime_bindings r ON r.workstream_id=w.workstream_id WHERE w.project_id=? AND w.desired_state='active' AND i.generation>i.notified_generation ORDER BY i.updated_at LIMIT 1",
+                (project_id,),
+            ).fetchone()
+            if issue is not None:
+                self.workspace.prompt_agent_nowait(issue["workspace_surface_id"], f"Pending Pisec remediation issue notification for project {project_id}; list and inspect issues through Pisec.")
+                with store.transaction():
+                    store.conn.execute("UPDATE issue_inbox SET notified_generation=?,updated_at=? WHERE workstream_id=? AND generation=?", (issue["generation"], utc_now(), issue["workstream_id"], issue["generation"]))
+                return
             row = store.conn.execute(
                 "SELECT i.generation FROM research_inbox i JOIN workstreams w ON w.project_id=i.project_id AND w.kind='secretary' AND w.desired_state='active' JOIN runtime_bindings r ON r.workstream_id=w.workstream_id WHERE i.project_id=? AND i.generation>i.notified_generation ORDER BY w.created_at LIMIT 1",
                 (project_id,),
@@ -456,6 +488,71 @@ class BrokerDispatcher:
         binding = verify_runtime_binding(store, payload, worker_only=True)
         project_id = str(binding["project_id"])
         workstream_id = str(binding["workstream_id"])
+        if operation in {"issue.report", "secretary.issue.report"}:
+            _exact(payload, auth_fields | {"category", "severity", "summary", "details", "requestedAction", "evidence", "idempotencyKey"})
+            return report_issue(store, project_id=project_id, reporter_workstream_id=workstream_id, category=payload["category"], severity=payload["severity"], summary=payload["summary"], details=payload["details"], requested_action=payload["requestedAction"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
+        if operation == "issue.list":
+            _exact(payload, auth_fields, {"state", "limit"})
+            return {"issues": list_issues(store, reporter_workstream_id=workstream_id, state=payload.get("state"), limit=int(payload.get("limit", 100)))}
+        if operation == "issue.inspect":
+            _exact(payload, auth_fields | {"issueId"})
+            return inspect_issue(store, issue_id=payload["issueId"], reporter_workstream_id=workstream_id)
+        if operation == "issue.add_context":
+            _exact(payload, auth_fields | {"issueId", "context", "idempotencyKey"})
+            inspect_issue(store, issue_id=payload["issueId"], reporter_workstream_id=workstream_id)
+            return add_issue_context(store, project_id=project_id, issue_id=payload["issueId"], actor_id=workstream_id, context=payload["context"], idempotency_key=payload["idempotencyKey"])
+        if operation == "issue.verify":
+            _exact(payload, auth_fields | {"issueId", "status", "evidence", "idempotencyKey"})
+            return verify_issue(store, project_id=project_id, issue_id=payload["issueId"], actor_id=workstream_id, status=payload["status"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
+        if operation == "access.effective":
+            _exact(payload, auth_fields)
+            from .access import effective_runtime_scope
+            scope = effective_runtime_scope(store, binding)
+            return {"workstreamId": workstream_id, "readPaths": [{"path": path, "sources": scope.get("readPathSources", {}).get(path, [])} for path in scope.get("dataDirs", [])], "pythonEnv": scope.get("pythonEnv")}
+        if operation == "runtime.bootstrap.get":
+            _exact(payload, auth_fields | {"sessionFile"})
+            session_file = str(payload["sessionFile"])
+            packet = get_task_packet(store, project_id, workstream_id)
+            from .access import effective_runtime_scope
+            scope = effective_runtime_scope(store, binding)
+            runtime_scope = {"pythonEnv": scope.get("pythonEnv"), "readPaths": [{"path": path, "sources": scope.get("readPathSources", {}).get(path, [])} for path in scope.get("dataDirs", [])]}
+            row = store.conn.execute("SELECT * FROM runtime_bootstrap_sessions WHERE workstream_id=? AND session_file=?", (workstream_id, session_file)).fetchone()
+            if row is None:
+                now = utc_now()
+                with store.transaction():
+                    store.conn.execute("INSERT INTO runtime_bootstrap_sessions(workstream_id,session_file,task_packet_delivered,bootstrap_generation,acknowledged_generation,last_event_sequence,updated_at) VALUES(?,?,0,1,0,0,?)", (workstream_id, session_file, now))
+            if full:
+                return {"sessionFile": session_file, "generation": row["bootstrap_generation"], "fullPacket": packet, "runtimeScope": runtime_scope, "changed": True}
+            return {"sessionFile": session_file, "generation": row["bootstrap_generation"], "fullPacket": None, "runtimeScope": runtime_scope, "changed": bool(changed), "coordination": [], "research": []}
+        if operation == "runtime.bootstrap.ack":
+            _exact(payload, auth_fields | {"sessionFile", "generation"})
+            with store.transaction():
+                store.conn.execute("UPDATE runtime_bootstrap_sessions SET task_packet_delivered=1,acknowledged_generation=?,last_event_sequence=(SELECT COALESCE(MAX(sequence),0) FROM events WHERE workstream_id=?),updated_at=? WHERE workstream_id=? AND session_file=?", (int(payload["generation"]), workstream_id, utc_now(), workstream_id, str(payload["sessionFile"])))
+            return {"acknowledged": True, "generation": int(payload["generation"])}
+        if operation == "workstream.checkpoint":
+            _exact(payload, auth_fields | {"idempotencyKey", "phase", "summary", "nextAction", "evidence"}, {"blockerCode", "blocker"})
+            result = checkpoint(store, workstream_id=workstream_id, runtime_instance_id=str(payload["runtimeInstanceId"]), phase=payload["phase"], summary=payload["summary"], next_action=payload["nextAction"], blocker_code=payload.get("blockerCode"), blocker=payload.get("blocker"), evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
+            return {"checkpoint": result}
+        if operation == "workstream.completion.submit":
+            _exact(payload, auth_fields | {"completionPacket"})
+            return {"completionPacket": submit_completion(store, workstream_id=workstream_id, runtime_instance_id=str(payload["runtimeInstanceId"]), packet=payload["completionPacket"])}
+        if operation == "coordination.request":
+            _exact(payload, auth_fields | {"kind", "summary", "question", "blocking", "idempotencyKey"})
+            return request_coordination(store, project_id=project_id, workstream_id=workstream_id, kind=payload["kind"], summary=payload["summary"], question=payload["question"], blocking=bool(payload["blocking"]), idempotency_key=payload["idempotencyKey"])
+        if operation in {"coordination.list", "coordination.inspect"}:
+            if operation == "coordination.list":
+                _exact(payload, auth_fields, {"includeResolved"})
+                from .workflow import list_coordination
+                return {"requests": list_coordination(store, project_id=project_id, workstream_id=workstream_id, include_resolved=bool(payload.get("includeResolved")))}
+            _exact(payload, auth_fields | {"requestId"})
+            from .workflow import list_coordination
+            rows = [row for row in list_coordination(store, project_id=project_id, workstream_id=workstream_id, include_resolved=True) if row["request_id"] == payload["requestId"]]
+            if not rows:
+                raise NotFoundError("coordination request was not found")
+            return rows[0]
+        if operation == "coordination.resolve":
+            _exact(payload, auth_fields | {"requestId"})
+            return acknowledge_coordination(store, project_id=project_id, workstream_id=workstream_id, request_id=payload["requestId"])
         if operation == "task.get":
             _exact(payload, auth_fields)
             result = get_task_packet(store, project_id, workstream_id)
@@ -471,7 +568,10 @@ class BrokerDispatcher:
                     parsed_scope = None
                 if isinstance(parsed_scope, dict) and isinstance(parsed_scope.get("pythonEnv"), str):
                     python_env = parsed_scope["pythonEnv"]
-            result["pythonEnv"] = python_env
+            from .access import effective_runtime_scope
+            scope = effective_runtime_scope(store, binding)
+            result["runtimeScope"] = {"pythonEnv": scope.get("pythonEnv"), "readPaths": [{"path": path, "sources": scope.get("readPathSources", {}).get(path, [])} for path in scope.get("dataDirs", [])]}
+            result["pythonEnv"] = result["runtimeScope"]["pythonEnv"]
             return result
         if operation == "research.request":
             _exact(payload, auth_fields | {"idempotencyKey", "request"})
@@ -531,11 +631,15 @@ class BrokerDispatcher:
         for wake in pending_research_wakes(store):
             self._queue_research_wake(wake["project_id"])
         rows = store.conn.execute(
-            "SELECT o.*, EXISTS(SELECT 1 FROM authorizations a WHERE a.operation_id=o.operation_id) AS has_authorization "
+            "SELECT o.*, EXISTS(SELECT 1 FROM authorizations a WHERE a.operation_id=o.operation_id) AS has_authorization, "
+            "(SELECT p.active FROM projects p WHERE p.project_id=o.project_id) AS project_active "
             "FROM operations o WHERE o.state IN ('applying','failed') ORDER BY o.created_at"
         ).fetchall()
         for row in rows:
             operation = dict(row)
+            if operation.pop("project_active") == 0:
+                result["resumed"].append({"operationId": operation["operation_id"], "state": "skipped-inactive-project"})
+                continue
             try:
                 if operation["kind"] == "workstream.create" and operation["has_authorization"] and operation["result_json"]:
                     scope = json.loads(operation["result_json"])
@@ -559,17 +663,43 @@ class BrokerDispatcher:
             _exact(payload, {"path"}, {"displayName", "defaultRef", "dataDirs"})
             return _public_project(register_project(store, payload["path"], display_name=payload.get("displayName"), default_ref=payload.get("defaultRef"), data_dirs=payload.get("dataDirs")))
         if operation == "project.list":
-            _exact(payload, set())
-            return {"projects": [_public_project(row) for row in list_projects(store)]}
+            _exact(payload, set(), {"includeInactive"})
+            include_inactive = payload.get("includeInactive") is True
+            every_project = [_public_project(row) for row in list_projects(store, include_inactive=True)]
+            active_projects = [row for row in every_project if row.get("active")]
+            return {
+                "projects": every_project if include_inactive else active_projects,
+                "inactiveProjects": [row for row in every_project if not row.get("active")],
+                "includeInactive": include_inactive,
+            }
         if operation == "presentation.snapshot":
             _exact(payload, set())
             return _presentation_snapshot(store)
+        if operation == "project.activity":
+            _exact(payload, set(), {"project", "after"})
+            if payload.get("project"):
+                project = resolve_project(store, str(payload["project"]))
+                return project_activity(store, project["project_id"], int(payload.get("after", 0)))
+            raise InvalidRequestError("project.activity requires a project selector")
+        if operation == "fleet.activity":
+            _exact(payload, set(), {"after"})
+            return fleet_activity(store, int(payload.get("after", 0)))
         if operation == "system.status":
-            _exact(payload, set(), {"project"})
+            _exact(payload, set(), {"project", "includeInactive"})
             if payload.get("project"):
                 project = resolve_project(store, str(payload["project"]))
                 return _public_project_status(project_status(store, project["project_id"]))
-            return {"projects": [_public_project(row) for row in list_projects(store)], "schema": "pisec-core", "version": 8}
+            include_inactive = payload.get("includeInactive") is True
+            every_project = [_public_project(row) for row in list_projects(store, include_inactive=True)]
+            active_projects = [row for row in every_project if row.get("active")]
+            return {
+                "projects": every_project if include_inactive else active_projects,
+                "inactiveProjects": [row for row in every_project if not row.get("active")],
+                "firstMate": _first_mate_summary(store),
+                "schema": "pisec-core",
+                "version": 12,
+                "operationContracts": operation_manifest(),
+            }
         if operation == "project.open":
             _exact(payload, {"project"})
             from .secretary import ensure_secretary, focus_secretary
@@ -582,6 +712,25 @@ class BrokerDispatcher:
                 "focused": True,
                 "reused": bool(result.get("reused", False)),
             }
+        if operation == "project.deactivate":
+            _exact(payload, {"project", "confirm"})
+            if payload["confirm"] != payload["project"]:
+                raise ConflictError("deactivation confirmation does not match the project selector")
+            from .projects import deactivate_project
+            result = deactivate_project(store, str(payload["project"]), self.workspace, self.harness)
+            project = get_project(store, result["projectId"])
+            return {
+                "project": _public_project(project),
+                "workstreamId": result.get("workstreamId"),
+                "retainedSessionRoot": result.get("retainedSessionRoot"),
+                "reused": bool(result.get("reused", False)),
+            }
+        if operation == "project.activate":
+            _exact(payload, {"project"})
+            from .projects import activate_project
+            result = activate_project(store, str(payload["project"]))
+            project = get_project(store, result["projectId"])
+            return {"project": _public_project(project), "reused": bool(result.get("reused", False))}
         if operation == "project.refresh":
             _exact(payload, {"all"}, {"waitSeconds"})
             if payload["all"] is not True:
@@ -642,27 +791,56 @@ class BrokerDispatcher:
                 "reused": bool(result.get("reused", False)),
             }
         if operation == "system.doctor":
-            _exact(payload, set())
+            _exact(payload, set(), {"liveSearchWorkstream"})
             from .doctor import run_doctor
-            return run_doctor(store, self.config, self.registry)
+            return run_doctor(store, self.config, self.registry, live_search_workstream=payload.get("liveSearchWorkstream"), workspace=self.workspace, harness=self.harness)
         raise InvalidRequestError("unsupported admin operation")
 
     def _secretary(self, store: PiStore, operation: str, project_id: str, secretary_workstream_id: str, payload: dict[str, Any]) -> Any:
+        if operation not in {"project.status", "project.activity", "issue.list", "issue.inspect", "git.status", "git.workstream_changes", "workstream.list", "workstream.inspect", "coordination.list", "coordination.inspect", "decision.list", "research.list", "research.inspect"}:
+            assert_project_writable(store, project_id)
         if operation == "project.status":
             _exact(payload, set())
             return _public_project_status(project_status(store, project_id))
+        if operation == "project.activity":
+            _exact(payload, set(), {"after"})
+            return project_activity(store, project_id, int(payload.get("after", 0)))
+        if operation == "coordination.list":
+            _exact(payload, set(), {"workstreamId", "includeResolved"})
+            from .workflow import list_coordination
+            return {"requests": list_coordination(store, project_id=project_id, workstream_id=payload.get("workstreamId"), include_resolved=bool(payload.get("includeResolved")))}
+        if operation == "coordination.inspect":
+            _exact(payload, {"requestId"})
+            from .workflow import list_coordination
+            rows = [row for row in list_coordination(store, project_id=project_id, include_resolved=True) if row["request_id"] == payload["requestId"]]
+            if not rows:
+                raise NotFoundError("coordination request was not found")
+            return rows[0]
+        if operation == "coordination.answer":
+            _exact(payload, {"requestId", "response", "idempotencyKey"}, {"decisionId"})
+            return answer_coordination(store, project_id=project_id, secretary_workstream_id=secretary_workstream_id, request_id=payload["requestId"], response=payload["response"], idempotency_key=payload["idempotencyKey"], decision_id=payload.get("decisionId"))
+        if operation == "access.list":
+            _exact(payload, set())
+            from .access import list_access_grants
+            return {"grants": list_access_grants(store, project_id=project_id)}
+        if operation in {"issue.report", "secretary.issue.report"}:
+            _exact(payload, {"category", "severity", "summary", "details", "requestedAction", "evidence", "idempotencyKey"})
+            return report_issue(store, project_id=project_id, reporter_workstream_id=secretary_workstream_id, category=payload["category"], severity=payload["severity"], summary=payload["summary"], details=payload["details"], requested_action=payload["requestedAction"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
+        if operation == "issue.list":
+            _exact(payload, set(), {"state", "limit"})
+            return {"issues": list_issues(store, project_id=project_id, state=payload.get("state"), limit=int(payload.get("limit", 100)))}
+        if operation == "issue.inspect":
+            _exact(payload, {"issueId"})
+            return inspect_issue(store, issue_id=payload["issueId"], project_id=project_id)
+        if operation == "issue.add_context":
+            _exact(payload, {"issueId", "context", "idempotencyKey"})
+            return add_issue_context(store, project_id=project_id, issue_id=payload["issueId"], actor_id=secretary_workstream_id, context=payload["context"], idempotency_key=payload["idempotencyKey"])
+        if operation == "issue.verify":
+            _exact(payload, {"issueId", "status", "evidence", "idempotencyKey"})
+            return verify_issue(store, project_id=project_id, issue_id=payload["issueId"], actor_id=secretary_workstream_id, status=payload["status"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
         if operation == "git.status":
             _exact(payload, set())
             return git_status(store, project_id)
-        if operation == "git.push":
-            _exact(payload, {"branch", "expectedLocalOid", "expectedRemoteOid"})
-            return push_branch(
-                store,
-                project_id,
-                branch=payload["branch"],
-                expected_local_oid=payload["expectedLocalOid"],
-                expected_remote_oid=payload["expectedRemoteOid"],
-            )
         if operation == "git.workstream_changes":
             _exact(payload, {"workstreamId"})
             return inspect_workstream_changes(store, project_id, payload["workstreamId"])
@@ -679,9 +857,9 @@ class BrokerDispatcher:
             _exact(payload, {"workstreamId"})
             return _public_inspect(inspect_workstream(store, project_id, payload["workstreamId"]))
         if operation == "workstream.prepare":
-            _exact(payload, {"title", "purpose", "brief", "taskPacket", "idempotencyKey"}, {"targetRef", "executionProfile", "externalDomains", "pythonEnv"})
+            _exact(payload, {"title", "purpose", "brief", "taskPacket", "idempotencyKey"}, {"targetRef", "executionProfile", "externalDomains", "pythonEnv", "workMode", "learningOverlay", "learningSeam", "decisionIds"})
             profile = payload.get("executionProfile", "worker-default")
-            prepared = prepare_workstream(store, project_id=project_id, title=payload["title"], purpose=payload["purpose"], brief=payload["brief"], task_packet=payload["taskPacket"], idempotency_key=payload["idempotencyKey"], harness=self.harness, workspace=self.workspace, target_ref=payload.get("targetRef"), execution_profile=profile, external_domains=payload.get("externalDomains", []), python_env=payload.get("pythonEnv"))
+            prepared = prepare_workstream(store, project_id=project_id, title=payload["title"], purpose=payload["purpose"], brief=payload["brief"], task_packet=payload["taskPacket"], idempotency_key=payload["idempotencyKey"], harness=self.harness, workspace=self.workspace, target_ref=payload.get("targetRef"), execution_profile=profile, work_mode=payload.get("workMode", "BUILD"), learning_overlay=payload.get("learningOverlay", "LIGHT"), learning_seam=payload.get("learningSeam"), decision_ids=payload.get("decisionIds", []), external_domains=payload.get("externalDomains", []), python_env=payload.get("pythonEnv"))
             return {"operation": _public_operation(prepared["operation"]), "workstream": _public_workstream(prepared["workstream"]), "approvalScope": prepared["approvalScope"]}
         if operation == "workstream.authorize_apply":
             _exact(payload, {"approvalScope"})
@@ -695,8 +873,8 @@ class BrokerDispatcher:
             _exact(payload, {"workstreamId"})
             return focus_workstream(store, project_id, payload["workstreamId"], self.workspace)
         if operation == "workstream.complete":
-            _exact(payload, {"workstreamId"})
-            return _public_workstream(complete_workstream(store, project_id, payload["workstreamId"]))
+            _exact(payload, {"workstreamId", "completionPacketSha256"})
+            return _public_workstream(complete_workstream(store, project_id, payload["workstreamId"], payload["completionPacketSha256"], self.workspace))
         if operation == "workstream.retire":
             _exact(payload, {"workstreamId"})
             return _public_workstream(retire_workstream(store, project_id, payload["workstreamId"], self.workspace))
@@ -742,13 +920,57 @@ class BrokerDispatcher:
         return str(get_project(store, project_id)["project_id"])
 
     def _fleet(self, store: PiStore, operation: str, first_mate_workstream_id: str, payload: dict[str, Any]) -> Any:
+        if operation == "fleet.activity":
+            _exact(payload, set(), {"after"})
+            return fleet_activity(store, int(payload.get("after", 0)))
         if operation == "fleet.status":
             _exact(payload, set(), {"projectId"})
             if payload.get("projectId") is not None:
                 project_id = self._fleet_project(store, payload)
                 return _public_project_status(project_status(store, project_id))
             statuses = [_public_project_status(project_status(store, project["project_id"])) for project in list_projects(store)]
-            return {"projects": statuses, "source": "pisec-sqlite", "firstMateWorkstreamId": first_mate_workstream_id}
+        if operation == "fleet.issue.list":
+            _exact(payload, set(), {"projectId", "state", "limit"})
+            return {"issues": list_issues(store, project_id=payload.get("projectId"), state=payload.get("state"), limit=int(payload.get("limit", 100)))}
+        if operation == "fleet.issue.inspect":
+            _exact(payload, {"issueId"}, {"projectId"})
+            return inspect_issue(store, issue_id=payload["issueId"], project_id=payload.get("projectId"))
+        if operation == "fleet.issue.add_context":
+            _exact(payload, {"projectId", "issueId", "context", "idempotencyKey"})
+            project_id = self._fleet_project(store, payload)
+            return add_issue_context(store, project_id=project_id, issue_id=payload["issueId"], actor_id=first_mate_workstream_id, context=payload["context"], idempotency_key=payload["idempotencyKey"])
+        if operation == "fleet.issue.acknowledge":
+            _exact(payload, {"projectId", "issueId"})
+            project_id = self._fleet_project(store, payload)
+            return acknowledge_issue(store, project_id=project_id, issue_id=payload["issueId"], actor_id=first_mate_workstream_id)
+        if operation == "fleet.issue.resolve":
+            _exact(payload, {"projectId", "issueId", "disposition", "reason", "decisionId"})
+            project_id = self._fleet_project(store, payload)
+            return resolve_issue(store, project_id=project_id, issue_id=payload["issueId"], actor_id=first_mate_workstream_id, disposition=payload["disposition"], reason=payload["reason"], decision_id=payload["decisionId"])
+        if operation == "fleet.access.list":
+            _exact(payload, {"projectId"}, {"workstreamId"})
+            from .access import list_access_grants
+            return {"grants": list_access_grants(store, project_id=self._fleet_project(store, payload), workstream_id=payload.get("workstreamId"))}
+        if operation == "fleet.access.inspect":
+            _exact(payload, {"projectId", "grantId"})
+            from .access import _grant_row
+            return dict(_grant_row(store, payload["grantId"]))
+        if operation == "fleet.access.grant.prepare":
+            _exact(payload, {"projectId", "subjectKind", "path", "idempotencyKey"}, {"workstreamId", "issueId"})
+            from .access import prepare_access_grant
+            return prepare_access_grant(store, project_id=self._fleet_project(store, payload), subject_kind=payload["subjectKind"], workstream_id=payload.get("workstreamId"), path=payload["path"], issue_id=payload.get("issueId"), idempotency_key=payload["idempotencyKey"])
+        if operation == "fleet.access.grant.apply":
+            _exact(payload, {"projectId", "approvalScope"})
+            from .access import authorize_apply_access_grant
+            return authorize_apply_access_grant(store, scope=payload["approvalScope"], harness=self.harness, workspace=self.workspace)
+        if operation == "fleet.access.revoke.prepare":
+            _exact(payload, {"projectId", "grantId", "idempotencyKey"})
+            from .access import prepare_access_revoke
+            return prepare_access_revoke(store, project_id=self._fleet_project(store, payload), grant_id=payload["grantId"], idempotency_key=payload["idempotencyKey"])
+        if operation == "fleet.access.revoke.apply":
+            _exact(payload, {"projectId", "approvalScope"})
+            from .access import authorize_apply_access_revoke
+            return authorize_apply_access_revoke(store, scope=payload["approvalScope"], harness=self.harness, workspace=self.workspace)
         if operation == "fleet.events":
             _exact(payload, set(), {"after", "limit"})
             rows = list_events(store, after=int(payload.get("after", 0)), limit=int(payload.get("limit", 256)))

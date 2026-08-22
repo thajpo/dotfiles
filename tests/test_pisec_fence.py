@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from scripts.pisec.adapters import artifact_document
 from scripts.pisec.fence import render_policy
 from scripts.pisec.git_objects import GitObjectManager
 from scripts.pisec.models import AuthorizationError, ConflictError, NeedsAttentionError, new_id
@@ -218,6 +219,21 @@ class RuntimeMaterializationTests(unittest.TestCase):
             self.assertNotIn(Path(artifacts.launch_secret_path).read_text().strip(), descriptor_path.read_text())
             self.assertEqual(descriptor_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(launcher.stat().st_mode & 0o777, 0o700)
+            binding = {
+                "workstream_id": scope["workstreamId"],
+                "workspace_session_name": "main",
+                "workspace_id": "w1",
+                "workspace_view_id": "w1:t1",
+                "workspace_surface_id": "w1:p1",
+                "harness_home": artifacts.harness_home,
+                "desired_generation_sha256": artifacts.generation_sha256,
+                "adapter_artifacts_json": artifact_document(adapter.manifest, artifacts),
+                "policy_path": artifacts.policy_path,
+                "policy_sha256": artifacts.policy_sha256,
+            }
+            checks = adapter.health_checks(binding, {"workstream_execution_profile": "secretary-project"})
+            descriptor_check = next(check for check in checks if check.name == "binding descriptor")
+            self.assertTrue(descriptor_check.ok, descriptor_check.detail)
 
 
 class FencePolicyAndShimTests(unittest.TestCase):
@@ -251,6 +267,26 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(policy_path.read_bytes()).hexdigest(), digest)
             checked = subprocess.run(["fence", "config", "show", "--settings", str(policy_path)], text=True, capture_output=True)
             self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_rendered_worker_policy_strips_linux_only_keys_on_macos(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree, common, workstream_id, branch = self.make_linked_repo(root)
+            state = root / "state"
+            private = state / "git-objects" / new_id("prj") / workstream_id / "objects"
+            (private / "info").mkdir(parents=True)
+            (private / "pack").mkdir()
+            agent = state / "omp" / workstream_id
+            agent.mkdir(parents=True)
+            scope = {"projectId": new_id("prj"), "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS)}
+            with patch("scripts.pisec.fence.is_macos", return_value=True):
+                policy_path, digest = render(scope, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
+            policy = json.loads(policy_path.read_text())
+            self.assertNotIn("devices", policy)
+            self.assertNotIn("allowLocalOutboundPorts", policy["network"])
+            self.assertEqual(policy["network"]["allowedDomains"], list(WEB_SEARCH_DOMAINS))
+            self.assertIn("command", policy)
+            self.assertEqual(hashlib.sha256(policy_path.read_bytes()).hexdigest(), digest)
 
     def test_rendered_worker_policy_exposes_approved_data_dirs_read_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -657,6 +693,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             "policyPath": str(policy),
             "policySha256": hashlib.sha256(policy.read_bytes()).hexdigest(),
             "generationSha256": "a" * 64,
+            "launchSecretPath": str(secret),
             "xdgDataHome": str(xdg["data"]),
             "xdgStateHome": str(xdg["state"]),
             "xdgCacheHome": str(xdg["cache"]),

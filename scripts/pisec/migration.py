@@ -92,6 +92,10 @@ def _migrate_one(
         raise NeedsAttentionError("legacy binding agent identity does not match durable scope")
     if workstream["kind"] == "secretary":
         observed = _secretary_surface(workspace, project, scope)
+    elif workstream["kind"] == "first_mate":
+        observed = workspace.observe_workstream(path=str(workstream["worktree_path"]), agent_name=str(scope["agentName"]))
+        if observed is None:
+            raise NeedsAttentionError("First Mate workspace surface is missing")
     else:
         observed = _worker_surface(store, workspace, project, workstream)
     artifacts = harness.materialize_profile(scope)

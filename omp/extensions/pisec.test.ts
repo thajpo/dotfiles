@@ -114,6 +114,7 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
   if (!Array.isArray(content) || content.length === 0) throw new TypeError("refusal content is missing");
   const refusalText = stringValue(asRecord(content[0]), "text");
   assert.deepEqual(tools, [
+    "pisec_project_activity",
     "pisec_project_status",
     "pisec_git_status",
     "pisec_push_branch",
@@ -130,6 +131,9 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
     "pisec_retire_workstream",
     "pisec_list_decisions",
     "pisec_record_decision",
+    "pisec_list_coordination_requests",
+    "pisec_inspect_coordination_request",
+    "pisec_answer_coordination_request",
     "pisec_resolve_decision",
     "pisec_list_worker_research_requests",
     "pisec_inspect_worker_research",
@@ -194,6 +198,12 @@ test("worker registers runtime handling without secretary tools", () => {
   const tools = stringArray(output.tools);
   const events = stringArray(output.events);
   assert.deepEqual(tools, [
+    "pisec_checkpoint_workstream",
+    "pisec_submit_completion",
+    "pisec_request_coordination",
+    "pisec_list_coordination",
+    "pisec_inspect_coordination",
+    "pisec_acknowledge_coordination",
     "pisec_show_task_packet",
     "pisec_request_secretary_research",
     "pisec_check_secretary_research",

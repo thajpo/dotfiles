@@ -25,6 +25,8 @@ _MERGE_SCOPE_FIELDS = frozenset({
     "sourceBranch",
     "sourceCommitOid",
     "strategy",
+    "completionPacketSha256",
+    "completionSourceCommitOid",
     "effects",
     "nonEffects",
 })
@@ -483,9 +485,16 @@ def inspect_workstream_changes(store: Any, project_id: str, workstream_id: str) 
 
 
 def prepare_workstream_merge(store: Any, project_id: str, workstream_id: str) -> dict[str, Any]:
-    _workstream_value, _repository_path, target_branch, target_oid, source_branch, source_oid, ff_only_ready, _private_objects_path = _comparison(store, project_id, workstream_id)
+    workstream, _repository_path, target_branch, target_oid, source_branch, source_oid, ff_only_ready, _private_objects_path = _comparison(store, project_id, workstream_id)
     if not ff_only_ready:
         raise ConflictError("workstream is not a fast-forward of the target branch")
+    if workstream["desired_state"] != "completed":
+        raise ConflictError("workstream must be completed before merge preparation")
+    packet = store.conn.execute("SELECT * FROM completion_packets WHERE workstream_id=?", (workstream_id,)).fetchone()
+    if packet is None:
+        raise ConflictError("workstream has no accepted completion packet")
+    if packet["source_commit_oid"] != source_oid:
+        raise ConflictError("completion packet source commit is stale")
     return {
         "kind": "git.merge.ff-only",
         "projectId": project_id,
@@ -495,6 +504,8 @@ def prepare_workstream_merge(store: Any, project_id: str, workstream_id: str) ->
         "sourceBranch": source_branch,
         "sourceCommitOid": source_oid,
         "strategy": "ff-only",
+        "completionPacketSha256": packet["packet_sha256"],
+        "completionSourceCommitOid": packet["source_commit_oid"],
         "effects": [f"advance refs/heads/{target_branch} from {target_oid} to {source_oid}"],
         "nonEffects": ["no push", "no branch deletion", "no worktree cleanup", "no conflict resolution"],
     }
@@ -510,13 +521,18 @@ def _validate_scope(scope_value: Mapping[str, Any]) -> dict[str, Any]:
     validate_id(scope.get("workstreamId"), prefix="ws")
     for field in ("targetBranch", "sourceBranch"):
         bounded_text(scope.get(field), name=field, limit=512)
-    for field in ("targetCommitOid", "sourceCommitOid"):
+    for field in ("targetCommitOid", "sourceCommitOid", "completionSourceCommitOid"):
         value = scope.get(field)
         if not isinstance(value, str) or len(value) not in _OID_LENGTHS or any(char not in "0123456789abcdef" for char in value):
             raise InvalidRequestError("merge approval scope contains an invalid commit id")
+    value = scope.get("completionPacketSha256")
+    if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise InvalidRequestError("merge approval scope contains an invalid completion packet digest")
+    if scope["completionSourceCommitOid"] != scope["sourceCommitOid"]:
+        raise InvalidRequestError("completion source commit does not match merge source")
     for field in ("effects", "nonEffects"):
         values = scope.get(field)
-        if not isinstance(values, list) or not values or any(not isinstance(value, str) or not value or len(value) > 1024 for value in values):
+        if not isinstance(values, list) or not values or any(not isinstance(item, str) or not item or len(item) > 1024 for item in values):
             raise InvalidRequestError("merge approval scope effects are invalid")
     canonical_json(scope, max_bytes=16 * 1024, max_text=4096)
     return scope
@@ -527,6 +543,10 @@ def apply_workstream_merge(store: Any, project_id: str, scope_value: Mapping[str
     if scope["projectId"] != project_id:
         raise ScopeMismatchError("merge approval scope belongs to another project")
     workstream_id = str(scope["workstreamId"])
+    workstream = _workstream(store, project_id, workstream_id)
+    packet = store.conn.execute("SELECT * FROM completion_packets WHERE workstream_id=? AND packet_sha256=?", (workstream_id, scope["completionPacketSha256"])).fetchone()
+    if packet is None or packet["source_commit_oid"] != scope["completionSourceCommitOid"] or workstream["desired_state"] != "completed":
+        raise ScopeMismatchError("accepted completion packet no longer matches workstream state")
     workstream = _workstream(store, project_id, workstream_id)
     private_objects = _private_objects(store, workstream)
     project = get_project(store, project_id)
@@ -545,12 +565,21 @@ def apply_workstream_merge(store: Any, project_id: str, scope_value: Mapping[str
         and current_target_oid == scope["sourceCommitOid"]
         and current_source_oid == scope["sourceCommitOid"]
     ):
+        with store.transaction():
+            receipt = store.conn.execute("SELECT * FROM merge_receipts WHERE workstream_id=? AND source_commit_oid=?", (workstream_id, scope["sourceCommitOid"])).fetchone()
+            if receipt is None:
+                event = append_event_in_transaction(store.conn, kind="project.git_merged", project_id=project_id, workstream_id=workstream_id, payload={"targetBranch": current_branch, "previousTargetOid": scope["targetCommitOid"], "sourceCommitOid": scope["sourceCommitOid"], "strategy": "ff-only", "reused": True})
+                store.conn.execute("INSERT INTO merge_receipts(workstream_id,source_commit_oid,target_branch,previous_target_oid,event_id,created_at) VALUES(?,?,?,?,?,?)", (workstream_id, scope["sourceCommitOid"], current_branch, scope["targetCommitOid"], event["event_id"], utc_now()))
+            else:
+                event = dict(store.conn.execute("SELECT * FROM events WHERE event_id=?", (receipt["event_id"],)).fetchone())
+            store.conn.execute("UPDATE issues SET state='verifying',updated_at=? WHERE issue_id IN (SELECT issue_id FROM issue_remediations WHERE workstream_id=?) AND state='remediating'", (utc_now(), workstream_id))
         return {
             "projectId": project_id,
             "workstreamId": workstream_id,
             "targetBranch": current_branch,
             "commitOid": current_target_oid,
             "merged": True,
+            "eventId": event["event_id"],
             "reused": True,
         }
     expected = prepare_workstream_merge(store, project_id, workstream_id)
@@ -569,7 +598,7 @@ def apply_workstream_merge(store: Any, project_id: str, scope_value: Mapping[str
     if merged_oid != scope["sourceCommitOid"]:
         raise NeedsAttentionError("Git merge did not reach the approved source commit")
     with store.transaction():
-        append_event_in_transaction(
+        event = append_event_in_transaction(
             store.conn,
             kind="project.git_merged",
             project_id=project_id,
@@ -583,11 +612,14 @@ def apply_workstream_merge(store: Any, project_id: str, scope_value: Mapping[str
                 "mergedAt": utc_now(),
             },
         )
+        store.conn.execute("INSERT INTO merge_receipts(workstream_id,source_commit_oid,target_branch,previous_target_oid,event_id,created_at) VALUES(?,?,?,?,?,?)", (workstream_id, scope["sourceCommitOid"], scope["targetBranch"], scope["targetCommitOid"], event["event_id"], utc_now()))
+        store.conn.execute("UPDATE issues SET state='verifying',updated_at=? WHERE issue_id IN (SELECT issue_id FROM issue_remediations WHERE workstream_id=?) AND state='remediating'", (utc_now(), workstream_id))
     return {
         "projectId": project_id,
         "workstreamId": workstream_id,
         "targetBranch": scope["targetBranch"],
         "commitOid": merged_oid,
+        "eventId": event["event_id"],
         "merged": True,
         "reused": False,
     }

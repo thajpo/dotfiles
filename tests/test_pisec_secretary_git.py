@@ -11,8 +11,10 @@ from scripts.pisec.models import ConflictError, InvalidRequestError, NeedsAttent
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
 from scripts.pisec.secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge, push_branch
-from tests.pisec_fixture import FixtureHarness, FixtureWorkspace
-from scripts.pisec.workstreams import prepare_workstream
+from scripts.pisec.workflow import submit_completion
+from scripts.pisec.secretary import ensure_secretary
+from scripts.pisec.workstreams import authorize_apply_workstream, complete_workstream, prepare_workstream
+from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace
 
 
 def git(path: Path, *args: str) -> str:
@@ -55,6 +57,7 @@ class SecretaryGitTests(unittest.TestCase):
         harness = FixtureHarness(root)
         workspace = FixtureWorkspace(root, store)
         project = register_project(store, repo, default_ref="main")
+        ensure_secretary(store, project["project_id"], harness, workspace)
         proposal = prepare_workstream(
             store,
             project_id=project["project_id"],
@@ -70,21 +73,42 @@ class SecretaryGitTests(unittest.TestCase):
             object_root=root / "objects",
         )
         scope = json.loads(store.conn.execute("SELECT result_json FROM operations WHERE workstream_id=?", (proposal["workstream"]["workstream_id"],)).fetchone()[0])
-        worktree = Path(scope["worktreePath"])
-        git(repo, "worktree", "add", "-q", "-b", scope["branchName"], str(worktree), scope["baseCommitOid"])
+        authorize_apply_workstream(
+            store,
+            scope=scope,
+            harness=harness,
+            workspace=workspace,
+            git_objects=FixtureGitObjects(),
+        )
+        workstream = store.conn.execute("SELECT worktree_path FROM workstreams WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
+        worktree = Path(workstream["worktree_path"])
         git(worktree, "config", "user.name", "Pisec Worker")
         git(worktree, "config", "user.email", "worker@example.invalid")
         common_objects = Path(project["git_common_dir"]) / "objects"
         private_objects = Path(scope["privateGitObjectDir"])
-        (private_objects / "info").mkdir(parents=True)
-        (private_objects / "pack").mkdir()
         for path in (private_objects, private_objects / "info", private_objects / "pack"):
             path.chmod(0o700)
-        (private_objects / "info" / "alternates").write_text(str(common_objects) + "\n")
         (private_objects / "info" / "alternates").chmod(0o600)
         (worktree / "feature.txt").write_text("implemented\n")
         git_with_objects(worktree, private_objects, common_objects, "add", "feature.txt")
         git_with_objects(worktree, private_objects, common_objects, "commit", "-qm", "implement feature")
+        source_commit = git_with_objects(worktree, private_objects, common_objects, "rev-parse", "HEAD").lower()
+        binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
+        task_packet = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
+        completion = submit_completion(
+            store,
+            workstream_id=scope["workstreamId"],
+            runtime_instance_id=binding["runtime_instance_id"],
+            packet={
+                "acceptance": [{"criterion": "Fast-forward merge succeeds.", "status": "passed", "evidence": ["Fixture commit."]}],
+                "verification": [{"command": "fixture verification", "result": "passed"}],
+                "sourceCommit": source_commit,
+                "taskPacketSha256": task_packet["packet_sha256"],
+                "changedSurfaces": ["fixture"],
+                "residualRisk": "none",
+            },
+        )
+        complete_workstream(store, project["project_id"], scope["workstreamId"], completion["packet_sha256"], workspace)
         return store, project, scope, repo, worktree, private_objects
 
     def test_inspection_and_exact_fast_forward_merge(self):
@@ -133,7 +157,7 @@ class SecretaryGitTests(unittest.TestCase):
 
             stale = dict(approval_scope)
             stale["sourceCommitOid"] = "0" * 40
-            with self.assertRaises(ScopeMismatchError):
+            with self.assertRaises(InvalidRequestError):
                 apply_workstream_merge(store, project["project_id"], stale)
             self.assertEqual(git(repo, "rev-parse", "HEAD"), approval_scope["targetCommitOid"])
 

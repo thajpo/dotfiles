@@ -100,9 +100,13 @@ Inspect the setup:
 ~/dotfiles/scripts/agent-workflow-doctor.sh
 ```
 On Apple Silicon macOS, the shared OMP/skills workflow and launchd sync are
-supported. The full Pisec fenced stack is intentionally Linux-only until a
-security-equivalent macOS sandbox and service adapter are approved; the
-installer fails before mutation instead of silently weakening isolation.
+supported. The full Pisec fenced stack runs on both platforms: Linux enforces
+via bubblewrap/Landlock/seccomp and systemd user services, while macOS
+enforces via Fence's generated Seatbelt profiles (`sandbox-exec`) and launchd
+agents installed by `scripts/pisec-macos-install.sh` (Treehouse and Collie
+remain Linux-only). The installer probes the host first instead of silently
+weakening isolation; known Seatbelt caveat: GPU/Metal compute may be denied
+inside fenced agents until iokit access is explicitly approved.
 
 
 
@@ -242,7 +246,7 @@ launch.
 reserves the runtime against new turns, waits for `idle`, exits OMP gracefully
 without closing the pane, regenerates managed artifacts, preserves the native
 session and project/workstream/worktree/branch identities, resumes the same
-session, and verifies a real Pisec-to-Herdr `working` to `idle` transition.
+session, and verifies fresh runtime attestation for the deployed generation.
 Busy bindings remain pending; failures are explicit and trigger a best-effort
 runtime restore. Repeating the command at the current generation performs no
 restart. The normal installer runs this refresh after migration and service
@@ -270,6 +274,15 @@ and limited to `read` and `web_search`. Answers use the exact bounded citation
 schema, persist as immutable SQLite packets, replay after restart, and are
 acknowledged by the worker after consumption. Workspace downtime affects
 prompt immediacy only; request and answer truth remains in Pisec.
+
+Secretaries can durably escalate recurring access, permission, lifecycle, or
+tooling failures without widening authority:
+`pisec_report_secretary_issue` records a bounded category, severity, exact
+failure details, requested minimum action, and evidence under the authenticated
+project secretary. The First Mate can inspect the cross-project inbox through
+`pisec_fleet_list_issues` and `pisec_fleet_inspect_issue`. Reports are
+idempotent and read-only for the First Mate; they never auto-grant paths,
+change Fence policy, or approve worker creation.
 
 An idle, exited, or missing harness process never implies completion. Pisec
 records runtime state separately and requires an explicit completion decision.

@@ -9,10 +9,15 @@ from typing import Any, Mapping
 from .adapters import HarnessAdapter, WorkspaceAdapter, WorkspaceObservation, artifact_document
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
-from .models import NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
+from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
 from .projects import resolve_project
 from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent
 from .workstreams import APPLY_LOCK, _wait_for_agent
+
+
+def _project_active(project: Mapping[str, Any]) -> bool:
+    value = project.get("active")
+    return True if value is None else bool(value)
 
 SECRETARY_CHECKPOINTS = (
     "workspace_observed_or_created",
@@ -164,7 +169,7 @@ def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdap
     if not ready:
         with store.transaction():
             now = utc_now()
-            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=applied_generation_sha256,observed_state='starting',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
+            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=IFNULL(applied_generation_sha256,launch_generation_sha256),observed_state='starting',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
         start_error: Exception | None = None
         try:
@@ -206,6 +211,8 @@ def _recover_prompt(workspace: WorkspaceAdapter, project: Mapping[str, Any], sco
 
 def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, workspace: WorkspaceAdapter, failpoint: Any = None) -> dict[str, Any]:
     project = resolve_project(store, project_selector)
+    if not _project_active(project):
+        raise ConflictError("project is inactive; reactivate it before opening a coordinator")
     harness.validate_execution_profile("secretary-project", "secretary")
     external_domains = tuple(harness.profile_domains("secretary-project", ()))
     existing = _secretary(store, project["project_id"])

@@ -9,10 +9,15 @@ from typing import Any, Mapping
 from .adapters import HarnessAdapter, WorkspaceAdapter, WorkspaceObservation, artifact_document
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
-from .models import NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
+from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
 from .projects import observe_project, resolve_project
 from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent
 from .workstreams import APPLY_LOCK, _wait_for_agent
+
+
+def _project_active(project: Mapping[str, Any]) -> bool:
+    value = project.get("active")
+    return True if value is None else bool(value)
 
 FIRST_MATE_CHECKPOINTS = (
     "workspace_observed_or_created",
@@ -24,6 +29,27 @@ FIRST_MATE_CHECKPOINTS = (
     "observed",
     "committed",
 )
+
+FIRST_MATE_RESPONSE_CONTRACT = (
+    "Default user-facing replies must fit a short screen and be action-oriented. "
+    "Use only the headings Status, Needs attention, and Next action when applicable. "
+    "Report material exceptions, active work, blockers, decisions needed, and next actions; "
+    "suppress healthy or idle project listings, raw metadata, timestamps, event history, "
+    "and implementation narration. Include a projectId or workstreamId only when the user "
+    "must approve, inspect, or act on that item. If nothing needs action, say so in one sentence. "
+    "Provide detailed evidence only when the user explicitly asks for a drill-down."
+)
+
+FIRST_MATE_BRIEF = (
+    "You are the Pisec First Mate. Monitor every registered Pisec project secretary and every unresolved remediation issue. "
+    "Inspect and acknowledge issue cards, obtain exact user approval before any external effect, and keep issues open until reporter verification "
+    "or an explicit declined, duplicate, or not_reproducible disposition backed by a matching resolved decision. "
+    "Delegate detailed work to the correct secretary, review worker worktrees read-only, and use explicit project IDs for every cross-project action. "
+    "Never self-approve worker creation or merges; never self-approve access grants, revokes, or deployments; never write project files, push raw Git, register projects, refresh runtimes, administer the host, or read host secrets. "
+    "Do not change lifecycle, Git, or host authority rules; use only brokered operations after exact user approval. "
+    f"{FIRST_MATE_RESPONSE_CONTRACT}"
+)
+
 
 
 def _first_mate(store: Any) -> dict[str, Any] | None:
@@ -143,7 +169,7 @@ def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdap
     if not ready:
         with store.transaction():
             now = utc_now()
-            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=applied_generation_sha256,observed_state='starting',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
+            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=IFNULL(applied_generation_sha256,launch_generation_sha256),observed_state='starting',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
         start_error: Exception | None = None
         try:
@@ -162,6 +188,8 @@ def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdap
 
 def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAdapter, workspace: WorkspaceAdapter, failpoint: Any = None) -> dict[str, Any]:
     project = resolve_project(store, control_project_selector)
+    if not _project_active(project):
+        raise ConflictError("control project is inactive; choose an active project for the First Mate")
     harness.validate_execution_profile("first-mate", "first_mate")
     external_domains = tuple(harness.profile_domains("first-mate", ()))
     existing = _first_mate(store)
@@ -175,7 +203,7 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         with store.transaction():
             store.conn.execute(
                 "INSERT INTO workstreams(workstream_id,project_id,kind,title,purpose,brief,harness_id,workspace_adapter_id,execution_profile,target_ref,base_commit_oid,branch_name,worktree_path,desired_state,provisioning_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (workstream_id, project["project_id"], "first_mate", "Global Pisec First Mate", "Manage all registered Pisec project secretaries.", "You are the Pisec First Mate. Monitor every registered project secretary, delegate detailed work to the correct secretary, review worker worktrees read-only, and use explicit project IDs for every cross-project action. Never self-approve worker creation or merges; never write project files, push raw Git, register projects, refresh runtimes, administer the host, or read host secrets.", harness.manifest.adapter_id, workspace.manifest.adapter_id, "first-mate", project["default_ref"], base_oid, branch, str(scratch), "active", "proposed", now, now),
+                (workstream_id, project["project_id"], "first_mate", "Global Pisec First Mate", "Manage all registered Pisec project secretaries.", FIRST_MATE_BRIEF, harness.manifest.adapter_id, workspace.manifest.adapter_id, "first-mate", project["default_ref"], base_oid, branch, str(scratch), "active", "proposed", now, now),
             )
             created = dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone())
             scope = _scope(project, created, operation_id)
@@ -196,14 +224,19 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
     fresh = _scope(project, existing, operation["operation_id"])
     if not isinstance(scope, dict) or scope != fresh:
         raise NeedsAttentionError("First Mate ensure scope is missing or invalid")
-    if operation["state"] == "succeeded" and existing["provisioning_state"] == "bound":
+    recoverable_missing = (
+        existing["provisioning_state"] == "needs_attention"
+        and existing["attention_reason"] == WORKSPACE_RUNTIME_MISSING
+        and operation["state"] in {"applying", "succeeded"}
+    )
+    if operation["state"] == "succeeded" and (existing["provisioning_state"] == "bound" or recoverable_missing):
         binding = _binding(store, existing["workstream_id"])
         if binding is None:
             raise NeedsAttentionError("First Mate runtime binding is missing")
         _recover_start(store, workspace, harness, scope, binding)
         workspace.focus_pane(binding["workspace_surface_id"])
         return {"project": resolve_project(store, project["project_id"]), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "binding": binding, "reused": True}
-    if operation["state"] == "needs_attention" or existing["provisioning_state"] == "needs_attention":
+    if operation["state"] == "needs_attention" or (existing["provisioning_state"] == "needs_attention" and not recoverable_missing):
         raise NeedsAttentionError("First Mate ensure requires attention")
     if operation["state"] == "failed":
         with store.transaction():

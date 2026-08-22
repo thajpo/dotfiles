@@ -228,6 +228,8 @@ function renderMergeScope(value: unknown): string {
     `target commit OID: ${String(scope.targetCommitOid ?? "")}`,
     `source branch: ${String(scope.sourceBranch ?? "")}`,
     `source commit OID: ${String(scope.sourceCommitOid ?? "")}`,
+    `completion packet digest: ${String(scope.completionPacketSha256 ?? "")}`,
+    `verification source commit: ${String(scope.completionSourceCommitOid ?? "")}`,
     `strategy: ${String(scope.strategy ?? "")}`,
     `effects: ${effects}`,
     `non-effects: ${nonEffects}`,
@@ -238,6 +240,8 @@ function registerRuntime(pi: ExtensionAPI): void {
   let sequence = 0;
   let rootSession = false;
   let agentActive = false;
+  let bootstrapGeneration = 0;
+  let bootstrapSessionFile: string | null = null;
   let reportQueue: Promise<void> = Promise.resolve();
   const report = (
     nextState: RuntimeState,
@@ -308,7 +312,7 @@ function registerRuntime(pi: ExtensionAPI): void {
       return {
         systemPrompt: [
           ...event.systemPrompt,
-          "Pisec First Mate contract: you are the global coordinator for every registered Pisec project. Use explicit projectId on every fleet operation. You may inspect fleet status, project secretaries, worker worktrees, Git objects, and durable research metadata through the authenticated fleet broker. Read-only filesystem access covers Pisec-managed project worktrees and Git objects only. Never write project files, worktrees, or Git objects; never raw-push; never register projects, refresh runtimes, administer the host, read host secrets, or self-approve worker creation or merges. Worker creation and merge application require exact interactive user approval in this surface.",
+          "Pisec First Mate contract: you are the global coordinator for every registered Pisec project. Use explicit projectId on every fleet operation. You may inspect fleet status, project secretaries, worker worktrees, Git objects, and durable research metadata through the authenticated fleet broker. Read-only filesystem access covers Pisec-managed project worktrees and Git objects only. Never write project files, worktrees, or Git objects; never raw-push; never register projects, refresh runtimes, administer the host, read host secrets, or self-approve worker creation or merges. Do not change lifecycle, Git, or host authority rules; use only brokered operations after exact user approval. Worker creation and merge application require exact interactive user approval in this surface. Default replies must fit a short screen and use only Status, Needs attention, and Next action when applicable. Report material exceptions, active work, blockers, decisions needed, and next actions; omit healthy or idle project listings, raw metadata, timestamps, event history, and implementation narration. Include projectId or workstreamId only when the user must approve, inspect, or act on that item. If nothing needs action, say so in one sentence. Give detailed evidence only for explicit drill-down requests.",
         ],
       };
     }
@@ -321,24 +325,25 @@ function registerRuntime(pi: ExtensionAPI): void {
       };
     }
     try {
-      const taskPacket = await runtimeOperation("task.get");
-      const research = await runtimeOperation("research.list");
-      const requests = research && typeof research === "object" && Array.isArray((research as JsonObject).requests)
-        ? ((research as JsonObject).requests as unknown[]).filter(item => item && typeof item === "object" && (item as JsonObject).state !== "acknowledged")
-        : [];
-      const pythonEnv = taskPacket && typeof taskPacket === "object" && typeof (taskPacket as JsonObject).pythonEnv === "string"
-        ? String((taskPacket as JsonObject).pythonEnv)
+      bootstrapSessionFile = sessionReference(ctx).value ?? "implicit";
+      const bootstrap = await runtimeOperation("runtime.bootstrap.get", { sessionFile: bootstrapSessionFile });
+      const fullPacket = bootstrap && typeof bootstrap === "object" ? (bootstrap as JsonObject).fullPacket : null;
+      bootstrapGeneration = bootstrap && typeof bootstrap === "object" && typeof (bootstrap as JsonObject).generation === "number"
+        ? Number((bootstrap as JsonObject).generation)
+        : 0;
+      const taskPacket = fullPacket && typeof fullPacket === "object" ? (fullPacket as JsonObject).packet ?? fullPacket : {};
+      const pythonEnv = fullPacket && typeof fullPacket === "object" && typeof (fullPacket as JsonObject).pythonEnv === "string"
+        ? String((fullPacket as JsonObject).pythonEnv)
         : "";
       const pythonContract = pythonEnv
-        ? `PYTHON_ENVIRONMENT\nAn approved python environment is exposed read-only inside this Fence at: ${pythonEnv}\nRun the project interpreter directly, e.g. ${pythonEnv}/bin/python -m pytest, ${pythonEnv}/bin/python -m ruff check, ${pythonEnv}/bin/python -c "import numpy". Never run uv sync, uv add, uv pip install, or any other package-management write: the env is shared and read-only, and wheel downloads are blocked. If the task needs packages the approved env lacks, persist a bounded secretary research request instead of trying to widen the environment.`
-        : "PYTHON_ENVIRONMENT\nNo python environment was approved for this workstream; the Fence exposes none. Do not attempt pip/uv installs inside the sandbox.";
+        ? `PYTHON_ENVIRONMENT\nAn approved python environment is exposed read-only inside this Fence at: ${pythonEnv}\nRun the project interpreter directly. Never run package-management writes inside the shared environment.`
+        : "PYTHON_ENVIRONMENT\nNo python environment was approved for this workstream; the Fence exposes none.";
       return {
         systemPrompt: [
           ...event.systemPrompt,
-          "Pisec worker contract: the following broker-authenticated immutable task packet is authoritative for this workstream. Do not edit or reinterpret its execution identity. Built-in web search is available only within the approved Fence domains. If information is unavailable, persist a bounded secretary research request instead of trying to widen Fence, and do not block synchronously waiting for a response. On resume, consume replayed secretary packets and acknowledge them only after using their contents. The research index below is metadata only; fetch each answered/declined request's full packet with pisec_inspect_secretary_research by request_id, then acknowledge it.",
-          `IMMUTABLE_TASK_PACKET\n${renderTaskPacket(taskPacket)}`,
+          "Pisec worker contract: the following broker-authenticated immutable task packet is authoritative for this workstream. Use durable checkpoints, coordination requests, and completion evidence tools for semantic progress. Ordinary chat is transient.",
+          ...(fullPacket ? [`IMMUTABLE_TASK_PACKET\n${renderTaskPacket(taskPacket)}`] : ["IMMUTABLE_TASK_PACKET\nNo packet body changed in this session; retain the previously accepted packet."]),
           pythonContract,
-          `UNACKNOWLEDGED_SECRETARY_RESEARCH_INDEX\n${renderTaskPacket(requests)}`,
         ],
       };
     } catch (error) {
@@ -348,6 +353,9 @@ function registerRuntime(pi: ExtensionAPI): void {
   pi.on("agent_start", async (_event, ctx) => {
     if (!rootSession) return;
     agentActive = true;
+    if (ROLE === "worker" && bootstrapSessionFile !== null) {
+      await runtimeOperation("runtime.bootstrap.ack", { sessionFile: bootstrapSessionFile, generation: bootstrapGeneration });
+    }
     return report("working", "lifecycle", ctx, sessionReference(ctx));
   });
   pi.on("agent_end", async (_event, ctx) => {
@@ -396,6 +404,12 @@ function secretaryTools(pi: ExtensionAPI): void {
       },
     });
   };
+  semantic("pisec_project_activity", "Pisec project activity", "project.activity", z.object({ after: z.number().int().min(0).optional() }), "read", params => params.after === undefined ? {} : { after: params.after });
+  semantic("pisec_report_secretary_issue", "Report issue", "issue.report", z.object({ category: z.enum(["permission", "access", "lifecycle", "tooling", "other"]), severity: z.enum(["blocking", "degraded", "improvement"]), summary: z.string().min(1).max(1024), details: z.string().min(1).max(4096), requested_action: z.string().min(1).max(4096), evidence: z.array(z.any()).max(64), idempotency_key: z.string().min(1).max(256) }), "exec", params => ({ category: params.category, severity: params.severity, summary: params.summary, details: params.details, requestedAction: params.requested_action, evidence: params.evidence, idempotencyKey: params.idempotency_key }));
+  semantic("pisec_list_issues", "List issues", "issue.list", z.object({ state: z.enum(["open", "acknowledged", "remediating", "verifying", "resolved"]).optional(), limit: z.number().int().min(1).max(1000).optional() }), "read", params => ({ ...(params.state ? { state: params.state } : {}), ...(params.limit ? { limit: params.limit } : {}) }));
+  semantic("pisec_inspect_issue", "Inspect issue", "issue.inspect", z.object({ issue_id: z.string().min(1).max(128) }), "read", params => ({ issueId: params.issue_id }));
+  semantic("pisec_add_issue_context", "Add issue context", "issue.add_context", z.object({ issue_id: z.string().min(1).max(128), context: z.any(), idempotency_key: z.string().min(1).max(256) }), "exec", params => ({ issueId: params.issue_id, context: params.context, idempotencyKey: params.idempotency_key }));
+  semantic("pisec_verify_issue", "Verify issue", "issue.verify", z.object({ issue_id: z.string().min(1).max(128), status: z.enum(["fixed", "still_blocked"]), evidence: z.any(), idempotency_key: z.string().min(1).max(256) }), "exec", params => ({ issueId: params.issue_id, status: params.status, evidence: params.evidence, idempotencyKey: params.idempotency_key }));
 
   semantic("pisec_project_status", "Pisec project status", "project.status", z.object({}), "read");
   semantic("pisec_git_status", "Pisec Git status", "git.status", z.object({}), "read");
@@ -420,7 +434,7 @@ function secretaryTools(pi: ExtensionAPI): void {
   semantic("pisec_list_workstreams", "List Pisec workstreams", "workstream.list", z.object({}), "read");
   semantic("pisec_inspect_workstream", "Inspect Pisec workstream", "workstream.inspect", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }));
   const taskPacketSchema = z.object({ schemaVersion: z.literal(1), outcome: z.string().min(1).max(4096), boundaries: z.array(z.string().min(1).max(4096)).max(16), acceptance: z.array(z.string().min(1).max(4096)).max(16), openQuestions: z.array(z.string().min(1).max(4096)).max(16), evidence: z.array(z.string().min(1).max(4096)).max(16) });
-  semantic("pisec_prepare_workstream", "Prepare Pisec workstream", "workstream.prepare", z.object({ title: z.string().min(1).max(512), purpose: z.string().min(1).max(4096), brief: z.string().min(1).max(4096), task_packet: taskPacketSchema, idempotency_key: z.string().min(1).max(256), target_ref: z.string().min(1).max(512).optional(), execution_profile: z.enum(["worker-default", "worker-networked"]).optional(), python_env: z.string().min(1).max(4096).optional() }), "read", params => ({ title: params.title, purpose: params.purpose, brief: params.brief, taskPacket: params.task_packet, idempotencyKey: params.idempotency_key, ...(params.target_ref ? { targetRef: params.target_ref } : {}), ...(params.execution_profile ? { executionProfile: params.execution_profile } : {}), ...(params.python_env ? { pythonEnv: params.python_env } : {}) }));
+  semantic("pisec_prepare_workstream", "Prepare Pisec workstream", "workstream.prepare", z.object({ title: z.string().min(1).max(512), purpose: z.string().min(1).max(4096), brief: z.string().min(1).max(4096), task_packet: taskPacketSchema, idempotency_key: z.string().min(1).max(256), target_ref: z.string().min(1).max(512).optional(), execution_profile: z.enum(["worker-default", "worker-networked"]).optional(), work_mode: z.enum(["FAST", "RIP", "BUILD", "MAJOR"]).optional(), learning_overlay: z.enum(["OFF", "LIGHT", "DEEP"]).optional(), learning_seam: z.string().min(1).max(1024).optional(), decision_ids: z.array(z.string().min(1).max(128)).max(16).optional(), python_env: z.string().min(1).max(4096).optional() }), "read", params => ({ title: params.title, purpose: params.purpose, brief: params.brief, taskPacket: params.task_packet, idempotencyKey: params.idempotency_key, ...(params.target_ref ? { targetRef: params.target_ref } : {}), ...(params.execution_profile ? { executionProfile: params.execution_profile } : {}), ...(params.work_mode ? { workMode: params.work_mode } : {}), ...(params.learning_overlay ? { learningOverlay: params.learning_overlay } : {}), ...(params.learning_seam ? { learningSeam: params.learning_seam } : {}), ...(params.decision_ids ? { decisionIds: params.decision_ids } : {}), ...(params.python_env ? { pythonEnv: params.python_env } : {}) }));
   pi.registerTool({
     name: "pisec_create_workstream",
     label: "Create Pisec workstream",
@@ -438,10 +452,13 @@ function secretaryTools(pi: ExtensionAPI): void {
   });
   semantic("pisec_send_workstream", "Send Pisec workstream message", "workstream.send", z.object({ workstream_id: z.string().min(1).max(128), message: z.string().min(1).max(4096) }), "exec", params => ({ workstreamId: params.workstream_id, text: params.message }));
   semantic("pisec_focus_workstream", "Focus Pisec workstream", "workstream.focus", z.object({ workstream_id: z.string().min(1).max(128) }), "exec", params => ({ workstreamId: params.workstream_id }));
-  semantic("pisec_complete_workstream", "Complete Pisec workstream", "workstream.complete", z.object({ workstream_id: z.string().min(1).max(128) }), "exec", params => ({ workstreamId: params.workstream_id }));
+  semantic("pisec_complete_workstream", "Complete Pisec workstream", "workstream.complete", z.object({ workstream_id: z.string().min(1).max(128), completion_packet_sha256: z.string().min(64).max(64) }), "exec", params => ({ workstreamId: params.workstream_id, completionPacketSha256: params.completion_packet_sha256 }));
   semantic("pisec_retire_workstream", "Retire Pisec workstream", "workstream.retire", z.object({ workstream_id: z.string().min(1).max(128) }), "exec", params => ({ workstreamId: params.workstream_id }));
   semantic("pisec_list_decisions", "List Pisec decisions", "decision.list", z.object({ state: z.enum(["open", "resolved"]).optional() }), "read", params => params.state ? { state: params.state } : {});
   semantic("pisec_record_decision", "Record Pisec decision", "decision.record", z.object({ summary: z.string().min(1).max(512), context: z.any(), workstream_id: z.string().min(1).max(128).optional() }), "exec", params => ({ summary: params.summary, context: params.context, ...(params.workstream_id ? { workstreamId: params.workstream_id } : {}) }));
+  semantic("pisec_list_coordination_requests", "List coordination requests", "coordination.list", z.object({ workstream_id: z.string().min(1).max(128).optional(), include_resolved: z.boolean().optional() }), "read", params => ({ ...(params.workstream_id ? { workstreamId: params.workstream_id } : {}), ...(params.include_resolved !== undefined ? { includeResolved: params.include_resolved } : {}) }));
+  semantic("pisec_inspect_coordination_request", "Inspect coordination request", "coordination.inspect", z.object({ request_id: z.string().min(1).max(128) }), "read", params => ({ requestId: params.request_id }));
+  semantic("pisec_answer_coordination_request", "Answer coordination request", "coordination.answer", z.object({ request_id: z.string().min(1).max(128), response: z.string().min(1).max(4096), idempotency_key: z.string().min(1).max(256), decision_id: z.string().min(1).max(128).optional() }), "exec", params => ({ requestId: params.request_id, response: params.response, idempotencyKey: params.idempotency_key, ...(params.decision_id ? { decisionId: params.decision_id } : {}) }));
   semantic("pisec_resolve_decision", "Resolve Pisec decision", "decision.resolve", z.object({ decision_id: z.string().min(1).max(128), resolution: z.string().min(1).max(4096) }), "exec", params => ({ decisionId: params.decision_id, resolution: params.resolution }));
   semantic("pisec_list_worker_research_requests", "List worker research requests", "research.list", z.object({ state: z.enum(["pending", "researching", "needs_context", "answered", "declined", "acknowledged"]).optional(), limit: z.number().int().min(1).max(100).optional(), workstream_id: z.string().min(1).max(128).optional() }), "read", params => ({ ...(params.state ? { state: params.state } : {}), ...(params.limit ? { limit: params.limit } : {}), ...(params.workstream_id ? { workstreamId: params.workstream_id } : {}) }));
   semantic("pisec_inspect_worker_research", "Inspect worker research", "research.inspect", z.object({ request_id: z.string().min(1).max(128), workstream_id: z.string().min(1).max(128).optional() }), "read", params => ({ requestId: params.request_id, ...(params.workstream_id ? { workstreamId: params.workstream_id } : {}) }));
@@ -467,8 +484,12 @@ function fleetTools(pi: ExtensionAPI): void {
         }
       },
     });
-  };
   const projectId = z.string().min(1).max(128);
+  fleet("pisec_fleet_list_issues", "List issues", "fleet.issue.list", z.object({ project_id: projectId.optional(), state: z.enum(["open", "acknowledged", "remediating", "verifying", "resolved"]).optional(), limit: z.number().int().min(1).max(1000).optional() }), "read", params => ({ ...(params.project_id ? { projectId: params.project_id } : {}), ...(params.state ? { state: params.state } : {}), ...(params.limit ? { limit: params.limit } : {}) }));
+  fleet("pisec_fleet_inspect_issue", "Inspect issue", "fleet.issue.inspect", z.object({ issue_id: z.string().min(1).max(128), project_id: projectId.optional() }), "read", params => ({ issueId: params.issue_id, ...(params.project_id ? { projectId: params.project_id } : {}) }));
+  fleet("pisec_fleet_add_issue_context", "Add issue context", "fleet.issue.add_context", z.object({ project_id: projectId, issue_id: z.string().min(1).max(128), context: z.any(), idempotency_key: z.string().min(1).max(256) }), "exec", params => ({ projectId: params.project_id, issueId: params.issue_id, context: params.context, idempotencyKey: params.idempotency_key }));
+  fleet("pisec_fleet_acknowledge_issue", "Acknowledge issue", "fleet.issue.acknowledge", z.object({ project_id: projectId, issue_id: z.string().min(1).max(128) }), "exec", params => ({ projectId: params.project_id, issueId: params.issue_id }));
+  fleet("pisec_fleet_resolve_issue", "Resolve issue", "fleet.issue.resolve", z.object({ project_id: projectId, issue_id: z.string().min(1).max(128), disposition: z.enum(["declined", "duplicate", "not_reproducible"]), reason: z.string().min(1).max(4096), decision_id: z.string().min(1).max(128) }), "exec", params => ({ projectId: params.project_id, issueId: params.issue_id, disposition: params.disposition, reason: params.reason, decisionId: params.decision_id }));
   fleet("pisec_fleet_status", "Fleet status", "fleet.status", z.object({ project_id: projectId.optional() }), "read", params => params.project_id ? { projectId: params.project_id } : {});
   fleet("pisec_fleet_events", "Fleet events", "fleet.events", z.object({ after: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(1000).optional() }), "read", params => ({ ...(params.after !== undefined ? { after: params.after } : {}), ...(params.limit !== undefined ? { limit: params.limit } : {}) }));
   fleet("pisec_fleet_send_secretary", "Message project secretary", "fleet.secretary.send", z.object({ project_id: projectId, message: z.string().min(1).max(4096), workstream_id: z.string().min(1).max(128).optional() }), "exec", params => ({ projectId: params.project_id, text: params.message, ...(params.workstream_id ? { workstreamId: params.workstream_id } : {}) }));
@@ -522,6 +543,16 @@ function workerTools(pi: ExtensionAPI): void {
       },
     });
   };
+  runtimeTool("pisec_checkpoint_workstream", "Checkpoint workstream", "Record a compact semantic checkpoint for the current workstream.", z.object({ idempotency_key: z.string().min(1).max(256), phase: z.enum(["investigating", "implementing", "verifying", "needs_input", "ready_review"]), summary: z.string().min(1).max(1024), next_action: z.string().min(1).max(1024), blocker_code: z.string().min(1).max(128).optional(), blocker: z.string().min(1).max(2048).optional(), evidence: z.array(z.any()).max(64) }), "workstream.checkpoint", params => ({ idempotencyKey: params.idempotency_key, phase: params.phase, summary: params.summary, nextAction: params.next_action, ...(params.blocker_code ? { blockerCode: params.blocker_code } : {}), ...(params.blocker ? { blocker: params.blocker } : {}), evidence: params.evidence }));
+  runtimeTool("pisec_submit_completion", "Submit completion packet", "Submit immutable acceptance and verification evidence for the current workstream.", z.object({ acceptance: z.array(z.object({ criterion: z.string().min(1).max(4096), status: z.literal("passed"), evidence: z.array(z.string().min(1).max(4096)).min(1)})).min(1).max(32), verification: z.array(z.object({ command: z.string().min(1).max(4096), result: z.string().min(1).max(8192)})).min(1).max(32), source_commit: z.string().min(40).max(64), task_packet_sha256: z.string().min(64).max(64), changed_surfaces: z.array(z.string().min(1).max(4096)).max(32), residual_risk: z.string().max(4096) }), "workstream.completion.submit", params => ({ completionPacket: { acceptance: params.acceptance, verification: params.verification, sourceCommit: params.source_commit, taskPacketSha256: params.task_packet_sha256, changedSurfaces: params.changed_surfaces, residualRisk: params.residual_risk } }));
+  runtimeTool("pisec_request_coordination", "Request coordination", "Persist a bounded clarification, blocker, or review request.", z.object({ kind: z.enum(["clarification", "blocker", "review_request"]), summary: z.string().min(1).max(1024), question: z.string().min(1).max(4096), blocking: z.boolean(), idempotency_key: z.string().min(1).max(256) }), "coordination.request", params => ({ kind: params.kind, summary: params.summary, question: params.question, blocking: params.blocking, idempotencyKey: params.idempotency_key }));
+  runtimeTool("pisec_list_coordination", "List coordination", "List compact coordination requests for this workstream.", z.object({ include_resolved: z.boolean().optional() }), "coordination.list", params => params.include_resolved === undefined ? {} : { includeResolved: params.include_resolved });
+  runtimeTool("pisec_inspect_coordination", "Inspect coordination", "Inspect one coordination request and its latest response.", z.object({ request_id: z.string().min(1).max(128) }), "coordination.inspect", params => ({ requestId: params.request_id }));
+  runtimeTool("pisec_report_issue", "Report issue", "Report a harness, access, lifecycle, or tooling issue.", z.object({ category: z.enum(["permission", "access", "lifecycle", "tooling", "other"]), severity: z.enum(["blocking", "degraded", "improvement"]), summary: z.string().min(1).max(1024), details: z.string().min(1).max(4096), requested_action: z.string().min(1).max(4096), evidence: z.array(z.any()).max(64), idempotency_key: z.string().min(1).max(256) }), "issue.report", params => ({ category: params.category, severity: params.severity, summary: params.summary, details: params.details, requestedAction: params.requested_action, evidence: params.evidence, idempotencyKey: params.idempotency_key }));
+  runtimeTool("pisec_list_issues", "List issues", "List issues reported by or linked to this worker.", z.object({ state: z.enum(["open", "acknowledged", "remediating", "verifying", "resolved"]).optional(), limit: z.number().int().min(1).max(1000).optional() }), "issue.list", params => ({ ...(params.state ? { state: params.state } : {}), ...(params.limit ? { limit: params.limit } : {}) }));
+  runtimeTool("pisec_inspect_issue", "Inspect issue", "Inspect one issue and its append-only action history.", z.object({ issue_id: z.string().min(1).max(128) }), "issue.inspect", params => ({ issueId: params.issue_id }));
+  runtimeTool("pisec_add_issue_context", "Add issue context", "Append bounded evidence to a worker issue.", z.object({ issue_id: z.string().min(1).max(128), context: z.any(), idempotency_key: z.string().min(1).max(256) }), "issue.add_context", params => ({ issueId: params.issue_id, context: params.context, idempotencyKey: params.idempotency_key }));
+  runtimeTool("pisec_verify_issue", "Verify issue", "Verify a remediation and close it only when fixed.", z.object({ issue_id: z.string().min(1).max(128), status: z.enum(["fixed", "still_blocked"]), evidence: z.any(), idempotency_key: z.string().min(1).max(256) }), "issue.verify", params => ({ issueId: params.issue_id, status: params.status, evidence: params.evidence, idempotencyKey: params.idempotency_key }));
   runtimeTool("pisec_show_task_packet", "Show immutable task packet", "Retrieve the broker-authenticated immutable task packet for this workstream.", z.object({}), "task.get");
   runtimeTool("pisec_request_secretary_research", "Request secretary research", "Persist a bounded research request without waiting for the secretary.", z.object({ summary: z.string().min(1).max(1024), question: z.string().min(1).max(4096), context: z.string().max(4096).optional(), attempted: z.array(z.string().min(1).max(4096)).max(16).optional(), candidate_sources: z.array(z.string().url().max(2048)).max(16).optional(), blocking: z.boolean().optional(), idempotency_key: z.string().min(1).max(256) }), "research.request", params => ({ idempotencyKey: params.idempotency_key, request: { kind: "research", summary: params.summary, question: params.question, context: params.context ?? "", attempted: params.attempted ?? [], candidateSources: params.candidate_sources ?? [], blocking: params.blocking ?? true } }));
   runtimeTool("pisec_check_secretary_research", "Check secretary research", "List durable research request metadata for this workstream (no packet bodies). Fetch a specific request's full packets with pisec_inspect_secretary_research.", z.object({ state: z.enum(["pending", "researching", "needs_context", "answered", "declined", "acknowledged"]).optional(), limit: z.number().int().min(1).max(100).optional() }), "research.list", params => ({ ...(params.state ? { state: params.state } : {}), ...(params.limit ? { limit: params.limit } : {}) }));

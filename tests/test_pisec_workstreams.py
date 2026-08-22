@@ -7,7 +7,8 @@ from unittest.mock import patch
 from scripts.pisec.models import IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, ScopeMismatchError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.secretary import ensure_secretary
-from scripts.pisec.projects import register_project
+from scripts.pisec.projects import _git, register_project
+from scripts.pisec.workflow import submit_completion
 from scripts.pisec.workstreams import authorize_apply_workstream, complete_workstream, prepare_workstream, retire_workstream
 from tests.pisec_fixture import DelayedFixtureWorkspace, FixtureGitObjects, FixtureHarness, FixtureWorkspace, UnattestedFixtureWorkspace, make_repo
 
@@ -49,9 +50,22 @@ class WorkstreamTests(unittest.TestCase):
     def prepare(self, root, store, project, harness, workspace, key="create-1", failpoint=None):
         task_packet = {"schemaVersion": 1, "outcome": "Parser behavior is implemented and verified.", "boundaries": ["Change the parser only."], "acceptance": ["Parser tests pass."], "openQuestions": [], "evidence": ["Test output."]}
         return prepare_workstream(store, project_id=project["project_id"], title="Implement parser", purpose="Ship exact behavior", brief="Implement and verify the parser without unrelated changes.", task_packet=task_packet, idempotency_key=key, harness=harness, workspace=workspace, work_root=root / "worktrees", object_root=root / "objects", failpoint=failpoint)
-
     def apply(self, prepared, store, harness, workspace, git_objects, failpoint=None):
         return authorize_apply_workstream(store, scope=prepared["approvalScope"], harness=harness, workspace=workspace, git_objects=git_objects, failpoint=failpoint)
+
+    def submit_completion(self, store, workstream):
+        binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()
+        task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()
+        source = _git(Path(workstream["worktree_path"]), "rev-parse", "HEAD").lower()
+        packet = {
+            "acceptance": [{"criterion": "Parser tests pass.", "status": "passed", "evidence": ["Test output."]}],
+            "verification": [{"command": "fixture verification", "result": "passed"}],
+            "sourceCommit": source,
+            "taskPacketSha256": task["packet_sha256"],
+            "changedSurfaces": ["fixture"],
+            "residualRisk": "none",
+        }
+        return submit_completion(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], packet=packet)
 
     def test_prepare_is_pure_and_idempotent(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
@@ -217,7 +231,8 @@ class WorkstreamTests(unittest.TestCase):
         workstream = result["workstream"]
         branch = workstream["branch_name"]
         checkout = workstream["worktree_path"]
-        complete_workstream(store, project["project_id"], workstream["workstream_id"])
+        completion = self.submit_completion(store, workstream)
+        complete_workstream(store, project["project_id"], workstream["workstream_id"], completion["packet_sha256"], workspace)
         store.conn.execute("UPDATE runtime_bindings SET observed_state='idle' WHERE workstream_id=?", (workstream["workstream_id"],))
         retired = retire_workstream(store, project["project_id"], workstream["workstream_id"], workspace)
         self.assertEqual(retired["desired_state"], "retired")

@@ -347,6 +347,7 @@ exit 0
                 "XDG_STATE_HOME": str(self.root / "state"),
                 "XDG_RUNTIME_DIR": str(self.runtime_root.parent),
                 "PISEC_RUNTIME_ROOT": str(self.runtime_root),
+                "PISEC_BWRAP_DIR": str(self.root / "pisec-bwrap"),
                 "XDG_CONFIG_HOME": str(self.home / ".config"),
                 "PATH": str(self.fake_bin) + ":/usr/bin:/bin",
                 "HERDR_PATH": str(self.fake_bin / "herdr-fixture"),
@@ -525,6 +526,29 @@ exit 0
         self.assertIn("Fence user namespaces/Landlock are unavailable", result.stderr)
         self.assertFalse((self.home / ".config" / "opencode").exists())
         self.assertFalse((self.home / ".local" / "lib" / "pisec").exists())
+
+    def test_bwrap_runtime_failure_reports_persistent_apparmor_fix(self):
+        self._write_command("bwrap", "exit 1\n")
+        restrict_path = self.root / "apparmor-restrict-userns"
+        restrict_path.write_text("1\n")
+        profile_path = self.root / "bwrap-userns-restrict"
+        profile_path.write_text("profile bwrap {}\n")
+        environment = self.env()
+        environment["PISEC_APPARMOR_RESTRICT_PATH"] = str(restrict_path)
+        environment["PISEC_BWRAP_APPARMOR_PROFILE"] = str(profile_path)
+        result = subprocess.run(
+            [str(INSTALLER), "--collie-host", "pisec.example.ts.net", "--collie-trusted-user", "tester"],
+            cwd=ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Ubuntu's AppArmor user-namespace restriction", result.stderr)
+        self.assertIn("pisec-linux-prereqs-install.sh", result.stderr)
+        self.assertFalse((self.home / ".config" / "opencode").exists())
+        self.assertFalse((self.home / ".local" / "lib" / "pisec").exists())
+
     def test_checksum_failure_precedes_home_mutation(self):
         environment = self.env()
         environment["TREEHOUSE_CHECKSUM_FAIL"] = "1"
