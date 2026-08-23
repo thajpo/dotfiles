@@ -9,6 +9,13 @@ override it naturally when they do so. Do not ask the user to classify routine
 tasks. Keep the mode semantics in the shared skill rather than duplicating them
 in a harness adapter.
 
+## Commit Approval
+
+When the user has reviewed the staged diff or explicitly requests a commit,
+draft a concise commit message and proceed without asking for separate
+commit-message approval. Treat the diff and scope, not the wording of the
+commit title, as the user approval boundary.
+
 ## Worker delegation
 
 Before preparing a worker, ensure the intended base branch contains the latest

@@ -1,6 +1,6 @@
 ---
 name: git-cleanup
-description: "Draft commit message, confirm, then safely commit/push with a cross-machine handoff packet."
+description: "Draft a concise commit message, then safely commit with a cross-machine handoff packet."
 ---
 
 # Git Cleanup
@@ -9,11 +9,11 @@ description: "Draft commit message, confirm, then safely commit/push with a cros
 - `draft-then-ship` (default and only mode for now).
 
 ## Goal
-Turn local edits into a safe, reviewable commit and pushed branch you can resume on another machine.
+Turn local edits into a safe, reviewable commit and handoff you can resume on another machine.
 
 ## Default Preference (Dotfiles)
-- When edits are in your dotfiles/config repos, default behavior is commit + push in the same session.
-- Do not leave local-only dotfile changes unless you explicitly say to skip push.
+- When edits are in your dotfiles/config repos, commit in the same session when the user requests the change.
+- Push only when the user explicitly requests a push.
 
 ## Inputs
 - Optional commit intent (short sentence).
@@ -48,7 +48,7 @@ Turn local edits into a safe, reviewable commit and pushed branch you can resume
 
 2. Draft commit message
 - Produce a 1-2 sentence message focused on why.
-- Show proposed message and ask for edit/accept (single decision point).
+- Do not ask for commit-message approval; use the drafted message after the staged diff has been reviewed or the user has explicitly requested the commit.
 
 3. Stage safely
 - Stage relevant tracked/untracked files.
@@ -59,9 +59,9 @@ Turn local edits into a safe, reviewable commit and pushed branch you can resume
 - If input test command exists, run it and report result.
 - If tests fail, hard-pause (do not commit).
 
-5. Commit and push
-- Create commit with approved message.
-- Push to upstream (`-u` when upstream missing).
+5. Commit and optionally push
+- Create the commit with the drafted message.
+- Push only when explicitly requested, using `-u` when the upstream is missing.
 - Never force push.
 
 6. Verify and handoff
