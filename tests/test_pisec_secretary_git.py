@@ -11,7 +11,7 @@ from scripts.pisec.models import ConflictError, InvalidRequestError, NeedsAttent
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
 from scripts.pisec.secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge, push_branch
-from scripts.pisec.workflow import submit_completion
+from scripts.pisec.workflow import checkpoint
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, complete_workstream, prepare_workstream
 from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace
@@ -95,11 +95,18 @@ class SecretaryGitTests(unittest.TestCase):
         source_commit = git_with_objects(worktree, private_objects, common_objects, "rev-parse", "HEAD").lower()
         binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
         task_packet = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
-        completion = submit_completion(
+        checkpoint(
             store,
             workstream_id=scope["workstreamId"],
             runtime_instance_id=binding["runtime_instance_id"],
-            packet={
+            phase="ready_review",
+            summary="Implementation is verified.",
+            next_action="Review the completion packet.",
+            blocker_code=None,
+            blocker=None,
+            evidence=["fixture verification"],
+            idempotency_key="ready-for-merge",
+            completion_packet={
                 "acceptance": [{"criterion": "Fast-forward merge succeeds.", "status": "passed", "evidence": ["Fixture commit."]}],
                 "verification": [{"command": "fixture verification", "result": "passed"}],
                 "sourceCommit": source_commit,
@@ -108,6 +115,7 @@ class SecretaryGitTests(unittest.TestCase):
                 "residualRisk": "none",
             },
         )
+        completion = store.conn.execute("SELECT packet_sha256 FROM completion_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
         complete_workstream(store, project["project_id"], scope["workstreamId"], completion["packet_sha256"], workspace)
         return store, project, scope, repo, worktree, private_objects
 

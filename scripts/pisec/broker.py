@@ -541,8 +541,8 @@ class BrokerDispatcher:
                 store.conn.execute("UPDATE runtime_bootstrap_sessions SET task_packet_delivered=1,acknowledged_generation=?,last_event_sequence=(SELECT COALESCE(MAX(sequence),0) FROM events WHERE workstream_id=?),updated_at=? WHERE workstream_id=? AND session_file=?", (int(payload["generation"]), workstream_id, utc_now(), workstream_id, str(payload["sessionFile"])))
             return {"acknowledged": True, "generation": int(payload["generation"])}
         if operation == "workstream.checkpoint":
-            _exact(payload, auth_fields | {"idempotencyKey", "phase", "summary", "nextAction", "evidence"}, {"blockerCode", "blocker"})
-            result = checkpoint(store, workstream_id=workstream_id, runtime_instance_id=str(payload["runtimeInstanceId"]), phase=payload["phase"], summary=payload["summary"], next_action=payload["nextAction"], blocker_code=payload.get("blockerCode"), blocker=payload.get("blocker"), evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
+            _exact(payload, auth_fields | {"idempotencyKey", "phase", "summary", "nextAction", "evidence"}, {"blockerCode", "blocker", "completionPacket"})
+            result = checkpoint(store, workstream_id=workstream_id, runtime_instance_id=str(payload["runtimeInstanceId"]), phase=payload["phase"], summary=payload["summary"], next_action=payload["nextAction"], blocker_code=payload.get("blockerCode"), blocker=payload.get("blocker"), evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"], completion_packet=payload.get("completionPacket"))
             return {"checkpoint": result}
         if operation == "workstream.completion.submit":
             _exact(payload, auth_fields | {"completionPacket"})

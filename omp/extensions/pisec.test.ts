@@ -199,7 +199,6 @@ test("worker registers runtime handling without secretary tools", () => {
   const events = stringArray(output.events);
   assert.deepEqual(tools, [
     "pisec_checkpoint_workstream",
-    "pisec_submit_completion",
     "pisec_request_coordination",
     "pisec_list_coordination",
     "pisec_inspect_coordination",

@@ -250,7 +250,7 @@ def _runtime_binding(store: Any, workstream_id: str, runtime_instance_id: str) -
     return dict(row)
 
 
-def checkpoint(store: Any, *, workstream_id: str, runtime_instance_id: str, phase: str, summary: str, next_action: str, blocker_code: str | None, blocker: str | None, evidence: Any, idempotency_key: str) -> dict[str, Any]:
+def checkpoint(store: Any, *, workstream_id: str, runtime_instance_id: str, phase: str, summary: str, next_action: str, blocker_code: str | None, blocker: str | None, evidence: Any, idempotency_key: str, completion_packet: Mapping[str, Any] | None = None) -> dict[str, Any]:
     binding = _runtime_binding(store, workstream_id, runtime_instance_id)
     if binding["desired_state"] != "active" or binding["provisioning_state"] != "bound":
         raise ConflictError("workstream is not active and bound")
@@ -264,13 +264,25 @@ def checkpoint(store: Any, *, workstream_id: str, runtime_instance_id: str, phas
             raise InvalidRequestError("needs_input checkpoints require a blocker code and explanation")
     elif blocker_code is not None or blocker is not None:
         raise InvalidRequestError("only needs_input checkpoints may claim a blocker")
+    if phase == "ready_review" and completion_packet is None:
+        raise InvalidRequestError("ready_review checkpoints require completion evidence")
+    if phase != "ready_review" and completion_packet is not None:
+        raise InvalidRequestError("completion evidence is only valid for ready_review checkpoints")
     if not isinstance(evidence, list) or any(not isinstance(item, (str, dict)) for item in evidence):
         raise InvalidRequestError("checkpoint evidence must be a list of references")
+    normalized_completion = _completion_packet(completion_packet) if completion_packet is not None else None
+    completion_sha = hashlib.sha256(canonical_json(normalized_completion).encode("utf-8")).hexdigest() if normalized_completion is not None else None
     summary = bounded_text(summary, name="summary", limit=1024)
     next_action = bounded_text(next_action, name="next_action", limit=1024)
     evidence_json = canonical_json(evidence, max_bytes=32768, max_text=4096)
     existing = store.conn.execute("SELECT * FROM workstream_checkpoints WHERE workstream_id=? AND idempotency_key=?", (workstream_id, idempotency_key)).fetchone()
     if existing is not None:
+        if normalized_completion is not None:
+            matching_packet = store.conn.execute("SELECT 1 FROM completion_packets WHERE workstream_id=? AND packet_sha256=?", (workstream_id, completion_sha)).fetchone()
+            if matching_packet is None and store.conn.execute("SELECT 1 FROM completion_packets WHERE workstream_id=?", (workstream_id,)).fetchone() is not None:
+                raise IdempotencyConflictError("ready_review checkpoint idempotency key was reused with different completion evidence")
+            if matching_packet is None:
+                submit_completion(store, workstream_id=workstream_id, runtime_instance_id=runtime_instance_id, packet=normalized_completion)
         return dict(existing)
     sequence = int(store.conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM workstream_checkpoints WHERE workstream_id=?", (workstream_id,)).fetchone()[0])
     now = utc_now()
@@ -281,6 +293,8 @@ def checkpoint(store: Any, *, workstream_id: str, runtime_instance_id: str, phas
             (checkpoint_id, workstream_id, runtime_instance_id, sequence, idempotency_key, phase, summary, next_action, blocker_code, blocker, evidence_json, now),
         )
         append_event_in_transaction(store.conn, kind="workstream.checkpointed", project_id=binding["project_id"], workstream_id=workstream_id, payload={"checkpointId": checkpoint_id, "sequence": sequence, "phase": phase})
+    if phase == "ready_review":
+        submit_completion(store, workstream_id=workstream_id, runtime_instance_id=runtime_instance_id, packet=completion_packet)
     return dict(store.conn.execute("SELECT * FROM workstream_checkpoints WHERE checkpoint_id=?", (checkpoint_id,)).fetchone())
 
 

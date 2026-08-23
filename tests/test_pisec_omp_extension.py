@@ -37,8 +37,6 @@ SECRETARY_TOOLS = [
     "pisec_decline_worker_research",
 ]
 WORKER_TOOLS = [
-    "pisec_checkpoint_workstream",
-    "pisec_submit_completion",
     "pisec_request_coordination",
     "pisec_list_coordination",
     "pisec_inspect_coordination",
