@@ -194,27 +194,28 @@ The OMP adapter keeps these execution profiles:
 Additional worker domains are immutable approval inputs; no live policy
 widening is available.
 
-Pisec deliberately does not merge or delete branches. The closeout sequence is:
+Pisec uses one bounded acceptance gate and then lets the project secretary own
+local integration. It does not use a pull request as the worker closeout
+protocol. The closeout sequence is:
 
 1. The worker commits reviewable changes on its Pisec branch and reports the
    result to the project coordinator.
-2. The coordinator can inspect and use normal local Git inside the registered
-   project. A trusted host shell may review independently; fenced workers
-   cannot push. A coordinator publishes an existing non-default origin branch
-   with `pisec_push_branch`. The host broker pins the registered origin,
-   requires exact local and remote commit IDs, proves the update is a
-   fast-forward, and uses a lease to reject a remote race. Raw `git push`,
-   branch creation/deletion, force push, and autonomous default-branch updates
-   remain denied. Worker creation and merge application still require exact
-   user approval in the OMP UI.
-3. After the human accepts the result, the coordinator marks the workstream
-   complete and then retires it. Completion records desired state only;
-   retirement closes the worker task tab and fenced runtime; the project room
-   survives.
-4. The host runs `pisec workstream cleanup ...` to remove the linked checkout
-   and isolated runtime capability. Cleanup refuses an active or dirty worktree
-   unless explicitly forced. It retains both the branch and private Git object
-   store because the branch may still depend on those objects.
+2. The coordinator prepares a bounded workstream acceptance showing the
+   immutable task and completion packet digests, candidate patch digest,
+   changed paths, checks, conflict policy, effects, and non-effects. The user
+   accepts that candidate once in the OMP UI. Target and final commit OIDs are
+   refreshed integration state, not a second approval input.
+3. After acceptance, the secretary refreshes the target, asks the original
+   worker to reconcile ordinary target drift within the accepted paths, reruns
+   bounded verification, promotes worker objects, and applies only a
+   `git merge --ff-only`. A successful integration records immutable acceptance
+   and verification provenance; it never pushes or changes unrelated paths.
+4. The secretary then completes, retires, and cleans up the worker. Completion
+   records desired state; retirement closes the worker task tab and fenced
+   runtime; cleanup removes the linked checkout while retaining the branch and
+   private Git object store because the branch may still depend on those
+   objects. Material ambiguity, scope expansion, failed checks requiring
+   judgment, dirty targets, and new capabilities remain user-visible stops.
 5. Delete the retained branch separately, only after verifying integration.
    Private-object purging is intentionally not part of cleanup; before adding
    such a purge, prove no retained Git ref depends on that store.
@@ -226,7 +227,7 @@ snapshots `~/.omp/agent/config.yml` as its base OMP configuration, then loads
 the Pisec overlay for gateway, workspace, and search wiring. Pisec launches
 OMP in `yolo` tool-approval mode because Fence owns command, filesystem, and
 network enforcement; exact semantic Pisec approvals (such as workstream
-creation and merge application) remain separate extension-level checks.
+creation and workstream acceptance) remain separate extension-level checks.
 Pisec-owned OMP panes have exactly one lifecycle reporter. Each isolated OMP
 home excludes `herdr-omp-agent-state.ts`; the private launcher explicitly loads
 `omp/extensions/pisec.ts`, which publishes the per-runtime

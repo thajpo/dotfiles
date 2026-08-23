@@ -9,6 +9,7 @@ from scripts.pisec.pi_store import PiStore
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.projects import _git, register_project
 from scripts.pisec.workflow import checkpoint, submit_completion
+from scripts.pisec.integration import apply_workstream_acceptance, prepare_workstream_acceptance
 from scripts.pisec.workstreams import authorize_apply_workstream, complete_workstream, prepare_workstream, retire_workstream
 from tests.pisec_fixture import DelayedFixtureWorkspace, FixtureGitObjects, FixtureHarness, FixtureWorkspace, UnattestedFixtureWorkspace, make_repo
 
@@ -260,6 +261,8 @@ class WorkstreamTests(unittest.TestCase):
         branch = workstream["branch_name"]
         checkout = workstream["worktree_path"]
         completion = self.submit_completion(store, workstream)
+        acceptance = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+        apply_workstream_acceptance(store, project["project_id"], acceptance["approvalScope"])
         complete_workstream(store, project["project_id"], workstream["workstream_id"], completion["packet_sha256"], workspace)
         store.conn.execute("UPDATE runtime_bindings SET observed_state='idle' WHERE workstream_id=?", (workstream["workstream_id"],))
         retired = retire_workstream(store, project["project_id"], workstream["workstream_id"], workspace)

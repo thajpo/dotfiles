@@ -201,6 +201,32 @@ class HerdrWorkspaceAdapter:
             raise InvalidRequestError("workspace tab label is invalid")
         return self._request("tab.rename", {"tab_id": view_id, "label": label})
 
+    def move_surface_to_tab(self, *, surface_id: str, workspace_id: str, label: str, focus: bool = False) -> WorkspaceObservation:
+        if any(not isinstance(value, str) or not value or "\x00" in value for value in (surface_id, workspace_id, label)):
+            raise InvalidRequestError("workspace pane move identity is invalid")
+        result = self._request(
+            "pane.move",
+            {
+                "pane_id": surface_id,
+                "destination": {"type": "new_tab", "workspace_id": workspace_id, "label": label},
+                "focus": focus,
+            },
+        )
+        move_result = result.get("move_result") if result.get("type") == "pane_move" else result
+        pane = move_result.get("pane") if isinstance(move_result, dict) else None
+        moved = result.get("type") == "pane_moved" or result.get("type") == "pane_move" and isinstance(move_result, dict) and move_result.get("changed") is True
+        if not moved or not isinstance(pane, dict):
+            raise PisecError("workspace returned an invalid pane move result")
+        identity = {
+            "workspace_id": pane.get("workspace_id"),
+            "view_id": pane.get("tab_id"),
+            "surface_id": pane.get("pane_id"),
+        }
+        if identity["workspace_id"] != workspace_id or any(not isinstance(value, str) or not value for value in identity.values()):
+            raise NeedsAttentionError("moved pane escaped the target workspace")
+        observed_cwd = pane.get("foreground_cwd") if isinstance(pane.get("foreground_cwd"), str) else pane.get("cwd")
+        return self._observation(identity, worktree_path=observed_cwd if isinstance(observed_cwd, str) else None, branch_name=None, agent=None)
+
     def run_command(self, surface_id: str, argv: Sequence[str], env: Mapping[str, str] | None = None) -> dict[str, Any]:
         if not isinstance(surface_id, str) or not surface_id or "\x00" in surface_id:
             raise InvalidRequestError("workspace surface id is invalid")
@@ -483,12 +509,12 @@ class HerdrWorkspaceAdapter:
                 expected_names = {str(row["agent_name"]), "omp"}
                 mismatch = mismatch or agent.get("name", agent.get("agent")) not in expected_names
             if row["kind"] == "worker":
-                worktree = workspace.get("worktree") if isinstance(workspace, dict) else None
-                observed_path = worktree.get("checkout_path") if isinstance(worktree, dict) else None
+                observed_path = pane.get("cwd") if isinstance(pane, dict) else None
+                if not isinstance(observed_path, str) and isinstance(pane, dict):
+                    observed_path = pane.get("foreground_cwd")
                 if not isinstance(observed_path, str):
-                    observed_path = pane.get("cwd") if isinstance(pane, dict) else None
-                    if not isinstance(observed_path, str) and isinstance(pane, dict):
-                        observed_path = pane.get("foreground_cwd")
+                    worktree = workspace.get("worktree") if isinstance(workspace, dict) else None
+                    observed_path = worktree.get("checkout_path") if isinstance(worktree, dict) else None
                 mismatch = mismatch or not isinstance(observed_path, str) or str(Path(observed_path).resolve(strict=False)) != str(Path(row["worktree_path"]).resolve(strict=False))
             if mismatch:
                 with store.transaction():

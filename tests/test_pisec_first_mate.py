@@ -22,7 +22,7 @@ class FirstMatePromptTests(unittest.TestCase):
         for safety_rule in (
             "configured First Mate fleet scope",
             "explicit project IDs",
-            "Never self-approve worker creation or merges",
+            "Never self-approve worker creation or workstream acceptance",
             "never write project files",
             "register projects",
             "Do not change lifecycle, Git, or host authority rules",

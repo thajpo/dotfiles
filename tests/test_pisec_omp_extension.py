@@ -19,15 +19,16 @@ SECRETARY_TOOL_OPERATIONS = [
     ("pisec_git_status", "git.status"),
     ("pisec_push_branch", "git.push"),
     ("pisec_inspect_workstream_changes", "git.workstream_changes"),
-    ("pisec_prepare_workstream_merge", "git.merge.prepare"),
-    ("pisec_merge_workstream", "git.merge.apply"),
+    ("pisec_prepare_workstream_acceptance", "workstream.accept.prepare"),
+    ("pisec_accept_workstream", "workstream.accept.apply"),
     ("pisec_list_workstreams", "workstream.list"),
     ("pisec_inspect_workstream", "workstream.inspect"),
+    ("pisec_list_integrations", "integration.list"),
+    ("pisec_inspect_integration", "integration.inspect"),
     ("pisec_prepare_workstream", "workstream.prepare"),
     ("pisec_create_workstream", "workstream.authorize_apply"),
     ("pisec_send_workstream", "workstream.send"),
     ("pisec_focus_workstream", "workstream.focus"),
-    ("pisec_complete_workstream", "workstream.complete"),
     ("pisec_retire_workstream", "workstream.retire"),
     ("pisec_list_decisions", "decision.list"),
     ("pisec_record_decision", "decision.record"),
@@ -59,11 +60,13 @@ FLEET_TOOL_OPERATIONS = [
     ("pisec_fleet_send_secretary", "fleet.secretary.send"),
     ("pisec_fleet_list_workstreams", "fleet.workstream.list"),
     ("pisec_fleet_inspect_workstream", "fleet.workstream.inspect"),
+    ("pisec_fleet_list_integrations", "fleet.integration.list"),
+    ("pisec_fleet_inspect_integration", "fleet.integration.inspect"),
     ("pisec_fleet_git_changes", "fleet.git.workstream_changes"),
     ("pisec_fleet_prepare_workstream", "fleet.workstream.prepare"),
     ("pisec_fleet_create_worker", "fleet.workstream.authorize_apply"),
-    ("pisec_fleet_prepare_merge", "fleet.git.merge.prepare"),
-    ("pisec_fleet_merge_workstream", "fleet.git.merge.apply"),
+    ("pisec_fleet_prepare_acceptance", "fleet.workstream.accept.prepare"),
+    ("pisec_fleet_accept_workstream", "fleet.workstream.accept.apply"),
 ]
 WORKER_TOOL_OPERATIONS = [
     ("pisec_checkpoint_workstream", "workstream.checkpoint"),
@@ -146,12 +149,12 @@ process.env.PISEC_SURFACE_ID = 'w1:p1';
 const module = await import({json.dumps(EXTENSION.as_uri())} + '?secretary=' + Date.now());
 module.default(pi);
 const create = records.tools.find(value => value.name === 'pisec_create_workstream');
-const merge = records.tools.find(value => value.name === 'pisec_merge_workstream');
+const accept = records.tools.find(value => value.name === 'pisec_accept_workstream');
 const scope = {{operationId:'op_'+'a'.repeat(32), projectId:'prj_'+'b'.repeat(32), workstreamId:'ws_'+'a'.repeat(32), title:'Title', purpose:'Purpose', brief:'Full brief', harnessId:'omp', workspaceAdapterId:'herdr', executionProfile:'worker-default', targetRef:'main', baseCommitOid:'a'.repeat(40), branchName:'pisec/ws_'+'a'.repeat(32)+'/work', worktreePath:'/tmp/work', privateGitObjectDir:'/tmp/objects', gitCommonObjectDir:'/tmp/common/objects', agentName:'pisec-agent', externalDomains:['html.duckduckgo.com'], effects:['create'], nonEffects:['push']}};
 const refused = await create.execute('id', {{approval_scope: scope}}, undefined, undefined, {{hasUI: false}});
-const mergeScope = {{kind:'git.merge.ff-only', projectId:'prj_'+'b'.repeat(32), workstreamId:'ws_'+'a'.repeat(32), targetBranch:'main', targetCommitOid:'a'.repeat(40), sourceBranch:'pisec/ws_'+'a'.repeat(32)+'/work', sourceCommitOid:'b'.repeat(40), strategy:'ff-only', effects:['advance main'], nonEffects:['no push']}};
-const mergeRefused = await merge.execute('id', {{approval_scope: mergeScope}}, undefined, undefined, {{hasUI: false}});
-console.log(JSON.stringify({{tools: records.tools.map(value => value.name), events: records.events, label: records.labels[0], approval: create.approval(scope), refused, mergeApproval: merge.approval(mergeScope), mergeRefused}}));
+const acceptanceScope = {{kind:'workstream.accept', projectId:'prj_'+'b'.repeat(32), workstreamId:'ws_'+'a'.repeat(32), targetBranch:'main', completionPacketSha256:'c'.repeat(64), taskPacketSha256:'d'.repeat(64), candidatePatchSha256:'e'.repeat(64), changedPaths:['src/main.ts'], acceptance:[{{criterion:'passed'}}], verification:[{{command:'bun test', result:'passed'}}], conflictPolicy:'bounded-worker-reconciliation', mergePolicy:{{}}, effects:['advance main'], nonEffects:['no push']}};
+const acceptRefused = await accept.execute('id', {{approval_scope: acceptanceScope}}, undefined, undefined, {{hasUI: false}});
+console.log(JSON.stringify({{tools: records.tools.map(value => value.name), events: records.events, label: records.labels[0], approval: create.approval(scope), refused, acceptanceApproval: accept.approval(acceptanceScope), acceptRefused}}));
 """
         result = subprocess.run(["bun", "-e", script], cwd=ROOT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -166,11 +169,11 @@ console.log(JSON.stringify({{tools: records.tools.map(value => value.name), even
         self.assertEqual(output["approval"]["tier"], "exec")
         self.assertTrue(output["refused"]["isError"])
         self.assertIn("interactive approval UI", output["refused"]["content"][0]["text"])
-        self.assertIn("target branch: main", output["mergeApproval"]["reason"])
-        self.assertIn("source commit OID: " + "b" * 40, output["mergeApproval"]["reason"])
-        self.assertEqual(output["mergeApproval"]["policy"], "prompt")
-        self.assertTrue(output["mergeRefused"]["isError"])
-        self.assertIn("interactive approval UI", output["mergeRefused"]["content"][0]["text"])
+        self.assertIn("target branch: main", output["acceptanceApproval"]["reason"])
+        self.assertIn("candidate patch digest: " + "e" * 64, output["acceptanceApproval"]["reason"])
+        self.assertEqual(output["acceptanceApproval"]["policy"], "prompt")
+        self.assertTrue(output["acceptRefused"]["isError"])
+        self.assertIn("interactive approval UI", output["acceptRefused"]["content"][0]["text"])
         self.assertIn("session_shutdown", output["events"])
 
     def test_bun_worker_registers_runtime_only_without_secretary_tools(self):

@@ -15,6 +15,15 @@ Turn local edits into a safe, reviewable commit and handoff you can resume on an
 - When edits are in your dotfiles/config repos, commit in the same session when the user requests the change.
 - Push only when the user explicitly requests a push.
 
+## Pisec Exception
+- A bounded Pisec worker is not a PR workstream. Its `ready_review` packet is
+  evidence for the secretary and does not imply acceptance.
+- The user accepts a bounded candidate once; after that, the Pisec secretary
+  owns target refresh, reconciliation, verification, fast-forward integration,
+  completion, retirement, and cleanup. Do not request a second merge approval.
+- Do not use this cleanup skill to push, open a PR, delete a Pisec worker
+  branch, or bypass the brokered acceptance/integration records.
+
 ## Inputs
 - Optional commit intent (short sentence).
 - Optional test command (run before commit when provided).

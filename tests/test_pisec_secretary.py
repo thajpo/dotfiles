@@ -5,7 +5,9 @@ import unittest
 
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.models import NeedsAttentionError, canonical_json
+from scripts.pisec.first_mate import ensure_first_mate
 from scripts.pisec.projects import register_project
+from scripts.pisec.projects import update_project_policy
 from scripts.pisec.secretary import ensure_secretary
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
@@ -22,6 +24,23 @@ class CrashOnce:
 
 
 class SecretaryTests(unittest.TestCase):
+    def test_fleet_secretary_is_a_tab_in_first_mate_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                first_mate = ensure_first_mate(store, project["project_id"], harness, workspace)
+                update_project_policy(store, project["project_id"], coordination_mode="fleet")
+                secretary = ensure_secretary(store, project["project_id"], harness, workspace)
+                self.assertEqual(secretary["binding"]["workspace_id"], first_mate["binding"]["workspace_id"])
+                self.assertNotEqual(secretary["binding"]["workspace_view_id"], first_mate["binding"]["workspace_view_id"])
+                self.assertEqual(len([call for call in workspace.calls if call[0] == "create_workspace"]), 1)
+                self.assertIn((secretary["binding"]["workspace_view_id"], f"Project: {project['display_name']}"), workspace.renamed)
+
     def test_ensure_is_one_per_project_and_replays(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

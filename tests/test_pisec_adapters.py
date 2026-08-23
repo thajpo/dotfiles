@@ -172,21 +172,22 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
                 },
             },
         )
-        self.dispatcher.dispatch(
+        prepared_acceptance = self.dispatcher.dispatch(
             "secretary",
-            "workstream.complete",
-            {
-                "authToken": secretary_token,
-                "workstreamId": worker_id,
-                "completionPacketSha256": completion["completionPacket"]["packet_sha256"],
-            },
+            "workstream.accept.prepare",
+            {"authToken": secretary_token, "workstreamId": worker_id},
         )
-        retired = self.dispatcher.dispatch("secretary", "workstream.retire", {"authToken": secretary_token, "workstreamId": worker_id})
-        self.assertEqual(retired["desired_state"], "retired")
-        cleaned = self.dispatcher.dispatch("admin", "workstream.cleanup", {"workstreamId": worker_id, "confirm": worker_id})
-        self.assertEqual(cleaned["operation"]["state"], "succeeded")
-        self.assertNotIn("private_git_object_dir", json.dumps(cleaned))
-        self.assertNotIn("launch_secret_path", json.dumps(cleaned))
+        accepted = self.dispatcher.dispatch(
+            "secretary",
+            "workstream.accept.apply",
+            {"authToken": secretary_token, "approvalScope": prepared_acceptance["approvalScope"]},
+        )
+        self.dispatcher.dispatch("admin", "system.reconcile", {"event": "integration", "payload": {"ok": True}})
+        with PiStore(self.root / "state") as store:
+            retired = store.conn.execute("SELECT desired_state FROM workstreams WHERE workstream_id=?", (worker_id,)).fetchone()
+            self.assertEqual(retired["desired_state"], "retired")
+            self.assertEqual(store.conn.execute("SELECT state FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()["state"], "integrated")
+            self.assertIsNone(store.conn.execute("SELECT 1 FROM runtime_bindings WHERE workstream_id=?", (worker_id,)).fetchone())
 
 
 if __name__ == "__main__":

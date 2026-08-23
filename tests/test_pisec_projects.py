@@ -6,8 +6,11 @@ import unittest
 
 from scripts.pisec.decisions import list_decisions, record_decision, resolve_decision
 from scripts.pisec.models import ConflictError, InvalidRequestError
+from scripts.pisec.first_mate import ensure_first_mate
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.projects import activate_project, deactivate_project, list_projects, observe_project, register_project
+from scripts.pisec.projects import activate_project, deactivate_project, list_projects, observe_project, register_project, update_project_policy
+from scripts.pisec.secretary import ensure_secretary
+from tests.pisec_fixture import FixtureHarness, FixtureWorkspace
 
 
 def make_repo(path: Path) -> None:
@@ -20,6 +23,30 @@ def make_repo(path: Path) -> None:
 
 
 class ProjectTests(unittest.TestCase):
+    def test_deactivate_fleet_project_closes_tab_not_first_mate_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            control_repo = root / "control"
+            fleet_repo = root / "fleet"
+            make_repo(control_repo)
+            make_repo(fleet_repo)
+            with PiStore(root / "state") as store:
+                control = register_project(store, control_repo)
+                fleet = register_project(store, fleet_repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                first_mate = ensure_first_mate(store, control["project_id"], harness, workspace)
+                update_project_policy(store, fleet["project_id"], coordination_mode="fleet")
+                secretary = ensure_secretary(store, fleet["project_id"], harness, workspace)
+                store.conn.execute("UPDATE runtime_bindings SET observed_state='idle' WHERE workstream_id=?", (secretary["workstream"]["workstream_id"],))
+
+                deactivate_project(store, fleet["project_id"], workspace, harness)
+
+                self.assertIn(("close_tab", secretary["binding"]["workspace_view_id"]), workspace.calls)
+                self.assertNotIn(("close", first_mate["binding"]["workspace_id"]), workspace.calls)
+                self.assertIsNotNone(store.conn.execute("SELECT 1 FROM runtime_bindings WHERE workstream_id=?", (first_mate["workstream"]["workstream_id"],)).fetchone())
+                self.assertIsNone(store.conn.execute("SELECT 1 FROM project_workspaces WHERE project_id=?", (fleet["project_id"],)).fetchone())
+
     def test_registration_uses_common_git_directory_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

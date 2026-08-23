@@ -845,11 +845,12 @@ if [[ -L "$old_pisec" && "$(readlink "$old_pisec")" == "$DOTFILES_DIR/omp/extens
   rm "$old_pisec"
   printf 'remove: retired global Pisec extension link %s\n' "$old_pisec"
 fi
-mkdir -p "$DOTFILES_DIR/skills" "$DOTFILES_DIR/agent" "$HOME/.config/opencode" "$HOME/.codex" "$HOME/.omp/agent"
+mkdir -p "$DOTFILES_DIR/skills" "$DOTFILES_DIR/agent" "$HOME/.config/opencode" "$HOME/.codex" "$HOME/.omp/agent" "$HOME/.claude"
 [[ -f "$DOTFILES_DIR/agent/AGENTS.md" && ! -L "$DOTFILES_DIR/agent/AGENTS.md" && -d "$DOTFILES_DIR/skills" && ! -L "$DOTFILES_DIR/skills" ]] || die "canonical agent instructions or skills are missing or unsafe"
 chmod go-w "$DOTFILES_DIR/agent/AGENTS.md" "$DOTFILES_DIR/skills"
 link_file "$DOTFILES_DIR/agent/AGENTS.md" "$HOME/.omp/agent/AGENTS.md"
 link_file "$DOTFILES_DIR/agent/AGENTS.md" "$HOME/.codex/AGENTS.md"
+link_file "$DOTFILES_DIR/agent/AGENTS.md" "$HOME/.claude/CLAUDE.md"
 link_file "$DOTFILES_DIR/skills" "$HOME/.skills"
 link_file "$HOME/.skills" "$HOME/.config/opencode/skills"
 link_file "$HOME/.skills" "$HOME/.codex/skills"

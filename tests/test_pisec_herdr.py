@@ -64,6 +64,18 @@ class FakeHerdrState:
             return {"type": "pane_input_sent"}
         if method == "pane.focus":
             return {"type": "pane_focused"}
+        if method == "pane.move":
+            workspace_id = params["destination"]["workspace_id"]
+            return {
+                "type": "pane_move",
+                "move_result": {
+                    "changed": True,
+                    "previous_pane_id": params["pane_id"],
+                    "previous_tab_id": "t1",
+                    "previous_workspace_id": "w1",
+                    "pane": {"pane_id": f"{workspace_id}:p4", "tab_id": f"{workspace_id}:t4", "workspace_id": workspace_id, "cwd": "/tmp/work"},
+                },
+            }
         if method == "tab.close":
             return {"type": "tab_closed", "tab_id": params["tab_id"]}
         if method == "agent.prompt":
@@ -114,6 +126,8 @@ class HerdrTests(unittest.TestCase):
         self.assertEqual(created.workspace_id, "w2")
         tab = self.adapter.create_tab(workspace_id="w2", cwd="/tmp/work", label="Task: Work", focus=False)
         self.assertEqual(tab.view_id, "t3")
+        moved = self.adapter.move_surface_to_tab(surface_id="w1:p1", workspace_id="w2", label="Project: repo")
+        self.assertEqual((moved.workspace_id, moved.view_id, moved.surface_id), ("w2", "w2:t4", "w2:p4"))
         self.adapter.rename_tab("t2", "Project chat")
         self.adapter.run_command(
             "w2:p1",
@@ -131,6 +145,7 @@ class HerdrTests(unittest.TestCase):
         self.assertNotIn("worktree.create", methods)
         self.assertNotIn("agent.start", methods)
         self.assertIn("pane.focus", methods)
+        self.assertIn("pane.move", methods)
         self.assertIn("tab.close", methods)
         command = next(params for method, params in self.state.requests if method == "pane.send_input")
         self.assertEqual(command["text"], "HERDR_SESSION=main HERDR_PANE_ID=w2:p1 '/tmp/launcher with spaces' --resume=abc 'quoted value'")
@@ -313,7 +328,7 @@ class HerdrTests(unittest.TestCase):
         self.assertEqual(result["updated"], 0)
         self.assertEqual(result["missing"], 1)
         self.assertEqual(store.conn.execute("SELECT provisioning_state FROM workstreams").fetchone()[0], "needs_attention")
-    def test_reconcile_uses_stock_pane_cwd_when_workspace_omits_worktree(self):
+    def test_reconcile_uses_pane_cwd_before_shared_workspace_worktree(self):
         class Store:
             def __init__(self):
                 self.conn = sqlite3.connect(":memory:")
@@ -338,7 +353,7 @@ class HerdrTests(unittest.TestCase):
         self.adapter.snapshot = lambda: {
             "version": "0.8.0",
             "protocol": 19,
-            "workspaces": [{"workspace_id": "w1"}],
+            "workspaces": [{"workspace_id": "w1", "worktree": {"checkout_path": "/tmp/first-mate", "branch": "main"}}],
             "tabs": [{"tab_id": "t1", "workspace_id": "w1"}],
             "panes": [{"pane_id": "w1:p1", "tab_id": "t1", "workspace_id": "w1", "cwd": "/tmp/work"}],
             "layouts": [],

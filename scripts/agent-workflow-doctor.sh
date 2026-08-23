@@ -42,6 +42,7 @@ check_path "$HOME/.config/opencode/opencode.jsonc" "$HOME/dotfiles/opencode/open
 check_path "$HOME/.skills" "$HOME/dotfiles/skills"
 check_path "$HOME/.config/opencode/skills" "$HOME/.skills"
 check_path "$HOME/.codex/skills" "$HOME/.skills"
+check_path "$HOME/.claude/CLAUDE.md" "$HOME/dotfiles/agent/AGENTS.md"
 
 printf '\nCore commands\n'
 check_cmd git "required"

@@ -188,6 +188,14 @@ def update_project_policy(
     if merge_policy is not None and merge_policy not in MERGE_POLICIES:
         raise InvalidRequestError("merge policy is invalid")
     current = get_project(store, project["project_id"])
+    if current["coordination_mode"] == "fleet" and coordination_mode is not None and coordination_mode != "fleet":
+        shared = store.conn.execute(
+            "SELECT 1 FROM project_workspaces pw JOIN runtime_bindings r ON r.workspace_id=pw.workspace_id "
+            "JOIN workstreams w ON w.workstream_id=r.workstream_id WHERE pw.project_id=? AND w.kind='first_mate' AND w.desired_state='active' LIMIT 1",
+            (project["project_id"],),
+        ).fetchone()
+        if shared is not None:
+            raise ConflictError("deactivate the fleet project before changing its coordination mode")
     selected_worker_policy = worker_creation_policy or current["worker_creation_policy"]
     selected_worker_document = worker_creation_policy_json if worker_creation_policy_json is not None else current["worker_creation_policy_json"]
     normalized_worker = normalize_worker_policy(selected_worker_policy, selected_worker_document)
@@ -293,7 +301,15 @@ def deactivate_project(store: Any, selector: str, workspace: Any, harness: Any) 
                     store.conn.execute("UPDATE operations SET state='applying',step='workspace_close_intent',error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?", (utc_now(), operation_id))
                 step = "workspace_close_intent"
             if rank(step) < rank("workspace_closed"):
-                workspace.close_workspace(str(binding["workspace_id"]))
+                shared = store.conn.execute(
+                    "SELECT 1 FROM runtime_bindings r JOIN workstreams w USING(workstream_id) "
+                    "WHERE r.workspace_id=? AND r.workstream_id<>? AND w.desired_state='active' LIMIT 1",
+                    (binding["workspace_id"], binding["workstream_id"]),
+                ).fetchone()
+                if shared is None:
+                    workspace.close_workspace(str(binding["workspace_id"]))
+                else:
+                    workspace.close_tab(str(binding["workspace_view_id"]))
                 with store.transaction():
                     store.conn.execute("UPDATE operations SET state='applying',step='workspace_closed',updated_at=? WHERE operation_id=?", (utc_now(), operation_id))
                 step = "workspace_closed"
@@ -325,6 +341,7 @@ def deactivate_project(store: Any, selector: str, workspace: Any, harness: Any) 
                 store.conn.execute("DELETE FROM runtime_bindings WHERE workstream_id=?", (binding["workstream_id"],))
             if secretary is not None:
                 store.conn.execute("UPDATE workstreams SET desired_state='retired',retired_at=?,attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, now, secretary["workstream_id"]))
+            store.conn.execute("DELETE FROM project_workspaces WHERE project_id=?", (project_id,))
             store.conn.execute("UPDATE projects SET active=0,deactivated_at=?,secretary_workstream_id=NULL,updated_at=? WHERE project_id=?", (now, now, project_id))
             store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(result), now, operation_id))
             append_event_in_transaction(store.conn, kind="project.deactivated", project_id=project_id, operation_id=operation_id, payload=result)

@@ -12,6 +12,7 @@ from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project, update_project_policy
 from scripts.pisec.secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge, push_branch
 from scripts.pisec.workflow import checkpoint
+from scripts.pisec.integration import apply_workstream_acceptance, prepare_workstream_acceptance
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, complete_workstream, prepare_workstream
 from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace
@@ -49,7 +50,7 @@ def make_repo(path: Path) -> None:
 
 
 class SecretaryGitTests(unittest.TestCase):
-    def fixture(self, root: Path, merge_policy: dict[str, object] | None = None):
+    def fixture(self, root: Path, merge_policy: dict[str, object] | None = None, accept_candidate: bool = True):
         repo = root / "repo"
         make_repo(repo)
         store = PiStore(root / "state")
@@ -118,7 +119,10 @@ class SecretaryGitTests(unittest.TestCase):
             },
         )
         completion = store.conn.execute("SELECT packet_sha256 FROM completion_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
-        complete_workstream(store, project["project_id"], scope["workstreamId"], completion["packet_sha256"], workspace)
+        if accept_candidate:
+            acceptance = prepare_workstream_acceptance(store, project["project_id"], scope["workstreamId"])
+            apply_workstream_acceptance(store, project["project_id"], acceptance["approvalScope"])
+            complete_workstream(store, project["project_id"], scope["workstreamId"], completion["packet_sha256"], workspace)
         return store, project, scope, repo, worktree, private_objects
 
     def test_inspection_and_exact_fast_forward_merge(self):
@@ -182,14 +186,14 @@ class SecretaryGitTests(unittest.TestCase):
 
     def test_checked_merge_policy_requires_allowed_branch_and_completion_check(self):
         with tempfile.TemporaryDirectory() as tmp:
+            store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), {"allowedTargetBranches": ["develop"]}, accept_candidate=False)
             with self.assertRaisesRegex(ConflictError, "target branch"):
-                store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), {"allowedTargetBranches": ["develop"]})
-                prepare_workstream_merge(store, project["project_id"], scope["workstreamId"])
+                prepare_workstream_acceptance(store, project["project_id"], scope["workstreamId"])
 
         with tempfile.TemporaryDirectory() as tmp:
-            store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), {"allowedTargetBranches": ["main"], "requiredChecks": ["missing check"]})
+            store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), {"allowedTargetBranches": ["main"], "requiredChecks": ["missing check"]}, accept_candidate=False)
             with self.assertRaisesRegex(ConflictError, "missing required merge checks"):
-                prepare_workstream_merge(store, project["project_id"], scope["workstreamId"])
+                prepare_workstream_acceptance(store, project["project_id"], scope["workstreamId"])
 
         with tempfile.TemporaryDirectory() as tmp:
             store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), {"allowedTargetBranches": ["main"], "requiredChecks": ["fixture verification"], "maxChangedFiles": 1})

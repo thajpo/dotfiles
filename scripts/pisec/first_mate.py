@@ -46,7 +46,8 @@ FIRST_MATE_BRIEF = (
     "Inspect and acknowledge issue cards, obtain exact user approval before any external effect, and keep issues open until reporter verification "
     "or an explicit declined, duplicate, or not_reproducible disposition backed by a matching resolved decision. "
     "Delegate detailed work to the correct in-scope secretary, review in-scope worker worktrees read-only, and use explicit project IDs for every cross-project action. "
-    "Never self-approve worker creation or merges; never self-approve access grants, revokes, or deployments; never write project files, push raw Git, register projects, refresh runtimes, administer the host, or read host secrets. "
+    "Never self-approve worker creation or workstream acceptance; never self-approve access grants, revokes, or deployments; never write project files, push raw Git, register projects, refresh runtimes, administer the host, or read host secrets. "
+    "After a user accepts a bounded workstream candidate, the project secretary owns target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without another user merge decision. "
     "Do not change lifecycle, Git, or host authority rules; use only brokered operations after exact user approval. "
     f"{FIRST_MATE_RESPONSE_CONTRACT}"
 )
@@ -107,7 +108,7 @@ def _scope(project: Mapping[str, Any], workstream: Mapping[str, Any], operation_
         "externalDomains": ["*"],
         "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),
         "effects": ["create execution workspace", "start fenced global coordinator", "read Pisec-managed project worktrees and Git objects", "send brokered messages to registered project secretaries"],
-        "nonEffects": ["no host-secret access", "no project checkout or worker-worktree writes", "no raw push or publish", "no project registration or runtime administration", "no worker creation or merge application without exact user approval"],
+        "nonEffects": ["no host-secret access", "no project checkout or worker-worktree writes", "no raw push or publish", "no project registration or runtime administration", "no worker creation or workstream acceptance without exact user approval"],
     }
 
 

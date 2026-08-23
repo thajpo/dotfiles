@@ -29,6 +29,18 @@ def _record(store: Any, project: Mapping[str, Any], workspace: WorkspaceAdapter)
     return value
 
 
+def _first_mate_workspace(store: Any, workspace: WorkspaceAdapter) -> str:
+    rows = store.conn.execute(
+        "SELECT r.workspace_id FROM runtime_bindings r JOIN workstreams w USING(workstream_id) "
+        "WHERE w.kind='first_mate' AND w.desired_state='active' AND w.provisioning_state='bound' "
+        "AND r.workspace_adapter_id=? AND r.workspace_session_name=?",
+        (workspace.manifest.adapter_id, workspace.manifest.session_name),
+    ).fetchall()
+    if len(rows) != 1 or not rows[0]["workspace_id"]:
+        raise NeedsAttentionError("fleet project requires one bound First Mate workspace")
+    return str(rows[0]["workspace_id"])
+
+
 def ensure_project_workspace(
     store: Any,
     project: Mapping[str, Any],
@@ -46,22 +58,29 @@ def ensure_project_workspace(
     record = _record(store, project, workspace)
     repository = str(project["repository_path"])
     observed: WorkspaceObservation | None = None
+    fleet_workspace_id = _first_mate_workspace(store, workspace) if project.get("coordination_mode") == "fleet" else None
     if record is None:
-        observed = _validate_observation(workspace.create_workspace(repository, label, focus=False))
+        if fleet_workspace_id is None:
+            observed = _validate_observation(workspace.create_workspace(repository, label, focus=False))
+            workspace_id = observed.workspace_id
+        else:
+            workspace_id = fleet_workspace_id
         now = utc_now()
         with store.transaction():
             existing = store.conn.execute("SELECT * FROM project_workspaces WHERE project_id=?", (project["project_id"],)).fetchone()
             if existing is None:
                 store.conn.execute(
                     "INSERT INTO project_workspaces(project_id,workspace_adapter_id,workspace_session_name,workspace_id,repository_path,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                    (project["project_id"], workspace.manifest.adapter_id, workspace.manifest.session_name, observed.workspace_id, repository, now, now),
+                    (project["project_id"], workspace.manifest.adapter_id, workspace.manifest.session_name, workspace_id, repository, now, now),
                 )
-            elif existing["workspace_id"] != observed.workspace_id:
+            elif existing["workspace_id"] != workspace_id:
                 raise ConflictError("project workspace was created concurrently with a different identity")
         record = _record(store, project, workspace)
         if record is None:
             raise NeedsAttentionError("project workspace was not persisted")
     workspace_id = str(record["workspace_id"])
+    if fleet_workspace_id is not None and workspace_id != fleet_workspace_id:
+        raise NeedsAttentionError("fleet project workspace requires topology migration")
     if observed is None and create_tab:
         observed = workspace.observe_tab(workspace_id=workspace_id, cwd=repository)
         if observed is None:

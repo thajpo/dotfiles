@@ -3,9 +3,11 @@ import tempfile
 import unittest
 
 from scripts.pisec.models import AuthorizationError, ConflictError, InvalidRequestError
+from scripts.pisec.first_mate import ensure_first_mate
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.project_workspaces import project_workspace
 from scripts.pisec.projects import fleet_activity, list_fleet_projects, register_project, require_fleet_project, update_project_policy
+from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
 from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
 
@@ -21,6 +23,42 @@ PACKET = {
 
 
 class ProjectPolicyTests(unittest.TestCase):
+    def test_fleet_worker_is_a_project_labeled_first_mate_tab(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            harness = FixtureHarness(root)
+            with PiStore(root / "state") as store:
+                workspace = FixtureWorkspace(root, store)
+                project = register_project(store, repo)
+                first_mate = ensure_first_mate(store, project["project_id"], harness, workspace)
+                update_project_policy(store, project["project_id"], coordination_mode="fleet")
+                prepared = prepare_workstream(
+                    store,
+                    project_id=project["project_id"],
+                    title="Fleet task",
+                    purpose="Verify fleet tab placement",
+                    brief="Stay inside the approved worktree.",
+                    task_packet=PACKET,
+                    idempotency_key="fleet-tab-worker",
+                    harness=harness,
+                    workspace=workspace,
+                )
+                applied = authorize_apply_workstream(
+                    store,
+                    scope=prepared["approvalScope"],
+                    harness=harness,
+                    workspace=workspace,
+                    git_objects=FixtureGitObjects(),
+                    actor="first_mate",
+                )
+                binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (applied["workstream"]["workstream_id"],)).fetchone()
+                self.assertEqual(binding["workspace_id"], first_mate["binding"]["workspace_id"])
+                create = next(call for call in workspace.calls if call[0] == "create_tab")
+                self.assertEqual(create[1][0], first_mate["binding"]["workspace_id"])
+                self.assertEqual(create[1][2], f"{project['display_name']}: Fleet task")
+
     def test_defaults_are_safe_and_policy_update_is_explicit(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -42,6 +80,24 @@ class ProjectPolicyTests(unittest.TestCase):
                 self.assertEqual(updated["coordination_mode"], "fleet")
                 self.assertEqual(updated["worker_creation_policy"], "bounded_auto")
                 self.assertEqual(updated["worker_creation_policy_json"]["workerLimit"], 2)
+
+    def test_provisioned_fleet_project_must_deactivate_before_leaving_fleet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            control_repo = root / "control"
+            fleet_repo = root / "fleet"
+            make_repo(control_repo)
+            make_repo(fleet_repo)
+            harness = FixtureHarness(root)
+            with PiStore(root / "state") as store:
+                workspace = FixtureWorkspace(root, store)
+                control = register_project(store, control_repo)
+                fleet = register_project(store, fleet_repo)
+                ensure_first_mate(store, control["project_id"], harness, workspace)
+                update_project_policy(store, fleet["project_id"], coordination_mode="fleet")
+                ensure_secretary(store, fleet["project_id"], harness, workspace)
+                with self.assertRaises(ConflictError):
+                    update_project_policy(store, fleet["project_id"], coordination_mode="project")
 
     def test_first_mate_scope_only_includes_fleet_projects(self):
         with tempfile.TemporaryDirectory() as tmp:

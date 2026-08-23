@@ -13,8 +13,8 @@ SOCKET_OPERATIONS = {
     }),
     "secretary": frozenset({
         "project.status", "project.activity", "issue.report", "secretary.issue.report", "issue.list", "issue.inspect", "issue.add_context", "issue.verify", "access.list", "git.status", "git.push", "git.workstream_changes",
-        "git.merge.prepare", "git.merge.apply", "workstream.list", "workstream.inspect", "workstream.prepare",
-        "workstream.authorize_apply", "workstream.send", "workstream.focus", "workstream.complete",
+        "workstream.list", "workstream.inspect", "workstream.prepare", "workstream.accept.prepare", "workstream.accept.apply",
+        "integration.list", "integration.inspect", "workstream.authorize_apply", "workstream.send", "workstream.focus",
         "workstream.retire", "coordination.list", "coordination.inspect", "coordination.answer", "decision.list",
         "decision.record", "decision.resolve", "research.list", "research.inspect", "research.claim",
         "research.request_context", "research.answer", "research.decline",
@@ -23,7 +23,8 @@ SOCKET_OPERATIONS = {
         "fleet.status", "fleet.activity", "fleet.events", "fleet.issue.list", "fleet.issue.inspect", "fleet.issue.add_context", "fleet.issue.acknowledge", "fleet.issue.resolve",
         "fleet.access.list", "fleet.access.inspect", "fleet.access.grant.prepare", "fleet.access.grant.apply", "fleet.access.revoke.prepare", "fleet.access.revoke.apply",
         "fleet.secretary.send", "fleet.workstream.list", "fleet.workstream.inspect", "fleet.git.workstream_changes", "fleet.workstream.prepare",
-        "fleet.workstream.authorize_apply", "fleet.git.merge.prepare", "fleet.git.merge.apply",
+        "fleet.workstream.authorize_apply", "fleet.workstream.accept.prepare", "fleet.workstream.accept.apply",
+        "fleet.integration.list", "fleet.integration.inspect",
     }),
     "runtime": frozenset({
         "runtime.report", "runtime.turn.prepare", "session.switch.prepare", "task.get", "runtime.bootstrap.get",

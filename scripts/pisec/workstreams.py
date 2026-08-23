@@ -409,6 +409,7 @@ def _authorize_apply_workstream(
         _mark_attention(store, operation_id, workstream_id, "project workspace could not be established")
         raise NeedsAttentionError("project workspace could not be established") from error
     coordinator_workspace_id = str(project_workspace["workspace_id"])
+    tab_label = f"{project['display_name']}: {scope['title']}" if project.get("coordination_mode") == "fleet" else f"Task: {scope['title']}"
     def observe_worker() -> WorkspaceObservation | None:
         return workspace.observe_tab(workspace_id=coordinator_workspace_id, cwd=scope["worktreePath"])
 
@@ -416,7 +417,7 @@ def _authorize_apply_workstream(
         created = workspace.create_tab(
             workspace_id=coordinator_workspace_id,
             cwd=scope["worktreePath"],
-            label=f"Task: {scope['title']}",
+            label=tab_label,
             focus=False,
         )
         if created.workspace_id != coordinator_workspace_id:
@@ -699,7 +700,13 @@ def complete_workstream(
         raise InvalidRequestError("completion packet digest is required")
     packet = store.conn.execute("SELECT * FROM completion_packets WHERE workstream_id=? AND packet_sha256=?", (workstream_id, completion_packet_sha256)).fetchone()
     if packet is None:
-        raise ConflictError("accepted completion packet was not found")
+        raise ConflictError("completion packet was not found")
+    accepted = store.conn.execute(
+        "SELECT 1 FROM workstream_acceptances a LEFT JOIN integration_jobs j ON j.acceptance_id=a.acceptance_id AND j.candidate_completion_packet_sha256=? WHERE a.workstream_id=? AND (a.completion_packet_sha256=? OR j.integration_id IS NOT NULL) LIMIT 1",
+        (completion_packet_sha256, workstream_id, completion_packet_sha256),
+    ).fetchone()
+    if accepted is None:
+        raise ConflictError("completion packet has not been accepted")
     blockers = store.conn.execute(
         "SELECT 1 FROM coordination_requests WHERE workstream_id=? AND blocking=1 AND state <> 'acknowledged' LIMIT 1",
         (workstream_id,),
@@ -714,6 +721,8 @@ def complete_workstream(
         raise ConflictError("workstream has an unresolved checkpoint blocker")
     if row["desired_state"] == "retired":
         raise ConflictError("retired workstream cannot be completed")
+    if row["desired_state"] == "completed":
+        return row
     operation_id, existing = _lifecycle_operation(store, kind="workstream.complete", project_id=project_id, workstream_id=workstream_id)
     if existing is not None and existing["state"] == "succeeded":
         return _workstream(store, workstream_id)

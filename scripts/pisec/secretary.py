@@ -167,7 +167,7 @@ def _scope(project: Mapping[str, Any], workstream: Mapping[str, Any], operation_
         "externalDomains": list(external_domains),
         "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),
         "effects": ["create execution workspace", "start fenced harness agent", "read and write the registered project", "use the configured harness/plugin/MCP surface", "fast-forward existing non-default origin branches through the authenticated Pisec broker"],
-        "nonEffects": ["no cross-project access", "no host-secret access", "no raw push or publish through normal command policy", "no force push, branch creation, branch deletion, or default-branch push", "no worker creation without exact approval"],
+        "nonEffects": ["no cross-project access", "no host-secret access", "no raw push or publish through normal command policy", "no force push, branch creation, branch deletion, or default-branch push", "no worker creation or workstream acceptance without exact approval"],
     }
 
 
@@ -223,8 +223,9 @@ def _recover_workspace(
     scope: Mapping[str, Any],
     expected: Mapping[str, Any] | None,
 ) -> WorkspaceObservation:
+    tab_label = f"Project: {project['display_name']}" if project.get("coordination_mode") == "fleet" else "Project chat"
     def normalize(observed: WorkspaceObservation) -> WorkspaceObservation:
-        workspace.rename_tab(observed.view_id, "Project chat")
+        workspace.rename_tab(observed.view_id, tab_label)
         return observed
 
     try:
@@ -252,7 +253,7 @@ def _recover_workspace(
 def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdapter, project: Mapping[str, Any], scope: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
     observed = _observe_binding(workspace, project, binding)
     if observed is not None:
-        workspace.rename_tab(observed.view_id, "Project chat")
+        workspace.rename_tab(observed.view_id, f"Project: {project['display_name']}" if project.get("coordination_mode") == "fleet" else "Project chat")
     agent = observed.agent if observed is not None else None
     ready = agent is not None and agent.surface_id == binding["workspace_surface_id"] and agent.interactive_ready is True
     if not ready:
@@ -313,7 +314,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         with store.transaction():
             store.conn.execute(
                 "INSERT INTO workstreams(workstream_id,project_id,kind,title,purpose,brief,harness_id,workspace_adapter_id,execution_profile,target_ref,base_commit_oid,branch_name,worktree_path,desired_state,provisioning_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (workstream_id, project["project_id"], "secretary", f"Project coordinator: {project['display_name']}", "Coordinate the registered project with durable Pisec workflows.", "You are the project coordinator. You have project-scoped write access, normal local Git, broad public web access, the full configured harness/plugin/MCP surface, and Pisec coordination tools inside Fence. Publish existing non-default branches only through pisec_push_branch; raw git push remains denied. Delegate bounded implementation to approved worker workstreams; use exact approval for worker creation and merge application; answer worker research only through durable Pisec packets.", harness.manifest.adapter_id, workspace.manifest.adapter_id, "secretary-project", project["default_ref"], "0" * 40, branch, project["repository_path"], "active", "creating", now, now),
+                (workstream_id, project["project_id"], "secretary", f"Project coordinator: {project['display_name']}", "Coordinate the registered project with durable Pisec workflows.", "You are the project coordinator. You have project-scoped write access, normal local Git, broad public web access, the full configured harness/plugin/MCP surface, and Pisec coordination tools inside Fence. Publish existing non-default branches only through pisec_push_branch; raw git push remains denied. Delegate bounded implementation to approved worker workstreams; use exact approval for worker creation and workstream acceptance. After acceptance, own target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without requesting a second merge approval. Answer worker research only through durable Pisec packets.", harness.manifest.adapter_id, workspace.manifest.adapter_id, "secretary-project", project["default_ref"], "0" * 40, branch, project["repository_path"], "active", "creating", now, now),
             )
             created = dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone())
             scope = _scope(project, created, operation_id, external_domains)

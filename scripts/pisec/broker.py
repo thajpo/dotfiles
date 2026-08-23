@@ -40,9 +40,10 @@ from .research import (
 )
 from .runtime import WORKSPACE_RUNTIME_MISSING, prepare_session_switch, record_runtime_tool_failure, report_runtime, start_bound_agent, verify_runtime_binding
 from .first_mate import ensure_first_mate, focus_first_mate
-from .secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge, push_branch
+from .secretary_git import git_status, inspect_workstream_changes, push_branch
+from .integration import apply_workstream_acceptance, inspect_integration, list_integrations, prepare_workstream_acceptance, reconcile_integrations
 from .workflow import acknowledge_coordination, acknowledge_issue, add_issue_context, answer_coordination, checkpoint, inspect_issue, link_issue_remediation, list_issues, request_coordination, request_help, request_issue_verification, report_issue, resolve_issue, submit_completion, verify_issue
-from .workstreams import authorize_apply_workstream, complete_workstream, focus_workstream, inspect_workstream, list_workstreams, prepare_workstream, retire_workstream, send_workstream
+from .workstreams import authorize_apply_workstream, focus_workstream, inspect_workstream, list_workstreams, prepare_workstream, retire_workstream, send_workstream
 from .operation_contracts import SOCKET_OPERATIONS
 ADMIN_OPERATIONS = SOCKET_OPERATIONS["admin"]
 SECRETARY_OPERATIONS = SOCKET_OPERATIONS["secretary"]
@@ -486,7 +487,12 @@ class BrokerDispatcher:
         if operation == "runtime.turn.prepare":
             _exact(payload, auth_fields)
             binding = verify_runtime_binding(store, payload)
-            if binding["refresh_pending"]:
+            with store.transaction():
+                prepared = store.conn.execute(
+                    "UPDATE runtime_bindings SET observed_state='working',updated_at=? WHERE workstream_id=? AND runtime_instance_id=? AND refresh_pending=0",
+                    (utc_now(), binding["workstream_id"], binding["runtime_instance_id"]),
+                ).rowcount
+            if prepared != 1:
                 raise PisecError("runtime is reserved for a generation refresh")
             return {"prepared": True}
         if operation == "session.switch.prepare":
@@ -640,6 +646,8 @@ class BrokerDispatcher:
             )
         ]
         result["workspace"] = self.workspace.reconcile(store, reconciler_payload)
+        result["integrations"] = reconcile_integrations(store, self.workspace, self.harness)
+        result["errors"].extend(result["integrations"].get("errors", []))
         result["resumed"].extend(
             self._resume_restored_agents(
                 store,
@@ -684,15 +692,16 @@ class BrokerDispatcher:
             return _public_project(register_project(store, payload["path"], display_name=payload.get("displayName"), default_ref=payload.get("defaultRef"), data_dirs=payload.get("dataDirs")))
         if operation == "project.policy.update":
             _exact(payload, {"project"}, {"coordinationMode", "workerCreationPolicy", "workerCreationPolicyJson", "mergePolicy", "mergePolicyJson"})
-            project = update_project_policy(
-                store,
-                str(payload["project"]),
-                coordination_mode=payload.get("coordinationMode"),
-                worker_creation_policy=payload.get("workerCreationPolicy"),
-                worker_creation_policy_json=payload.get("workerCreationPolicyJson"),
-                merge_policy=payload.get("mergePolicy"),
-                merge_policy_json=payload.get("mergePolicyJson"),
-            )
+            with self._reconcile_lock:
+                project = update_project_policy(
+                    store,
+                    str(payload["project"]),
+                    coordination_mode=payload.get("coordinationMode"),
+                    worker_creation_policy=payload.get("workerCreationPolicy"),
+                    worker_creation_policy_json=payload.get("workerCreationPolicyJson"),
+                    merge_policy=payload.get("mergePolicy"),
+                    merge_policy_json=payload.get("mergePolicyJson"),
+                )
             return _public_project(project)
         if operation == "project.list":
             _exact(payload, set(), {"includeInactive"})
@@ -729,7 +738,7 @@ class BrokerDispatcher:
                 "inactiveProjects": [row for row in every_project if not row.get("active")],
                 "firstMate": _first_mate_summary(store),
                 "schema": "pisec-core",
-                "version": 14,
+                "version": 15,
                 "operationContracts": operation_manifest(),
             }
         if operation == "project.open":
@@ -749,7 +758,8 @@ class BrokerDispatcher:
             if payload["confirm"] != payload["project"]:
                 raise ConflictError("deactivation confirmation does not match the project selector")
             from .projects import deactivate_project
-            result = deactivate_project(store, str(payload["project"]), self.workspace, self.harness)
+            with self._reconcile_lock:
+                result = deactivate_project(store, str(payload["project"]), self.workspace, self.harness)
             project = get_project(store, result["projectId"])
             return {
                 "project": _public_project(project),
@@ -845,7 +855,7 @@ class BrokerDispatcher:
         raise InvalidRequestError("unsupported admin operation")
 
     def _secretary(self, store: PiStore, operation: str, project_id: str, secretary_workstream_id: str, payload: dict[str, Any]) -> Any:
-        if operation not in {"project.status", "project.activity", "issue.list", "issue.inspect", "git.status", "git.workstream_changes", "workstream.list", "workstream.inspect", "coordination.list", "coordination.inspect", "decision.list", "research.list", "research.inspect"}:
+        if operation not in {"project.status", "project.activity", "issue.list", "issue.inspect", "git.status", "git.workstream_changes", "workstream.list", "workstream.inspect", "workstream.accept.prepare", "integration.list", "integration.inspect", "coordination.list", "coordination.inspect", "decision.list", "research.list", "research.inspect"}:
             assert_project_writable(store, project_id)
         if operation == "project.status":
             _exact(payload, set())
@@ -892,12 +902,21 @@ class BrokerDispatcher:
         if operation == "git.workstream_changes":
             _exact(payload, {"workstreamId"})
             return inspect_workstream_changes(store, project_id, payload["workstreamId"])
-        if operation == "git.merge.prepare":
+        if operation == "workstream.accept.prepare":
             _exact(payload, {"workstreamId"})
-            return {"approvalScope": prepare_workstream_merge(store, project_id, payload["workstreamId"])}
-        if operation == "git.merge.apply":
+            return prepare_workstream_acceptance(store, project_id, payload["workstreamId"])
+        if operation == "workstream.accept.apply":
             _exact(payload, {"approvalScope"})
-            return apply_workstream_merge(store, project_id, payload["approvalScope"])
+            if not isinstance(payload["approvalScope"], Mapping):
+                raise InvalidRequestError("acceptance scope must be an object")
+            return apply_workstream_acceptance(store, project_id, payload["approvalScope"])
+        if operation == "integration.list":
+            _exact(payload, set(), {"state"})
+            states = None if payload.get("state") is None else {payload["state"]}
+            return {"integrations": list_integrations(store, project_id, states=states)}
+        if operation == "integration.inspect":
+            _exact(payload, {"integrationId"})
+            return inspect_integration(store, project_id, payload["integrationId"])
         if operation == "workstream.list":
             _exact(payload, set())
             return {"workstreams": [_public_workstream(row) for row in list_workstreams(store, project_id)]}
@@ -920,9 +939,6 @@ class BrokerDispatcher:
         if operation == "workstream.focus":
             _exact(payload, {"workstreamId"})
             return focus_workstream(store, project_id, payload["workstreamId"], self.workspace)
-        if operation == "workstream.complete":
-            _exact(payload, {"workstreamId", "completionPacketSha256"})
-            return _public_workstream(complete_workstream(store, project_id, payload["workstreamId"], payload["completionPacketSha256"], self.workspace))
         if operation == "workstream.retire":
             _exact(payload, {"workstreamId"})
             return _public_workstream(retire_workstream(store, project_id, payload["workstreamId"], self.workspace))
@@ -1080,16 +1096,26 @@ class BrokerDispatcher:
                 raise InvalidRequestError("fleet approval scope project does not match projectId")
             applied = authorize_apply_workstream(store, scope=scope, harness=self.harness, workspace=self.workspace, git_objects=self.git_objects, actor="first_mate")
             return {"operation": _public_operation(applied["operation"]), "workstream": _public_workstream(applied["workstream"])}
-        if operation == "fleet.git.merge.prepare":
+        if operation == "fleet.workstream.accept.prepare":
             _exact(payload, {"projectId", "workstreamId"})
-            return {"approvalScope": prepare_workstream_merge(store, self._fleet_project(store, payload), payload["workstreamId"])}
-        if operation == "fleet.git.merge.apply":
+            project_id = self._fleet_project(store, payload)
+            return prepare_workstream_acceptance(store, project_id, payload["workstreamId"])
+        if operation == "fleet.workstream.accept.apply":
             _exact(payload, {"projectId", "approvalScope"})
             project_id = self._fleet_project(store, payload)
             scope = payload["approvalScope"]
             if not isinstance(scope, Mapping) or scope.get("projectId") != project_id:
-                raise InvalidRequestError("fleet merge scope project does not match projectId")
-            return apply_workstream_merge(store, project_id, scope)
+                raise InvalidRequestError("fleet acceptance scope project does not match projectId")
+            return apply_workstream_acceptance(store, project_id, scope)
+        if operation == "fleet.integration.list":
+            _exact(payload, {"projectId"}, {"state"})
+            project_id = self._fleet_project(store, payload)
+            states = None if payload.get("state") is None else {payload["state"]}
+            return {"integrations": list_integrations(store, project_id, states=states)}
+        if operation == "fleet.integration.inspect":
+            _exact(payload, {"projectId", "integrationId"})
+            project_id = self._fleet_project(store, payload)
+            return inspect_integration(store, project_id, payload["integrationId"])
         raise InvalidRequestError("unsupported fleet operation")
 
     def _notify_worker_research(self, store: PiStore, result: Mapping[str, Any], disposition: str) -> None:

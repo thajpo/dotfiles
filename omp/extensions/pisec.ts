@@ -215,22 +215,27 @@ function renderExactScope(value: unknown): string {
   ].join("\n");
 }
 
-function renderMergeScope(value: unknown): string {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return "Pisec refused: merge approval scope is not an object";
+function renderAcceptanceScope(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "Pisec refused: acceptance scope is not an object";
   const scope = value as JsonObject;
+  const changedPaths = Array.isArray(scope.changedPaths) ? scope.changedPaths.join(", ") || "(none)" : "(invalid)";
+  const acceptance = Array.isArray(scope.acceptance) ? JSON.stringify(scope.acceptance) : "(invalid)";
+  const verification = Array.isArray(scope.verification) ? JSON.stringify(scope.verification) : "(invalid)";
   const effects = Array.isArray(scope.effects) ? scope.effects.join("; ") : "(invalid)";
   const nonEffects = Array.isArray(scope.nonEffects) ? scope.nonEffects.join("; ") : "(invalid)";
   return [
-    "Pisec exact fast-forward merge approval",
+    "Pisec bounded workstream acceptance",
     `project id: ${String(scope.projectId ?? "")}`,
     `workstream id: ${String(scope.workstreamId ?? "")}`,
     `target branch: ${String(scope.targetBranch ?? "")}`,
-    `target commit OID: ${String(scope.targetCommitOid ?? "")}`,
-    `source branch: ${String(scope.sourceBranch ?? "")}`,
-    `source commit OID: ${String(scope.sourceCommitOid ?? "")}`,
     `completion packet digest: ${String(scope.completionPacketSha256 ?? "")}`,
-    `verification source commit: ${String(scope.completionSourceCommitOid ?? "")}`,
-    `strategy: ${String(scope.strategy ?? "")}`,
+    `task packet digest: ${String(scope.taskPacketSha256 ?? "")}`,
+    `candidate patch digest: ${String(scope.candidatePatchSha256 ?? "")}`,
+    `changed paths: ${changedPaths}`,
+    `acceptance criteria: ${acceptance}`,
+    `verification evidence: ${verification}`,
+    `conflict policy: ${String(scope.conflictPolicy ?? "")}`,
+    `merge policy: ${JSON.stringify(scope.mergePolicy ?? {})}`,
     `effects: ${effects}`,
     `non-effects: ${nonEffects}`,
   ].join("\n");
@@ -326,20 +331,21 @@ function registerRuntime(pi: ExtensionAPI): void {
     return report("idle", "lifecycle", ctx, sessionReference(ctx));
   });
   pi.on("before_agent_start", async (event, ctx) => {
-    await runtimeOperation("runtime.turn.prepare");
     if (ROLE === "first_mate") {
+      await runtimeOperation("runtime.turn.prepare");
       return {
         systemPrompt: [
           ...event.systemPrompt,
-          "Pisec First Mate contract: you are the coordinator for projects in the configured First Mate fleet scope. Use explicit projectId on every fleet operation. You may inspect fleet status, in-scope project secretaries, in-scope worker worktrees, Git objects, and durable research metadata through the authenticated fleet broker. Read-only filesystem access covers Pisec-managed in-scope project worktrees and Git objects only. Never write project files, worktrees, or Git objects; never raw-push; never register projects, refresh runtimes, administer the host, read host secrets, or self-approve worker creation or merges. Do not change lifecycle, Git, or host authority rules; use only brokered operations after exact user approval. Worker creation and merge application require exact interactive user approval in this surface. Default replies must fit a short screen and use only Status, Needs attention, and Next action when applicable. Report material exceptions, active work, blockers, decisions needed, and next actions; omit healthy or idle project listings, raw metadata, timestamps, event history, and implementation narration. Include projectId or workstreamId only when the user must approve, inspect, or act on that item. If nothing needs action, say so in one sentence. Give detailed evidence only for explicit drill-down requests.",
+           "Pisec First Mate contract: you are the coordinator for projects in the configured First Mate fleet scope. Use explicit projectId on every fleet operation. You may inspect fleet status, in-scope project secretaries, in-scope worker worktrees, Git objects, and durable research metadata through the authenticated fleet broker. Read-only filesystem access covers Pisec-managed in-scope project worktrees and Git objects only. Never write project files, worktrees, or Git objects; never raw-push; never register projects, refresh runtimes, administer the host, read host secrets, or self-approve worker creation or workstream acceptance. Do not change lifecycle, Git, or host authority rules; use only brokered operations after exact user approval. Worker creation and bounded workstream acceptance require exact interactive user approval in this surface. After acceptance, the project secretary owns target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without a second merge approval. Default replies must fit a short screen and use only Status, Needs attention, and Next action when applicable. Report material exceptions, active work, blockers, decisions needed, and next actions; omit healthy or idle project listings, raw metadata, timestamps, event history, and implementation narration. Include projectId or workstreamId only when the user must approve, inspect, or act on that item. If nothing needs action, say so in one sentence. Give detailed evidence only for explicit drill-down requests.",
         ],
       };
     }
     if (ROLE === "secretary") {
+      await runtimeOperation("runtime.turn.prepare");
       return {
         systemPrompt: [
           ...event.systemPrompt,
-          "Pisec secretary contract: you are trusted inside exactly one registered project Fence. You may use the full standard OMP tool surface, installed plugins, project MCP, copied user extensions/skills/rules/commands/themes/agents, normal local Git, project writes, and broad public web access. Plugins and MCP are trusted code inside this same Fence boundary, not extra sandboxes. Fence denies sibling projects, host secrets, metadata IP, and the real harness/workspace state. Raw git push remains denied; publish an existing non-default branch with pisec_push_branch, which performs only a pinned-origin fast-forward through the host broker without exposing credentials. Keep worker creation and merge application behind exact interactive approval. For independent worker research requests, list pending packets and launch the exact @smol pisec-web-research agent in one task batch; return every answer through durable Pisec research tools. Do not claim product state from memory; inspect through Pisec adapters.",
+           "Pisec secretary contract: you are trusted inside exactly one registered project Fence. You may use the full standard OMP tool surface, installed plugins, project MCP, copied user extensions/skills/rules/commands/themes/agents, normal local Git, project writes, and broad public web access. Plugins and MCP are trusted code inside this same Fence boundary, not extra sandboxes. Fence denies sibling projects, host secrets, metadata IP, and the real harness/workspace state. Raw git push remains denied; publish an existing non-default branch with pisec_push_branch, which performs only a pinned-origin fast-forward through the host broker without exposing credentials. Keep worker creation and bounded workstream acceptance behind exact interactive approval. After acceptance, own target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without requesting a second merge approval. For independent worker research requests, list pending packets and launch the exact @smol pisec-web-research agent in one task batch; return every answer through durable Pisec research tools. Do not claim product state from memory; inspect through Pisec adapters.",
         ],
       };
     }
@@ -357,10 +363,11 @@ function registerRuntime(pi: ExtensionAPI): void {
       const pythonContract = pythonEnv
         ? `PYTHON_ENVIRONMENT\nAn approved python environment is exposed read-only inside this Fence at: ${pythonEnv}\nRun the project interpreter directly. Never run package-management writes inside the shared environment.`
         : "PYTHON_ENVIRONMENT\nNo python environment was approved for this workstream; the Fence exposes none.";
+      await runtimeOperation("runtime.turn.prepare");
       return {
         systemPrompt: [
           ...event.systemPrompt,
-          "Pisec worker contract: the following broker-authenticated immutable task packet is authoritative for this workstream. Use durable checkpoints and coordination requests for semantic progress. Ordinary chat is transient. When implementation and verification are complete, submit one ready_review checkpoint with exact completion evidence; that checkpoint submits the immutable completion packet automatically. Do not submit a separate completion packet.",
+           "Pisec worker contract: the following broker-authenticated immutable task packet is authoritative for this workstream. Use durable checkpoints and coordination requests for semantic progress. Ordinary chat is transient. When implementation and verification are complete, submit one ready_review checkpoint with exact completion evidence; that checkpoint submits the immutable completion packet automatically. Acceptance is a separate user gate owned by the secretary; never claim acceptance or request a second merge approval. If the secretary reports bounded target drift, rebase only within the accepted task scope, rerun verification, and submit a new ready_review checkpoint.",
           ...(fullPacket ? [`IMMUTABLE_TASK_PACKET\n${renderTaskPacket(taskPacket)}`] : ["IMMUTABLE_TASK_PACKET\nNo packet body changed in this session; retain the previously accepted packet."]),
           pythonContract,
         ],
@@ -448,17 +455,17 @@ function secretaryTools(pi: ExtensionAPI): void {
   semantic("pisec_git_status", "Pisec Git status", "git.status", z.object({}), "read");
   semantic("pisec_push_branch", "Push project branch", "git.push", z.object({ branch: z.string().min(1).max(512), expected_local_oid: z.string().min(40).max(64), expected_remote_oid: z.string().min(40).max(64) }), "exec", params => ({ branch: params.branch, expectedLocalOid: params.expected_local_oid, expectedRemoteOid: params.expected_remote_oid }));
   semantic("pisec_inspect_workstream_changes", "Inspect workstream Git changes", "git.workstream_changes", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }));
-  semantic("pisec_prepare_workstream_merge", "Prepare workstream merge", "git.merge.prepare", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }));
+  semantic("pisec_prepare_workstream_acceptance", "Prepare workstream acceptance", "workstream.accept.prepare", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }));
   pi.registerTool({
-    name: "pisec_merge_workstream",
-    label: "Merge Pisec workstream",
-    description: "Apply one exact, previously prepared fast-forward merge scope.",
-    approval: scope => ({ tier: "exec", policy: "prompt", reason: renderMergeScope(scope) }),
+    name: "pisec_accept_workstream",
+    label: "Accept Pisec workstream",
+    description: "Accept one exact bounded workstream candidate. This is the only user approval; the secretary owns later integration and closeout.",
+    approval: scope => ({ tier: "exec", policy: "prompt", reason: renderAcceptanceScope(scope) }),
     parameters: z.object({ approval_scope: z.any() }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      if (!ctx.hasUI) return textResult("Pisec refused Git merge because an interactive approval UI is unavailable.", true);
+      if (!ctx.hasUI) return textResult("Pisec refused workstream acceptance because an interactive approval UI is unavailable.", true);
       try {
-        return textResult(await semanticRequest("git.merge.apply", { approvalScope: params.approval_scope as JsonObject }));
+        return textResult(await semanticRequest("workstream.accept.apply", { approvalScope: params.approval_scope as JsonObject }));
       } catch (error) {
         return textResult(error instanceof Error ? error.message : String(error), true);
       }
@@ -466,6 +473,8 @@ function secretaryTools(pi: ExtensionAPI): void {
   });
   semantic("pisec_list_workstreams", "List Pisec workstreams", "workstream.list", z.object({}), "read");
   semantic("pisec_inspect_workstream", "Inspect Pisec workstream", "workstream.inspect", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }));
+  semantic("pisec_list_integrations", "List Pisec integrations", "integration.list", z.object({ state: z.enum(["queued", "refreshing", "awaiting_worker", "verifying", "applying", "integrated", "needs_attention"]).optional() }), "read", params => params.state ? { state: params.state } : {});
+  semantic("pisec_inspect_integration", "Inspect Pisec integration", "integration.inspect", z.object({ integration_id: z.string().min(1).max(128) }), "read", params => ({ integrationId: params.integration_id }));
   const taskPacketSchema = z.object({ schemaVersion: z.literal(1), outcome: z.string().min(1).max(4096), boundaries: z.array(z.string().min(1).max(4096)).max(16), acceptance: z.array(z.string().min(1).max(4096)).max(16), openQuestions: z.array(z.string().min(1).max(4096)).max(16), evidence: z.array(z.string().min(1).max(4096)).max(16) });
   semantic("pisec_prepare_workstream", "Prepare Pisec workstream", "workstream.prepare", z.object({ title: z.string().min(1).max(512), purpose: z.string().min(1).max(4096), brief: z.string().min(1).max(4096), task_packet: taskPacketSchema, idempotency_key: z.string().min(1).max(256), target_ref: z.string().min(1).max(512).optional(), execution_profile: z.enum(["worker-default", "worker-networked"]).optional(), work_mode: z.enum(["FAST", "RIP", "BUILD", "MAJOR"]).optional(), learning_overlay: z.enum(["OFF", "LIGHT", "DEEP"]).optional(), learning_seam: z.string().min(1).max(1024).optional(), decision_ids: z.array(z.string().min(1).max(128)).max(16).optional(), python_env: z.string().min(1).max(4096).optional() }), "read", params => ({ title: params.title, purpose: params.purpose, brief: params.brief, taskPacket: params.task_packet, idempotencyKey: params.idempotency_key, ...(params.target_ref ? { targetRef: params.target_ref } : {}), ...(params.execution_profile ? { executionProfile: params.execution_profile } : {}), ...(params.work_mode ? { workMode: params.work_mode } : {}), ...(params.learning_overlay ? { learningOverlay: params.learning_overlay } : {}), ...(params.learning_seam ? { learningSeam: params.learning_seam } : {}), ...(params.decision_ids ? { decisionIds: params.decision_ids } : {}), ...(params.python_env ? { pythonEnv: params.python_env } : {}) }));
   pi.registerTool({
@@ -485,7 +494,6 @@ function secretaryTools(pi: ExtensionAPI): void {
   });
   semantic("pisec_send_workstream", "Send Pisec workstream message", "workstream.send", z.object({ workstream_id: z.string().min(1).max(128), message: z.string().min(1).max(4096) }), "exec", params => ({ workstreamId: params.workstream_id, text: params.message }));
   semantic("pisec_focus_workstream", "Focus Pisec workstream", "workstream.focus", z.object({ workstream_id: z.string().min(1).max(128) }), "exec", params => ({ workstreamId: params.workstream_id }));
-  semantic("pisec_complete_workstream", "Complete Pisec workstream", "workstream.complete", z.object({ workstream_id: z.string().min(1).max(128), completion_packet_sha256: z.string().min(64).max(64) }), "exec", params => ({ workstreamId: params.workstream_id, completionPacketSha256: params.completion_packet_sha256 }));
   semantic("pisec_retire_workstream", "Retire Pisec workstream", "workstream.retire", z.object({ workstream_id: z.string().min(1).max(128) }), "exec", params => ({ workstreamId: params.workstream_id }));
   semantic("pisec_list_decisions", "List Pisec decisions", "decision.list", z.object({ state: z.enum(["open", "resolved"]).optional() }), "read", params => params.state ? { state: params.state } : {});
   semantic("pisec_record_decision", "Record Pisec decision", "decision.record", z.object({ summary: z.string().min(1).max(512), context: z.any(), workstream_id: z.string().min(1).max(128).optional() }), "exec", params => ({ summary: params.summary, context: params.context, ...(params.workstream_id ? { workstreamId: params.workstream_id } : {}) }));
@@ -549,6 +557,8 @@ function fleetTools(pi: ExtensionAPI): void {
   fleet("pisec_fleet_send_secretary", "Message project secretary", "fleet.secretary.send", z.object({ project_id: projectId, message: z.string().min(1).max(4096), workstream_id: z.string().min(1).max(128).optional() }), "exec", params => ({ projectId: params.project_id, text: params.message, ...(params.workstream_id ? { workstreamId: params.workstream_id } : {}) }));
   fleet("pisec_fleet_list_workstreams", "List project workstreams", "fleet.workstream.list", z.object({ project_id: projectId }), "read", params => ({ projectId: params.project_id }));
   fleet("pisec_fleet_inspect_workstream", "Inspect project workstream", "fleet.workstream.inspect", z.object({ project_id: projectId, workstream_id: z.string().min(1).max(128) }), "read", params => ({ projectId: params.project_id, workstreamId: params.workstream_id }));
+  fleet("pisec_fleet_list_integrations", "List project integrations", "fleet.integration.list", z.object({ project_id: projectId, state: z.enum(["queued", "refreshing", "awaiting_worker", "verifying", "applying", "integrated", "needs_attention"]).optional() }), "read", params => ({ projectId: params.project_id, ...(params.state ? { state: params.state } : {}) }));
+  fleet("pisec_fleet_inspect_integration", "Inspect project integration", "fleet.integration.inspect", z.object({ project_id: projectId, integration_id: z.string().min(1).max(128) }), "read", params => ({ projectId: params.project_id, integrationId: params.integration_id }));
   fleet("pisec_fleet_git_changes", "Inspect project workstream changes", "fleet.git.workstream_changes", z.object({ project_id: projectId, workstream_id: z.string().min(1).max(128) }), "read", params => ({ projectId: params.project_id, workstreamId: params.workstream_id }));
   const taskPacketSchema = z.object({ schemaVersion: z.literal(1), outcome: z.string().min(1).max(4096), boundaries: z.array(z.string().min(1).max(4096)).max(16), acceptance: z.array(z.string().min(1).max(4096)).max(16), openQuestions: z.array(z.string().min(1).max(4096)).max(16), evidence: z.array(z.string().min(1).max(4096)).max(16) });
   fleet("pisec_fleet_prepare_workstream", "Prepare project worker", "fleet.workstream.prepare", z.object({ project_id: projectId, title: z.string().min(1).max(512), purpose: z.string().min(1).max(4096), brief: z.string().min(1).max(4096), task_packet: taskPacketSchema, idempotency_key: z.string().min(1).max(256), target_ref: z.string().min(1).max(512).optional(), execution_profile: z.enum(["worker-default", "worker-networked"]).optional(), python_env: z.string().min(1).max(4096).optional() }), "read", params => ({ projectId: params.project_id, title: params.title, purpose: params.purpose, brief: params.brief, taskPacket: params.task_packet, idempotencyKey: params.idempotency_key, ...(params.target_ref ? { targetRef: params.target_ref } : {}), ...(params.execution_profile ? { executionProfile: params.execution_profile } : {}), ...(params.python_env ? { pythonEnv: params.python_env } : {}) }));
@@ -564,16 +574,16 @@ function fleetTools(pi: ExtensionAPI): void {
       catch (error) { return textResult(error instanceof Error ? error.message : String(error), true); }
     },
   });
-  fleet("pisec_fleet_prepare_merge", "Prepare project merge", "fleet.git.merge.prepare", z.object({ project_id: projectId, workstream_id: z.string().min(1).max(128) }), "read", params => ({ projectId: params.project_id, workstreamId: params.workstream_id }));
+  fleet("pisec_fleet_prepare_acceptance", "Prepare project acceptance", "fleet.workstream.accept.prepare", z.object({ project_id: projectId, workstream_id: z.string().min(1).max(128) }), "read", params => ({ projectId: params.project_id, workstreamId: params.workstream_id }));
   pi.registerTool({
-    name: "pisec_fleet_merge_workstream",
-    label: "Merge project workstream",
-    description: "Apply one exact prepared fast-forward merge after interactive user approval.",
-    approval: scope => ({ tier: "exec", policy: "prompt", reason: renderMergeScope(scope) }),
+    name: "pisec_fleet_accept_workstream",
+    label: "Accept project workstream",
+    description: "Accept one exact bounded project workstream candidate. The secretary owns later integration and closeout.",
+    approval: scope => ({ tier: "exec", policy: "prompt", reason: renderAcceptanceScope(scope) }),
     parameters: z.object({ project_id: projectId, approval_scope: z.any() }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      if (!ctx.hasUI) return textResult("Pisec refused Git merge because interactive approval is unavailable.", true);
-      try { return textResult(await semanticRequest("fleet.git.merge.apply", { projectId: params.project_id, approvalScope: params.approval_scope as JsonObject })); }
+      if (!ctx.hasUI) return textResult("Pisec refused workstream acceptance because interactive approval is unavailable.", true);
+      try { return textResult(await semanticRequest("fleet.workstream.accept.apply", { projectId: params.project_id, approvalScope: params.approval_scope as JsonObject })); }
       catch (error) { return textResult(error instanceof Error ? error.message : String(error), true); }
     },
   });

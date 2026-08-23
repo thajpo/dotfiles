@@ -6,6 +6,7 @@ import unittest
 from scripts.pisec.access import authorize_apply_access_grant, authorize_apply_access_revoke, effective_runtime_scope, prepare_access_grant, prepare_access_revoke
 from scripts.pisec.adapters import AdapterRegistry
 from scripts.pisec.broker import BrokerDispatcher
+from scripts.pisec.models import PisecError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
 from scripts.pisec.secretary import ensure_secretary
@@ -20,6 +21,14 @@ class ScopeAwareFixtureHarness(FixtureHarness):
 
 
 class Phase3Tests(unittest.TestCase):
+    def test_turn_prepare_atomically_claims_runtime_against_refresh(self):
+        result = self.dispatcher.dispatch("runtime", "runtime.turn.prepare", self.auth)
+        self.assertTrue(result["prepared"])
+        self.assertEqual(self.store.conn.execute("SELECT observed_state FROM runtime_bindings WHERE workstream_id=?", (self.worker_id,)).fetchone()[0], "working")
+        self.store.conn.execute("UPDATE runtime_bindings SET observed_state='idle',refresh_pending=1 WHERE workstream_id=?", (self.worker_id,))
+        with self.assertRaises(PisecError):
+            self.dispatcher.dispatch("runtime", "runtime.turn.prepare", self.auth)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)

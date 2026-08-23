@@ -37,3 +37,24 @@ may both work directly with the worker. If the worker needs public-web research
 beyond its approved tools, dispatch the exact `@smol` `pisec-web-research`
 agent for the pending packet directly — do not ask the user for permission —
 and return the answer through the durable Pisec research tools.
+
+## Pisec Workstream Contract
+
+When operating inside a Pisec project, use the local secretary workflow rather
+than a PR workflow for bounded worker tasks:
+
+- Human authorization has two distinct points: delegate the bounded worker
+  scope, then accept the completed candidate once. Do not add a second merge
+  approval.
+- A worker's `ready_review` checkpoint submits completion evidence; it does not
+  imply acceptance. Keep the task packet, completion packet, allowed paths,
+  checks, and conflict policy immutable and inspectable.
+- After acceptance, the project secretary owns target refresh, bounded worker
+  reconciliation, verification, `ff-only` target integration, completion,
+  retirement, and cleanup. Target and final commit OIDs are refreshed state.
+- The original worker may resolve ordinary target drift only within the
+  accepted scope, rerun verification, and submit a new ready-review packet.
+- Escalate only material ambiguity, scope expansion, failed checks requiring
+  judgment, a dirty target, or a genuinely new capability.
+- Do not push, open a PR, delete branches, or clean up a worker as a substitute
+  for the brokered acceptance and integration records.

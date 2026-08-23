@@ -5,6 +5,14 @@ description: "Manage one-issue-per-worktree lifecycle for branch isolation, PR t
 
 # Worktree Manager
 
+## Pisec Exception
+Pisec worker worktrees are broker-owned bounded execution surfaces, not PR
+worktrees. Do not create a PR, request a second merge approval, delete the
+branch, or run generic cleanup after a worker reports ready review. The user
+accepts the bounded candidate once; the project secretary owns refresh,
+reconciliation, verification, fast-forward integration, retirement, and
+cleanup through Pisec.
+
 ## Usage
 - Internal helper skill.
 - Normally invoked by `$pr-iterate`, not directly by user.

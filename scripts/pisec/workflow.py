@@ -356,7 +356,7 @@ def submit_completion(store: Any, *, workstream_id: str, runtime_instance_id: st
     with store.transaction():
         store.conn.execute(
             "INSERT INTO completion_packets(completion_packet_id,workstream_id,source_commit_oid,task_packet_sha256,packet_sha256,packet_json,submitted_at,accepted_at) VALUES(?,?,?,?,?,?,?,?)",
-            (packet_id, workstream_id, observed_source, task["packet_sha256"], packet_sha, canonical_json(normalized, max_bytes=65536, max_text=8192), now, now),
+            (packet_id, workstream_id, observed_source, task["packet_sha256"], packet_sha, canonical_json(normalized, max_bytes=65536, max_text=8192), now, None),
         )
         append_event_in_transaction(store.conn, kind="workstream.completion_submitted", project_id=project_id, workstream_id=workstream_id, payload={"completionPacketSha256": packet_sha, "sourceCommit": observed_source})
     return dict(store.conn.execute("SELECT * FROM completion_packets WHERE completion_packet_id=?", (packet_id,)).fetchone())

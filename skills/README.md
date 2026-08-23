@@ -5,6 +5,14 @@
 - Preferred flow: `Use $git-cleanup draft-then-ship`.
 - If push should be skipped for a specific case, explicitly state that in the request.
 
+## Pisec Exception
+- Pisec worker tasks use one bounded local acceptance followed by secretary-owned
+  refresh, reconciliation, verification, fast-forward integration, and cleanup;
+  they do not use a PR or a second merge approval.
+- A worker ready-review packet is evidence, not acceptance. Keep target/final
+  commit OIDs as refreshable integration state and preserve immutable task,
+  candidate, path, check, and conflict-policy scope.
+
 ## Active Workflow Skills (current)
 - User-facing:
   - `repo-init`: one-time repo bootstrap (planning + templates + baseline CI).

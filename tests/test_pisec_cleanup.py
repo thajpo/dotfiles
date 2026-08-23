@@ -8,6 +8,7 @@ from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import _git, register_project
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workflow import submit_completion
+from scripts.pisec.integration import apply_workstream_acceptance, prepare_workstream_acceptance
 from scripts.pisec.workstreams import authorize_apply_workstream, complete_workstream, prepare_workstream, retire_workstream
 from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
 
@@ -51,6 +52,8 @@ class CleanupTests(unittest.TestCase):
             store, project, harness, workspace, workstream = self.setup_bound_worker(root)
             self.addCleanup(store.close)
             completion = self.submit_completion(store, workstream)
+            acceptance = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            apply_workstream_acceptance(store, project["project_id"], acceptance["approvalScope"])
             complete_workstream(store, project["project_id"], workstream["workstream_id"], completion["packet_sha256"], workspace)
             store.conn.execute("UPDATE runtime_bindings SET observed_state='idle' WHERE workstream_id=?", (workstream["workstream_id"],))
             retire_workstream(store, project["project_id"], workstream["workstream_id"], workspace)
@@ -80,6 +83,8 @@ class CleanupTests(unittest.TestCase):
             store, project, harness, workspace, workstream = self.setup_bound_worker(root)
             self.addCleanup(store.close)
             completion = self.submit_completion(store, workstream)
+            acceptance = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            apply_workstream_acceptance(store, project["project_id"], acceptance["approvalScope"])
             complete_workstream(store, project["project_id"], workstream["workstream_id"], completion["packet_sha256"], workspace)
             store.conn.execute("UPDATE runtime_bindings SET observed_state='idle' WHERE workstream_id=?", (workstream["workstream_id"],))
             retire_workstream(store, project["project_id"], workstream["workstream_id"], workspace)

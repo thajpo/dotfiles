@@ -22,6 +22,9 @@ from scripts.pisec.adapters import (
 
 def make_repo(path: Path) -> None:
     subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
+    path.chmod(0o755)
+    (path / ".git" / "objects").chmod(0o700)
+    (path / ".git" / "objects" / "pack").chmod(0o700)
     subprocess.run(["git", "-C", str(path), "config", "user.name", "Pisec Test"], check=True)
     subprocess.run(["git", "-C", str(path), "config", "user.email", "pisec@example.invalid"], check=True)
     (path / "README").write_text("fixture\n")
@@ -41,13 +44,14 @@ class FixtureHarness:
 
     def validate_execution_profile(self, profile: str, role: str) -> None:
         self.calls.append(("validate", (profile, role)))
-        expected = "secretary" if profile == "secretary-project" else "worker"
-        if profile not in {"secretary-project", "worker-default", "worker-networked"} or role != expected:
+        expected = {"first-mate": "first_mate", "secretary-project": "secretary", "worker-default": "worker", "worker-networked": "worker"}.get(profile)
+        if expected is None or role != expected:
             raise ValueError("fixture profile is invalid")
 
     def profile_domains(self, profile: str, additional_domains: Sequence[str]) -> tuple[str, ...]:
         self.calls.append(("domains", (profile, tuple(additional_domains))))
-        self.validate_execution_profile(profile, "secretary" if profile == "secretary-project" else "worker")
+        role = "first_mate" if profile == "first-mate" else "secretary" if profile == "secretary-project" else "worker"
+        self.validate_execution_profile(profile, role)
         return tuple(sorted({"fixture.test", *additional_domains}))
 
     def desired_generation(self, scope: Mapping[str, Any]) -> str:
@@ -182,6 +186,28 @@ class FixtureWorkspace:
         self.calls.append(("rename_tab", (view_id, label)))
         self.renamed.append((view_id, label))
         return {"renamed": view_id, "label": label}
+
+    def move_surface_to_tab(self, *, surface_id: str, workspace_id: str, label: str, focus: bool = False) -> WorkspaceObservation:
+        self.calls.append(("move_surface_to_tab", (surface_id, workspace_id, label, focus)))
+        item = next((value for value in self.worktrees.values() if value.surface_id == surface_id), None)
+        if item is None:
+            raise RuntimeError("fixture pane is missing")
+        self._counter += 1
+        moved = WorkspaceObservation(
+            workspace_id=workspace_id,
+            view_id=f"fixture-view-{self._counter}",
+            surface_id=f"fixture-surface-{self._counter}",
+            worktree_path=item.worktree_path,
+            branch_name=item.branch_name,
+            agent=None,
+        )
+        if item.worktree_path is not None:
+            self.worktrees[str(Path(item.worktree_path).resolve(strict=False))] = moved
+        self.runtime_states[moved.surface_id] = self.runtime_states.pop(surface_id, "stopped")
+        for name, agent in list(self.agents.items()):
+            if agent.surface_id == surface_id:
+                self.agents[name] = AgentObservation(agent.name, moved.surface_id, agent.interactive_ready, agent.state)
+        return moved
 
     def observe_tab(self, *, workspace_id: str, cwd: str) -> WorkspaceObservation | None:
         path = str(Path(cwd).resolve(strict=False))

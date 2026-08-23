@@ -1,4 +1,4 @@
-"""Fresh Pisec core epoch-fourteen schema."""
+"""Fresh Pisec core epoch-fifteen schema."""
 
 from __future__ import annotations
 import json
@@ -6,15 +6,20 @@ import hashlib
 import os
 import shutil
 import sqlite3
+import subprocess
 from .models import utc_now
 
 SCHEMA_NAME = "pisec-core"
-SCHEMA_VERSION = 14
-MIGRATION_NAME = "pisec-core-epoch-14"
-PREVIOUS_SCHEMA_VERSION = 13
+SCHEMA_VERSION = 15
+MIGRATION_NAME = "pisec-core-epoch-15"
+PREVIOUS_SCHEMA_VERSION = 14
 PREVIOUS_SCHEMA_NAME = "pisec-core"
-PREVIOUS_MIGRATION_NAME = "pisec-core-epoch-13"
-PREVIOUS_SCHEMA_DIGEST = "sha256:db5e4cb13fe6f4aeaa929130a9ce136b08720cdf7eee211590c63f27054ef814"
+PREVIOUS_MIGRATION_NAME = "pisec-core-epoch-14"
+PREVIOUS_SCHEMA_DIGEST = "sha256:9a866e19c95e672ee2f8b3bd896ed6e89ea7a1d0a9179d6f766f1bbe161a637b"
+PREVIOUS_EPOCH_THIRTEEN_SCHEMA_VERSION = 13
+PREVIOUS_EPOCH_THIRTEEN_SCHEMA_NAME = "pisec-core"
+PREVIOUS_EPOCH_THIRTEEN_MIGRATION_NAME = "pisec-core-epoch-13"
+PREVIOUS_EPOCH_THIRTEEN_SCHEMA_DIGEST = "sha256:db5e4cb13fe6f4aeaa929130a9ce136b08720cdf7eee211590c63f27054ef814"
 PREVIOUS_EPOCH_TWELVE_SCHEMA_VERSION = 12
 PREVIOUS_EPOCH_TWELVE_SCHEMA_NAME = "pisec-core"
 PREVIOUS_EPOCH_TWELVE_MIGRATION_NAME = "pisec-core-epoch-12"
@@ -229,15 +234,86 @@ CREATE TABLE completion_packets (
     packet_sha256 TEXT NOT NULL UNIQUE CHECK(length(packet_sha256) = 64),
     packet_json TEXT NOT NULL CHECK(length(CAST(packet_json AS BLOB)) <= 65536),
     submitted_at TEXT NOT NULL,
-    accepted_at TEXT NOT NULL
+    accepted_at TEXT
 );
 CREATE TRIGGER completion_packets_no_update BEFORE UPDATE ON completion_packets
+WHEN NEW.completion_packet_id IS NOT OLD.completion_packet_id
+  OR NEW.workstream_id IS NOT OLD.workstream_id
+  OR NEW.source_commit_oid IS NOT OLD.source_commit_oid
+  OR NEW.task_packet_sha256 IS NOT OLD.task_packet_sha256
+  OR NEW.packet_sha256 IS NOT OLD.packet_sha256
+  OR NEW.packet_json IS NOT OLD.packet_json
+  OR NEW.submitted_at IS NOT OLD.submitted_at
+  OR (OLD.accepted_at IS NOT NULL AND NEW.accepted_at IS NOT OLD.accepted_at)
 BEGIN
     SELECT RAISE(ABORT, 'Pisec completion packets are immutable');
 END;
 CREATE TRIGGER completion_packets_no_delete BEFORE DELETE ON completion_packets
 BEGIN
     SELECT RAISE(ABORT, 'Pisec completion packets are immutable');
+END;
+
+CREATE TABLE workstream_acceptances (
+    acceptance_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    workstream_id TEXT NOT NULL REFERENCES workstreams(workstream_id),
+    completion_packet_sha256 TEXT NOT NULL REFERENCES completion_packets(packet_sha256),
+    source_commit_oid TEXT NOT NULL CHECK(length(source_commit_oid) IN (40,64)),
+    target_branch TEXT NOT NULL CHECK(length(target_branch) BETWEEN 1 AND 512),
+    candidate_patch_sha256 TEXT NOT NULL CHECK(length(candidate_patch_sha256) = 64),
+    changed_paths_json TEXT NOT NULL CHECK(length(CAST(changed_paths_json AS BLOB)) <= 32768),
+    scope_json TEXT NOT NULL CHECK(length(CAST(scope_json AS BLOB)) <= 65536),
+    scope_sha256 TEXT NOT NULL CHECK(length(scope_sha256) = 64),
+    accepted_at TEXT NOT NULL,
+    UNIQUE(workstream_id)
+);
+CREATE TRIGGER workstream_acceptances_no_update BEFORE UPDATE ON workstream_acceptances
+BEGIN
+    SELECT RAISE(ABORT, 'Pisec workstream acceptances are immutable');
+END;
+CREATE TRIGGER workstream_acceptances_no_delete BEFORE DELETE ON workstream_acceptances
+BEGIN
+    SELECT RAISE(ABORT, 'Pisec workstream acceptances are immutable');
+END;
+
+CREATE TABLE integration_jobs (
+    integration_id TEXT PRIMARY KEY,
+    acceptance_id TEXT NOT NULL UNIQUE REFERENCES workstream_acceptances(acceptance_id),
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    workstream_id TEXT NOT NULL REFERENCES workstreams(workstream_id),
+    state TEXT NOT NULL CHECK(state IN ('queued','refreshing','awaiting_worker','verifying','applying','integrated','needs_attention')),
+    target_branch TEXT NOT NULL CHECK(length(target_branch) BETWEEN 1 AND 512),
+    candidate_completion_packet_sha256 TEXT NOT NULL REFERENCES completion_packets(packet_sha256),
+    candidate_source_oid TEXT NOT NULL CHECK(length(candidate_source_oid) IN (40,64)),
+    integration_source_oid TEXT CHECK(integration_source_oid IS NULL OR length(integration_source_oid) IN (40,64)),
+    target_oid TEXT CHECK(target_oid IS NULL OR length(target_oid) IN (40,64)),
+    attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
+    last_error TEXT,
+    next_action TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    integrated_at TEXT
+);
+
+CREATE TABLE integration_reports (
+    integration_report_id TEXT PRIMARY KEY,
+    integration_id TEXT NOT NULL REFERENCES integration_jobs(integration_id),
+    workstream_id TEXT NOT NULL REFERENCES workstreams(workstream_id),
+    source_commit_oid TEXT NOT NULL CHECK(length(source_commit_oid) IN (40,64)),
+    verification_json TEXT NOT NULL CHECK(length(CAST(verification_json AS BLOB)) <= 65536),
+    changed_surfaces_json TEXT NOT NULL CHECK(length(CAST(changed_surfaces_json AS BLOB)) <= 32768),
+    residual_risk TEXT NOT NULL CHECK(length(residual_risk) <= 4096),
+    report_sha256 TEXT NOT NULL CHECK(length(report_sha256) = 64),
+    submitted_at TEXT NOT NULL,
+    UNIQUE(integration_id, source_commit_oid)
+);
+CREATE TRIGGER integration_reports_no_update BEFORE UPDATE ON integration_reports
+BEGIN
+    SELECT RAISE(ABORT, 'Pisec integration reports are immutable');
+END;
+CREATE TRIGGER integration_reports_no_delete BEFORE DELETE ON integration_reports
+BEGIN
+    SELECT RAISE(ABORT, 'Pisec integration reports are immutable');
 END;
 
 CREATE TABLE coordination_requests (
@@ -453,6 +529,11 @@ CREATE TABLE merge_receipts (
     source_commit_oid TEXT NOT NULL,
     target_branch TEXT NOT NULL,
     previous_target_oid TEXT NOT NULL,
+    acceptance_id TEXT REFERENCES workstream_acceptances(acceptance_id),
+    integration_id TEXT REFERENCES integration_jobs(integration_id),
+    accepted_source_commit_oid TEXT,
+    verification_json TEXT,
+    strategy TEXT NOT NULL DEFAULT 'ff-only',
     event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
     created_at TEXT NOT NULL,
     PRIMARY KEY(workstream_id, source_commit_oid)
@@ -1015,6 +1096,125 @@ def _add_epoch_fourteen_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def _add_epoch_fifteen_schema(connection: sqlite3.Connection) -> None:
+    """Add candidate acceptance and durable post-acceptance integration state."""
+    completion_columns = {
+        row[1]: row
+        for row in connection.execute("PRAGMA table_info(completion_packets)")
+    }
+    accepted_column = completion_columns.get("accepted_at")
+    if accepted_column is not None and int(accepted_column[3]) != 0:
+        connection.execute("DROP TRIGGER IF EXISTS completion_packets_no_update")
+        connection.execute("DROP TRIGGER IF EXISTS completion_packets_no_delete")
+        connection.execute("ALTER TABLE completion_packets RENAME TO completion_packets_epoch15")
+        connection.execute(
+            """
+            CREATE TABLE completion_packets (
+                completion_packet_id TEXT PRIMARY KEY,
+                workstream_id TEXT NOT NULL REFERENCES workstreams(workstream_id),
+                source_commit_oid TEXT NOT NULL CHECK(length(source_commit_oid) IN (40,64)),
+                task_packet_sha256 TEXT NOT NULL CHECK(length(task_packet_sha256) = 64),
+                packet_sha256 TEXT NOT NULL UNIQUE CHECK(length(packet_sha256) = 64),
+                packet_json TEXT NOT NULL CHECK(length(CAST(packet_json AS BLOB)) <= 65536),
+                submitted_at TEXT NOT NULL,
+                accepted_at TEXT
+            )
+            """
+        )
+        # Epoch fourteen used accepted_at for checkpoint submission time, so
+        # legacy rows must return to the unaccepted state.
+        connection.execute(
+            "INSERT INTO completion_packets SELECT completion_packet_id,workstream_id,source_commit_oid,task_packet_sha256,packet_sha256,packet_json,submitted_at,NULL FROM completion_packets_epoch15"
+        )
+        connection.execute("DROP TABLE completion_packets_epoch15")
+        connection.executescript(
+            """
+            CREATE TRIGGER completion_packets_no_update BEFORE UPDATE ON completion_packets
+            WHEN NEW.completion_packet_id IS NOT OLD.completion_packet_id
+              OR NEW.workstream_id IS NOT OLD.workstream_id
+              OR NEW.source_commit_oid IS NOT OLD.source_commit_oid
+              OR NEW.task_packet_sha256 IS NOT OLD.task_packet_sha256
+              OR NEW.packet_sha256 IS NOT OLD.packet_sha256
+              OR NEW.packet_json IS NOT OLD.packet_json
+              OR NEW.submitted_at IS NOT OLD.submitted_at
+              OR (OLD.accepted_at IS NOT NULL AND NEW.accepted_at IS NOT OLD.accepted_at)
+            BEGIN SELECT RAISE(ABORT, 'Pisec completion packets are immutable'); END;
+            CREATE TRIGGER completion_packets_no_delete BEFORE DELETE ON completion_packets
+            BEGIN SELECT RAISE(ABORT, 'Pisec completion packets are immutable'); END;
+            """
+        )
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS workstream_acceptances (
+            acceptance_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(project_id),
+            workstream_id TEXT NOT NULL REFERENCES workstreams(workstream_id),
+            completion_packet_sha256 TEXT NOT NULL REFERENCES completion_packets(packet_sha256),
+            source_commit_oid TEXT NOT NULL CHECK(length(source_commit_oid) IN (40,64)),
+            target_branch TEXT NOT NULL CHECK(length(target_branch) BETWEEN 1 AND 512),
+            candidate_patch_sha256 TEXT NOT NULL CHECK(length(candidate_patch_sha256) = 64),
+            changed_paths_json TEXT NOT NULL CHECK(length(CAST(changed_paths_json AS BLOB)) <= 32768),
+            scope_json TEXT NOT NULL CHECK(length(CAST(scope_json AS BLOB)) <= 65536),
+            scope_sha256 TEXT NOT NULL CHECK(length(scope_sha256) = 64),
+            accepted_at TEXT NOT NULL,
+            UNIQUE(workstream_id)
+        );
+        CREATE TRIGGER IF NOT EXISTS workstream_acceptances_no_update BEFORE UPDATE ON workstream_acceptances
+        BEGIN SELECT RAISE(ABORT, 'Pisec workstream acceptances are immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS workstream_acceptances_no_delete BEFORE DELETE ON workstream_acceptances
+        BEGIN SELECT RAISE(ABORT, 'Pisec workstream acceptances are immutable'); END;
+        CREATE TABLE IF NOT EXISTS integration_jobs (
+            integration_id TEXT PRIMARY KEY,
+            acceptance_id TEXT NOT NULL UNIQUE REFERENCES workstream_acceptances(acceptance_id),
+            project_id TEXT NOT NULL REFERENCES projects(project_id),
+            workstream_id TEXT NOT NULL REFERENCES workstreams(workstream_id),
+            state TEXT NOT NULL CHECK(state IN ('queued','refreshing','awaiting_worker','verifying','applying','integrated','needs_attention')),
+            target_branch TEXT NOT NULL CHECK(length(target_branch) BETWEEN 1 AND 512),
+            candidate_completion_packet_sha256 TEXT NOT NULL REFERENCES completion_packets(packet_sha256),
+            candidate_source_oid TEXT NOT NULL CHECK(length(candidate_source_oid) IN (40,64)),
+            integration_source_oid TEXT CHECK(integration_source_oid IS NULL OR length(integration_source_oid) IN (40,64)),
+            target_oid TEXT CHECK(target_oid IS NULL OR length(target_oid) IN (40,64)),
+            attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
+            last_error TEXT,
+            next_action TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            integrated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS integration_reports (
+            integration_report_id TEXT PRIMARY KEY,
+            integration_id TEXT NOT NULL REFERENCES integration_jobs(integration_id),
+            workstream_id TEXT NOT NULL REFERENCES workstreams(workstream_id),
+            source_commit_oid TEXT NOT NULL CHECK(length(source_commit_oid) IN (40,64)),
+            verification_json TEXT NOT NULL CHECK(length(CAST(verification_json AS BLOB)) <= 65536),
+            changed_surfaces_json TEXT NOT NULL CHECK(length(CAST(changed_surfaces_json AS BLOB)) <= 32768),
+            residual_risk TEXT NOT NULL CHECK(length(residual_risk) <= 4096),
+            report_sha256 TEXT NOT NULL CHECK(length(report_sha256) = 64),
+            submitted_at TEXT NOT NULL,
+            UNIQUE(integration_id, source_commit_oid)
+        );
+        CREATE TRIGGER IF NOT EXISTS integration_reports_no_update BEFORE UPDATE ON integration_reports
+        BEGIN SELECT RAISE(ABORT, 'Pisec integration reports are immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS integration_reports_no_delete BEFORE DELETE ON integration_reports
+        BEGIN SELECT RAISE(ABORT, 'Pisec integration reports are immutable'); END;
+        """
+    )
+    receipt_columns = {row[1] for row in connection.execute("PRAGMA table_info(merge_receipts)")}
+    additions = (
+        ("acceptance_id", "TEXT REFERENCES workstream_acceptances(acceptance_id)"),
+        ("integration_id", "TEXT REFERENCES integration_jobs(integration_id)"),
+        ("accepted_source_commit_oid", "TEXT"),
+        ("verification_json", "TEXT"),
+        ("strategy", "TEXT NOT NULL DEFAULT 'ff-only'"),
+    )
+    for name, definition in additions:
+        if name not in receipt_columns:
+            connection.execute(f"ALTER TABLE merge_receipts ADD COLUMN {name} {definition}")
+    job_columns = {row[1] for row in connection.execute("PRAGMA table_info(integration_jobs)")}
+    if "candidate_completion_packet_sha256" not in job_columns:
+        connection.execute("ALTER TABLE integration_jobs ADD COLUMN candidate_completion_packet_sha256 TEXT REFERENCES completion_packets(packet_sha256)")
+
+
 def _rebuild_epoch_ten_operations(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -1051,8 +1251,11 @@ def migrate_schema(connection: sqlite3.Connection) -> bool:
     expected = (SCHEMA_NAME, SCHEMA_VERSION, schema_digest(), MIGRATION_NAME)
     if actual == expected:
         return False
-    epoch_thirteen_identities = {
+    epoch_fourteen_identities = {
         (PREVIOUS_SCHEMA_NAME, PREVIOUS_SCHEMA_VERSION, PREVIOUS_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME),
+    }
+    epoch_thirteen_identities = {
+        (PREVIOUS_EPOCH_THIRTEEN_SCHEMA_NAME, PREVIOUS_EPOCH_THIRTEEN_SCHEMA_VERSION, PREVIOUS_EPOCH_THIRTEEN_SCHEMA_DIGEST, PREVIOUS_EPOCH_THIRTEEN_MIGRATION_NAME),
     }
     epoch_twelve_identities = {
         (PREVIOUS_EPOCH_TWELVE_SCHEMA_NAME, PREVIOUS_EPOCH_TWELVE_SCHEMA_VERSION, PREVIOUS_EPOCH_TWELVE_SCHEMA_DIGEST, PREVIOUS_EPOCH_TWELVE_MIGRATION_NAME),
@@ -1075,12 +1278,12 @@ def migrate_schema(connection: sqlite3.Connection) -> bool:
     }
     epoch_seven = (SCHEMA_NAME, EPOCH_SEVEN_SCHEMA_VERSION, EPOCH_SEVEN_SCHEMA_DIGEST, EPOCH_SEVEN_MIGRATION_NAME)
     epoch_six = (SCHEMA_NAME, EPOCH_SIX_SCHEMA_VERSION, EPOCH_SIX_SCHEMA_DIGEST, EPOCH_SIX_MIGRATION_NAME)
-    if actual not in epoch_thirteen_identities | epoch_twelve_identities | epoch_eleven_identities | epoch_ten_identities | epoch_nine_identities | epoch_eight_identities | {epoch_six, epoch_seven}:
+    if actual not in epoch_fourteen_identities | epoch_thirteen_identities | epoch_twelve_identities | epoch_eleven_identities | epoch_ten_identities | epoch_nine_identities | epoch_eight_identities | {epoch_six, epoch_seven}:
         raise sqlite3.DatabaseError("unsupported Pisec schema migration")
     connection.execute("PRAGMA foreign_keys=OFF")
     connection.execute("BEGIN IMMEDIATE")
     try:
-        if actual not in epoch_twelve_identities | epoch_thirteen_identities:
+        if actual not in epoch_twelve_identities | epoch_thirteen_identities | epoch_fourteen_identities:
             if actual == epoch_six and "data_dirs" not in {row[1] for row in connection.execute("PRAGMA table_info(projects)")}:
                 connection.execute("ALTER TABLE projects ADD COLUMN data_dirs TEXT")
             if actual in {epoch_six, epoch_seven} | epoch_eight_identities:
@@ -1124,10 +1327,11 @@ def migrate_schema(connection: sqlite3.Connection) -> bool:
                 connection.execute("DROP TABLE secretary_issue_reports_epoch11")
             now = utc_now()
             connection.execute("INSERT OR IGNORE INTO issue_inbox(workstream_id,generation,notified_generation,updated_at) SELECT workstream_id,0,0,? FROM workstreams WHERE kind IN ('secretary','first_mate') AND desired_state <> 'retired'", (now,))
-        if actual not in epoch_thirteen_identities:
+        if actual not in epoch_thirteen_identities | epoch_fourteen_identities:
             _rebuild_epoch_thirteen_operations(connection)
             _add_epoch_thirteen_schema(connection)
         _add_epoch_fourteen_schema(connection)
+        _add_epoch_fifteen_schema(connection)
         connection.execute(
             "UPDATE control_meta SET schema_version=?,schema_sha256=?,migration_name=? WHERE singleton=1",
             (SCHEMA_VERSION, schema_digest(), MIGRATION_NAME),
