@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from typing import Any, Mapping
 
 from .events import append_event_in_transaction
@@ -79,7 +80,10 @@ def report_issue(store: Any, *, project_id: str, reporter_workstream_id: str, ca
             (issue_id, project_id, reporter_workstream_id, reporter["kind"], category, severity, text[0], text[1], text[2], evidence_json, idempotency_key, digest, "open", now, now),
         )
         append_event_in_transaction(store.conn, kind="issue.reported", project_id=project_id, workstream_id=reporter_workstream_id, payload={"issueId": issue_id, "reporterKind": reporter["kind"], "severity": severity})
-        recipients = [row["workstream_id"] for row in store.conn.execute("SELECT workstream_id FROM workstreams WHERE kind='first_mate' AND desired_state='active'")]
+        fleet_project = store.conn.execute("SELECT coordination_mode FROM projects WHERE project_id=?", (project_id,)).fetchone()
+        recipients = []
+        if fleet_project is not None and fleet_project["coordination_mode"] == "fleet":
+            recipients = [row["workstream_id"] for row in store.conn.execute("SELECT workstream_id FROM workstreams WHERE kind='first_mate' AND desired_state='active'")]
         if reporter["kind"] == "worker":
             recipients.extend(row["workstream_id"] for row in store.conn.execute("SELECT workstream_id FROM workstreams WHERE project_id=? AND kind='secretary' AND desired_state='active'", (project_id,)))
         for recipient in set(recipients):
@@ -87,7 +91,7 @@ def report_issue(store: Any, *, project_id: str, reporter_workstream_id: str, ca
     return inspect_issue(store, issue_id=issue_id, project_id=project_id)
 
 
-def list_issues(store: Any, *, project_id: str | None = None, state: str | None = None, limit: int = 100, reporter_workstream_id: str | None = None) -> list[dict[str, Any]]:
+def list_issues(store: Any, *, project_id: str | None = None, project_ids: Sequence[str] | None = None, state: str | None = None, limit: int = 100, reporter_workstream_id: str | None = None) -> list[dict[str, Any]]:
     if limit < 1 or limit > 1000:
         raise InvalidRequestError("issue limit is invalid")
     params: list[Any] = []
@@ -95,6 +99,12 @@ def list_issues(store: Any, *, project_id: str | None = None, state: str | None 
     if project_id is not None:
         where.append("project_id=?")
         params.append(project_id)
+    if project_ids is not None:
+        ids = list(dict.fromkeys(project_ids))
+        if not ids:
+            return []
+        where.append("project_id IN (" + ",".join("?" for _ in ids) + ")")
+        params.extend(ids)
     if reporter_workstream_id is not None:
         where.append("(reporter_workstream_id=? OR EXISTS (SELECT 1 FROM issue_remediations r WHERE r.issue_id=issues.issue_id AND r.workstream_id=?))")
         params.extend((reporter_workstream_id, reporter_workstream_id))

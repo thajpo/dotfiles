@@ -20,6 +20,7 @@ class FirstMatePromptTests(unittest.TestCase):
     def test_brief_preserves_safety_and_response_contract(self):
         self.assertIn(FIRST_MATE_RESPONSE_CONTRACT, FIRST_MATE_BRIEF)
         for safety_rule in (
+            "configured First Mate fleet scope",
             "explicit project IDs",
             "Never self-approve worker creation or merges",
             "never write project files",

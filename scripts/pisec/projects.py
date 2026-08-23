@@ -12,13 +12,14 @@ from typing import Any
 
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
-from .models import ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, bounded_text, canonical_json, new_id, utc_now, validate_id
+from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, bounded_text, canonical_json, new_id, utc_now, validate_id
 from .policies import normalize_merge_policy, normalize_worker_policy
 from .research import research_counts
 
 COORDINATION_MODES = frozenset({"fleet", "project", "direct"})
 WORKER_CREATION_POLICIES = frozenset({"review", "bounded_auto"})
 MERGE_POLICIES = frozenset({"review", "checked_auto"})
+FLEET_COORDINATION_MODE = "fleet"
 
 
 def _git(path: Path, *args: str) -> str:
@@ -137,6 +138,27 @@ def list_projects(store: Any, include_inactive: bool = False) -> list[dict[str, 
     else:
         rows = store.conn.execute("SELECT * FROM projects WHERE active=1 ORDER BY display_name,project_id")
     return [dict(row) for row in rows]
+
+
+def list_fleet_projects(store: Any) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in store.conn.execute(
+            "SELECT * FROM projects WHERE active=1 AND coordination_mode=? ORDER BY display_name,project_id",
+            (FLEET_COORDINATION_MODE,),
+        )
+    ]
+
+
+def fleet_project_ids(store: Any) -> list[str]:
+    return [str(row["project_id"]) for row in store.conn.execute("SELECT project_id FROM projects WHERE active=1 AND coordination_mode=? ORDER BY display_name,project_id", (FLEET_COORDINATION_MODE,))]
+
+
+def require_fleet_project(store: Any, project_id: str) -> dict[str, Any]:
+    project = get_project(store, project_id)
+    if not project.get("active") or project.get("coordination_mode") != FLEET_COORDINATION_MODE:
+        raise AuthorizationError("project is outside the First Mate fleet scope")
+    return project
 
 
 def update_project_policy(
@@ -396,7 +418,7 @@ def fleet_activity(store: Any, after: int = 0) -> dict[str, Any]:
             "displayName": row["display_name"],
             "cards": project_activity(store, row["project_id"], after)["cards"],
         }
-        for row in list_projects(store)
+        for row in list_fleet_projects(store)
     ]
     return {"projects": projects, "after": after, "cursor": int(store.conn.execute("SELECT COALESCE(MAX(sequence),0) FROM events").fetchone()[0])}
 

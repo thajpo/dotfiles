@@ -2,10 +2,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.pisec.models import ConflictError, InvalidRequestError
+from scripts.pisec.models import AuthorizationError, ConflictError, InvalidRequestError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.project_workspaces import project_workspace
-from scripts.pisec.projects import register_project, update_project_policy
+from scripts.pisec.projects import fleet_activity, list_fleet_projects, register_project, require_fleet_project, update_project_policy
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
 from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
 
@@ -42,6 +42,25 @@ class ProjectPolicyTests(unittest.TestCase):
                 self.assertEqual(updated["coordination_mode"], "fleet")
                 self.assertEqual(updated["worker_creation_policy"], "bounded_auto")
                 self.assertEqual(updated["worker_creation_policy_json"]["workerLimit"], 2)
+
+    def test_first_mate_scope_only_includes_fleet_projects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fleet_repo = root / "fleet-repo"
+            secretary_repo = root / "secretary-repo"
+            make_repo(fleet_repo)
+            make_repo(secretary_repo)
+            with PiStore(root / "state") as store:
+                fleet_project = register_project(store, fleet_repo)
+                secretary_project = register_project(store, secretary_repo)
+                update_project_policy(store, fleet_project["project_id"], coordination_mode="fleet")
+                update_project_policy(store, secretary_project["project_id"], coordination_mode="project")
+
+                self.assertEqual([row["project_id"] for row in list_fleet_projects(store)], [fleet_project["project_id"]])
+                self.assertEqual(fleet_activity(store)["projects"], [{"projectId": fleet_project["project_id"], "displayName": fleet_project["display_name"], "cards": []}])
+                self.assertEqual(require_fleet_project(store, fleet_project["project_id"])["project_id"], fleet_project["project_id"])
+                with self.assertRaises(AuthorizationError):
+                    require_fleet_project(store, secretary_project["project_id"])
 
     def test_bounded_worker_policy_rechecks_profile_and_limit(self):
         with tempfile.TemporaryDirectory() as tmp:

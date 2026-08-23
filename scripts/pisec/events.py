@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from typing import Any
 
 from .models import canonical_json, new_id, utc_now
@@ -33,9 +34,18 @@ def append_event(store: Any, **kwargs: Any) -> dict[str, Any]:
         return append_event_in_transaction(store.conn, **kwargs)
 
 
-def list_events(store: Any, *, after: int = 0, limit: int = 256) -> list[dict[str, Any]]:
+def list_events(store: Any, *, after: int = 0, limit: int = 256, project_ids: Sequence[str] | None = None) -> list[dict[str, Any]]:
     if not isinstance(after, int) or isinstance(after, bool) or after < 0:
         raise ValueError("after must be a non-negative integer")
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1000:
         raise ValueError("limit must be between 1 and 1000")
-    return [dict(row) for row in store.conn.execute("SELECT * FROM events WHERE sequence>? ORDER BY sequence LIMIT ?", (after, limit))]
+    params: list[Any] = [after]
+    where = ["sequence>?"]
+    if project_ids is not None:
+        ids = list(dict.fromkeys(project_ids))
+        if not ids:
+            return []
+        where.append("project_id IN (" + ",".join("?" for _ in ids) + ")")
+        params.extend(ids)
+    params.append(limit)
+    return [dict(row) for row in store.conn.execute("SELECT * FROM events WHERE " + " AND ".join(where) + " ORDER BY sequence LIMIT ?", params)]

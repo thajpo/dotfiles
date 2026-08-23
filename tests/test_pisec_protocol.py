@@ -9,9 +9,9 @@ import unittest
 
 from scripts.pisec.adapters import AdapterRegistry, AgentObservation, WorkspaceObservation
 from scripts.pisec.broker import BrokerDispatcher, BrokerService
-from scripts.pisec.models import InvalidRequestError, PisecError, new_id
+from scripts.pisec.models import AuthorizationError, InvalidRequestError, PisecError, new_id
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.projects import register_project
+from scripts.pisec.projects import register_project, update_project_policy
 from scripts.pisec.protocol import decode_request, request, success_response
 from scripts.pisec.secretary import ensure_secretary
 from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
@@ -68,6 +68,15 @@ class BrokerSocketTests(unittest.TestCase):
         self.assertEqual(projects["projects"][0]["project_id"], self.project_id)
         status = request(self.service.paths["secretary"], "project.status", {"authToken": self.token})
         self.assertEqual(status["project"]["project_id"], self.project_id)
+
+    def test_first_mate_fleet_scope_is_required_and_filtered(self):
+        with PiStore(self.state) as store:
+            dispatcher = self.service.dispatcher
+            with self.assertRaises(AuthorizationError):
+                dispatcher._fleet(store, "fleet.status", "ws_00000000000000000000000000000000", {"projectId": self.project_id})
+            self.assertEqual(dispatcher._fleet(store, "fleet.status", "ws_00000000000000000000000000000000", {})["projects"], [])
+            update_project_policy(store, self.project_id, coordination_mode="fleet")
+            self.assertEqual([item["project"]["project_id"] for item in dispatcher._fleet(store, "fleet.status", "ws_00000000000000000000000000000000", {})["projects"]], [self.project_id])
     def test_secretary_issue_report_is_durable_and_idempotent(self):
         payload = {"authToken": self.token, "category": "permission", "severity": "blocking", "summary": "Worker cannot read approved source", "details": "The fenced worker received permission denied for the approved Herdr excerpt.", "requestedAction": "Review the minimum read-only source scope.", "evidence": ["PermissionError: denied"], "idempotencyKey": "source-read-1"}
         first = request(self.service.paths["secretary"], "secretary.issue.report", payload)

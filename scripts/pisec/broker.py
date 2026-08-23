@@ -21,7 +21,7 @@ from .events import list_events
 from .migration import migrate_legacy_bindings
 from .models import AuthorizationError, ConflictError, InvalidRequestError, NotFoundError, PisecError, ScopeMismatchError, UnsafeStateError, bounded_text, utc_now, validate_id
 from .pi_store import PiStore
-from .projects import assert_project_writable, fleet_activity, get_project, list_projects, project_activity, project_status, register_project, resolve_project, update_project_policy
+from .projects import assert_project_writable, fleet_activity, fleet_project_ids, get_project, list_fleet_projects, list_projects, project_activity, project_status, register_project, require_fleet_project, resolve_project, update_project_policy
 from .protocol import MAX_MESSAGE_BYTES, decode_request, error_response, success_response
 from .research import (
     acknowledge_research,
@@ -377,6 +377,9 @@ class BrokerDispatcher:
 
     def _wake_project(self, project_id: str) -> None:
         with self.store_factory() as store:
+            project = store.conn.execute("SELECT coordination_mode FROM projects WHERE project_id=? AND active=1", (project_id,)).fetchone()
+            if project is None or project["coordination_mode"] != "fleet":
+                return
             issue = store.conn.execute(
                 "SELECT i.workstream_id,i.generation,r.workspace_surface_id FROM issue_inbox i JOIN workstreams w ON w.workstream_id=i.workstream_id JOIN runtime_bindings r ON r.workstream_id=w.workstream_id WHERE w.project_id=? AND w.desired_state='active' AND i.generation>i.notified_generation ORDER BY i.updated_at LIMIT 1",
                 (project_id,),
@@ -962,7 +965,7 @@ class BrokerDispatcher:
         project_id = payload.get("projectId")
         if not isinstance(project_id, str):
             raise InvalidRequestError("fleet projectId is required")
-        return str(get_project(store, project_id)["project_id"])
+        return str(require_fleet_project(store, project_id)["project_id"])
 
     def _fleet(self, store: PiStore, operation: str, first_mate_workstream_id: str, payload: dict[str, Any]) -> Any:
         if operation == "fleet.activity":
@@ -973,13 +976,23 @@ class BrokerDispatcher:
             if payload.get("projectId") is not None:
                 project_id = self._fleet_project(store, payload)
                 return _public_project_status(project_status(store, project_id))
-            statuses = [_public_project_status(project_status(store, project["project_id"])) for project in list_projects(store)]
+            statuses = [_public_project_status(project_status(store, project["project_id"])) for project in list_fleet_projects(store)]
+            return {"projects": statuses}
         if operation == "fleet.issue.list":
             _exact(payload, set(), {"projectId", "state", "limit"})
-            return {"issues": list_issues(store, project_id=payload.get("projectId"), state=payload.get("state"), limit=int(payload.get("limit", 100)))}
+            project_id = payload.get("projectId")
+            if project_id is not None:
+                project_id = self._fleet_project(store, payload)
+            return {"issues": list_issues(store, project_id=project_id, project_ids=None if project_id is not None else fleet_project_ids(store), state=payload.get("state"), limit=int(payload.get("limit", 100)))}
         if operation == "fleet.issue.inspect":
             _exact(payload, {"issueId"}, {"projectId"})
-            return inspect_issue(store, issue_id=payload["issueId"], project_id=payload.get("projectId"))
+            project_id = payload.get("projectId")
+            if project_id is not None:
+                project_id = self._fleet_project(store, payload)
+            issue = inspect_issue(store, issue_id=payload["issueId"], project_id=project_id)
+            if project_id is None:
+                require_fleet_project(store, str(issue["project_id"]))
+            return issue
         if operation == "fleet.issue.add_context":
             _exact(payload, {"projectId", "issueId", "context", "idempotencyKey"})
             project_id = self._fleet_project(store, payload)
@@ -999,8 +1012,9 @@ class BrokerDispatcher:
         if operation == "fleet.access.inspect":
             _exact(payload, {"projectId", "grantId"})
             from .access import _grant_row
+            project_id = self._fleet_project(store, payload)
             grant = _grant_row(store, payload["grantId"])
-            if grant["project_id"] != self._fleet_project(store, payload):
+            if grant["project_id"] != project_id:
                 raise NotFoundError("access grant was not found")
             return dict(grant)
         if operation == "fleet.access.grant.prepare":
@@ -1029,7 +1043,7 @@ class BrokerDispatcher:
             return authorize_apply_access_revoke(store, scope=approval_scope, harness=self.harness, workspace=self.workspace)
         if operation == "fleet.events":
             _exact(payload, set(), {"after", "limit"})
-            rows = list_events(store, after=int(payload.get("after", 0)), limit=int(payload.get("limit", 256)))
+            rows = list_events(store, after=int(payload.get("after", 0)), limit=int(payload.get("limit", 256)), project_ids=fleet_project_ids(store))
             return {"events": [{"sequence": row["sequence"], "eventId": row["event_id"], "kind": row["kind"], "projectId": row["project_id"], "workstreamId": row["workstream_id"], "operationId": row["operation_id"], "createdAt": row["created_at"]} for row in rows]}
         if operation == "fleet.secretary.send":
             _exact(payload, {"projectId", "text"}, {"workstreamId"})
