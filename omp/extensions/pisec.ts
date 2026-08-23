@@ -484,6 +484,7 @@ function fleetTools(pi: ExtensionAPI): void {
         }
       },
     });
+  };
   const projectId = z.string().min(1).max(128);
   fleet("pisec_fleet_list_issues", "List issues", "fleet.issue.list", z.object({ project_id: projectId.optional(), state: z.enum(["open", "acknowledged", "remediating", "verifying", "resolved"]).optional(), limit: z.number().int().min(1).max(1000).optional() }), "read", params => ({ ...(params.project_id ? { projectId: params.project_id } : {}), ...(params.state ? { state: params.state } : {}), ...(params.limit ? { limit: params.limit } : {}) }));
   fleet("pisec_fleet_inspect_issue", "Inspect issue", "fleet.issue.inspect", z.object({ issue_id: z.string().min(1).max(128), project_id: projectId.optional() }), "read", params => ({ issueId: params.issue_id, ...(params.project_id ? { projectId: params.project_id } : {}) }));

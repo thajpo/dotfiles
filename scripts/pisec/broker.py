@@ -50,6 +50,7 @@ FLEET_OPERATIONS = SOCKET_OPERATIONS["fleet"]
 RUNTIME_OPERATIONS = SOCKET_OPERATIONS["runtime"]
 from .operation_contracts import operation_manifest
 WORKSPACE_RECONCILE_INTERVAL_SECONDS = 5.0
+WORKSPACE_STARTUP_GRACE_SECONDS = 2.0
 RUNTIME_RESTART_BACKOFF_SECONDS = 30.0
 RESEARCH_WAKE_DEBOUNCE_SECONDS = 0.1
 logger = logging.getLogger(__name__)
@@ -238,6 +239,9 @@ class BrokerDispatcher:
                     (workstream_id,),
                 ).fetchone()
                 if current_row is None or current_row["desired_state"] != "active" or current_row["provisioning_state"] not in {"bound", "needs_attention"}:
+                    continue
+                selected_generation = current_row["launch_generation_sha256"] or current_row["applied_generation_sha256"]
+                if selected_generation != current_row["desired_generation_sha256"]:
                     continue
                 binding = dict(current_row)
                 observation = self.workspace.observe_surface(
@@ -517,10 +521,17 @@ class BrokerDispatcher:
             scope = effective_runtime_scope(store, binding)
             runtime_scope = {"pythonEnv": scope.get("pythonEnv"), "readPaths": [{"path": path, "sources": scope.get("readPathSources", {}).get(path, [])} for path in scope.get("dataDirs", [])]}
             row = store.conn.execute("SELECT * FROM runtime_bootstrap_sessions WHERE workstream_id=? AND session_file=?", (workstream_id, session_file)).fetchone()
+            full = row is None
             if row is None:
                 now = utc_now()
                 with store.transaction():
                     store.conn.execute("INSERT INTO runtime_bootstrap_sessions(workstream_id,session_file,task_packet_delivered,bootstrap_generation,acknowledged_generation,last_event_sequence,updated_at) VALUES(?,?,0,1,0,0,?)", (workstream_id, session_file, now))
+                row = store.conn.execute("SELECT * FROM runtime_bootstrap_sessions WHERE workstream_id=? AND session_file=?", (workstream_id, session_file)).fetchone()
+            if row is None:
+                raise PisecError("runtime bootstrap session could not be created")
+            full = full or not bool(row["task_packet_delivered"])
+            latest_event = store.conn.execute("SELECT COALESCE(MAX(sequence),0) FROM events WHERE workstream_id=?", (workstream_id,)).fetchone()[0]
+            changed = int(latest_event) > int(row["last_event_sequence"])
             if full:
                 return {"sessionFile": session_file, "generation": row["bootstrap_generation"], "fullPacket": packet, "runtimeScope": runtime_scope, "changed": True}
             return {"sessionFile": session_file, "generation": row["bootstrap_generation"], "fullPacket": None, "runtimeScope": runtime_scope, "changed": bool(changed), "coordination": [], "research": []}

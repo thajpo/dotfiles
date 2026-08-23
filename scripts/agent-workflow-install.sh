@@ -377,7 +377,7 @@ from pathlib import Path
 import os
 import sqlite3
 
-from scripts.pisec.pi_schema import MIGRATION_NAME, PREVIOUS_MIGRATION_NAME, PREVIOUS_SCHEMA_DIGEST, PREVIOUS_SCHEMA_VERSION, SCHEMA_NAME, SCHEMA_VERSION, schema_digest
+from scripts.pisec.pi_schema import MIGRATION_NAME, PREVIOUS_EPOCH_TEN_MIGRATION_NAME, PREVIOUS_EPOCH_TEN_SCHEMA_DIGEST, PREVIOUS_EPOCH_TEN_SCHEMA_VERSION, PREVIOUS_MIGRATION_NAME, PREVIOUS_SCHEMA_DIGEST, PREVIOUS_SCHEMA_VERSION, SCHEMA_NAME, SCHEMA_VERSION, schema_digest
 
 root = Path(os.environ["PISEC_STATE_CHECK_ROOT"])
 if not root.exists() and not root.is_symlink():
@@ -402,6 +402,10 @@ actual = None if row is None else tuple(row)
 if actual == expected:
     print("current")
 elif actual == (SCHEMA_NAME, PREVIOUS_SCHEMA_VERSION, PREVIOUS_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME):
+    print("migratable")
+elif actual in {
+    (SCHEMA_NAME, PREVIOUS_EPOCH_TEN_SCHEMA_VERSION, PREVIOUS_EPOCH_TEN_SCHEMA_DIGEST, PREVIOUS_EPOCH_TEN_MIGRATION_NAME),
+}:
     print("migratable")
 else:
     print("stale")
