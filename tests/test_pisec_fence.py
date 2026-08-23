@@ -278,6 +278,32 @@ class FencePolicyAndShimTests(unittest.TestCase):
         common = (repo / common_value).resolve() if not Path(common_value).is_absolute() else Path(common_value).resolve()
         return repo, worktree, common, workstream_id, branch
 
+    def test_rendered_first_mate_policy_exposes_only_fleet_project_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            assigned = root / "assigned"
+            assigned.mkdir()
+            agent = root / "agent"
+            agent.mkdir()
+            fleet_worktree = root / "worktrees" / new_id("prj")
+            fleet_objects = root / "git-objects" / new_id("prj")
+            scope = {
+                "projectId": new_id("prj"),
+                "workstreamId": new_id("ws"),
+                "executionProfile": "first-mate",
+                "worktreePath": str(assigned),
+                "fleetProjectWorktrees": [str(fleet_worktree)],
+                "fleetProjectGitObjects": [str(fleet_objects)],
+            }
+            policy_path, digest = render(scope, root, agent, make_config(root))
+            policy = json.loads(policy_path.read_text())
+            allow_read = policy["filesystem"]["allowRead"]
+            self.assertIn(str(fleet_worktree), allow_read)
+            self.assertIn(str(fleet_objects), allow_read)
+            self.assertNotIn(str(fleet_worktree.parent), allow_read)
+            self.assertNotIn(str(fleet_objects.parent), allow_read)
+            self.assertEqual(hashlib.sha256(policy_path.read_bytes()).hexdigest(), digest)
+
     def test_rendered_worker_policy_validates_with_fence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

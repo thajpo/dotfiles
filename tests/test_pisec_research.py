@@ -9,7 +9,7 @@ from scripts.pisec.adapters import AdapterRegistry
 from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.models import AuthorizationError, IdempotencyConflictError, InvalidRequestError, NotFoundError
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.projects import register_project
+from scripts.pisec.projects import register_project, update_project_policy
 from scripts.pisec.research import inspect_research, list_research_requests, list_unacknowledged_research, research_counts, validate_research_request
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
@@ -163,6 +163,7 @@ class ResearchTests(unittest.TestCase):
 
     def test_research_wake_replays_after_workspace_failure(self):
         temp, root, store, harness, workspace, project_a, _project_b, _secretary, worker_a, _worker_b = self.fixture()
+        update_project_policy(store, project_a["project_id"], coordination_mode="fleet")
         store.close()
         self.addCleanup(temp.cleanup)
         dispatcher = self.dispatcher(root, harness, workspace)

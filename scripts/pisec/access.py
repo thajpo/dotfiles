@@ -197,7 +197,8 @@ def effective_runtime_scope(store: Any, binding: Mapping[str, Any]) -> dict[str,
         for grant in store.conn.execute("SELECT * FROM access_grants WHERE project_id=? AND state IN ('activating','active') AND (subject_kind='project_workers' OR workstream_id=?)", (binding["project_id"], binding["workstream_id"])):
             data_dirs.append(str(grant["path"]))
             grant_sources.setdefault(str(grant["path"]), []).append({"kind": "project_grant" if grant["subject_kind"] == "project_workers" else "workstream_grant", "sourceId": str(grant["grant_id"])})
-    result = dict(scope)
+    from .releases import fleet_scope_paths
+    result = fleet_scope_paths(store, scope)
     result["dataDirs"] = sorted(set(data_dirs))
     result["readPathSources"] = {path: ([{"kind": "project_data", "sourceId": str(binding["project_id"])}] if path in data_dirs and path not in grant_sources else []) + grant_sources.get(path, []) for path in result["dataDirs"]}
     return result

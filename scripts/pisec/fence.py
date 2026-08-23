@@ -229,8 +229,18 @@ def render_policy(
     elif profile == "first-mate":
         assigned = Path(scope["worktreePath"]).resolve(strict=True)
         replacements["${ASSIGNED_ROOT}"] = str(assigned)
-        replacements["${FLEET_WORKTREES}"] = _resolve_scope_dir(scope.get("fleetWorktreesDir"), "fleet worktrees dir")
-        replacements["${FLEET_GIT_OBJECTS}"] = _resolve_scope_dir(scope.get("fleetGitObjectsDir"), "fleet git objects dir")
+        def _resolve_scope_dirs(raw: Any, label: str) -> list[str]:
+            if not isinstance(raw, list) or len(raw) > 4096:
+                raise NeedsAttentionError(f"approved {label} are missing or invalid")
+            result: list[str] = []
+            for item in raw:
+                path = _resolve_scope_dir(item, label)
+                if path not in result:
+                    result.append(path)
+            return result
+
+        replacements["${FLEET_WORKTREES}"] = _resolve_scope_dirs(scope.get("fleetProjectWorktrees"), "fleet project worktree dirs")
+        replacements["${FLEET_GIT_OBJECTS}"] = _resolve_scope_dirs(scope.get("fleetProjectGitObjects"), "fleet project Git object dirs")
         replacements["${FLEET_SOCKET_DIR}"] = str((runtime_base / "fleet").absolute())
     else:
         worktree = Path(scope["worktreePath"]).resolve(strict=True)
