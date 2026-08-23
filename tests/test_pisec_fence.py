@@ -2,6 +2,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import runpy
 import sqlite3
 import subprocess
 import tempfile
@@ -240,8 +241,11 @@ class RuntimeMaterializationTests(unittest.TestCase):
             launcher = adapter.commit_launch_binding(released_scope, artifacts, workspace_session_name="main", workspace_id="w1", workspace_view_id="w1:t1", workspace_surface_id="w1:p1")
             descriptor_path = launcher.parent / "binding.json"
             document = json.loads(descriptor_path.read_text())
+            launcher_schema = runpy.run_path(str(launcher))["DESCRIPTOR_FIELDS"]
+            self.assertEqual(set(document), launcher_schema)
             self.assertEqual(document["schemaVersion"], 3)
             self.assertEqual(document["harnessId"], "omp")
+            self.assertEqual(document["runtimeReleaseId"], released_scope["runtimeReleaseId"])
             self.assertEqual(document["canonicalRoot"], str(managed.resolve()))
             self.assertEqual(document["workspaceSessionName"], "main")
             self.assertEqual(document["workspaceSurfaceId"], "w1:p1")
@@ -704,6 +708,9 @@ class FencePolicyAndShimTests(unittest.TestCase):
                 launch_secret_path TEXT,
                 policy_path TEXT,
                 policy_sha256 TEXT,
+                desired_release_id TEXT,
+                applied_release_id TEXT,
+                launch_release_id TEXT,
                 desired_generation_sha256 TEXT,
                 applied_generation_sha256 TEXT,
                 launch_generation_sha256 TEXT,
@@ -722,8 +729,8 @@ class FencePolicyAndShimTests(unittest.TestCase):
             (workstream_id, project_id, role, "secretary-project" if role == "secretary" else "worker-default", str(managed.resolve()), "active", "bound"),
         )
         connection.execute(
-            "INSERT INTO runtime_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (workstream_id, "main", workspace_id, view_id, surface_id, "omp", str(agent), str(secret), str(policy), hashlib.sha256(policy.read_bytes()).hexdigest(), "a" * 64, "a" * 64, "a" * 64, None if private is None else str(private), session_kind, session_value, "starting"),
+            "INSERT INTO runtime_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (workstream_id, "main", workspace_id, view_id, surface_id, "omp", str(agent), str(secret), str(policy), hashlib.sha256(policy.read_bytes()).hexdigest(), "rel_fixture", "rel_fixture", "rel_fixture", "a" * 64, "a" * 64, "a" * 64, None if private is None else str(private), session_kind, session_value, "starting"),
         )
         connection.commit()
         connection.close()
@@ -748,6 +755,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             "extensionPath": str(extension),
             "policyPath": str(policy),
             "policySha256": hashlib.sha256(policy.read_bytes()).hexdigest(),
+            "runtimeReleaseId": "rel_fixture",
             "generationSha256": "a" * 64,
             "launchSecretPath": str(secret),
             "xdgDataHome": str(xdg["data"]),

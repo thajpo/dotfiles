@@ -238,7 +238,7 @@ class BrokerDispatcher:
                     "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?",
                     (workstream_id,),
                 ).fetchone()
-                if current_row is None or current_row["desired_state"] != "active" or current_row["provisioning_state"] not in {"bound", "needs_attention"}:
+                if current_row is None or current_row["refresh_pending"] or current_row["desired_state"] != "active" or current_row["provisioning_state"] not in {"bound", "needs_attention"}:
                     continue
                 selected_generation = current_row["launch_generation_sha256"] or current_row["applied_generation_sha256"]
                 if not isinstance(selected_generation, str) or len(selected_generation) != 64:

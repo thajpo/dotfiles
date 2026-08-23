@@ -36,6 +36,7 @@ DESCRIPTOR_FIELDS = frozenset(
         "extensionPath",
         "policyPath",
         "policySha256",
+        "runtimeReleaseId",
         "generationSha256",
         "xdgDataHome",
         "xdgStateHome",
@@ -257,7 +258,8 @@ def validate_durable_binding(descriptor: dict[str, object]) -> sqlite3.Row:
             SELECT b.workstream_id, b.workspace_session_name, b.workspace_id,
                    b.workspace_view_id, b.workspace_surface_id,
                    b.harness_id, b.harness_home, b.launch_secret_path, b.policy_path,
-                   b.policy_sha256, b.desired_generation_sha256, b.private_git_object_dir, b.observed_state,
+                   b.policy_sha256, b.desired_release_id, b.desired_generation_sha256, b.private_git_object_dir, b.observed_state,
+                   b.applied_release_id, b.launch_release_id,
                    b.applied_generation_sha256, b.launch_generation_sha256,
                    b.native_session_kind, b.native_session_value,
                    w.project_id, w.kind, w.execution_profile, w.worktree_path,
@@ -281,7 +283,10 @@ def validate_durable_binding(descriptor: dict[str, object]) -> sqlite3.Row:
     # generation.  Once a runtime has attested its session start, launch is
     # cleared and applied is the durable authorization for subsequent starts.
     # The desired generation may legitimately be newer while refresh is pending.
+    selected_release = row["launch_release_id"] or row["applied_release_id"]
     selected_generation = row["launch_generation_sha256"] or row["applied_generation_sha256"]
+    if not isinstance(selected_release, str) or not selected_release:
+        fail("durable binding has no selected launch release")
     if not isinstance(selected_generation, str) or not selected_generation:
         fail("durable binding has no selected launch generation")
     expected_role = "secretary" if row["kind"] == "secretary" else "first_mate" if row["kind"] == "first_mate" else "worker"
@@ -296,6 +301,7 @@ def validate_durable_binding(descriptor: dict[str, object]) -> sqlite3.Row:
         or row["launch_secret_path"] != descriptor["launchSecretPath"]
         or row["policy_path"] != descriptor["policyPath"]
         or row["policy_sha256"] != descriptor["policySha256"]
+        or selected_release != descriptor["runtimeReleaseId"]
         or selected_generation != descriptor["generationSha256"]
         or row["kind"] != descriptor["role"]
         or expected_role != descriptor["role"]

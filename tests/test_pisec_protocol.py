@@ -227,6 +227,34 @@ class BrokerSocketTests(unittest.TestCase):
         self.assertEqual(result["resumed"], [])
         self.assertFalse(any(call[0] == "run" for call in self.workspace.calls))
 
+    def test_startup_reconcile_does_not_overtake_generation_refresh(self):
+        repo_path = str(self.repo)
+        self.workspace.worktrees[repo_path] = WorkspaceObservation(
+            workspace_id=self.binding["workspace_id"],
+            view_id=self.binding["workspace_view_id"],
+            surface_id=self.binding["workspace_surface_id"],
+            worktree_path=repo_path,
+            branch_name=None,
+            agent=None,
+        )
+        self.workspace.runtime_states[self.binding["workspace_surface_id"]] = "stopped"
+        desired = "b" * 64
+        with PiStore(self.state) as store:
+            store.conn.execute(
+                "UPDATE runtime_bindings SET observed_state='starting',refresh_pending=1,desired_generation_sha256=?,launch_generation_sha256=? WHERE workstream_id=?",
+                (desired, desired, self.binding["workstream_id"]),
+            )
+        result = self.service.dispatcher.startup_reconcile()
+        self.assertEqual(result["resumed"], [])
+        self.assertFalse(any(call[0] == "run" for call in self.workspace.calls))
+        with PiStore(self.state) as store:
+            binding = store.conn.execute(
+                "SELECT launch_generation_sha256,refresh_pending FROM runtime_bindings WHERE workstream_id=?",
+                (self.binding["workstream_id"],),
+            ).fetchone()
+            self.assertEqual(binding["launch_generation_sha256"], desired)
+            self.assertEqual(binding["refresh_pending"], 1)
+
 
     def test_secretary_projection_omits_binding_material(self):
         status = request(self.service.paths["secretary"], "project.status", {"authToken": self.token})
