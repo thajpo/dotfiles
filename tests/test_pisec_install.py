@@ -45,6 +45,10 @@ class FakeAdminHandler(socketserver.StreamRequestHandler):
         request = json.loads(self.rfile.readline())
         if request["operation"] == "system.doctor":
             result = {"ok": True}
+        elif request["operation"] == "runtime.release.build":
+            result = {"release_id": "rel_" + "a" * 32, "content_sha256": "a" * 64, "reused": False}
+        elif request["operation"] == "runtime.release.activate":
+            result = {"release_id": request["payload"]["releaseId"], "content_sha256": "a" * 64, "activated": True}
         elif request["operation"] == "project.refresh":
             result = {"ok": True, "generation": None, "upgraded": [], "pending": [], "skipped": [], "failed": []}
         else:

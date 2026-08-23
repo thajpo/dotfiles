@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from scripts.pisec.pi_store import PiStore
+from scripts.pisec.models import NeedsAttentionError, canonical_json
 from scripts.pisec.projects import register_project
 from scripts.pisec.secretary import ensure_secretary
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
@@ -71,6 +72,51 @@ class SecretaryTests(unittest.TestCase):
                 second = ensure_secretary(store, project["project_id"], harness, workspace)
                 self.assertTrue(second["reused"])
                 self.assertEqual(second["workstream"]["provisioning_state"], "bound")
+                repaired = json.loads(store.conn.execute("SELECT result_json FROM operations WHERE workstream_id=?", (workstream_id,)).fetchone()[0])
+                self.assertIn("projectWorktreesDir", repaired)
+                self.assertIn("projectGitObjectsDir", repaired)
+                self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='secretary.scope.repaired'").fetchone()[0], 1)
+
+    def test_ensure_repairs_missing_or_malformed_scope_before_restart(self):
+        for stored_scope in (None, "{"):
+            with self.subTest(stored_scope=stored_scope), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                repo = root / "repo"
+                make_repo(repo)
+                with PiStore(root / "state") as store:
+                    project = register_project(store, repo)
+                    harness = FixtureHarness(root)
+                    workspace = FixtureWorkspace(root, store)
+                    first = ensure_secretary(store, project["project_id"], harness, workspace)
+                    workstream_id = first["workstream"]["workstream_id"]
+                    workspace.agents.clear()
+                    store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='workspace runtime is missing' WHERE workstream_id=?", (workstream_id,))
+                    store.conn.execute("UPDATE operations SET result_json=? WHERE workstream_id=?", (stored_scope, workstream_id))
+                    second = ensure_secretary(store, project["project_id"], harness, workspace)
+                    self.assertTrue(second["reused"])
+                    self.assertEqual(second["workstream"]["provisioning_state"], "bound")
+                    repaired = json.loads(store.conn.execute("SELECT result_json FROM operations WHERE workstream_id=?", (workstream_id,)).fetchone()[0])
+                    self.assertEqual(repaired["workstreamId"], workstream_id)
+                    self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='secretary.scope.repaired'").fetchone()[0], 1)
+
+    def test_ensure_refuses_scope_identity_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                first = ensure_secretary(store, project["project_id"], harness, workspace)
+                workstream_id = first["workstream"]["workstream_id"]
+                row = store.conn.execute("SELECT result_json FROM operations WHERE workstream_id=?", (workstream_id,)).fetchone()
+                scope = json.loads(row[0])
+                scope["projectId"] = "prj_" + "0" * 32
+                store.conn.execute("UPDATE operations SET result_json=? WHERE workstream_id=?", (canonical_json(scope), workstream_id))
+                with self.assertRaisesRegex(NeedsAttentionError, "scope identity mismatch"):
+                    ensure_secretary(store, project["project_id"], harness, workspace)
+                self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='secretary.scope.repaired'").fetchone()[0], 0)
 
     def test_replay_converges_after_each_secretary_checkpoint(self):
         failpoints = [

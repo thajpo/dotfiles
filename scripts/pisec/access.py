@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .fence import resolve_data_dirs
+from .models import ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, canonical_json, json_digest, new_id, utc_now
 from .platform import runtime_root
 
 _VIRTUAL_ROOTS = tuple(Path(value) for value in ("/proc", "/sys", "/dev", "/run"))
@@ -55,6 +56,18 @@ def _grant_row(store: Any, grant_id: str) -> Mapping[str, Any]:
     if row is None:
         raise NotFoundError("access grant was not found")
     return row
+
+
+def _grant_targets(store: Any, grant: Mapping[str, Any]) -> list[str]:
+    if grant["subject_kind"] == "workstream":
+        return [str(grant["workstream_id"])]
+    return [
+        str(row["workstream_id"])
+        for row in store.conn.execute(
+            "SELECT w.workstream_id FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.project_id=? AND w.kind='worker' AND w.desired_state='active' AND w.provisioning_state='bound'",
+            (grant["project_id"],),
+        )
+    ]
 
 
 def _operation(store: Any, *, kind: str, project_id: str, request: Mapping[str, Any], idempotency_key: str) -> Mapping[str, Any]:
@@ -112,19 +125,19 @@ def authorize_apply_access_grant(store: Any, *, scope: Mapping[str, Any], harnes
     if operation is None or grant is None or grant["proposal_operation_id"] != operation["operation_id"] or grant["path"] != scope.get("path") or grant["project_id"] != scope.get("projectId"):
         raise ScopeMismatchError("access grant scope does not match its proposal")
     now = utc_now()
-    target_ids = [str(grant["workstream_id"])] if grant["subject_kind"] == "workstream" else [str(row["workstream_id"]) for row in store.conn.execute("SELECT w.workstream_id FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.project_id=? AND w.kind='worker' AND w.desired_state='active' AND w.provisioning_state='bound'", (grant["project_id"],))]
+    target_ids = _grant_targets(store, grant)
     with store.transaction():
         if store.conn.execute("SELECT 1 FROM authorizations WHERE operation_id=?", (operation["operation_id"],)).fetchone() is None:
             store.conn.execute("INSERT INTO authorizations(authorization_id,operation_id,scope_sha256,kind,scope_json,actor,consumed_at) VALUES(?,?,?,'access.grant',?,?,?)", (new_id("az"), operation["operation_id"], json_digest(scope), canonical_json(scope), actor, now))
         store.conn.execute("UPDATE access_grants SET state='active',approved_at=COALESCE(approved_at,?),updated_at=? WHERE grant_id=?", (now, now, grant["grant_id"]))
-        for target_id in target_ids:
-            store.conn.execute("UPDATE runtime_bindings SET refresh_pending=1,updated_at=? WHERE workstream_id=?", (now, target_id))
         if grant["issue_id"] is not None:
             if store.conn.execute("SELECT 1 FROM issue_remediations WHERE issue_id=? AND access_grant_id=?", (grant["issue_id"], grant["grant_id"])).fetchone() is None:
                 store.conn.execute("INSERT INTO issue_remediations(remediation_id,issue_id,kind,access_grant_id,created_at) VALUES(?,?, 'access_grant',?,?)", (new_id("rem"), grant["issue_id"], grant["grant_id"], now))
             store.conn.execute("UPDATE issues SET state='remediating',updated_at=? WHERE issue_id=? AND state IN ('open','acknowledged')", (now, grant["issue_id"]))
         store.conn.execute("UPDATE operations SET state='succeeded',step='applied',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json({"grantId": grant["grant_id"], "state": "active"}), now, operation["operation_id"]))
-    return {"grant": dict(_grant_row(store, grant["grant_id"])), "operation": dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation["operation_id"],)).fetchone())}
+    from .refresh import refresh_bindings
+    refresh = refresh_bindings(store, harness, workspace, target_ids, wait_seconds=0)
+    return {"grant": dict(_grant_row(store, grant["grant_id"])), "operation": dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation["operation_id"],)).fetchone()), "refresh": refresh}
 
 
 def prepare_access_revoke(store: Any, *, project_id: str, grant_id: str, idempotency_key: str) -> dict[str, Any]:
@@ -147,12 +160,15 @@ def authorize_apply_access_revoke(store: Any, *, scope: Mapping[str, Any], harne
     if operation is None:
         raise ScopeMismatchError("access revoke operation was not found")
     now = utc_now()
+    target_ids = _grant_targets(store, grant)
     with store.transaction():
         if store.conn.execute("SELECT 1 FROM authorizations WHERE operation_id=?", (operation["operation_id"],)).fetchone() is None:
             store.conn.execute("INSERT INTO authorizations(authorization_id,operation_id,scope_sha256,kind,scope_json,actor,consumed_at) VALUES(?,?,?,'access.revoke',?,?,?)", (new_id("az"), operation["operation_id"], json_digest(scope), canonical_json(scope), actor, now))
         store.conn.execute("UPDATE access_grants SET state='revoked',revoked_at=?,updated_at=? WHERE grant_id=?", (now, now, grant["grant_id"]))
         store.conn.execute("UPDATE operations SET state='succeeded',step='applied',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json({"grantId": grant["grant_id"], "state": "revoked"}), now, operation["operation_id"]))
-    return {"grant": dict(_grant_row(store, grant["grant_id"])), "operation": dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation["operation_id"],)).fetchone())}
+    from .refresh import refresh_bindings
+    refresh = refresh_bindings(store, harness, workspace, target_ids, wait_seconds=0)
+    return {"grant": dict(_grant_row(store, grant["grant_id"])), "operation": dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation["operation_id"],)).fetchone()), "refresh": refresh}
 
 
 def list_access_grants(store: Any, *, project_id: str | None = None, workstream_id: str | None = None) -> list[dict[str, Any]]:

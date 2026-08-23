@@ -240,11 +240,11 @@ class FixtureWorkspace:
         if self.store is None:
             from scripts.pisec.pi_store import PiStore
             with PiStore(self.root / "state") as store:
-                store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL WHERE workspace_surface_id=?", (runtime_instance, surface_id))
+                store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_release_id=COALESCE(launch_release_id,applied_release_id),launch_release_id=NULL,applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL WHERE workspace_surface_id=?", (runtime_instance, surface_id))
         else:
             row = self.store.conn.execute("SELECT workstream_id FROM runtime_bindings WHERE workspace_surface_id=?", (surface_id,)).fetchone()
             if row is not None:
-                self.store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL WHERE workstream_id=?", (runtime_instance, row["workstream_id"]))
+                self.store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_release_id=COALESCE(launch_release_id,applied_release_id),launch_release_id=NULL,applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL WHERE workstream_id=?", (runtime_instance, row["workstream_id"]))
         return {"started": True, "name": name, "surfaceId": surface_id}
 
     def run_command(self, surface_id: str, argv: Sequence[str], env: Mapping[str, str] | None = None) -> Mapping[str, Any]:

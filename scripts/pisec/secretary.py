@@ -11,6 +11,8 @@ from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
 from .projects import resolve_project
+from .project_workspaces import ensure_project_workspace
+from .releases import materialize_active_release
 from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent
 from .workstreams import APPLY_LOCK, _wait_for_agent
 
@@ -30,6 +32,24 @@ SECRETARY_CHECKPOINTS = (
     "committed",
 )
 
+_SCOPE_IDENTITY_FIELDS = frozenset(
+    {
+        "projectId",
+        "workstreamId",
+        "operationId",
+        "harnessId",
+        "workspaceAdapterId",
+        "executionProfile",
+        "targetRef",
+        "baseCommitOid",
+        "branchName",
+        "worktreePath",
+        "agentName",
+        "privateGitObjectDir",
+        "gitCommonObjectDir",
+    }
+)
+
 
 def _secretary(store: Any, project_id: str) -> dict[str, Any] | None:
     row = store.conn.execute("SELECT * FROM workstreams WHERE project_id=? AND kind='secretary' AND desired_state <> 'retired'", (project_id,)).fetchone()
@@ -44,6 +64,75 @@ def _binding(store: Any, workstream_id: str) -> dict[str, Any] | None:
 def _operation(store: Any, workstream_id: str) -> dict[str, Any] | None:
     row = store.conn.execute("SELECT * FROM operations WHERE workstream_id=? AND kind='secretary.ensure' ORDER BY created_at DESC LIMIT 1", (workstream_id,)).fetchone()
     return None if row is None else dict(row)
+
+
+def _validate_binding_identity(binding: Mapping[str, Any] | None, scope: Mapping[str, Any], harness: HarnessAdapter, workspace: WorkspaceAdapter) -> None:
+    if binding is None:
+        return
+    if binding.get("workstream_id") != scope["workstreamId"]:
+        raise NeedsAttentionError("secretary runtime binding does not match its workstream")
+    if binding.get("harness_id") != harness.manifest.adapter_id or binding.get("workspace_adapter_id") != workspace.manifest.adapter_id:
+        raise NeedsAttentionError("secretary runtime binding uses a different adapter")
+    if binding.get("workspace_session_name") != workspace.manifest.session_name:
+        raise NeedsAttentionError("secretary runtime binding uses a different workspace session")
+    if binding.get("agent_name") != scope["agentName"]:
+        raise NeedsAttentionError("secretary runtime binding agent identity does not match its scope")
+    if not all(isinstance(binding.get(key), str) and binding[key] for key in ("workspace_id", "workspace_view_id", "workspace_surface_id")):
+        raise NeedsAttentionError("secretary runtime binding has incomplete workspace identity")
+
+
+def _load_or_repair_scope(
+    store: Any,
+    project: Mapping[str, Any],
+    workstream: Mapping[str, Any],
+    operation: Mapping[str, Any],
+    binding: Mapping[str, Any] | None,
+    harness: HarnessAdapter,
+    workspace: WorkspaceAdapter,
+    external_domains: tuple[str, ...],
+) -> dict[str, Any]:
+    if operation.get("project_id") != project["project_id"] or operation.get("workstream_id") != workstream["workstream_id"]:
+        raise NeedsAttentionError("secretary ensure operation identity does not match its project")
+    if workstream.get("project_id") != project["project_id"] or workstream.get("kind") != "secretary":
+        raise NeedsAttentionError("secretary workstream identity does not match its project")
+
+    canonical = _scope(project, workstream, operation["operation_id"], external_domains)
+    _validate_binding_identity(binding, canonical, harness, workspace)
+    raw = operation.get("result_json")
+    try:
+        stored = json.loads(raw) if raw is not None else None
+    except (TypeError, json.JSONDecodeError):
+        stored = None
+    if stored is not None and not isinstance(stored, dict):
+        stored = None
+    if isinstance(stored, dict):
+        unknown = set(stored) - set(canonical)
+        if unknown:
+            raise NeedsAttentionError("secretary ensure scope contains unknown fields")
+        mismatched = sorted(field for field in _SCOPE_IDENTITY_FIELDS if field in stored and stored[field] != canonical[field])
+        if mismatched:
+            raise NeedsAttentionError(f"secretary ensure scope identity mismatch: {', '.join(mismatched)}")
+
+    if stored == canonical:
+        return canonical
+
+    repaired_fields = sorted(set(canonical) - set(stored or {}))
+    if isinstance(stored, dict):
+        repaired_fields.extend(sorted(field for field in set(stored) & set(canonical) if stored[field] != canonical[field]))
+    with store.transaction():
+        store.conn.execute(
+            "UPDATE operations SET result_json=?,updated_at=? WHERE operation_id=?",
+            (canonical_json(canonical), utc_now(), operation["operation_id"]),
+        )
+        append_event_in_transaction(
+            store.conn,
+            kind="secretary.scope.repaired",
+            project_id=project["project_id"],
+            workstream_id=workstream["workstream_id"],
+            operation_id=operation["operation_id"],
+            payload={"repairedFields": sorted(set(repaired_fields)), "source": "registered project, secretary workstream, and runtime binding identity"},
+        )
+    return canonical
 
 
 def _rank(step: str) -> int:
@@ -128,6 +217,7 @@ def _observe_binding(workspace: WorkspaceAdapter, project: Mapping[str, Any], bi
 
 
 def _recover_workspace(
+    store: Any,
     workspace: WorkspaceAdapter,
     project: Mapping[str, Any],
     scope: Mapping[str, Any],
@@ -137,16 +227,18 @@ def _recover_workspace(
         workspace.rename_tab(observed.view_id, "Project chat")
         return observed
 
-    observed = _observe(workspace, project, scope, expected)
-    if observed is not None:
-        return normalize(observed)
-
-    def create() -> WorkspaceObservation:
-        observed = workspace.create_workspace(project["repository_path"], f"Project: {project['display_name']}", focus=False)
-        return normalize(observed)
-
     try:
-        return create()
+        result = ensure_project_workspace(
+            store,
+            project,
+            workspace,
+            label=f"Project: {project['display_name']}",
+            create_tab=True,
+        )
+        observed = result.get("observation")
+        if not isinstance(observed, WorkspaceObservation):
+            raise NeedsAttentionError("project workspace tab is missing")
+        return normalize(_validate_workspace(observed, expected))
     except Exception as error:
         try:
             observed = _observe(workspace, project, scope, expected)
@@ -154,10 +246,7 @@ def _recover_workspace(
             raise NeedsAttentionError("secretary workspace effect is ambiguous") from observe_error
         if observed is not None:
             return normalize(observed)
-        try:
-            return create()
-        except Exception:
-            raise RuntimeError("secretary workspace creation failed after retry") from error
+        raise RuntimeError("secretary project workspace creation failed") from error
 
 
 def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdapter, project: Mapping[str, Any], scope: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
@@ -169,7 +258,7 @@ def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdap
     if not ready:
         with store.transaction():
             now = utc_now()
-            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=IFNULL(applied_generation_sha256,launch_generation_sha256),observed_state='starting',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
+            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_release_id=IFNULL(applied_release_id,launch_release_id),launch_generation_sha256=IFNULL(applied_generation_sha256,launch_generation_sha256),observed_state='starting',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
         start_error: Exception | None = None
         try:
@@ -238,17 +327,16 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
     operation = _operation(store, existing["workstream_id"])
     if operation is None:
         raise NeedsAttentionError("secretary ensure operation is missing")
-    try:
-        scope = json.loads(operation["result_json"])
-    except (TypeError, json.JSONDecodeError) as error:
-        raise NeedsAttentionError("secretary ensure scope is missing or invalid") from error
-    if not isinstance(scope, dict) or not set(scope).issubset(set(_scope(project, existing, operation["operation_id"], external_domains))):
-        raise NeedsAttentionError("secretary ensure scope is missing or invalid")
-    optional = frozenset({"projectWorktreesDir", "projectGitObjectsDir"})
-    if set(scope) - optional != set(_scope(project, existing, operation["operation_id"], external_domains)) - optional:
-        raise NeedsAttentionError("secretary ensure scope is missing or invalid")
-    if scope["harnessId"] != harness.manifest.adapter_id or scope["workspaceAdapterId"] != workspace.manifest.adapter_id:
-        raise NeedsAttentionError("configured adapter does not match the approved secretary scope")
+    scope = _load_or_repair_scope(
+        store,
+        project,
+        existing,
+        operation,
+        _binding(store, existing["workstream_id"]),
+        harness,
+        workspace,
+        external_domains,
+    )
     recoverable_missing = existing["provisioning_state"] == "needs_attention" and existing["attention_reason"] == WORKSPACE_RUNTIME_MISSING
     if operation["state"] == "succeeded" and (existing["provisioning_state"] == "bound" or recoverable_missing):
         binding = _binding(store, existing["workstream_id"])
@@ -270,7 +358,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
             store.conn.execute("UPDATE operations SET state='applying',error_code=NULL,error_message=?,updated_at=? WHERE operation_id=? AND state='failed'", ("retrying durable secretary saga", utc_now(), operation["operation_id"]))
         operation = _operation(store, existing["workstream_id"])
     if _rank(operation["step"]) < _rank("workspace_observed_or_created"):
-        observed = _recover_workspace(workspace, project, scope, None)
+        observed = _recover_workspace(store, workspace, project, scope, None)
         _validate_workspace(observed)
         with store.transaction():
             _checkpoint(store, operation["operation_id"], "workspace_observed_or_created")
@@ -284,21 +372,25 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
             raise NeedsAttentionError("secretary workspace is missing after checkpoint")
         _validate_workspace(observed)
     artifacts = None
+    release = None
+    materialized_scope = scope
     if _rank(operation["step"]) < _rank("profile_materialized"):
-        artifacts = harness.materialize_profile(scope)
+        artifacts, release, materialized_scope = materialize_active_release(store, harness, scope)
         with store.transaction():
             _checkpoint(store, operation["operation_id"], "profile_materialized")
         _hit(failpoint, "after_secretary_profile_materialization", scope)
         operation = _operation(store, existing["workstream_id"])
     binding = _binding(store, existing["workstream_id"])
     if artifacts is None and binding is None:
-        artifacts = harness.materialize_profile(scope)
+        artifacts, release, materialized_scope = materialize_active_release(store, harness, scope)
     if artifacts is not None and binding is None and _rank(operation["step"]) < _rank("binding_committed"):
+        if release is None:
+            raise NeedsAttentionError("runtime release was not resolved")
         now = utc_now()
         with store.transaction():
             store.conn.execute(
-                "INSERT INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (existing["workstream_id"], workspace.manifest.adapter_id, workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), None, None, artifacts.launch_secret_path, None, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
+                "INSERT INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_release_id,applied_release_id,launch_release_id,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (existing["workstream_id"], workspace.manifest.adapter_id, workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), None, None, artifacts.launch_secret_path, None, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, release["release_id"], None, release["release_id"], artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
             )
             _checkpoint(store, operation["operation_id"], "binding_committed")
         _hit(failpoint, "after_secretary_binding_commit", scope)
@@ -308,9 +400,9 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         raise NeedsAttentionError("secretary runtime binding was not persisted")
     if _rank(operation["step"]) < _rank("map_committed"):
         if artifacts is None:
-            artifacts = harness.materialize_profile(scope)
+            artifacts, release, materialized_scope = materialize_active_release(store, harness, scope)
         harness.commit_launch_binding(
-            scope,
+            materialized_scope,
             artifacts,
             workspace_session_name=workspace.manifest.session_name,
             workspace_id=observed.workspace_id,

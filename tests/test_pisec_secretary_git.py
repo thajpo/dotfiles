@@ -9,7 +9,7 @@ from unittest.mock import patch
 import scripts.pisec.secretary_git as secretary_git_module
 from scripts.pisec.models import ConflictError, InvalidRequestError, NeedsAttentionError, ScopeMismatchError
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.projects import register_project
+from scripts.pisec.projects import register_project, update_project_policy
 from scripts.pisec.secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge, push_branch
 from scripts.pisec.workflow import checkpoint
 from scripts.pisec.secretary import ensure_secretary
@@ -49,7 +49,7 @@ def make_repo(path: Path) -> None:
 
 
 class SecretaryGitTests(unittest.TestCase):
-    def fixture(self, root: Path):
+    def fixture(self, root: Path, merge_policy: dict[str, object] | None = None):
         repo = root / "repo"
         make_repo(repo)
         store = PiStore(root / "state")
@@ -57,6 +57,8 @@ class SecretaryGitTests(unittest.TestCase):
         harness = FixtureHarness(root)
         workspace = FixtureWorkspace(root, store)
         project = register_project(store, repo, default_ref="main")
+        if merge_policy is not None:
+            update_project_policy(store, project["project_id"], merge_policy="checked_auto", merge_policy_json=merge_policy)
         ensure_secretary(store, project["project_id"], harness, workspace)
         proposal = prepare_workstream(
             store,
@@ -177,6 +179,22 @@ class SecretaryGitTests(unittest.TestCase):
             git(repo, "commit", "-qm", "advance target")
             with self.assertRaisesRegex(ConflictError, "fast-forward"):
                 prepare_workstream_merge(store, project["project_id"], scope["workstreamId"])
+
+    def test_checked_merge_policy_requires_allowed_branch_and_completion_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ConflictError, "target branch"):
+                store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), {"allowedTargetBranches": ["develop"]})
+                prepare_workstream_merge(store, project["project_id"], scope["workstreamId"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), {"allowedTargetBranches": ["main"], "requiredChecks": ["missing check"]})
+            with self.assertRaisesRegex(ConflictError, "missing required merge checks"):
+                prepare_workstream_merge(store, project["project_id"], scope["workstreamId"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), {"allowedTargetBranches": ["main"], "requiredChecks": ["fixture verification"], "maxChangedFiles": 1})
+            approval = prepare_workstream_merge(store, project["project_id"], scope["workstreamId"])
+            self.assertEqual(approval["targetBranch"], "main")
 
     def push_fixture(self, root: Path):
         remote = root / "remote.git"

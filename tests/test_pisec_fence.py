@@ -46,7 +46,33 @@ def render(scope: dict, root: Path, agent: Path, config: dict, *, baseline=()):
     return render_policy(root / "state", scope, agent, config, harness_home=agent, adapter_replacements={"HARNESS_EXECUTABLE": "/usr/bin/false"}, baseline_domains=baseline)
 
 
+def with_release(adapter: OmpHarnessAdapter, scope: dict) -> dict:
+    release = adapter.build_runtime_release()
+    return {**scope, "runtimeReleaseId": "rel_" + release.content_sha256[:32], "runtimeReleaseSha256": release.content_sha256, "runtimeReleaseRoot": release.root_path}
+
+
 class RuntimeMaterializationTests(unittest.TestCase):
+    def test_built_release_isolated_from_later_user_surface_edits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            rules = home / ".omp" / "agent" / "rules"
+            rules.mkdir(parents=True)
+            source = rules / "custom.md"
+            source.write_text("first\n")
+            adapter = OmpHarnessAdapter(state_root=root / "state", config=make_config(root))
+            worktree = root / "worktree"
+            worktree.mkdir()
+            scope = {"projectId": new_id("prj"), "workstreamId": new_id("ws"), "executionProfile": "secretary-project", "worktreePath": str(worktree)}
+            with patch("scripts.pisec.harnesses.omp.Path.home", return_value=home):
+                first_release = adapter.build_runtime_release()
+                first_scope = {**scope, "runtimeReleaseId": "rel_" + first_release.content_sha256[:32], "runtimeReleaseSha256": first_release.content_sha256, "runtimeReleaseRoot": first_release.root_path}
+                source.write_text("second\n")
+                artifacts = adapter.materialize_profile(first_scope)
+                second_release = adapter.build_runtime_release()
+            self.assertEqual((Path(artifacts.harness_home) / "rules" / "custom.md").read_text(), "first\n")
+            self.assertNotEqual(first_release.content_sha256, second_release.content_sha256)
+
     def test_config_validation_and_gateway_only_models(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -55,7 +81,7 @@ class RuntimeMaterializationTests(unittest.TestCase):
             assigned = root / "assigned"
             assigned.mkdir()
             scope = {"projectId": new_id("prj"), "workstreamId": new_id("ws"), "executionProfile": "secretary-project", "worktreePath": str(assigned)}
-            artifacts = adapter.materialize_profile(scope)
+            artifacts = adapter.materialize_profile(with_release(adapter, scope))
             models = json.loads((Path(artifacts.harness_home) / "models.yml").read_text())
             self.assertEqual(set(models["providers"]), {"openai-codex", "deepseek"})
             for provider in models["providers"].values():
@@ -103,7 +129,8 @@ class RuntimeMaterializationTests(unittest.TestCase):
             scope = {"projectId": new_id("prj"), "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS)}
             env_dir = root / "venv"
             env_dir.mkdir()
-            self.assertNotEqual(adapter.desired_generation(scope), adapter.desired_generation({**scope, "pythonEnv": str(env_dir)}))
+            released_scope = with_release(adapter, scope)
+            self.assertNotEqual(adapter.desired_generation(released_scope), adapter.desired_generation({**released_scope, "pythonEnv": str(env_dir)}))
 
     def test_profile_replay_reuses_runtime_token_and_agent_surface(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,10 +147,11 @@ class RuntimeMaterializationTests(unittest.TestCase):
             (private / "pack").mkdir()
             adapter = OmpHarnessAdapter(state_root=root / "state", config=make_config(root))
             scope = {"projectId": new_id("prj"), "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS)}
-            first = adapter.materialize_profile(scope)
+            released_scope = with_release(adapter, scope)
+            first = adapter.materialize_profile(released_scope)
             custom = Path(first.harness_home) / "custom.txt"
             custom.write_text("preserve\n")
-            second = adapter.materialize_profile(scope)
+            second = adapter.materialize_profile(released_scope)
             self.assertEqual(Path(first.launch_secret_path).read_text(), Path(second.launch_secret_path).read_text())
             self.assertEqual(first.runtime_token_sha256, second.runtime_token_sha256)
             self.assertEqual(custom.read_text(), "preserve\n")
@@ -207,8 +235,9 @@ class RuntimeMaterializationTests(unittest.TestCase):
             control_db.parent.mkdir(parents=True, exist_ok=True)
             control_db.touch()
             os.chmod(control_db, 0o600)
-            artifacts = adapter.materialize_profile(scope)
-            launcher = adapter.commit_launch_binding(scope, artifacts, workspace_session_name="main", workspace_id="w1", workspace_view_id="w1:t1", workspace_surface_id="w1:p1")
+            released_scope = with_release(adapter, scope)
+            artifacts = adapter.materialize_profile(released_scope)
+            launcher = adapter.commit_launch_binding(released_scope, artifacts, workspace_session_name="main", workspace_id="w1", workspace_view_id="w1:t1", workspace_surface_id="w1:p1")
             descriptor_path = launcher.parent / "binding.json"
             document = json.loads(descriptor_path.read_text())
             self.assertEqual(document["schemaVersion"], 3)
@@ -226,6 +255,7 @@ class RuntimeMaterializationTests(unittest.TestCase):
                 "workspace_view_id": "w1:t1",
                 "workspace_surface_id": "w1:p1",
                 "harness_home": artifacts.harness_home,
+                "desired_release_id": released_scope["runtimeReleaseId"],
                 "desired_generation_sha256": artifacts.generation_sha256,
                 "adapter_artifacts_json": artifact_document(adapter.manifest, artifacts),
                 "policy_path": artifacts.policy_path,

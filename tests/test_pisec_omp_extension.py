@@ -4,50 +4,88 @@ import os
 import subprocess
 import unittest
 
+from scripts.pisec.operation_contracts import SOCKET_OPERATIONS
+
 ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = ROOT / "omp" / "extensions" / "pisec.ts"
-SECRETARY_TOOLS = [
-    "pisec_project_activity",
-    "pisec_report_secretary_issue",
-    "pisec_project_status",
-    "pisec_git_status",
-    "pisec_push_branch",
-    "pisec_inspect_workstream_changes",
-    "pisec_prepare_workstream_merge",
-    "pisec_merge_workstream",
-    "pisec_list_workstreams",
-    "pisec_inspect_workstream",
-    "pisec_prepare_workstream",
-    "pisec_create_workstream",
-    "pisec_send_workstream",
-    "pisec_focus_workstream",
-    "pisec_complete_workstream",
-    "pisec_retire_workstream",
-    "pisec_list_decisions",
-    "pisec_record_decision",
-    "pisec_list_coordination_requests",
-    "pisec_inspect_coordination_request",
-    "pisec_answer_coordination_request",
-    "pisec_resolve_decision",
-    "pisec_list_worker_research_requests",
-    "pisec_inspect_worker_research",
-    "pisec_claim_worker_research",
-    "pisec_request_worker_research_context",
-    "pisec_answer_worker_research",
-    "pisec_decline_worker_research",
+SECRETARY_TOOL_OPERATIONS = [
+    ("pisec_project_activity", "project.activity"),
+    ("pisec_report_secretary_issue", "issue.report"),
+    ("pisec_list_issues", "issue.list"),
+    ("pisec_inspect_issue", "issue.inspect"),
+    ("pisec_add_issue_context", "issue.add_context"),
+    ("pisec_verify_issue", "issue.verify"),
+    ("pisec_project_status", "project.status"),
+    ("pisec_git_status", "git.status"),
+    ("pisec_push_branch", "git.push"),
+    ("pisec_inspect_workstream_changes", "git.workstream_changes"),
+    ("pisec_prepare_workstream_merge", "git.merge.prepare"),
+    ("pisec_merge_workstream", "git.merge.apply"),
+    ("pisec_list_workstreams", "workstream.list"),
+    ("pisec_inspect_workstream", "workstream.inspect"),
+    ("pisec_prepare_workstream", "workstream.prepare"),
+    ("pisec_create_workstream", "workstream.authorize_apply"),
+    ("pisec_send_workstream", "workstream.send"),
+    ("pisec_focus_workstream", "workstream.focus"),
+    ("pisec_complete_workstream", "workstream.complete"),
+    ("pisec_retire_workstream", "workstream.retire"),
+    ("pisec_list_decisions", "decision.list"),
+    ("pisec_record_decision", "decision.record"),
+    ("pisec_list_coordination_requests", "coordination.list"),
+    ("pisec_inspect_coordination_request", "coordination.inspect"),
+    ("pisec_answer_coordination_request", "coordination.answer"),
+    ("pisec_resolve_decision", "decision.resolve"),
+    ("pisec_list_worker_research_requests", "research.list"),
+    ("pisec_inspect_worker_research", "research.inspect"),
+    ("pisec_claim_worker_research", "research.claim"),
+    ("pisec_request_worker_research_context", "research.request_context"),
+    ("pisec_answer_worker_research", "research.answer"),
+    ("pisec_decline_worker_research", "research.decline"),
 ]
-WORKER_TOOLS = [
-    "pisec_request_coordination",
-    "pisec_list_coordination",
-    "pisec_inspect_coordination",
-    "pisec_acknowledge_coordination",
-    "pisec_show_task_packet",
-    "pisec_request_secretary_research",
-    "pisec_check_secretary_research",
-    "pisec_inspect_secretary_research",
-    "pisec_add_secretary_research_context",
-    "pisec_acknowledge_secretary_research",
+FLEET_TOOL_OPERATIONS = [
+    ("pisec_fleet_list_access_grants", "fleet.access.list"),
+    ("pisec_fleet_inspect_access_grant", "fleet.access.inspect"),
+    ("pisec_fleet_prepare_access_grant", "fleet.access.grant.prepare"),
+    ("pisec_fleet_apply_access_grant", "fleet.access.grant.apply"),
+    ("pisec_fleet_prepare_access_revoke", "fleet.access.revoke.prepare"),
+    ("pisec_fleet_apply_access_revoke", "fleet.access.revoke.apply"),
+    ("pisec_fleet_list_issues", "fleet.issue.list"),
+    ("pisec_fleet_inspect_issue", "fleet.issue.inspect"),
+    ("pisec_fleet_add_issue_context", "fleet.issue.add_context"),
+    ("pisec_fleet_acknowledge_issue", "fleet.issue.acknowledge"),
+    ("pisec_fleet_resolve_issue", "fleet.issue.resolve"),
+    ("pisec_fleet_status", "fleet.status"),
+    ("pisec_fleet_events", "fleet.events"),
+    ("pisec_fleet_send_secretary", "fleet.secretary.send"),
+    ("pisec_fleet_list_workstreams", "fleet.workstream.list"),
+    ("pisec_fleet_inspect_workstream", "fleet.workstream.inspect"),
+    ("pisec_fleet_git_changes", "fleet.git.workstream_changes"),
+    ("pisec_fleet_prepare_workstream", "fleet.workstream.prepare"),
+    ("pisec_fleet_create_worker", "fleet.workstream.authorize_apply"),
+    ("pisec_fleet_prepare_merge", "fleet.git.merge.prepare"),
+    ("pisec_fleet_merge_workstream", "fleet.git.merge.apply"),
 ]
+WORKER_TOOL_OPERATIONS = [
+    ("pisec_checkpoint_workstream", "workstream.checkpoint"),
+    ("pisec_request_help", "help.request"),
+    ("pisec_request_coordination", "coordination.request"),
+    ("pisec_list_coordination", "coordination.list"),
+    ("pisec_inspect_coordination", "coordination.inspect"),
+    ("pisec_report_issue", "issue.report"),
+    ("pisec_list_issues", "issue.list"),
+    ("pisec_inspect_issue", "issue.inspect"),
+    ("pisec_add_issue_context", "issue.add_context"),
+    ("pisec_verify_issue", "issue.verify"),
+    ("pisec_show_task_packet", "task.get"),
+    ("pisec_request_secretary_research", "research.request"),
+    ("pisec_check_secretary_research", "research.list"),
+    ("pisec_inspect_secretary_research", "research.inspect"),
+    ("pisec_add_secretary_research_context", "research.add_context"),
+    ("pisec_acknowledge_secretary_research", "research.acknowledge"),
+]
+SECRETARY_TOOLS = [name for name, _ in SECRETARY_TOOL_OPERATIONS]
+FLEET_TOOLS = [name for name, _ in FLEET_TOOL_OPERATIONS]
+WORKER_TOOLS = [name for name, _ in WORKER_TOOL_OPERATIONS]
 
 
 class OmpExtensionTests(unittest.TestCase):
@@ -90,7 +128,7 @@ console.log(JSON.stringify(records));
         script = f"""
 const records = {{tools: [], events: [], labels: []}};
 const chain = () => ({{min: chain, max: chain, optional: chain, int: chain, url: chain}});
-const zod = {{string: chain, enum: chain, any: chain, object: value => value, literal: chain, array: chain, number: chain, boolean: chain}};
+const zod = {{string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain}};
 const pi = {{
   zod,
   setLabel(value) {{ records.labels.push(value); }},
@@ -139,7 +177,7 @@ console.log(JSON.stringify({{tools: records.tools.map(value => value.name), even
         script = f"""
 const records = {{tools: [], events: [], labels: []}};
 const chain = () => ({{min: chain, max: chain, optional: chain, int: chain, url: chain}});
-const zod = {{string: chain, enum: chain, any: chain, object: value => value, literal: chain, array: chain, number: chain, boolean: chain}};
+const zod = {{string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain}};
 const pi = {{
   zod,
   setLabel(value) {{ records.labels.push(value); }},
@@ -163,6 +201,16 @@ console.log(JSON.stringify({{tools: records.tools, events: records.events, label
         self.assertEqual(output["tools"], WORKER_TOOLS)
         self.assertEqual(output["label"], "Pisec Worker")
         self.assertIn("session_start", output["events"])
+
+    def test_exposed_tools_only_use_operations_allowed_by_their_socket(self):
+        for socket, tools in (
+            ("secretary", SECRETARY_TOOL_OPERATIONS),
+            ("fleet", FLEET_TOOL_OPERATIONS),
+            ("runtime", WORKER_TOOL_OPERATIONS),
+        ):
+            with self.subTest(socket=socket):
+                exposed = {operation for _, operation in tools}
+                self.assertEqual(exposed - SOCKET_OPERATIONS[socket], set())
 
     def test_bun_build_succeeds(self):
         result = subprocess.run(["bun", "build", str(EXTENSION), "--target", "bun", "--outdir", "/tmp/pisec-extension-check"], cwd=ROOT, text=True, capture_output=True)

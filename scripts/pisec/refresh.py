@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from .adapters import HarnessAdapter, WorkspaceAdapter, artifact_document
 from .fence import resolve_data_dirs
 from .models import NeedsAttentionError, PisecError, utc_now
+from .releases import active_runtime_release, release_scope
 from .runtime import start_bound_agent
 
 
@@ -34,16 +35,17 @@ def mark_stale_bindings(store: Any, harness: HarnessAdapter) -> dict[str, Any]:
     stale: list[dict[str, str]] = []
     current: list[dict[str, str]] = []
     failed: list[dict[str, str]] = []
+    release = active_runtime_release(store, harness)
     for binding in _active_bindings(store):
         workstream_id = str(binding["workstream_id"])
         try:
-            desired = harness.desired_generation(_binding_scope(store, binding))
+            desired = harness.desired_generation(release_scope(_binding_scope(store, binding), release))
             if len(desired) != 64:
                 raise PisecError("harness returned an invalid runtime generation")
             with store.transaction():
                 store.conn.execute(
-                    "UPDATE runtime_bindings SET desired_generation_sha256=?,updated_at=? WHERE workstream_id=?",
-                    (desired, utc_now(), workstream_id),
+                    "UPDATE runtime_bindings SET desired_release_id=?,desired_generation_sha256=?,updated_at=? WHERE workstream_id=?",
+                    (release["release_id"], desired, utc_now(), workstream_id),
                 )
             item = {"project": str(binding["display_name"]), "workstreamId": workstream_id, "generation": desired}
             artifacts_current = True
@@ -65,7 +67,7 @@ def mark_stale_bindings(store: Any, harness: HarnessAdapter) -> dict[str, Any]:
                     )
                 except (OSError, TypeError, ValueError, json.JSONDecodeError):
                     artifacts_current = False
-            if binding["applied_generation_sha256"] == desired and artifacts_current:
+            if binding["applied_release_id"] == release["release_id"] and binding["applied_generation_sha256"] == desired and artifacts_current:
                 current.append(item)
             else:
                 if not artifacts_current and binding["applied_generation_sha256"] == desired:
@@ -114,13 +116,14 @@ def _wait_for_start(
     workstream_id: str,
     old_instance: str | None,
     generation: str,
+    release_id: str,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while True:
         binding = _runtime_state(store, workstream_id)
         instance = binding["runtime_instance_id"]
-        if instance and instance != old_instance and int(binding["report_seq"]) >= 1 and binding["applied_generation_sha256"] == generation:
+        if instance and instance != old_instance and int(binding["report_seq"]) >= 1 and binding["applied_release_id"] == release_id and binding["applied_generation_sha256"] == generation:
             if workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"])).state == "live":
                 return binding
         if time.monotonic() >= deadline:
@@ -132,10 +135,12 @@ def _wait_for_start(
 
 def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, binding: Mapping[str, Any]) -> dict[str, Any]:
     workstream_id = str(binding["workstream_id"])
-    with store.transaction():
-        store.conn.execute("UPDATE runtime_bindings SET refresh_pending=1,updated_at=? WHERE workstream_id=?", (utc_now(), workstream_id))
     binding = _runtime_state(store, workstream_id)
     desired = str(binding["desired_generation_sha256"])
+    desired_release_id = str(binding["desired_release_id"])
+    release = store.conn.execute("SELECT * FROM runtime_releases WHERE release_id=?", (desired_release_id,)).fetchone()
+    if release is None:
+        raise NeedsAttentionError("desired runtime release is missing")
     old_instance = str(binding["runtime_instance_id"]) if binding["runtime_instance_id"] else None
     runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
     if runtime.state == "unknown":
@@ -147,7 +152,9 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
         workspace.stop_runtime(str(binding["workspace_surface_id"]))
         _wait_for_exit(workspace, binding)
 
-    scope = _binding_scope(store, binding)
+    with store.transaction():
+        store.conn.execute("UPDATE runtime_bindings SET refresh_pending=1,updated_at=? WHERE workstream_id=?", (utc_now(), workstream_id))
+    scope = release_scope(_binding_scope(store, binding), dict(release))
     artifacts = harness.materialize_profile(scope)
     if artifacts.generation_sha256 != desired:
         raise NeedsAttentionError("runtime generation changed while it was being materialized")
@@ -166,7 +173,7 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
     now = utc_now()
     with store.transaction():
         store.conn.execute(
-            "UPDATE runtime_bindings SET harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_generation_sha256=?,launch_generation_sha256=?,runtime_instance_id=NULL,report_seq=0,observed_state='starting',last_observed_at=?,updated_at=? WHERE workstream_id=?",
+            "UPDATE runtime_bindings SET harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_release_id=?,launch_release_id=?,desired_generation_sha256=?,launch_generation_sha256=?,runtime_instance_id=NULL,report_seq=0,observed_state='starting',last_observed_at=?,updated_at=? WHERE workstream_id=?",
             (
                 artifacts.harness_home,
                 artifact_document(harness.manifest, artifacts),
@@ -174,6 +181,8 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
                 artifacts.policy_path,
                 artifacts.policy_sha256,
                 artifacts.runtime_token_sha256,
+                desired_release_id,
+                desired_release_id,
                 desired,
                 desired,
                 now,
@@ -195,7 +204,7 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
         project_id=str(refreshed["project_id"]),
         cwd=str(refreshed["worktree_path"]),
     )
-    attested = _wait_for_start(store, workspace, workstream_id, old_instance, desired)
+    attested = _wait_for_start(store, workspace, workstream_id, old_instance, desired, desired_release_id)
     with store.transaction():
         store.conn.execute("UPDATE runtime_bindings SET refresh_pending=0,updated_at=? WHERE workstream_id=?", (utc_now(), workstream_id))
     attested = _runtime_state(store, workstream_id)
@@ -236,7 +245,7 @@ def refresh_projects(
         progressed = False
         for workstream_id in remaining:
             binding = _runtime_state(store, workstream_id)
-            if binding["applied_generation_sha256"] == binding["desired_generation_sha256"]:
+            if binding["applied_release_id"] == binding["desired_release_id"] and binding["applied_generation_sha256"] == binding["desired_generation_sha256"]:
                 result["skipped"].append({"project": binding["display_name"], "workstreamId": workstream_id, "generation": binding["desired_generation_sha256"], "reason": "current generation"})
                 progressed = True
                 continue
@@ -317,7 +326,9 @@ def refresh_bindings(store: Any, harness: HarnessAdapter, workspace: WorkspaceAd
     result = {"generation": None, "upgraded": [], "pending": [], "skipped": [item for item in marked["current"] if str(item["workstreamId"]) in selected], "failed": [], "ok": True}
     deadline = time.monotonic() + float(wait_seconds)
     remaining = [str(item["workstreamId"]) for item in selected_marked]
-    while remaining and time.monotonic() <= deadline:
+    attempted = False
+    while remaining and (not attempted or time.monotonic() <= deadline):
+        attempted = True
         next_remaining: list[str] = []
         for workstream_id in remaining:
             binding = _runtime_state(store, workstream_id)

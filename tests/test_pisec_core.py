@@ -73,10 +73,10 @@ class StoreTests(unittest.TestCase):
                 PiStore(root)
 
 
-    def test_epoch_twelve_fresh_store_has_issue_reports(self):
+    def test_epoch_fourteen_fresh_store_has_project_policy_and_runtime_releases(self):
         with tempfile.TemporaryDirectory() as tmp, PiStore(Path(tmp) / "state") as store:
             metadata = store.conn.execute("SELECT schema_name,schema_version,migration_name FROM control_meta").fetchone()
-            self.assertEqual(tuple(metadata), ("pisec-core", 12, "pisec-core-epoch-12"))
+            self.assertEqual(tuple(metadata), ("pisec-core", 14, "pisec-core-epoch-14"))
             columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(secretary_issue_reports)")}
             self.assertIn("requested_action", columns)
             self.assertIn("evidence_json", columns)
@@ -89,11 +89,18 @@ class StoreTests(unittest.TestCase):
             self.assertIn("data_dirs", project_columns)
             self.assertIn("active", project_columns)
             self.assertIn("deactivated_at", project_columns)
+            self.assertIn("coordination_mode", project_columns)
+            self.assertIn("worker_creation_policy", project_columns)
+            self.assertIn("merge_policy", project_columns)
             binding_columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(runtime_bindings)")}
             self.assertIn("desired_generation_sha256", binding_columns)
             self.assertIn("applied_generation_sha256", binding_columns)
             self.assertIn("launch_generation_sha256", binding_columns)
             self.assertIn("refresh_pending", binding_columns)
+            self.assertIn("desired_release_id", binding_columns)
+            self.assertIn("applied_release_id", binding_columns)
+            self.assertIn("launch_release_id", binding_columns)
+            self.assertIsNotNone(store.conn.execute("SELECT sql FROM sqlite_master WHERE name='runtime_releases'").fetchone())
             operation_sql = store.conn.execute("SELECT sql FROM sqlite_master WHERE name='operations'").fetchone()[0]
             self.assertNotIn("'authorized'", operation_sql)
 
@@ -111,7 +118,7 @@ class StoreTests(unittest.TestCase):
             with PiStore(root) as migrated:
                 project = migrated.conn.execute("SELECT display_name,remote_url,data_dirs,active FROM projects WHERE project_id=?", (project_id,)).fetchone()
                 self.assertEqual(tuple(project), ("Project", None, None, 1))
-                self.assertEqual(tuple(migrated.conn.execute("SELECT schema_version,migration_name FROM control_meta").fetchone()), (12, "pisec-core-epoch-12"))
+                self.assertEqual(tuple(migrated.conn.execute("SELECT schema_version,migration_name FROM control_meta").fetchone()), (14, "pisec-core-epoch-14"))
 class OperationEventTests(unittest.TestCase):
     def test_idempotency_binds_key_to_request_forever(self):
         with tempfile.TemporaryDirectory() as tmp, PiStore(Path(tmp) / "state") as store:

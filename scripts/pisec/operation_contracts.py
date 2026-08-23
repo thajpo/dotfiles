@@ -9,6 +9,7 @@ SOCKET_OPERATIONS = {
         "project.refresh", "project.deactivate", "project.activate", "secretary.ensure", "secretary.focus",
         "first_mate.ensure", "first_mate.focus", "workstream.focus", "workstream.cleanup", "system.status",
         "system.reconcile", "system.doctor", "workspace.startup", "workspace.event", "presentation.snapshot",
+        "runtime.release.build", "runtime.release.list", "runtime.release.activate", "project.policy.update",
     }),
     "secretary": frozenset({
         "project.status", "project.activity", "issue.report", "secretary.issue.report", "issue.list", "issue.inspect", "issue.add_context", "issue.verify", "access.list", "git.status", "git.push", "git.workstream_changes",
@@ -26,7 +27,7 @@ SOCKET_OPERATIONS = {
     }),
     "runtime": frozenset({
         "runtime.report", "runtime.turn.prepare", "session.switch.prepare", "task.get", "runtime.bootstrap.get",
-        "runtime.bootstrap.ack", "issue.report", "issue.list", "issue.inspect", "issue.add_context", "issue.verify", "access.effective",
+        "runtime.bootstrap.ack", "runtime.tool_failure", "help.request", "issue.report", "issue.list", "issue.inspect", "issue.add_context", "issue.verify", "access.effective",
         "workstream.checkpoint", "workstream.completion.submit", "coordination.request", "coordination.list", "coordination.inspect", "coordination.resolve",
         "research.request", "research.list", "research.inspect", "research.add_context", "research.acknowledge",
     }),

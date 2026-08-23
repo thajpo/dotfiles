@@ -23,6 +23,9 @@ class PisecCliTests(unittest.TestCase):
             ["project", "list", "--json"],
             ["project", "open", "demo", "--json"],
             ["project", "refresh", "--all", "--wait-seconds", "0", "--json"],
+            ["release", "build", "--json"],
+            ["release", "list", "--json"],
+            ["release", "activate", "rel_" + "a" * 32, "--json"],
             ["doctor", "--json"],
         ):
             with self.subTest(arguments=arguments):

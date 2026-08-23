@@ -11,6 +11,7 @@ from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
 from .projects import observe_project, resolve_project
+from .releases import materialize_active_release
 from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent
 from .workstreams import APPLY_LOCK, _wait_for_agent
 
@@ -169,7 +170,7 @@ def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdap
     if not ready:
         with store.transaction():
             now = utc_now()
-            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=IFNULL(applied_generation_sha256,launch_generation_sha256),observed_state='starting',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
+            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_release_id=IFNULL(applied_release_id,launch_release_id),launch_generation_sha256=IFNULL(applied_generation_sha256,launch_generation_sha256),observed_state='starting',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
         start_error: Exception | None = None
         try:
@@ -254,21 +255,25 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         if observed is None:
             raise NeedsAttentionError("First Mate workspace is missing after checkpoint")
     artifacts = None
+    release = None
+    materialized_scope = scope
     if _rank(operation["step"]) < _rank("profile_materialized"):
-        artifacts = harness.materialize_profile(scope)
+        artifacts, release, materialized_scope = materialize_active_release(store, harness, scope)
         with store.transaction():
             store.conn.execute("UPDATE operations SET state='applying',step=?,updated_at=? WHERE operation_id=?", ("profile_materialized", utc_now(), operation["operation_id"]))
         _hit(failpoint, "after_first_mate_profile_materialization", scope)
         operation = _operation(store, existing["workstream_id"])
     binding = _binding(store, existing["workstream_id"])
     if artifacts is None and binding is None:
-        artifacts = harness.materialize_profile(scope)
+        artifacts, release, materialized_scope = materialize_active_release(store, harness, scope)
     if artifacts is not None and binding is None:
+        if release is None:
+            raise NeedsAttentionError("runtime release was not resolved")
         now = utc_now()
         with store.transaction():
             store.conn.execute(
-                "INSERT INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (existing["workstream_id"], workspace.manifest.adapter_id, workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), None, None, artifacts.launch_secret_path, None, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
+                "INSERT INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_release_id,applied_release_id,launch_release_id,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (existing["workstream_id"], workspace.manifest.adapter_id, workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), None, None, artifacts.launch_secret_path, None, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, release["release_id"], None, release["release_id"], artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
             )
             store.conn.execute("UPDATE operations SET state='applying',step=?,updated_at=? WHERE operation_id=?", ("binding_committed", now, operation["operation_id"]))
         _hit(failpoint, "after_first_mate_binding_commit", scope)
@@ -278,8 +283,8 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         raise NeedsAttentionError("First Mate runtime binding was not persisted")
     if _rank(operation["step"]) < _rank("map_committed"):
         if artifacts is None:
-            artifacts = harness.materialize_profile(scope)
-        harness.commit_launch_binding(scope, artifacts, workspace_session_name=workspace.manifest.session_name, workspace_id=observed.workspace_id, workspace_view_id=observed.view_id, workspace_surface_id=observed.surface_id)
+            artifacts, release, materialized_scope = materialize_active_release(store, harness, scope)
+        harness.commit_launch_binding(materialized_scope, artifacts, workspace_session_name=workspace.manifest.session_name, workspace_id=observed.workspace_id, workspace_view_id=observed.view_id, workspace_surface_id=observed.surface_id)
         with store.transaction():
             store.conn.execute("UPDATE operations SET state='applying',step=?,updated_at=? WHERE operation_id=?", ("map_committed", utc_now(), operation["operation_id"]))
         _hit(failpoint, "after_first_mate_policy_map_materialization", scope)

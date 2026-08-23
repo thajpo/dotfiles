@@ -15,7 +15,7 @@ MAX_JSON_BYTES = 64 * 1024
 MAX_JSON_DEPTH = 32
 MAX_JSON_ITEMS = 4096
 MAX_TEXT = 4096
-ID_PREFIXES = frozenset({"prj", "ws", "op", "az", "dec", "evt", "req", "tp", "wrq", "rpk", "cp", "cmp", "cr", "cop", "sir", "iss", "iup", "rem", "agr", "dep", "mrg"})
+ID_PREFIXES = frozenset({"prj", "ws", "op", "az", "dec", "evt", "req", "tp", "wrq", "rpk", "cp", "cmp", "cr", "cop", "sir", "iss", "iup", "rem", "agr", "dep", "mrg", "rel"})
 ID_RE = re.compile(r"^(?P<prefix>[a-z][a-z0-9]{0,15})_(?P<random>[0-9a-f]{32})$")
 OID_RE = re.compile(r"^[0-9a-f]{40,64}$")
 

@@ -15,8 +15,11 @@ from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .git_objects import GitObjectManager
 from .models import AuthorizationError, ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id
+from .policies import enforce_worker_creation_policy
 from .projects import _git, assert_project_writable, get_project
+from .project_workspaces import ensure_project_workspace
 from .research import issue_task_packet_in_transaction, validate_task_packet
+from .releases import materialize_active_release
 from .runtime import start_bound_agent
 APPLY_LOCK = threading.RLock()
 CHECKPOINTS = (
@@ -222,6 +225,7 @@ def prepare_workstream(
         "nonEffects": ["no push", "no merge", "no cleanup", "no branch deletion"],
         "taskPacket": normalized_task_packet,
     }
+    enforce_worker_creation_policy(store, project, scope)
     now = utc_now()
     with store.transaction():
         store.conn.execute(
@@ -302,25 +306,6 @@ def _wait_for_agent(
 
 def _prompt_agent(workspace: WorkspaceAdapter, target: str, text: str) -> Mapping[str, Any]:
     return workspace.prompt_agent_nowait(target, text)
-def _coordinator_binding(store: Any, project_id: str, workspace: WorkspaceAdapter) -> dict[str, Any]:
-    rows = store.conn.execute(
-        "SELECT w.workstream_id,w.project_id,w.worktree_path,w.provisioning_state,r.* "
-        "FROM workstreams w JOIN runtime_bindings r USING(workstream_id) "
-        "WHERE w.project_id=? AND w.kind='secretary' AND w.desired_state <> 'retired'",
-        (project_id,),
-    ).fetchall()
-    if len(rows) != 1:
-        raise NeedsAttentionError("project coordinator binding is missing or duplicated")
-    binding = dict(rows[0])
-    if binding["provisioning_state"] != "bound":
-        raise NeedsAttentionError("project coordinator binding is not bound")
-    if binding.get("workspace_adapter_id") != workspace.manifest.adapter_id or binding.get("workspace_session_name") != workspace.manifest.session_name:
-        raise NeedsAttentionError("project coordinator binding does not match the configured Herdr session")
-    if not binding.get("workspace_id") or not binding.get("workspace_view_id") or not binding.get("workspace_surface_id"):
-        raise NeedsAttentionError("project coordinator binding has incomplete workspace identity")
-    return binding
-
-
 def _git_worktree_identity(project_root: Path, worktree_path: str, branch_name: str) -> bool:
     output = _git(project_root, "worktree", "list", "--porcelain")
     target = str(Path(worktree_path).resolve(strict=False))
@@ -407,25 +392,23 @@ def _authorize_apply_workstream(
         issue_task_packet_in_transaction(store.conn, scope=scope)
 
     project = get_project(store, scope["projectId"])
+    enforce_worker_creation_policy(store, project, scope)
     current_oid = _git(Path(project["repository_path"]), "rev-parse", "--verify", "--end-of-options", f"{scope['targetRef']}^{{commit}}").lower()
     if current_oid != scope["baseCommitOid"]:
         _mark_attention(store, operation_id, workstream_id, "approved target ref moved")
         raise NeedsAttentionError("approved target ref moved")
     try:
-        coordinator = _coordinator_binding(store, scope["projectId"], workspace)
-        coordinator_observation = workspace.observe_surface(
-            workspace_id=str(coordinator["workspace_id"]),
-            view_id=str(coordinator["workspace_view_id"]),
-            surface_id=str(coordinator["workspace_surface_id"]),
-            cwd=str(project["repository_path"]),
+        project_workspace = ensure_project_workspace(
+            store,
+            project,
+            workspace,
+            label=f"Project: {project['display_name']}",
+            create_tab=False,
         )
     except Exception as error:
-        _mark_attention(store, operation_id, workstream_id, "project coordinator workspace could not be corroborated")
-        raise NeedsAttentionError("project coordinator workspace could not be corroborated") from error
-    if coordinator_observation is None:
-        _mark_attention(store, operation_id, workstream_id, "project coordinator workspace is missing")
-        raise NeedsAttentionError("project coordinator workspace is missing")
-    coordinator_workspace_id = str(coordinator["workspace_id"])
+        _mark_attention(store, operation_id, workstream_id, "project workspace could not be established")
+        raise NeedsAttentionError("project workspace could not be established") from error
+    coordinator_workspace_id = str(project_workspace["workspace_id"])
     def observe_worker() -> WorkspaceObservation | None:
         return workspace.observe_tab(workspace_id=coordinator_workspace_id, cwd=scope["worktreePath"])
 
@@ -510,16 +493,16 @@ def _authorize_apply_workstream(
         operation = _operation(store, operation_id)
 
     if _rank(operation["step"]) < _rank("profile_materialized"):
-        artifacts = harness.materialize_profile(scope)
+        artifacts, release, materialized_scope = materialize_active_release(store, harness, scope)
         artifact_json = artifact_document(harness.manifest, artifacts)
         now = utc_now()
         with store.transaction():
             store.conn.execute(
-                "INSERT OR REPLACE INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (workstream_id, workspace.manifest.adapter_id, workspace.manifest.session_name, observation.workspace_id, observation.view_id, observation.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_json, None, None, artifacts.launch_secret_path, scope["privateGitObjectDir"], artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
+                "INSERT OR REPLACE INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_release_id,applied_release_id,launch_release_id,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (workstream_id, workspace.manifest.adapter_id, workspace.manifest.session_name, observation.workspace_id, observation.view_id, observation.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_json, None, None, artifacts.launch_secret_path, scope["privateGitObjectDir"], artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, release["release_id"], None, release["release_id"], artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
             )
         harness.commit_launch_binding(
-            scope,
+            materialized_scope,
             artifacts,
             workspace_session_name=workspace.manifest.session_name,
             workspace_id=observation.workspace_id,
@@ -666,7 +649,7 @@ def _lifecycle_operation(store: Any, *, kind: str, project_id: str, workstream_i
 
 def list_workstreams(store: Any, project_id: str) -> list[dict[str, Any]]:
     get_project(store, project_id)
-    return [dict(row) for row in store.conn.execute("SELECT w.*,r.observed_state,r.last_observed_at,r.agent_name,r.desired_generation_sha256,r.applied_generation_sha256,CASE WHEN r.desired_generation_sha256 IS NOT NULL AND r.desired_generation_sha256 IS NOT r.applied_generation_sha256 THEN 1 ELSE 0 END AS runtime_stale,t.task_packet_id,t.packet_sha256 AS task_packet_sha256 FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) LEFT JOIN task_packets t USING(workstream_id) WHERE w.project_id=? ORDER BY w.created_at,w.workstream_id", (project_id,))]
+    return [dict(row) for row in store.conn.execute("SELECT w.*,r.observed_state,r.last_observed_at,r.agent_name,r.desired_release_id,r.applied_release_id,r.desired_generation_sha256,r.applied_generation_sha256,CASE WHEN r.desired_release_id IS NOT r.applied_release_id OR (r.desired_generation_sha256 IS NOT NULL AND r.desired_generation_sha256 IS NOT r.applied_generation_sha256) THEN 1 ELSE 0 END AS runtime_stale,t.task_packet_id,t.packet_sha256 AS task_packet_sha256 FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) LEFT JOIN task_packets t USING(workstream_id) WHERE w.project_id=? ORDER BY w.created_at,w.workstream_id", (project_id,))]
 
 
 def inspect_workstream(store: Any, project_id: str, workstream_id: str) -> dict[str, Any]:

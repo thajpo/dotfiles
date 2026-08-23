@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 from pathlib import Path
+import re
 from typing import Any, Mapping
 
 from .adapters import HarnessAdapter, WorkspaceAdapter
-from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, validate_id
+from .events import append_event_in_transaction
+from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, bounded_text, validate_id
 from .models import utc_now
 
 RUNTIME_FIELDS = frozenset({"workstreamId", "runtimeInstanceId", "seq", "event", "reason", "state", "nativeSessionKind", "nativeSessionValue", "startSource", "surfaceId", "token"})
@@ -17,6 +19,8 @@ SESSION_SWITCH_REASONS = frozenset({"new", "resume", "fork", "handoff"})
 OBSERVED_STATES = frozenset({"unknown", "starting", "working", "blocked", "idle", "done", "stopped", "missing", "error"})
 
 WORKSPACE_RUNTIME_MISSING = "workspace runtime is missing"
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:/-]+$")
+TOOL_FAILURE_CODES = frozenset({"tool_error", "tool_timeout", "tool_cancelled", "tool_unknown"})
 def start_bound_agent(
     store: Any,
     workspace: WorkspaceAdapter,
@@ -115,6 +119,25 @@ def verify_runtime_binding(store: Any, payload: Mapping[str, Any], *, worker_onl
         raise ConflictError("runtime instance is stale")
     return dict(row)
 
+
+def record_runtime_tool_failure(store: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+    binding = verify_runtime_binding(store, payload)
+    tool_name = bounded_text(payload.get("toolName"), name="toolName", limit=128)
+    if _TOOL_NAME_RE.fullmatch(tool_name) is None:
+        raise InvalidRequestError("toolName contains invalid characters")
+    failure_code = payload.get("failureCode")
+    if failure_code not in TOOL_FAILURE_CODES:
+        raise InvalidRequestError("failureCode is invalid")
+    with store.transaction():
+        event = append_event_in_transaction(
+            store.conn,
+            kind="runtime.tool_failed",
+            project_id=str(binding["project_id"]),
+            workstream_id=str(binding["workstream_id"]),
+            payload={"toolName": tool_name, "failureCode": failure_code},
+        )
+    return {"recorded": True, "eventId": event["event_id"], "workstreamId": binding["workstream_id"]}
+
 def prepare_session_switch(store: Any, payload: Mapping[str, Any], harness: HarnessAdapter) -> dict[str, Any]:
     binding = verify_runtime_binding(store, payload, allow_session_start=False)
     reason = payload.get("reason")
@@ -193,7 +216,7 @@ def report_runtime(store: Any, payload_value: Mapping[str, Any], harness: Harnes
             workspace.report_state(surface_id, "unknown", None, workspace_seq, instance, harness.manifest)
         now = utc_now()
         store.conn.execute(
-            "UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=?,workspace_report_seq=?,native_session_kind=COALESCE(?,native_session_kind),native_session_value=COALESCE(?,native_session_value),observed_state=?,applied_generation_sha256=CASE WHEN ?='session_start' THEN COALESCE(launch_generation_sha256,applied_generation_sha256) ELSE applied_generation_sha256 END,launch_generation_sha256=CASE WHEN ?='session_start' THEN NULL ELSE launch_generation_sha256 END,last_observed_at=?,updated_at=? WHERE workstream_id=?",
-            (instance, seq, workspace_seq, kind, value, state, event, event, now, now, workstream_id),
+            "UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=?,workspace_report_seq=?,native_session_kind=COALESCE(?,native_session_kind),native_session_value=COALESCE(?,native_session_value),observed_state=?,applied_release_id=CASE WHEN ?='session_start' THEN COALESCE(launch_release_id,applied_release_id) ELSE applied_release_id END,launch_release_id=CASE WHEN ?='session_start' THEN NULL ELSE launch_release_id END,applied_generation_sha256=CASE WHEN ?='session_start' THEN COALESCE(launch_generation_sha256,applied_generation_sha256) ELSE applied_generation_sha256 END,launch_generation_sha256=CASE WHEN ?='session_start' THEN NULL ELSE launch_generation_sha256 END,last_observed_at=?,updated_at=? WHERE workstream_id=?",
+            (instance, seq, workspace_seq, kind, value, state, event, event, event, event, now, now, workstream_id),
         )
     return {"accepted": True, "workstreamId": workstream_id, "seq": seq, "reason": reason, "workspaceReportSeq": workspace_seq}

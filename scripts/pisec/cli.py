@@ -60,7 +60,7 @@ def parser() -> argparse.ArgumentParser:
         dest="command",
         required=True,
         title="commands",
-        metavar="{project,status,reconcile,board,broker,doctor,workstream}",
+        metavar="{project,release,status,reconcile,board,broker,doctor,workstream}",
     )
 
     project = commands.add_parser(
@@ -139,6 +139,32 @@ def parser() -> argparse.ArgumentParser:
     _add_json_argument(project_activate)
     project_activate.add_argument("project", metavar="PROJECT", help="repository path, display name, or project id")
 
+    project_policy = project_commands.add_parser(
+        "policy",
+        **_parser_kwargs(
+            help="set explicit project coordination and automation policy",
+            description="Update durable project policy. Defaults are review-only; automatic behavior must be selected explicitly.",
+        ),
+    )
+    _add_json_argument(project_policy)
+    project_policy.add_argument("project", metavar="PROJECT", help="repository path, display name, or project id")
+    project_policy.add_argument("--coordination-mode", choices=("fleet", "project", "direct"))
+    project_policy.add_argument("--worker-creation-policy", choices=("review", "bounded_auto"))
+    project_policy.add_argument("--worker-policy-json", metavar="JSON", help="bounded JSON constraints for bounded_auto")
+    project_policy.add_argument("--merge-policy", choices=("review", "checked_auto"))
+    project_policy.add_argument("--merge-policy-json", metavar="JSON", help="bounded JSON constraints for checked_auto")
+
+    release = commands.add_parser("release", help="build, list, or activate immutable runtime releases")
+    _add_json_argument(release)
+    release_commands = release.add_subparsers(dest="release_command", required=True, title="release commands")
+    release_build = release_commands.add_parser("build", help="snapshot current runtime software into an immutable release")
+    _add_json_argument(release_build)
+    release_list = release_commands.add_parser("list", help="list built runtime releases")
+    _add_json_argument(release_list)
+    release_activate = release_commands.add_parser("activate", help="select the release desired by new and refreshed runtimes")
+    _add_json_argument(release_activate)
+    release_activate.add_argument("release", metavar="RELEASE", help="runtime release id")
+
 
     status = commands.add_parser(
         "status",
@@ -216,7 +242,7 @@ def parser() -> argparse.ArgumentParser:
 
 def _command_path(args: argparse.Namespace) -> tuple[str, ...]:
     path = [str(args.command)]
-    for name in ("project_command", "workstream_command"):
+    for name in ("project_command", "release_command", "workstream_command"):
         value = getattr(args, name, None)
         if value:
             path.append(str(value))
@@ -452,6 +478,15 @@ def _human_result(command: tuple[str, ...], result: Any) -> str:
             lines.append(f"Project: {_scalar_text(project.get('display_name'))} ({_scalar_text(project.get('project_id'))})")
         lines.append("Open a fresh coordinator with `pisec project open`.")
         return "\n".join(lines)
+    if command == ("project", "policy") and isinstance(result, Mapping):
+        return "\n".join(
+            [
+                "Project policy updated" if not result.get("reused") else "Project policy unchanged",
+                f"Coordination mode: {_scalar_text(result.get('coordination_mode'))}",
+                f"Worker creation: {_scalar_text(result.get('worker_creation_policy'))}",
+                f"Merge: {_scalar_text(result.get('merge_policy'))}",
+            ]
+        )
     if command == ("status",):
         return "\n".join(_status_lines(result, "Pisec status"))
     if command == ("board",):
@@ -479,6 +514,12 @@ def _human_result(command: tuple[str, ...], result: Any) -> str:
                 rows = [(item.get("project", "-"), item.get("workstreamId", "-"), item.get("reason", item.get("state", item.get("generation", "-")))) for item in values if isinstance(item, Mapping)]
                 lines.extend(_table(("PROJECT", "WORKSTREAM", "RESULT"), rows))
         return "\n".join(lines)
+    if command == ("release", "list") and isinstance(result, Mapping):
+        releases = result.get("releases", [])
+        rows = [(item.get("release_id", "-"), item.get("content_sha256", "-"), "current" if item.get("release_id") == result.get("currentReleaseId") else "built") for item in releases if isinstance(item, Mapping)]
+        return "\n".join([f"Runtime releases ({len(rows)})", *_table(("RELEASE", "CONTENT", "STATE"), rows)])
+    if command in {("release", "build"), ("release", "activate")} and isinstance(result, Mapping):
+        return f"Runtime release: {_scalar_text(result.get('release_id'))}\nContent: {_scalar_text(result.get('content_sha256'))}"
     if command == ("reconcile",) and isinstance(result, Mapping):
         lines = ["Reconcile complete" if result.get("reconciled") else "Reconcile incomplete"]
         workspace = result.get("workspace")
@@ -561,8 +602,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _call("project.deactivate", {"project": args.project, "confirm": args.confirm})
         elif args.command == "project" and args.project_command == "activate":
             result = _call("project.activate", {"project": args.project})
+        elif args.command == "project" and args.project_command == "policy":
+            payload = {"project": args.project}
+            for argument, field in (
+                ("coordination_mode", "coordinationMode"),
+                ("worker_creation_policy", "workerCreationPolicy"),
+                ("merge_policy", "mergePolicy"),
+            ):
+                value = getattr(args, argument)
+                if value is not None:
+                    payload[field] = value
+            for argument, field in (("worker_policy_json", "workerCreationPolicyJson"), ("merge_policy_json", "mergePolicyJson")):
+                value = getattr(args, argument)
+                if value is not None:
+                    payload[field] = json.loads(value)
+            result = _call("project.policy.update", payload)
         elif args.command == "project" and args.project_command == "refresh":
             result = _call("project.refresh", {"all": bool(args.all), "waitSeconds": args.wait_seconds}, timeout=max(30.0, args.wait_seconds + 120.0))
+        elif args.command == "release" and args.release_command == "build":
+            result = _call("runtime.release.build", {})
+        elif args.command == "release" and args.release_command == "list":
+            result = _call("runtime.release.list", {})
+        elif args.command == "release" and args.release_command == "activate":
+            result = _call("runtime.release.activate", {"releaseId": args.release})
         elif args.command == "status":
             result = _call("system.status", {} if args.project is None else {"project": args.project})
         elif args.command == "reconcile":

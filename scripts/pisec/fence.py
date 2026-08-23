@@ -167,12 +167,13 @@ def render_policy(
     harness_home: Path,
     adapter_replacements: Mapping[str, Any] | None = None,
     baseline_domains: tuple[str, ...] = (),
+    template_root: Path | None = None,
 ) -> tuple[Path, str]:
     workstream_id = validate_id(scope["workstreamId"], prefix="ws")
     profile = scope.get("executionProfile")
     if not isinstance(profile, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,127}", profile):
         raise InvalidRequestError("Fence execution profile is invalid")
-    template_path = _repo_root() / "pisec" / "fence" / f"{profile}.jsonc"
+    template_path = (template_root if template_root is not None else _repo_root() / "pisec" / "fence") / f"{profile}.jsonc"
     if not template_path.is_file():
         raise InvalidRequestError("Fence execution profile is unavailable")
     template = json.loads(template_path.read_text())

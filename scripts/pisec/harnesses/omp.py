@@ -11,12 +11,10 @@ import re
 import secrets
 import shutil
 import stat
-import tempfile
-import time
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
-from ..adapters import AdapterHealth, HarnessAdapter, HarnessArtifacts, HarnessManifest
+from ..adapters import AdapterHealth, HarnessAdapter, HarnessArtifacts, HarnessManifest, RuntimeReleaseArtifacts
 from ..fsutil import _atomic_write, _read_runtime_secret, _secure_secret, _secure_tree
 from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canonical_json, validate_id
 
@@ -287,7 +285,7 @@ def _plugin_source() -> Path | None:
     return None
 
 
-def _copy_plugin_snapshot(destination: Path) -> dict[str, str]:
+def _copy_plugin_snapshot(destination: Path, source: Path | None = None) -> dict[str, str]:
     data_home = destination / "xdg" / "data"
     state_home = destination / "xdg" / "state"
     cache_home = destination / "xdg" / "cache"
@@ -304,7 +302,7 @@ def _copy_plugin_snapshot(destination: Path) -> dict[str, str]:
     staged = plugin_parent / f".plugins.staged-{secrets.token_hex(8)}"
     staged.mkdir(mode=0o700)
     try:
-        source = _plugin_source()
+        source = _plugin_source() if source is None else source
         if source is not None:
             for name in PLUGIN_FILES:
                 origin = source / name
@@ -325,6 +323,45 @@ def _copy_plugin_snapshot(destination: Path) -> dict[str, str]:
         "xdg_cache_home": str(cache_home),
         "xdg_config_home": str(config_home),
         "plugin_root": str(plugin_target),
+    }
+
+
+def _copy_release_surface(source: Path, destination: Path) -> None:
+    if not source.is_dir() or source.is_symlink():
+        raise PisecError("runtime release agent surface is unavailable")
+    for name in COPY_NAMES:
+        origin = source / name
+        target = destination / name
+        if not origin.exists():
+            if target.exists() and not target.is_symlink():
+                shutil.rmtree(target)
+            continue
+        staged = target.with_name(f".{target.name}.staged-{secrets.token_hex(8)}")
+        shutil.copytree(origin, staged, symlinks=False)
+        _normalize_owner_tree(staged)
+        _activate_directory(staged, target)
+    for name in COPY_FILES:
+        origin = source / name
+        target = destination / name
+        if origin.exists():
+            _copy_safe_entry(origin, target)
+        elif target.exists() and not target.is_symlink():
+            target.unlink()
+
+
+def _copy_released_plugins(release_root: Path, destination: Path) -> dict[str, str]:
+    for name in ("data", "state", "cache", "config"):
+        target = destination / "xdg" / name
+        source = release_root / "xdg" / name
+        if target.exists() and not target.is_symlink():
+            shutil.rmtree(target)
+        _copy_safe_entry(source, target)
+    return {
+        "xdg_data_home": str(destination / "xdg" / "data"),
+        "xdg_state_home": str(destination / "xdg" / "state"),
+        "xdg_cache_home": str(destination / "xdg" / "cache"),
+        "xdg_config_home": str(destination / "xdg" / "config"),
+        "plugin_root": str(destination / "xdg" / "data" / "omp" / "plugins"),
     }
 
 
@@ -398,7 +435,6 @@ class OmpHarnessAdapter:
         self.harness_config = _validate_harness_config(dict(harness["config"]))
         self.config["harness"] = {"id": self.manifest.adapter_id, "config": self.harness_config}
         self.policy_renderer = policy_renderer
-        self._surface_digest_cache: tuple[float, str] | None = None
 
     def validate_execution_profile(self, profile: str, role: str) -> None:
         if profile not in OMP_PROFILE_IDS:
@@ -418,31 +454,72 @@ class OmpHarnessAdapter:
             raise InvalidRequestError("approved external domains contain duplicates")
         return tuple(sorted(values))
 
+    def build_runtime_release(self) -> RuntimeReleaseArtifacts:
+        releases_root = self.state_root / "runtime-releases"
+        _secure_tree(self.state_root, releases_root)
+        staged = releases_root / f".staged-{secrets.token_hex(8)}"
+        staged.mkdir(mode=0o700)
+        try:
+            surface = staged / "agent"
+            surface.mkdir(mode=0o700)
+            _copy_user_surface(surface)
+            _copy_user_config(surface)
+            extensions = surface / "extensions"
+            agents = surface / "agents"
+            extensions.mkdir(mode=0o700, exist_ok=True)
+            agents.mkdir(mode=0o700, exist_ok=True)
+            repository = _repo_root()
+            _copy_safe_entry(repository / "omp" / "extensions" / "pisec.ts", extensions / "pisec.ts")
+            managed_agent = repository / "omp" / "agents" / "pisec-web-research.md"
+            if managed_agent.exists():
+                _copy_safe_entry(managed_agent, agents / managed_agent.name)
+            _copy_plugin_snapshot(staged)
+            managed = staged / "managed"
+            managed.mkdir(mode=0o700)
+            _copy_safe_entry(repository / "pisec" / "fence", managed / "fence")
+            _copy_safe_entry(repository / "pisec" / "runtime-bin" / "omp", managed / "omp")
+            manifest = {
+                "schemaVersion": 1,
+                "adapter": self.manifest.adapter_id,
+                "adapterVersion": self.manifest.version_label,
+                "config": self.config,
+                "harnessExecutableSha256": _file_digest(Path(self.harness_config["executablePath"])),
+                "fenceExecutableSha256": _file_digest(Path(str(self.config["fencePath"]))),
+            }
+            _atomic_write(staged / "release.json", canonical_json(manifest, max_bytes=256 * 1024, max_text=64 * 1024) + "\n")
+            _normalize_owner_tree(staged)
+            digest = _tree_digest(staged)
+            target = releases_root / digest
+            if target.exists():
+                if target.is_symlink() or not target.is_dir() or _tree_digest(target) != digest:
+                    raise PisecError("existing runtime release is unsafe or corrupt")
+                shutil.rmtree(staged)
+            else:
+                os.replace(staged, target)
+            return RuntimeReleaseArtifacts(digest, manifest, str(target.absolute()))
+        except Exception:
+            if staged.exists():
+                shutil.rmtree(staged)
+            raise
+
+    def _release_root(self, scope: Mapping[str, Any]) -> Path:
+        root_value = scope.get("runtimeReleaseRoot")
+        digest = scope.get("runtimeReleaseSha256")
+        if not isinstance(root_value, str) or not isinstance(digest, str) or len(digest) != 64:
+            raise InvalidRequestError("runtime release scope is incomplete")
+        root = Path(root_value).absolute()
+        expected_parent = (self.state_root / "runtime-releases").absolute()
+        if root.parent != expected_parent or root.name != digest or root.is_symlink() or not root.is_dir():
+            raise NeedsAttentionError("runtime release root is invalid")
+        if _tree_digest(root) != digest:
+            raise NeedsAttentionError("runtime release contents do not match their digest")
+        return root
+
     def desired_generation(self, scope: Mapping[str, Any]) -> str:
         profile = scope.get("executionProfile")
         role = _profile_role(str(profile))
         self.validate_execution_profile(str(profile), role)
-        repository = _repo_root()
-        cached = self._surface_digest_cache
-        if cached is not None and time.monotonic() - cached[0] < 5.0:
-            copied_surface_digest = cached[1]
-        else:
-            with tempfile.TemporaryDirectory(prefix="pisec-generation-") as temporary:
-                snapshot = Path(temporary)
-                _copy_user_surface(snapshot)
-                _copy_user_config(snapshot)
-                discovery = snapshot / "agent"
-                discovery.mkdir(mode=0o700)
-                _copy_user_surface(discovery)
-                _copy_plugin_snapshot(snapshot)
-                managed_agent = repository / "omp" / "agents" / "pisec-web-research.md"
-                if managed_agent.exists():
-                    for agents_dir in (snapshot / "agents", discovery / "agents"):
-                        agents_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-                        _copy_safe_entry(managed_agent, agents_dir / managed_agent.name)
-                copied_surface_digest = _tree_digest(snapshot)
-            self._surface_digest_cache = (time.monotonic(), copied_surface_digest)
-        policy_sources = repository / "pisec" / "fence"
+        release_root = self._release_root(scope)
         scope_dict = {
             key: scope.get(key)
             for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "fleetWorktreesDir", "fleetGitObjectsDir", "externalDomains")
@@ -451,20 +528,14 @@ class OmpHarnessAdapter:
             scope_dict["dataDirs"] = scope["dataDirs"]
         if scope.get("pythonEnv"):
             scope_dict["pythonEnv"] = scope["pythonEnv"]
-        extension_name = "pisec.ts"
         manifest = {
             "schemaVersion": 1,
             "adapter": self.manifest.adapter_id,
             "adapterVersion": self.manifest.version_label,
             "scope": scope_dict,
-            "config": self.config,
-            "copiedSurfaceSha256": copied_surface_digest,
-            "modelProvidersSha256": hashlib.sha256(canonical_json(self._model_providers(str(profile), scope.get("externalDomains") if isinstance(scope.get("externalDomains"), list) else []), max_bytes=64 * 1024, max_text=8 * 1024).encode("utf-8")).hexdigest(),
-            "pisecExtensionSha256": _file_digest(repository / "omp" / "extensions" / extension_name),
-            "runtimeLauncherSha256": _file_digest(repository / "pisec" / "runtime-bin" / "omp"),
-            "fencePoliciesSha256": _tree_digest(policy_sources),
-            "harnessExecutableSha256": _file_digest(Path(self.harness_config["executablePath"])),
-            "fenceExecutableSha256": _file_digest(Path(str(self.config["fencePath"]))),
+            "runtimeReleaseId": scope.get("runtimeReleaseId"),
+            "runtimeReleaseSha256": scope.get("runtimeReleaseSha256"),
+            "runtimeReleaseRoot": str(release_root),
         }
         return hashlib.sha256(canonical_json(manifest, max_bytes=256 * 1024, max_text=64 * 1024).encode("utf-8")).hexdigest()
 
@@ -483,22 +554,16 @@ class OmpHarnessAdapter:
         profile = scope.get("executionProfile")
         role = _profile_role(str(profile))
         self.validate_execution_profile(profile, role)
+        release_root = self._release_root(scope)
         generation_sha256 = self.desired_generation(scope)
         agent_dir = self.state_root / "omp" / workstream_id
         _secure_tree(self.state_root, agent_dir)
         _secure_tree(agent_dir, agent_dir / "sessions")
-        _copy_user_surface(agent_dir)
-        _copy_user_config(agent_dir)
+        _copy_release_surface(release_root / "agent", agent_dir)
         discovery_agent_dir = agent_dir / "agent"
         _secure_tree(self.state_root, discovery_agent_dir)
-        _copy_user_surface(discovery_agent_dir)
-        plugin_info = _copy_plugin_snapshot(agent_dir)
-        managed_agent = _repo_root() / "omp" / "agents" / "pisec-web-research.md"
-        if managed_agent.exists():
-            for agents_dir in (agent_dir / "agents", discovery_agent_dir / "agents"):
-                _secure_tree(agent_dir if agents_dir.parent == agent_dir else discovery_agent_dir, agents_dir)
-                _copy_safe_entry(managed_agent, agents_dir / managed_agent.name)
-                _normalize_owner_tree(agents_dir)
+        _copy_release_surface(release_root / "agent", discovery_agent_dir)
+        plugin_info = _copy_released_plugins(release_root, agent_dir)
         secret_path = self.state_root / "secrets" / f"{workstream_id}.token"
         _secure_tree(self.state_root, secret_path.parent)
         if secret_path.exists() or secret_path.is_symlink():
@@ -546,8 +611,9 @@ class OmpHarnessAdapter:
                 "WORKSPACE_CONFIG": Path.home() / ".config" / "herdr",
             },
             baseline_domains=OMP_BASELINE_DOMAINS,
+            template_root=release_root / "managed" / "fence",
         )
-        extension_path = _repo_root() / "omp" / "extensions" / "pisec.ts"
+        extension_path = agent_dir / "extensions" / "pisec.ts"
         adapter_data = {
             "overlayPath": str(overlay_path),
             "xdgDataHome": plugin_info["xdg_data_home"],
@@ -556,6 +622,8 @@ class OmpHarnessAdapter:
             "xdgConfigHome": plugin_info["xdg_config_home"],
             "pluginRoot": plugin_info["plugin_root"],
             "extensionPath": str(extension_path.absolute()),
+            "launcherTemplate": str((release_root / "managed" / "omp").absolute()),
+            "runtimeReleaseId": str(scope["runtimeReleaseId"]),
         }
         return HarnessArtifacts(
             harness_home=str(agent_dir),
@@ -626,6 +694,7 @@ class OmpHarnessAdapter:
             "extensionPath": str(Path(_artifact_value(artifacts, "extensionPath")).absolute()),
             "policyPath": str(Path(artifacts.policy_path).absolute()),
             "policySha256": artifacts.policy_sha256,
+            "runtimeReleaseId": _artifact_value(artifacts, "runtimeReleaseId"),
             "generationSha256": artifacts.generation_sha256,
             "xdgDataHome": str(Path(_artifact_value(artifacts, "xdgDataHome")).absolute()),
             "xdgStateHome": str(Path(_artifact_value(artifacts, "xdgStateHome")).absolute()),
@@ -661,7 +730,7 @@ class OmpHarnessAdapter:
                 raise NeedsAttentionError("launch binding identity drifted")
             if current == descriptor and not replace:
                 return launcher_path
-        template = _repo_root() / "pisec" / "runtime-bin" / "omp"
+        template = Path(_artifact_value(artifacts, "launcherTemplate"))
         try:
             template_info = template.lstat()
         except OSError as error:
@@ -710,7 +779,7 @@ class OmpHarnessAdapter:
         artifact_values = document.get("values") if isinstance(document, Mapping) else None
         if isinstance(artifact_values, Mapping):
             for key, value in artifact_values.items():
-                if key != "extensionPath" and isinstance(value, str):
+                if key in {"overlayPath", "xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot"} and isinstance(value, str):
                     values.append(value)
         for value in sorted(set(values), key=lambda item: (len(Path(item).parts), item), reverse=True):
             self._remove_state_path(value)
@@ -862,6 +931,7 @@ class OmpHarnessAdapter:
                     and descriptor.get("workspaceViewId") == binding.get("workspace_view_id")
                     and descriptor.get("workspaceSurfaceId") == binding.get("workspace_surface_id")
                     and descriptor.get("harnessHome") == str(Path(str(binding.get("harness_home", ""))).absolute())
+                    and descriptor.get("runtimeReleaseId") == binding.get("desired_release_id")
                     and descriptor.get("generationSha256") == binding.get("desired_generation_sha256")
                     and isinstance(identity_hash, str)
                     and hashlib.sha256(canonical_json(identity_payload, max_bytes=64 * 1024, max_text=8 * 1024).encode("utf-8")).hexdigest() == identity_hash
@@ -879,7 +949,7 @@ class OmpHarnessAdapter:
                 and artifact_document_value.get("adapterId") == self.manifest.adapter_id
                 and artifact_document_value.get("generationSha256") == binding.get("desired_generation_sha256")
                 and isinstance(values, Mapping)
-                and set(values) == {"overlayPath", "xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot", "extensionPath"}
+                and set(values) == {"overlayPath", "xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot", "extensionPath", "launcherTemplate", "runtimeReleaseId"}
                 and all(isinstance(value, str) and value for value in values.values())
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):

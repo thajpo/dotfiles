@@ -13,7 +13,12 @@ from typing import Any
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .models import ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, bounded_text, canonical_json, new_id, utc_now, validate_id
+from .policies import normalize_merge_policy, normalize_worker_policy
 from .research import research_counts
+
+COORDINATION_MODES = frozenset({"fleet", "project", "direct"})
+WORKER_CREATION_POLICIES = frozenset({"review", "bounded_auto"})
+MERGE_POLICIES = frozenset({"review", "checked_auto"})
 
 
 def _git(path: Path, *args: str) -> str:
@@ -66,6 +71,9 @@ def get_project(store: Any, project_id: str) -> dict[str, Any]:
     value = dict(row)
     raw_data = value.get("data_dirs")
     value["data_dirs"] = json.loads(raw_data) if raw_data else []
+    for field in ("worker_creation_policy_json", "merge_policy_json"):
+        raw_policy = value.get(field)
+        value[field] = json.loads(raw_policy) if isinstance(raw_policy, str) and raw_policy else {}
     return value
 
 
@@ -129,6 +137,64 @@ def list_projects(store: Any, include_inactive: bool = False) -> list[dict[str, 
     else:
         rows = store.conn.execute("SELECT * FROM projects WHERE active=1 ORDER BY display_name,project_id")
     return [dict(row) for row in rows]
+
+
+def update_project_policy(
+    store: Any,
+    selector: str,
+    *,
+    coordination_mode: str | None = None,
+    worker_creation_policy: str | None = None,
+    worker_creation_policy_json: Mapping[str, Any] | None = None,
+    merge_policy: str | None = None,
+    merge_policy_json: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    project = resolve_project(store, selector)
+    values = {
+        "coordination_mode": coordination_mode,
+        "worker_creation_policy": worker_creation_policy,
+        "worker_creation_policy_json": worker_creation_policy_json,
+        "merge_policy": merge_policy,
+        "merge_policy_json": merge_policy_json,
+    }
+    if all(value is None for value in values.values()):
+        raise InvalidRequestError("project policy update must change at least one policy")
+    if coordination_mode is not None and coordination_mode not in COORDINATION_MODES:
+        raise InvalidRequestError("coordination mode is invalid")
+    if worker_creation_policy is not None and worker_creation_policy not in WORKER_CREATION_POLICIES:
+        raise InvalidRequestError("worker creation policy is invalid")
+    if merge_policy is not None and merge_policy not in MERGE_POLICIES:
+        raise InvalidRequestError("merge policy is invalid")
+    current = get_project(store, project["project_id"])
+    selected_worker_policy = worker_creation_policy or current["worker_creation_policy"]
+    selected_worker_document = worker_creation_policy_json if worker_creation_policy_json is not None else current["worker_creation_policy_json"]
+    normalized_worker = normalize_worker_policy(selected_worker_policy, selected_worker_document)
+    selected_merge_policy = merge_policy or current["merge_policy"]
+    selected_merge_document = merge_policy_json if merge_policy_json is not None else current["merge_policy_json"]
+    normalized_merge = normalize_merge_policy(selected_merge_policy, selected_merge_document)
+    updates: dict[str, Any] = {}
+    for name, value in values.items():
+        if value is None:
+            continue
+        if name.endswith("_json"):
+            updates[name] = canonical_json(dict(value), max_bytes=16 * 1024, max_text=4096)
+        else:
+            updates[name] = value
+    if worker_creation_policy is not None or worker_creation_policy_json is not None:
+        updates["worker_creation_policy_json"] = canonical_json(normalized_worker, max_bytes=16 * 1024, max_text=4096)
+    if merge_policy is not None or merge_policy_json is not None:
+        updates["merge_policy_json"] = canonical_json(normalized_merge, max_bytes=16 * 1024, max_text=4096)
+    changed = {name: value for name, value in updates.items() if current.get(name) != (json.loads(value) if name.endswith("_json") else value)}
+    if not changed:
+        return {**current, "reused": True}
+    assignments = ",".join(f"{name}=?" for name in updates)
+    params = [updates[name] for name in updates]
+    now = utc_now()
+    params.extend((now, project["project_id"]))
+    with store.transaction():
+        store.conn.execute(f"UPDATE projects SET {assignments},updated_at=? WHERE project_id=?", params)
+        append_event_in_transaction(store.conn, kind="project.policy.updated", project_id=project["project_id"], payload={"changed": sorted(changed), "coordinationMode": coordination_mode, "workerCreationPolicy": worker_creation_policy, "mergePolicy": merge_policy})
+    return {**get_project(store, project["project_id"]), "reused": False}
 
 
 def _project_lifecycle_state(store: Any, project: Mapping[str, Any]) -> bool:

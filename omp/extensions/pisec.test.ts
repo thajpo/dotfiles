@@ -57,7 +57,7 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
   const output = runProbe(`
     const records = { tools: [], events: [], labels: [] };
     const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
-    const zod = { string: chain, enum: chain, any: chain, object: value => value, literal: chain, array: chain, number: chain, boolean: chain };
+    const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
     Object.assign(process.env, {
       PISEC_ROLE: "secretary",
       PISEC_RUNTIME_SOCKET: "/tmp/runtime.sock",
@@ -115,6 +115,11 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
   const refusalText = stringValue(asRecord(content[0]), "text");
   assert.deepEqual(tools, [
     "pisec_project_activity",
+    "pisec_report_secretary_issue",
+    "pisec_list_issues",
+    "pisec_inspect_issue",
+    "pisec_add_issue_context",
+    "pisec_verify_issue",
     "pisec_project_status",
     "pisec_git_status",
     "pisec_push_branch",
@@ -170,11 +175,63 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
   assert.ok(events.includes("session_shutdown"));
 });
 
+test("first mate exposes the exact fleet surface", () => {
+  const output = runProbe(`
+    const records = { tools: [], events: [], labels: [] };
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
+    const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
+    Object.assign(process.env, {
+      PISEC_ROLE: "first_mate",
+      PISEC_RUNTIME_SOCKET: "/tmp/runtime.sock",
+      PISEC_FLEET_SOCKET: "/tmp/fleet.sock",
+      PISEC_RUNTIME_TOKEN: "t".repeat(48),
+      PISEC_WORKSTREAM_ID: "ws_" + "a".repeat(32),
+      PISEC_RUNTIME_INSTANCE_ID: "instance",
+      PISEC_SURFACE_ID: "w1:p1",
+    });
+    const pi = {
+      zod,
+      registerTool(value) { records.tools.push(value.name); },
+      on(value) { records.events.push(value); },
+      setLabel(value) { records.labels.push(value); },
+      setActiveTools() { return Promise.resolve(); },
+    };
+    const module = await import(${JSON.stringify(EXTENSION)} + "?first-mate=" + Date.now());
+    module.default(pi);
+    console.log(JSON.stringify(records));
+  `);
+  assert.deepEqual(stringArray(output.tools), [
+    "pisec_fleet_list_access_grants",
+    "pisec_fleet_inspect_access_grant",
+    "pisec_fleet_prepare_access_grant",
+    "pisec_fleet_apply_access_grant",
+    "pisec_fleet_prepare_access_revoke",
+    "pisec_fleet_apply_access_revoke",
+    "pisec_fleet_list_issues",
+    "pisec_fleet_inspect_issue",
+    "pisec_fleet_add_issue_context",
+    "pisec_fleet_acknowledge_issue",
+    "pisec_fleet_resolve_issue",
+    "pisec_fleet_status",
+    "pisec_fleet_events",
+    "pisec_fleet_send_secretary",
+    "pisec_fleet_list_workstreams",
+    "pisec_fleet_inspect_workstream",
+    "pisec_fleet_git_changes",
+    "pisec_fleet_prepare_workstream",
+    "pisec_fleet_create_worker",
+    "pisec_fleet_prepare_merge",
+    "pisec_fleet_merge_workstream",
+  ]);
+  assert.equal(stringArray(output.labels)[0], "Pisec First Mate");
+  assert.ok(stringArray(output.events).includes("session_shutdown"));
+});
+
 test("worker registers runtime handling without secretary tools", () => {
   const output = runProbe(`
     const records = { tools: [], events: [], labels: [] };
     const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
-    const zod = { string: chain, enum: chain, any: chain, object: value => value, literal: chain, array: chain, number: chain, boolean: chain };
+    const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
     Object.assign(process.env, {
       PISEC_ROLE: "worker",
       PISEC_RUNTIME_SOCKET: "/tmp/runtime.sock",
@@ -199,10 +256,15 @@ test("worker registers runtime handling without secretary tools", () => {
   const events = stringArray(output.events);
   assert.deepEqual(tools, [
     "pisec_checkpoint_workstream",
+    "pisec_request_help",
     "pisec_request_coordination",
     "pisec_list_coordination",
     "pisec_inspect_coordination",
-    "pisec_acknowledge_coordination",
+    "pisec_report_issue",
+    "pisec_list_issues",
+    "pisec_inspect_issue",
+    "pisec_add_issue_context",
+    "pisec_verify_issue",
     "pisec_show_task_packet",
     "pisec_request_secretary_research",
     "pisec_check_secretary_research",
@@ -238,7 +300,7 @@ test("only the root UI session reports idle-working-idle lifecycle", () => {
     });
     const handlers = {};
     const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
-    const zod = { string: chain, enum: chain, any: chain, object: value => value, literal: chain, array: chain, number: chain, boolean: chain };
+    const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
     Object.assign(process.env, {
       PISEC_ROLE: "secretary",
       PISEC_RUNTIME_SOCKET: socketPath,
@@ -273,6 +335,59 @@ test("only the root UI session reports idle-working-idle lifecycle", () => {
   assert.deepEqual(output.events, ["session_start", "lifecycle", "lifecycle"]);
 });
 
+test("failed tool telemetry is bounded and excludes tool output", () => {
+  const output = runProbe(`
+    const { rm } = await import("node:fs/promises");
+    const socketPath = "/tmp/pisec-extension-failure-" + process.pid + "-" + Date.now() + ".sock";
+    await rm(socketPath, { force: true });
+    const requests = [];
+    const server = Bun.listen({
+      unix: socketPath,
+      socket: {
+        data(socket, data) {
+          const request = JSON.parse(data.toString().trim());
+          requests.push(request);
+          socket.write(JSON.stringify({ requestId: request.requestId, ok: true, result: { accepted: true } }) + "\\n");
+          socket.end();
+        },
+      },
+    });
+    const handlers = {};
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
+    const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
+    Object.assign(process.env, {
+      PISEC_ROLE: "worker",
+      PISEC_RUNTIME_SOCKET: socketPath,
+      PISEC_RUNTIME_TOKEN: "t".repeat(48),
+      PISEC_WORKSTREAM_ID: "ws_" + "a".repeat(32),
+      PISEC_RUNTIME_INSTANCE_ID: "instance",
+      PISEC_SURFACE_ID: "w1:p1",
+    });
+    const pi = {
+      zod,
+      registerTool() {},
+      on(name, handler) { (handlers[name] ??= []).push(handler); },
+      setLabel() {},
+      setActiveTools() { return Promise.resolve(); },
+    };
+    const module = await import(${JSON.stringify(EXTENSION)} + "?failure=" + Date.now());
+    module.default(pi);
+    const root = { hasUI: true, sessionManager: { getSessionFile() {} }, ui: { notify() {} } };
+    await handlers.session_start[0]({}, root);
+    await handlers.tool_execution_end[0]({ toolName: "pisec_request_help", isError: true, error: "secret output must not be sent" }, root);
+    await handlers.tool_execution_end[0]({ toolName: "bad tool name", isError: true }, root);
+    server.stop(true);
+    await rm(socketPath, { force: true });
+    console.log(JSON.stringify({ operations: requests.map(request => request.operation), failure: requests[1]?.payload }));
+  `);
+  assert.deepEqual(output.operations, ["runtime.report", "runtime.tool_failure"]);
+  const failure = asRecord(output.failure);
+  assert.equal(failure.toolName, "pisec_request_help");
+  assert.equal(failure.failureCode, "tool_error");
+  assert.equal("error" in failure, false);
+  assert.equal("secret output must not be sent" in failure, false);
+});
+
 test("worker rejects a session resume target outside its owned session root", () => {
   const output = runProbe(`
     const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises");
@@ -282,7 +397,7 @@ test("worker rejects a session resume target outside its owned session root", ()
     await writeFile(outside, "outside\\n");
     const records = { events: [], handlers: {} };
     const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
-    const zod = { string: chain, enum: chain, any: chain, object: value => value, literal: chain, array: chain, number: chain, boolean: chain };
+    const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
     Object.assign(process.env, {
       PISEC_ROLE: "worker",
       PISEC_RUNTIME_SOCKET: "/tmp/runtime.sock",

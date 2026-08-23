@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from .events import append_event_in_transaction
 from .models import ConflictError, InvalidRequestError, NeedsAttentionError, ScopeMismatchError, bounded_text, canonical_json, utc_now, validate_id
+from .policies import enforce_merge_policy
 from .projects import get_project
 
 _OID_LENGTHS = frozenset({40, 64})
@@ -495,6 +496,42 @@ def prepare_workstream_merge(store: Any, project_id: str, workstream_id: str) ->
         raise ConflictError("workstream has no accepted completion packet")
     if packet["source_commit_oid"] != source_oid:
         raise ConflictError("completion packet source commit is stale")
+    try:
+        completion_packet = json.loads(str(packet["packet_json"]))
+    except (TypeError, json.JSONDecodeError) as error:
+        raise NeedsAttentionError("completion packet is invalid") from error
+    if not isinstance(completion_packet, dict):
+        raise NeedsAttentionError("completion packet is invalid")
+    project = get_project(store, project_id)
+    policy = enforce_merge_policy(project, target_branch=target_branch, completion_packet=completion_packet)
+    if "maxChangedFiles" in policy:
+        _code, names = _run_git(
+            _repository_path,
+            "diff",
+            "--name-only",
+            "--no-ext-diff",
+            target_oid,
+            source_oid,
+            max_bytes=128 * 1024,
+            alternate_objects=(_private_objects_path,),
+        )
+        changed_files = [line for line in names.splitlines() if line]
+        if len(changed_files) > policy["maxChangedFiles"]:
+            raise ConflictError("merge exceeds the checked project changed-file limit")
+    if "maxDiffBytes" in policy:
+        try:
+            _run_git(
+                _repository_path,
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                target_oid,
+                source_oid,
+                max_bytes=policy["maxDiffBytes"] + 1,
+                alternate_objects=(_private_objects_path,),
+            )
+        except InvalidRequestError as error:
+            raise ConflictError("merge exceeds the checked project diff-size limit") from error
     return {
         "kind": "git.merge.ff-only",
         "projectId": project_id,

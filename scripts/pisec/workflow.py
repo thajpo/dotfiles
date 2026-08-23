@@ -14,6 +14,7 @@ COORDINATION_KINDS = frozenset({"clarification", "blocker", "review_request"})
 
 ISSUE_CATEGORIES = frozenset({"permission", "access", "lifecycle", "tooling", "other"})
 ISSUE_SEVERITIES = frozenset({"blocking", "degraded", "improvement"})
+HELP_KINDS = frozenset({"clarification", "blocker", "review", "access", "permission", "tooling", "lifecycle"})
 
 
 def _issue_row(store: Any, issue_id: str, project_id: str | None = None) -> dict[str, Any]:
@@ -383,6 +384,50 @@ def request_coordination(store: Any, *, project_id: str, workstream_id: str, kin
         store.conn.execute("INSERT INTO coordination_requests(request_id,project_id,workstream_id,task_packet_id,kind,summary,question,blocking,state,idempotency_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (request_id, project_id, workstream_id, packet["task_packet_id"], kind, bounded_text(summary, name="summary", limit=1024), bounded_text(question, name="question", limit=4096), 1 if blocking else 0, "open", idempotency_key, now, now))
         append_event_in_transaction(store.conn, kind="coordination.requested", project_id=project_id, workstream_id=workstream_id, payload={"requestId": request_id, "kind": kind, "blocking": bool(blocking)})
     return dict(store.conn.execute("SELECT * FROM coordination_requests WHERE request_id=?", (request_id,)).fetchone())
+
+
+def request_help(
+    store: Any,
+    *,
+    project_id: str,
+    workstream_id: str,
+    kind: str,
+    summary: str,
+    details: str,
+    requested_action: str,
+    blocking: bool,
+    evidence: Any,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """Route one worker help request to the existing durable record type."""
+    if kind not in HELP_KINDS:
+        raise InvalidRequestError("help request kind is invalid")
+    if kind in {"clarification", "blocker", "review"}:
+        coordination_kind = "review_request" if kind == "review" else kind
+        request = request_coordination(
+            store,
+            project_id=project_id,
+            workstream_id=workstream_id,
+            kind=coordination_kind,
+            summary=summary,
+            question=details,
+            blocking=False if kind == "review" else bool(blocking),
+            idempotency_key=idempotency_key,
+        )
+        return {"kind": kind, "recordType": "coordination", "request": request}
+    issue = report_issue(
+        store,
+        project_id=project_id,
+        reporter_workstream_id=workstream_id,
+        category=kind,
+        severity="blocking" if blocking else "degraded",
+        summary=summary,
+        details=details,
+        requested_action=requested_action,
+        evidence=evidence,
+        idempotency_key=idempotency_key,
+    )
+    return {"kind": kind, "recordType": "issue", "request": issue}
 
 
 def answer_coordination(store: Any, *, project_id: str, secretary_workstream_id: str, request_id: str, response: str, idempotency_key: str, decision_id: str | None = None) -> dict[str, Any]:

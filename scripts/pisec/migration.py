@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from .adapters import HarnessAdapter, WorkspaceAdapter, WorkspaceObservation, artifact_document
 from .models import NeedsAttentionError, canonical_json, utc_now
 from .runtime import start_bound_agent
+from .releases import materialize_active_release
 
 
 def _scope(operation: Mapping[str, Any]) -> dict[str, Any]:
@@ -98,9 +99,9 @@ def _migrate_one(
             raise NeedsAttentionError("First Mate workspace surface is missing")
     else:
         observed = _worker_surface(store, workspace, project, workstream)
-    artifacts = harness.materialize_profile(scope)
+    artifacts, release, materialized_scope = materialize_active_release(store, harness, scope)
     harness.commit_launch_binding(
-        scope,
+        materialized_scope,
         artifacts,
         workspace_session_name=workspace.manifest.session_name,
         workspace_id=observed.workspace_id,
@@ -111,8 +112,8 @@ def _migrate_one(
     now = utc_now()
     with store.transaction():
         store.conn.execute(
-            "UPDATE runtime_bindings SET workspace_session_name=?,workspace_id=?,workspace_view_id=?,workspace_surface_id=?,harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_generation_sha256=?,applied_generation_sha256=NULL,launch_generation_sha256=?,runtime_instance_id=NULL,observed_state='starting',report_seq=0,workspace_report_seq=0,last_observed_at=NULL,updated_at=? WHERE workstream_id=?",
-            (workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, artifacts.generation_sha256, now, expected_workstream_id),
+            "UPDATE runtime_bindings SET workspace_session_name=?,workspace_id=?,workspace_view_id=?,workspace_surface_id=?,harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_release_id=?,applied_release_id=NULL,launch_release_id=?,desired_generation_sha256=?,applied_generation_sha256=NULL,launch_generation_sha256=?,runtime_instance_id=NULL,observed_state='starting',report_seq=0,workspace_report_seq=0,last_observed_at=NULL,updated_at=? WHERE workstream_id=?",
+            (workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, release["release_id"], release["release_id"], artifacts.generation_sha256, artifacts.generation_sha256, now, expected_workstream_id),
         )
         store.conn.execute(
             "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?",

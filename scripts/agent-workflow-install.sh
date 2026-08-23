@@ -1080,7 +1080,30 @@ if [[ -z "${PISEC_COLLIE_PROBE_URL:-}" ]]; then
 fi
 verify_collie_surface
 
-printf '\nRolling stale Pisec runtimes to the deployed generation\n'
+printf '\nBuilding and activating the deployed Pisec runtime release\n'
+if ! release_output="$(python3 "$HOME/.local/bin/pisec" --json release build)"; then
+  die "Pisec runtime release build could not run"
+fi
+printf '%s\n' "$release_output"
+if ! release_id="$(RELEASE_OUTPUT="$release_output" python3 - <<'PY'
+import json
+import os
+
+value = json.loads(os.environ["RELEASE_OUTPUT"])
+release_id = value.get("release_id") if isinstance(value, dict) else None
+if not isinstance(release_id, str):
+    raise SystemExit("Pisec runtime release build returned an invalid result")
+print(release_id)
+PY
+)"; then
+  die "Pisec runtime release build returned an invalid result"
+fi
+if ! activate_output="$(python3 "$HOME/.local/bin/pisec" --json release activate "$release_id")"; then
+  die "Pisec runtime release activation could not run"
+fi
+printf '%s\n' "$activate_output"
+
+printf '\nRolling stale Pisec runtimes to the activated release\n'
 if ! refresh_output="$(python3 "$HOME/.local/bin/pisec" --json project refresh --all --wait-seconds 300)"; then
   die "Pisec runtime refresh could not run"
 fi

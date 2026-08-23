@@ -1,4 +1,4 @@
-"""Fresh Pisec core epoch-twelve schema."""
+"""Fresh Pisec core epoch-fourteen schema."""
 
 from __future__ import annotations
 import json
@@ -9,13 +9,21 @@ import sqlite3
 from .models import utc_now
 
 SCHEMA_NAME = "pisec-core"
-SCHEMA_VERSION = 12
-MIGRATION_NAME = "pisec-core-epoch-12"
-PREVIOUS_SCHEMA_VERSION = 11
-PREVIOUS_SCHEMA_NAME = "pisec-core-epoch-11"
-PREVIOUS_MIGRATION_NAME = "pisec-core-epoch-11"
-PREVIOUS_SCHEMA_DIGEST = "sha256:2dbbf3e3e01957a231a7b75c87d7a1799836884fafa2b3f53dfc2fd4a5c3e466"
-DEPLOYED_EPOCH_ELEVEN_SCHEMA_DIGEST = PREVIOUS_SCHEMA_DIGEST
+SCHEMA_VERSION = 14
+MIGRATION_NAME = "pisec-core-epoch-14"
+PREVIOUS_SCHEMA_VERSION = 13
+PREVIOUS_SCHEMA_NAME = "pisec-core"
+PREVIOUS_MIGRATION_NAME = "pisec-core-epoch-13"
+PREVIOUS_SCHEMA_DIGEST = "sha256:db5e4cb13fe6f4aeaa929130a9ce136b08720cdf7eee211590c63f27054ef814"
+PREVIOUS_EPOCH_TWELVE_SCHEMA_VERSION = 12
+PREVIOUS_EPOCH_TWELVE_SCHEMA_NAME = "pisec-core"
+PREVIOUS_EPOCH_TWELVE_MIGRATION_NAME = "pisec-core-epoch-12"
+PREVIOUS_EPOCH_TWELVE_SCHEMA_DIGEST = "sha256:21f28f9aab4dace088a2bb84f55f5f934296003462043b6d0d74c314315573bd"
+PREVIOUS_EPOCH_ELEVEN_SCHEMA_VERSION = 11
+PREVIOUS_EPOCH_ELEVEN_SCHEMA_NAME = "pisec-core"
+PREVIOUS_EPOCH_ELEVEN_MIGRATION_NAME = "pisec-core-epoch-11"
+PREVIOUS_EPOCH_ELEVEN_SCHEMA_DIGEST = "sha256:2dbbf3e3e01957a231a7b75c87d7a1799836884fafa2b3f53dfc2fd4a5c3e466"
+DEPLOYED_EPOCH_ELEVEN_SCHEMA_DIGEST = PREVIOUS_EPOCH_ELEVEN_SCHEMA_DIGEST
 PREVIOUS_EPOCH_TEN_SCHEMA_VERSION = 10
 PREVIOUS_EPOCH_TEN_SCHEMA_NAME = "pisec-core-epoch-10"
 PREVIOUS_EPOCH_TEN_MIGRATION_NAME = "pisec-core-epoch-10"
@@ -57,11 +65,26 @@ CREATE TABLE projects (
     remote_url TEXT CHECK(remote_url IS NULL OR length(remote_url) BETWEEN 1 AND 2048),
     data_dirs TEXT,
     secretary_workstream_id TEXT,
+    coordination_mode TEXT NOT NULL DEFAULT 'direct' CHECK(coordination_mode IN ('fleet','project','direct')),
+    worker_creation_policy TEXT NOT NULL DEFAULT 'review' CHECK(worker_creation_policy IN ('review','bounded_auto')),
+    worker_creation_policy_json TEXT NOT NULL DEFAULT '{}',
+    merge_policy TEXT NOT NULL DEFAULT 'review' CHECK(merge_policy IN ('review','checked_auto')),
+    merge_policy_json TEXT NOT NULL DEFAULT '{}',
     active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     deactivated_at TEXT,
     FOREIGN KEY(secretary_workstream_id) REFERENCES workstreams(workstream_id)
+);
+
+CREATE TABLE project_workspaces (
+    project_id TEXT PRIMARY KEY REFERENCES projects(project_id),
+    workspace_adapter_id TEXT NOT NULL CHECK(length(workspace_adapter_id) BETWEEN 1 AND 64),
+    workspace_session_name TEXT NOT NULL CHECK(length(workspace_session_name) BETWEEN 1 AND 128),
+    workspace_id TEXT NOT NULL CHECK(length(workspace_id) BETWEEN 1 AND 256),
+    repository_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE workstreams (
@@ -93,6 +116,25 @@ ON workstreams(kind) WHERE kind='first_mate' AND desired_state <> 'retired';
 CREATE UNIQUE INDEX one_active_secretary_per_project
 ON workstreams(project_id) WHERE kind='secretary' AND desired_state <> 'retired';
 
+CREATE TABLE runtime_releases (
+    release_id TEXT PRIMARY KEY,
+    harness_id TEXT NOT NULL CHECK(length(harness_id) BETWEEN 1 AND 64),
+    adapter_version TEXT NOT NULL CHECK(length(adapter_version) BETWEEN 1 AND 128),
+    content_sha256 TEXT NOT NULL UNIQUE CHECK(length(content_sha256) = 64),
+    manifest_json TEXT NOT NULL CHECK(length(CAST(manifest_json AS BLOB)) <= 262144),
+    root_path TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TRIGGER runtime_releases_no_update BEFORE UPDATE ON runtime_releases
+BEGIN SELECT RAISE(ABORT, 'Pisec runtime releases are immutable'); END;
+CREATE TRIGGER runtime_releases_no_delete BEFORE DELETE ON runtime_releases
+BEGIN SELECT RAISE(ABORT, 'Pisec runtime releases are immutable'); END;
+CREATE TABLE runtime_release_channels (
+    channel TEXT PRIMARY KEY CHECK(channel = 'current'),
+    release_id TEXT NOT NULL REFERENCES runtime_releases(release_id),
+    activated_at TEXT NOT NULL
+);
+
 CREATE TABLE runtime_bindings (
     workstream_id TEXT PRIMARY KEY REFERENCES workstreams(workstream_id),
     workspace_adapter_id TEXT NOT NULL CHECK(length(workspace_adapter_id) BETWEEN 1 AND 64),
@@ -111,6 +153,9 @@ CREATE TABLE runtime_bindings (
     policy_path TEXT NOT NULL,
     policy_sha256 TEXT NOT NULL CHECK(length(policy_sha256) = 64),
     runtime_token_sha256 TEXT NOT NULL CHECK(length(runtime_token_sha256) = 64),
+    desired_release_id TEXT REFERENCES runtime_releases(release_id),
+    applied_release_id TEXT REFERENCES runtime_releases(release_id),
+    launch_release_id TEXT REFERENCES runtime_releases(release_id),
     desired_generation_sha256 TEXT CHECK(desired_generation_sha256 IS NULL OR length(desired_generation_sha256) = 64),
     applied_generation_sha256 TEXT CHECK(applied_generation_sha256 IS NULL OR length(applied_generation_sha256) = 64),
     launch_generation_sha256 TEXT CHECK(launch_generation_sha256 IS NULL OR length(launch_generation_sha256) = 64),
@@ -434,7 +479,7 @@ CREATE TABLE deployment_actions (
 
 CREATE TABLE operations (
     operation_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL CHECK(kind IN ('project.register','project.deactivate','secretary.ensure','first_mate.ensure','workstream.create','workstream.complete','workstream.retire','workstream.cleanup','access.grant','access.revoke','deployment.apply')),
+    kind TEXT NOT NULL CHECK(kind IN ('project.register','project.deactivate','secretary.ensure','first_mate.ensure','workstream.create','workstream.complete','workstream.retire','workstream.cleanup','access.grant','access.revoke','deployment.apply','runtime.release.build','runtime.release.activate')),
     project_id TEXT REFERENCES projects(project_id),
     workstream_id TEXT REFERENCES workstreams(workstream_id),
     idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key) BETWEEN 1 AND 256),
@@ -862,6 +907,114 @@ def _rebuild_epoch_twelve_operations(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE authorizations_epoch12 RENAME TO authorizations")
 
 
+def _add_epoch_thirteen_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_releases (
+            release_id TEXT PRIMARY KEY,
+            harness_id TEXT NOT NULL CHECK(length(harness_id) BETWEEN 1 AND 64),
+            adapter_version TEXT NOT NULL CHECK(length(adapter_version) BETWEEN 1 AND 128),
+            content_sha256 TEXT NOT NULL UNIQUE CHECK(length(content_sha256) = 64),
+            manifest_json TEXT NOT NULL CHECK(length(CAST(manifest_json AS BLOB)) <= 262144),
+            root_path TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS runtime_releases_no_update BEFORE UPDATE ON runtime_releases
+        BEGIN SELECT RAISE(ABORT, 'Pisec runtime releases are immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS runtime_releases_no_delete BEFORE DELETE ON runtime_releases
+        BEGIN SELECT RAISE(ABORT, 'Pisec runtime releases are immutable'); END;
+        CREATE TABLE IF NOT EXISTS runtime_release_channels (
+            channel TEXT PRIMARY KEY CHECK(channel = 'current'),
+            release_id TEXT NOT NULL REFERENCES runtime_releases(release_id),
+            activated_at TEXT NOT NULL
+        );
+        """
+    )
+    binding_columns = {row[1] for row in connection.execute("PRAGMA table_info(runtime_bindings)")}
+    if "desired_release_id" not in binding_columns:
+        connection.execute("ALTER TABLE runtime_bindings ADD COLUMN desired_release_id TEXT REFERENCES runtime_releases(release_id)")
+    if "applied_release_id" not in binding_columns:
+        connection.execute("ALTER TABLE runtime_bindings ADD COLUMN applied_release_id TEXT REFERENCES runtime_releases(release_id)")
+    if "launch_release_id" not in binding_columns:
+        connection.execute("ALTER TABLE runtime_bindings ADD COLUMN launch_release_id TEXT REFERENCES runtime_releases(release_id)")
+
+
+def _rebuild_epoch_thirteen_operations(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE operations_epoch13 (
+            operation_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL CHECK(kind IN ('project.register','project.deactivate','secretary.ensure','first_mate.ensure','workstream.create','workstream.complete','workstream.retire','workstream.cleanup','access.grant','access.revoke','deployment.apply','runtime.release.build','runtime.release.activate')),
+            project_id TEXT REFERENCES projects(project_id),
+            workstream_id TEXT REFERENCES workstreams(workstream_id),
+            idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key) BETWEEN 1 AND 256),
+            request_json TEXT NOT NULL,
+            request_sha256 TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('planned','applying','succeeded','failed','needs_attention','cancelled')),
+            step TEXT NOT NULL,
+            result_json TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute("INSERT INTO operations_epoch13 SELECT operation_id,kind,project_id,workstream_id,idempotency_key,request_json,request_sha256,state,step,result_json,error_code,error_message,created_at,updated_at FROM operations")
+    connection.execute("DROP TABLE operations")
+    connection.execute("ALTER TABLE operations_epoch13 RENAME TO operations")
+
+
+def _add_epoch_fourteen_schema(connection: sqlite3.Connection) -> None:
+    project_columns = {row[1] for row in connection.execute("PRAGMA table_info(projects)")}
+    additions = (
+        ("coordination_mode", "TEXT NOT NULL DEFAULT 'direct' CHECK(coordination_mode IN ('fleet','project','direct'))"),
+        ("worker_creation_policy", "TEXT NOT NULL DEFAULT 'review' CHECK(worker_creation_policy IN ('review','bounded_auto'))"),
+        ("worker_creation_policy_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("merge_policy", "TEXT NOT NULL DEFAULT 'review' CHECK(merge_policy IN ('review','checked_auto'))"),
+        ("merge_policy_json", "TEXT NOT NULL DEFAULT '{}'"),
+    )
+    for name, definition in additions:
+        if name not in project_columns:
+            connection.execute(f"ALTER TABLE projects ADD COLUMN {name} {definition}")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS project_workspaces (
+            project_id TEXT PRIMARY KEY REFERENCES projects(project_id),
+            workspace_adapter_id TEXT NOT NULL CHECK(length(workspace_adapter_id) BETWEEN 1 AND 64),
+            workspace_session_name TEXT NOT NULL CHECK(length(workspace_session_name) BETWEEN 1 AND 128),
+            workspace_id TEXT NOT NULL CHECK(length(workspace_id) BETWEEN 1 AND 256),
+            repository_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        UPDATE projects
+        SET coordination_mode='project'
+        WHERE coordination_mode='direct'
+          AND EXISTS (
+              SELECT 1 FROM workstreams w
+              WHERE w.project_id=projects.project_id
+                AND w.kind='secretary'
+                AND w.desired_state <> 'retired'
+          )
+        """
+    )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO project_workspaces(project_id,workspace_adapter_id,workspace_session_name,workspace_id,repository_path,created_at,updated_at)
+        SELECT p.project_id,r.workspace_adapter_id,r.workspace_session_name,r.workspace_id,p.repository_path,p.created_at,p.updated_at
+        FROM projects p
+        JOIN workstreams w ON w.project_id=p.project_id AND w.kind='secretary' AND w.desired_state <> 'retired'
+        JOIN runtime_bindings r ON r.workstream_id=w.workstream_id
+        WHERE r.workspace_id IS NOT NULL
+        """
+    )
+
+
 def _rebuild_epoch_ten_operations(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -898,9 +1051,15 @@ def migrate_schema(connection: sqlite3.Connection) -> bool:
     expected = (SCHEMA_NAME, SCHEMA_VERSION, schema_digest(), MIGRATION_NAME)
     if actual == expected:
         return False
+    epoch_thirteen_identities = {
+        (PREVIOUS_SCHEMA_NAME, PREVIOUS_SCHEMA_VERSION, PREVIOUS_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME),
+    }
+    epoch_twelve_identities = {
+        (PREVIOUS_EPOCH_TWELVE_SCHEMA_NAME, PREVIOUS_EPOCH_TWELVE_SCHEMA_VERSION, PREVIOUS_EPOCH_TWELVE_SCHEMA_DIGEST, PREVIOUS_EPOCH_TWELVE_MIGRATION_NAME),
+    }
     epoch_eleven_identities = {
-        (SCHEMA_NAME, PREVIOUS_SCHEMA_VERSION, PREVIOUS_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME),
-        (SCHEMA_NAME, PREVIOUS_SCHEMA_VERSION, DEPLOYED_EPOCH_ELEVEN_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME),
+        (PREVIOUS_EPOCH_ELEVEN_SCHEMA_NAME, PREVIOUS_EPOCH_ELEVEN_SCHEMA_VERSION, PREVIOUS_EPOCH_ELEVEN_SCHEMA_DIGEST, PREVIOUS_EPOCH_ELEVEN_MIGRATION_NAME),
+        (PREVIOUS_EPOCH_ELEVEN_SCHEMA_NAME, PREVIOUS_EPOCH_ELEVEN_SCHEMA_VERSION, DEPLOYED_EPOCH_ELEVEN_SCHEMA_DIGEST, PREVIOUS_EPOCH_ELEVEN_MIGRATION_NAME),
     }
     epoch_ten_identities = {
         (SCHEMA_NAME, PREVIOUS_EPOCH_TEN_SCHEMA_VERSION, PREVIOUS_EPOCH_TEN_SCHEMA_DIGEST, PREVIOUS_EPOCH_TEN_MIGRATION_NAME),
@@ -916,52 +1075,59 @@ def migrate_schema(connection: sqlite3.Connection) -> bool:
     }
     epoch_seven = (SCHEMA_NAME, EPOCH_SEVEN_SCHEMA_VERSION, EPOCH_SEVEN_SCHEMA_DIGEST, EPOCH_SEVEN_MIGRATION_NAME)
     epoch_six = (SCHEMA_NAME, EPOCH_SIX_SCHEMA_VERSION, EPOCH_SIX_SCHEMA_DIGEST, EPOCH_SIX_MIGRATION_NAME)
-    if actual not in epoch_eleven_identities | epoch_ten_identities | epoch_nine_identities | epoch_eight_identities | {epoch_six, epoch_seven}:
+    if actual not in epoch_thirteen_identities | epoch_twelve_identities | epoch_eleven_identities | epoch_ten_identities | epoch_nine_identities | epoch_eight_identities | {epoch_six, epoch_seven}:
         raise sqlite3.DatabaseError("unsupported Pisec schema migration")
     connection.execute("PRAGMA foreign_keys=OFF")
     connection.execute("BEGIN IMMEDIATE")
     try:
-        if actual == epoch_six and "data_dirs" not in {row[1] for row in connection.execute("PRAGMA table_info(projects)")}:
-            connection.execute("ALTER TABLE projects ADD COLUMN data_dirs TEXT")
-        if actual in {epoch_six, epoch_seven} | epoch_eight_identities:
-            _rebuild_epoch_eight_tables(connection)
-        project_columns = {row[1] for row in connection.execute("PRAGMA table_info(projects)")}
-        if "active" not in project_columns:
-            connection.execute("ALTER TABLE projects ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
-        if "deactivated_at" not in project_columns:
-            connection.execute("ALTER TABLE projects ADD COLUMN deactivated_at TEXT")
-        decision_columns = {row[1] for row in connection.execute("PRAGMA table_info(decisions)")}
-        if "resolved_at" not in decision_columns:
-            connection.execute("ALTER TABLE decisions ADD COLUMN resolved_at TEXT")
-        if "updated_at" not in decision_columns:
-            connection.execute("ALTER TABLE decisions ADD COLUMN updated_at TEXT")
-        _rebuild_epoch_ten_operations(connection)
-        _add_epoch_ten_schema(connection)
-        old_issue_table = False
-        if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='secretary_issue_reports'").fetchone() is not None:
-            connection.execute("ALTER TABLE secretary_issue_reports RENAME TO secretary_issue_reports_epoch11")
-            old_issue_table = True
-        _rebuild_epoch_twelve_operations(connection)
-        _add_epoch_twelve_schema(connection)
-        if old_issue_table:
-            rows = connection.execute("SELECT * FROM secretary_issue_reports_epoch11").fetchall()
-            for old in rows:
-                report = {
-                    "category": old["category"],
-                    "severity": old["severity"],
-                    "summary": old["summary"],
-                    "details": old["details"],
-                    "requestedAction": old["requested_action"],
-                    "evidence": json.loads(old["evidence_json"]),
-                }
-                report_sha = hashlib.sha256(json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-                connection.execute(
-                    "INSERT INTO issues(issue_id,project_id,reporter_workstream_id,reporter_kind,category,severity,summary,details,requested_action,evidence_json,idempotency_key,report_sha256,state,disposition,resolution,created_at,updated_at,acknowledged_at,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (old["issue_id"], old["project_id"], old["secretary_workstream_id"], "secretary", old["category"], old["severity"], old["summary"], old["details"], old["requested_action"], old["evidence_json"], old["idempotency_key"], report_sha, "resolved" if old["state"] == "resolved" else old["state"], "fixed" if old["state"] == "resolved" else None, old["resolution"], old["created_at"], old["updated_at"], old["acknowledged_at"], old["resolved_at"]),
-                )
-            connection.execute("DROP TABLE secretary_issue_reports_epoch11")
-        now = utc_now()
-        connection.execute("INSERT OR IGNORE INTO issue_inbox(workstream_id,generation,notified_generation,updated_at) SELECT workstream_id,0,0,? FROM workstreams WHERE kind IN ('secretary','first_mate') AND desired_state <> 'retired'", (now,))
+        if actual not in epoch_twelve_identities | epoch_thirteen_identities:
+            if actual == epoch_six and "data_dirs" not in {row[1] for row in connection.execute("PRAGMA table_info(projects)")}:
+                connection.execute("ALTER TABLE projects ADD COLUMN data_dirs TEXT")
+            if actual in {epoch_six, epoch_seven} | epoch_eight_identities:
+                _rebuild_epoch_eight_tables(connection)
+            project_columns = {row[1] for row in connection.execute("PRAGMA table_info(projects)")}
+            if "active" not in project_columns:
+                connection.execute("ALTER TABLE projects ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+            if "deactivated_at" not in project_columns:
+                connection.execute("ALTER TABLE projects ADD COLUMN deactivated_at TEXT")
+            decision_columns = {row[1] for row in connection.execute("PRAGMA table_info(decisions)")}
+            if "resolved_at" not in decision_columns:
+                connection.execute("ALTER TABLE decisions ADD COLUMN resolved_at TEXT")
+            if "updated_at" not in decision_columns:
+                connection.execute("ALTER TABLE decisions ADD COLUMN updated_at TEXT")
+            _rebuild_epoch_ten_operations(connection)
+            _add_epoch_ten_schema(connection)
+            old_issue_table = False
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='secretary_issue_reports'").fetchone() is not None:
+                connection.execute("ALTER TABLE secretary_issue_reports RENAME TO secretary_issue_reports_epoch11")
+                connection.execute("DROP TRIGGER IF EXISTS issues_secretary_report_insert")
+                connection.execute("DROP TRIGGER IF EXISTS issues_secretary_report_update")
+                old_issue_table = True
+            _rebuild_epoch_twelve_operations(connection)
+            _add_epoch_twelve_schema(connection)
+            if old_issue_table:
+                rows = connection.execute("SELECT * FROM secretary_issue_reports_epoch11").fetchall()
+                for old in rows:
+                    report = {
+                        "category": old["category"],
+                        "severity": old["severity"],
+                        "summary": old["summary"],
+                        "details": old["details"],
+                        "requestedAction": old["requested_action"],
+                        "evidence": json.loads(old["evidence_json"]),
+                    }
+                    report_sha = hashlib.sha256(json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+                    connection.execute(
+                        "INSERT INTO issues(issue_id,project_id,reporter_workstream_id,reporter_kind,category,severity,summary,details,requested_action,evidence_json,idempotency_key,report_sha256,state,disposition,resolution,created_at,updated_at,acknowledged_at,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (old["issue_id"], old["project_id"], old["secretary_workstream_id"], "secretary", old["category"], old["severity"], old["summary"], old["details"], old["requested_action"], old["evidence_json"], old["idempotency_key"], report_sha, "resolved" if old["state"] == "resolved" else old["state"], "fixed" if old["state"] == "resolved" else None, old["resolution"], old["created_at"], old["updated_at"], old["acknowledged_at"], old["resolved_at"]),
+                    )
+                connection.execute("DROP TABLE secretary_issue_reports_epoch11")
+            now = utc_now()
+            connection.execute("INSERT OR IGNORE INTO issue_inbox(workstream_id,generation,notified_generation,updated_at) SELECT workstream_id,0,0,? FROM workstreams WHERE kind IN ('secretary','first_mate') AND desired_state <> 'retired'", (now,))
+        if actual not in epoch_thirteen_identities:
+            _rebuild_epoch_thirteen_operations(connection)
+            _add_epoch_thirteen_schema(connection)
+        _add_epoch_fourteen_schema(connection)
         connection.execute(
             "UPDATE control_meta SET schema_version=?,schema_sha256=?,migration_name=? WHERE singleton=1",
             (SCHEMA_VERSION, schema_digest(), MIGRATION_NAME),
