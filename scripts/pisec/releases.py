@@ -76,11 +76,23 @@ def active_runtime_release(store: Any, harness: HarnessAdapter, *, bootstrap: bo
     row = store.conn.execute(
         "SELECT r.* FROM runtime_release_channels c JOIN runtime_releases r USING(release_id) WHERE c.channel='current'"
     ).fetchone()
+    if row is not None and row["harness_id"] == harness.manifest.adapter_id:
+        return dict(row)
+    if row is not None:
+        compatible = store.conn.execute(
+            "SELECT * FROM runtime_releases WHERE harness_id=? ORDER BY created_at DESC,release_id LIMIT 1",
+            (harness.manifest.adapter_id,),
+        ).fetchone()
+        if compatible is not None:
+            return dict(compatible)
     if row is None:
         if not bootstrap:
             raise ConflictError("no runtime release is active")
         built = build_runtime_release(store, harness)
         activate_runtime_release(store, str(built["release_id"]))
+        row = store.conn.execute("SELECT * FROM runtime_releases WHERE release_id=?", (built["release_id"],)).fetchone()
+    else:
+        built = build_runtime_release(store, harness)
         row = store.conn.execute("SELECT * FROM runtime_releases WHERE release_id=?", (built["release_id"],)).fetchone()
     if row is None or row["harness_id"] != harness.manifest.adapter_id:
         raise ConflictError("active runtime release does not match the configured harness")

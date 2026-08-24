@@ -33,10 +33,15 @@ def _version_tuple(value: str) -> tuple[int, int, int]:
         raise PisecError("workspace returned an invalid version") from error
 
 
-def _runtime_source(runtime_instance_id: str) -> str:
+def _runtime_source(runtime_instance_id: str, harness_id: str = "omp") -> str:
     if not isinstance(runtime_instance_id, str) or not runtime_instance_id:
         raise ValueError("runtime instance id is required")
-    return "pisec:omp:" + hashlib.sha256(runtime_instance_id.encode("utf-8")).hexdigest()[:32]
+    return f"pisec:{harness_id}:" + hashlib.sha256(runtime_instance_id.encode("utf-8")).hexdigest()[:32]
+
+
+def _harness_identity(harness: Any) -> tuple[str, str]:
+    manifest = harness if isinstance(harness, HarnessManifest) else harness.manifest
+    return manifest.adapter_id, manifest.agent_kind
 
 
 class HerdrWorkspaceAdapter:
@@ -429,7 +434,7 @@ class HerdrWorkspaceAdapter:
                 return RuntimeProcessObservation("unknown", "invalid foreground process information")
             valid_processes.append(process)
             for index, value in enumerate(argv[:-1]):
-                if value == "--settings" and argv[index + 1] == process_identity and "--" in argv[index + 2 :]:
+                if value in {"--settings", "--config"} and argv[index + 1] == process_identity and "--" in argv[index + 2 :]:
                     return RuntimeProcessObservation("live", f"pid={pid}")
         if len(valid_processes) == 1 and valid_processes[0]["pid"] == shell_pid:
             return RuntimeProcessObservation("stopped", f"shell_pid={shell_pid}")
@@ -441,7 +446,8 @@ class HerdrWorkspaceAdapter:
         kind, value = native_session
         if kind not in {"path", "id"} or start_source not in {"startup", "resume"}:
             raise ValueError("invalid native session report")
-        params: dict[str, Any] = {"pane_id": surface_id, "source": _runtime_source(runtime_instance_id), "agent": harness.agent_kind, "seq": seq, "session_start_source": start_source}
+        harness_id, agent_kind = _harness_identity(harness)
+        params: dict[str, Any] = {"pane_id": surface_id, "source": _runtime_source(runtime_instance_id, harness_id), "agent": agent_kind, "seq": seq, "session_start_source": start_source}
         params["agent_session_path" if kind == "path" else "agent_session_id"] = value
         result = self._request("pane.report_agent_session", params)
         if result.get("type") != "ok":
@@ -451,13 +457,15 @@ class HerdrWorkspaceAdapter:
     def report_state(self, surface_id: str, state: str, message: str | None, seq: int, runtime_instance_id: str, harness: HarnessManifest) -> dict[str, Any]:
         if state not in {"idle", "working", "blocked", "unknown"}:
             raise ValueError("invalid workspace report state")
-        result = self._request("pane.report_agent", {"pane_id": surface_id, "source": _runtime_source(runtime_instance_id), "agent": harness.agent_kind, "state": state, "message": message, "seq": seq})
+        harness_id, agent_kind = _harness_identity(harness)
+        result = self._request("pane.report_agent", {"pane_id": surface_id, "source": _runtime_source(runtime_instance_id, harness_id), "agent": agent_kind, "state": state, "message": message, "seq": seq})
         if result.get("type") != "ok":
             raise PisecError("workspace rejected the runtime state report")
         return result
 
     def release_agent(self, surface_id: str, seq: int, runtime_instance_id: str, harness: HarnessManifest) -> dict[str, Any]:
-        result = self._request("pane.release_agent", {"pane_id": surface_id, "source": _runtime_source(runtime_instance_id), "agent": harness.agent_kind, "seq": seq})
+        harness_id, agent_kind = _harness_identity(harness)
+        result = self._request("pane.release_agent", {"pane_id": surface_id, "source": _runtime_source(runtime_instance_id, harness_id), "agent": agent_kind, "seq": seq})
         if result.get("type") != "ok":
             raise PisecError("workspace rejected the runtime release report")
         return result
@@ -467,8 +475,10 @@ class HerdrWorkspaceAdapter:
         agents = [item for item in snapshot.get("agents", []) if isinstance(item, dict)]
         workspaces = snapshot.get("workspaces", [])
         panes = snapshot.get("panes", [])
+        workstream_columns = {str(item[1]) for item in store.conn.execute("PRAGMA table_info(workstreams)").fetchall()}
+        harness_column = "w.harness_id" if "harness_id" in workstream_columns else "'omp'"
         rows = store.conn.execute(
-            "SELECT w.workstream_id,w.kind,w.worktree_path,w.desired_state,w.provisioning_state,r.observed_state,r.agent_name,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,r.policy_path,(SELECT o.state FROM operations o WHERE o.workstream_id=w.workstream_id ORDER BY o.created_at DESC LIMIT 1) AS latest_operation_state FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) WHERE w.desired_state <> 'retired' AND w.provisioning_state <> 'proposed'"
+            f"SELECT w.workstream_id,w.kind,{harness_column} AS harness_id,w.worktree_path,w.desired_state,w.provisioning_state,r.observed_state,r.agent_name,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,r.policy_path,(SELECT o.state FROM operations o WHERE o.workstream_id=w.workstream_id ORDER BY o.created_at DESC LIMIT 1) AS latest_operation_state FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) WHERE w.desired_state <> 'retired' AND w.provisioning_state <> 'proposed'"
         ).fetchall()
         updated = 0
         missing = 0
@@ -506,7 +516,7 @@ class HerdrWorkspaceAdapter:
             surface_id = pane.get("pane_id")
             mismatch = not isinstance(view_id, str) or not view_id or not isinstance(surface_id, str) or not surface_id
             if agent is not None:
-                expected_names = {str(row["agent_name"]), "omp"}
+                expected_names = {str(row["agent_name"]), str(row["harness_id"])}
                 mismatch = mismatch or agent.get("name", agent.get("agent")) not in expected_names
             if row["kind"] == "worker":
                 observed_path = pane.get("cwd") if isinstance(pane, dict) else None

@@ -10,6 +10,7 @@ from .adapters import AdapterRegistry
 from .broker import BrokerDispatcher
 from .config import PisecConfig
 from .git_objects import GitObjectManager
+from .harnesses.codex import CodexHarnessAdapter
 from .harnesses.omp import OmpHarnessAdapter
 from .pi_store import PiStore
 from .workspaces.herdr import HerdrWorkspaceAdapter
@@ -25,6 +26,8 @@ def build_adapters(
     harness = OmpHarnessAdapter(state_root=state_root, config=config)
     workspace = HerdrWorkspaceAdapter.from_config(config["workspace"]["config"], validate=False)
     registry.register_harness(harness)
+    if "codex" in config.worker_harnesses:
+        registry.register_harness(CodexHarnessAdapter(state_root=state_root, config=config))
     registry.register_workspace(workspace)
     selected_harness = registry.resolve_harness(config["harness"]["id"])
     selected_workspace = registry.resolve_workspace(config["workspace"]["id"])

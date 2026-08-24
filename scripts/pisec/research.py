@@ -29,7 +29,7 @@ URL_MAX = 2048
 TASK_PACKET_KEYS = frozenset({"schemaVersion", "outcome", "boundaries", "acceptance", "openQuestions", "evidence"})
 EXECUTION_PACKET_KEYS = frozenset({
     "projectId", "workstreamId", "title", "purpose", "brief", "targetRef", "baseCommitOid",
-    "branchName", "executionProfile", "externalDomains", "harnessId", "workspaceAdapterId", "nonEffects", "approvalScopeSha256",
+    "branchName", "executionProfile", "externalDomains", "harnessId", "workspaceAdapterId", "implementationModel", "harnessModel", "reasoningEffort", "nonEffects", "approvalScopeSha256",
 })
 RESEARCH_REQUEST_KEYS = frozenset({"kind", "summary", "question", "context", "attempted", "candidateSources", "blocking"})
 RESEARCH_RESULT_KEYS = frozenset({"schemaVersion", "findings", "sources", "uncertainties"})
@@ -101,6 +101,11 @@ def _execution_packet(value: Any) -> dict[str, Any]:
         validate_id(execution[key], prefix=prefix)
     for key, limit in (("title", 512), ("purpose", PACKET_TEXT_LIMIT), ("brief", PACKET_TEXT_LIMIT), ("targetRef", 512), ("branchName", 512), ("executionProfile", 128), ("harnessId", 64), ("workspaceAdapterId", 64)):
         bounded_text(execution[key], name=f"taskPacket.execution.{key}", limit=limit)
+    for key in ("implementationModel", "harnessModel"):
+        if execution[key] is not None:
+            bounded_text(execution[key], name=f"taskPacket.execution.{key}", limit=256)
+    if execution["reasoningEffort"] is not None and execution["reasoningEffort"] not in {"low", "medium", "high", "xhigh"}:
+        raise InvalidRequestError("taskPacket.execution.reasoningEffort is invalid")
     bounded_text(execution["baseCommitOid"], name="taskPacket.execution.baseCommitOid", limit=128)
     if not isinstance(execution["externalDomains"], list) or len(execution["externalDomains"]) > PACKET_MAX_ITEMS:
         raise InvalidRequestError("taskPacket.execution.externalDomains is invalid")
@@ -307,6 +312,9 @@ def issue_task_packet_in_transaction(connection: Any, *, scope: Mapping[str, Any
         "externalDomains": scope["externalDomains"],
         "harnessId": scope["harnessId"],
         "workspaceAdapterId": scope["workspaceAdapterId"],
+        "implementationModel": scope.get("implementationModel"),
+        "harnessModel": scope.get("harnessModel"),
+        "reasoningEffort": scope.get("reasoningEffort"),
         "nonEffects": scope["nonEffects"],
         "approvalScopeSha256": json_digest(scope),
     })

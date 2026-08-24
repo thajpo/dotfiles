@@ -563,14 +563,15 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
         return {"integrationId": integration_id, "state": "needs_attention"}
 
 
-def reconcile_integrations(store: Any, workspace: Any | None = None, harness: Any | None = None, *, limit: int = 32) -> dict[str, Any]:
+def reconcile_integrations(store: Any, workspace: Any | None = None, harness: Any | None = None, *, limit: int = 32, harness_resolver: Any | None = None) -> dict[str, Any]:
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 256:
         raise InvalidRequestError("integration limit is invalid")
     rows = [dict(row) for row in store.conn.execute("SELECT * FROM integration_jobs WHERE state IN ('queued','refreshing','awaiting_worker','verifying','applying','integrated','needs_attention') ORDER BY created_at,integration_id LIMIT ?", (limit,))]
     result = {"processed": [], "errors": []}
     for row in rows:
         try:
-            result["processed"].append(_process_job(store, row, workspace, harness))
+            selected_harness = harness_resolver(str(row["workstream_id"])) if callable(harness_resolver) else harness
+            result["processed"].append(_process_job(store, row, workspace, selected_harness))
         except Exception as error:
             result["errors"].append({"integrationId": row["integration_id"], "code": getattr(error, "code", "internal_error"), "message": str(error)[:512]})
     return result

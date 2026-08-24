@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Fail-closed Codex worker launcher."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import secrets
+import stat
+import sys
+
+
+def fail(message: str, code: int = 126) -> None:
+    print(f"pisec codex launcher: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def secure_file(path: Path, *, executable: bool = False) -> None:
+    try:
+        info = path.lstat()
+    except OSError:
+        fail(f"required file is unavailable: {path}", 127)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o002 or (info.st_mode & 0o020 and info.st_gid != os.getgid()):
+        fail(f"required file is unsafe: {path}")
+    if executable and not info.st_mode & stat.S_IXUSR:
+        fail(f"required executable is not executable: {path}")
+
+
+def secure_directory(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except OSError:
+        fail(f"required directory is unavailable: {path}", 127)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        fail(f"required directory is unsafe: {path}")
+
+
+def main() -> None:
+    launcher = Path(__file__).absolute()
+    secure_file(launcher, executable=True)
+    descriptor_path = launcher.parent / "binding.json"
+    secure_file(descriptor_path)
+    descriptor = json.loads(descriptor_path.read_text())
+    if not isinstance(descriptor, dict) or descriptor.get("schemaVersion") != 1 or descriptor.get("harnessId") != "codex":
+        fail("binding descriptor is invalid")
+    identity = descriptor.get("identitySha256")
+    body = {key: value for key, value in descriptor.items() if key != "identitySha256"}
+    if not isinstance(identity, str) or hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest() != identity:
+        fail("binding identity digest does not match")
+    root = Path(str(descriptor["canonicalRoot"])).resolve(strict=True)
+    if Path.cwd().resolve(strict=True) != root:
+        fail("current directory does not match the approved worktree")
+    home = Path(str(descriptor["harnessHome"]))
+    codex_home = Path(str(descriptor["codexHome"]))
+    secure_directory(home)
+    secure_directory(codex_home)
+    for key in ("configPath", "promptPath", "mcpPath", "hookPath", "hooksPath", "policyPath", "launchSecretPath"):
+        secure_file(Path(str(descriptor[key])))
+    secure_file(Path(str(descriptor["harnessExecutablePath"])))
+    secure_file(Path(str(descriptor["nodeExecutablePath"])), executable=True)
+    secure_file(Path(str(descriptor["fencePath"])), executable=True)
+    secure_file(Path(str(descriptor["gatewayTokenFile"])))
+    token = Path(str(descriptor["launchSecretPath"])).read_text().strip()
+    if len(token) < 32:
+        fail("runtime token is invalid")
+    start_args = sys.argv[1:]
+    resume = None
+    if start_args:
+        if len(start_args) != 1 or not start_args[0].startswith("--resume="):
+            fail("unsupported Codex launcher arguments")
+        resume = start_args[0].split("=", 1)[1]
+    gateway_token = Path(str(descriptor["gatewayTokenFile"])).read_text().strip()
+    if not 32 <= len(gateway_token) <= 512 or "\x00" in gateway_token:
+        fail("gateway token is invalid")
+    environment = {
+        "HOME": str(home),
+        "CODEX_HOME": str(codex_home),
+        "PISEC_WORKSTREAM_ID": str(descriptor["workstreamId"]),
+        "PISEC_PROJECT_ID": str(descriptor["projectId"]),
+        "PISEC_RUNTIME_SOCKET": str(descriptor["runtimeSocketPath"]),
+        "PISEC_RUNTIME_TOKEN": token,
+        "PISEC_RUNTIME_INSTANCE_ID": secrets.token_hex(16),
+        "PISEC_SURFACE_ID": str(descriptor["workspaceSurfaceId"]),
+        "PISEC_HARNESS_HOME": str(home),
+        "PISEC_SESSION_START_SOURCE": "resume" if resume is not None else "startup",
+        "PISEC_ROLE": "worker",
+        "OPENAI_BASE_URL": str(descriptor["gatewayBaseUrl"]).rstrip("/") + "/v1",
+        "OPENAI_API_KEY": gateway_token,
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OBJECT_DIRECTORY": str(descriptor["privateGitObjectDir"]),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(descriptor["gitCommonObjectDir"]),
+    }
+    environment.update({key: value for key, value in os.environ.items() if key.startswith("LC_")})
+    fence = [str(descriptor["fencePath"]), "--settings", str(descriptor["policyPath"]), "--expose-host-path", str(Path(str(descriptor["gitCommonObjectDir"])).absolute()), "--", str(descriptor["nodeExecutablePath"]), str(descriptor["harnessExecutablePath"]), "--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen", "--cd", str(root), "--model", str(descriptor["model"])]
+    if resume is None:
+        fence.append(Path(str(descriptor["promptPath"])).read_text())
+    else:
+        fence.extend(["resume", resume])
+    os.execve(str(descriptor["fencePath"]), fence, environment)
+
+
+if __name__ == "__main__":
+    main()

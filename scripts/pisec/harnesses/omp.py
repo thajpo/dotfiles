@@ -522,7 +522,7 @@ class OmpHarnessAdapter:
         release_root = self._release_root(scope)
         scope_dict = {
             key: scope.get(key)
-            for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "fleetWorktreesDir", "fleetGitObjectsDir", "externalDomains")
+            for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "fleetWorktreesDir", "fleetGitObjectsDir", "externalDomains", "implementationModel", "harnessModel", "reasoningEffort")
         }
         if scope.get("dataDirs"):
             scope_dict["dataDirs"] = scope["dataDirs"]

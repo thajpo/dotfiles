@@ -147,8 +147,9 @@ def _validate_pisec_envelope(value: object) -> dict:
     if not isinstance(value, dict):
         raise ValueError("Pisec config must be a JSON object")
     expected = {"schemaVersion", "fencePath", "harness", "workspace"}
-    if set(value) != expected:
-        unknown = sorted(set(value) - expected)
+    optional = {"workerRouting", "workerHarnesses"}
+    if not expected.issubset(value) or set(value) - expected - optional:
+        unknown = sorted(set(value) - expected - optional)
         missing = sorted(expected - set(value))
         detail = []
         if unknown:
@@ -169,6 +170,16 @@ def _validate_pisec_envelope(value: object) -> dict:
             raise ValueError(f"Pisec {name} adapter id is invalid")
         if not isinstance(envelope["config"], dict):
             raise ValueError(f"Pisec {name} adapter config is invalid")
+    worker_harnesses = value.get("workerHarnesses")
+    if worker_harnesses is not None:
+        if not isinstance(worker_harnesses, dict):
+            raise ValueError("Pisec workerHarnesses is invalid")
+        for adapter_id, envelope in worker_harnesses.items():
+            if not isinstance(adapter_id, str) or re.fullmatch(r"[a-z][a-z0-9-]{0,63}", adapter_id) is None or not isinstance(envelope, dict) or envelope.get("id") != adapter_id or set(envelope) != {"id", "config"} or not isinstance(envelope["config"], dict):
+                raise ValueError("Pisec worker harness envelope is invalid")
+    worker_routing = value.get("workerRouting")
+    if worker_routing is not None and (not isinstance(worker_routing, dict) or set(worker_routing) != {"defaultModel", "fallbackHarness", "routes"}):
+        raise ValueError("Pisec workerRouting is invalid")
     return value
 
 

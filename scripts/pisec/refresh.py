@@ -31,15 +31,16 @@ def _active_bindings(store: Any) -> list[dict[str, Any]]:
     ]
 
 
-def mark_stale_bindings(store: Any, harness: HarnessAdapter) -> dict[str, Any]:
+def mark_stale_bindings(store: Any, harness: HarnessAdapter, *, harness_resolver: Any | None = None) -> dict[str, Any]:
     stale: list[dict[str, str]] = []
     current: list[dict[str, str]] = []
     failed: list[dict[str, str]] = []
-    release = active_runtime_release(store, harness)
     for binding in _active_bindings(store):
         workstream_id = str(binding["workstream_id"])
         try:
-            desired = harness.desired_generation(release_scope(_binding_scope(store, binding), release))
+            selected_harness = harness_resolver(workstream_id) if callable(harness_resolver) else harness
+            release = active_runtime_release(store, selected_harness)
+            desired = selected_harness.desired_generation(release_scope(_binding_scope(store, binding), release))
             if len(desired) != 64:
                 raise PisecError("harness returned an invalid runtime generation")
             with store.transaction():
@@ -49,10 +50,10 @@ def mark_stale_bindings(store: Any, harness: HarnessAdapter) -> dict[str, Any]:
                 )
             item = {"project": str(binding["display_name"]), "workstreamId": workstream_id, "generation": desired}
             artifacts_current = True
-            if harness.manifest.adapter_id == "omp":
+            if selected_harness.manifest.adapter_id == "omp":
                 try:
                     artifact_value = json.loads(str(binding["adapter_artifacts_json"]))
-                    descriptor_path = harness.launch_binding_path(workstream_id).with_name("binding.json")
+                    descriptor_path = selected_harness.launch_binding_path(workstream_id).with_name("binding.json")
                     descriptor_value = json.loads(descriptor_path.read_text())
                     home = Path(str(binding["harness_home"]))
                     artifacts_current = (
@@ -217,10 +218,11 @@ def refresh_projects(
     workspace: WorkspaceAdapter,
     *,
     wait_seconds: float = 300.0,
+    harness_resolver: Any | None = None,
 ) -> dict[str, Any]:
     if not isinstance(wait_seconds, (int, float)) or isinstance(wait_seconds, bool) or not 0 <= wait_seconds <= 3600:
         raise PisecError("refresh wait must be between 0 and 3600 seconds")
-    marked = mark_stale_bindings(store, harness)
+    marked = mark_stale_bindings(store, harness, harness_resolver=harness_resolver)
     result: dict[str, Any] = {"generation": None, "upgraded": [], "pending": [], "skipped": [], "failed": list(marked["failed"])}
     for item in marked["current"]:
         result["skipped"].append({**item, "reason": "current generation"})
@@ -253,7 +255,8 @@ def refresh_projects(
                 next_remaining.append(workstream_id)
                 continue
             try:
-                refreshed = _refresh_one(store, harness, workspace, binding)
+                selected_harness = harness_resolver(workstream_id) if callable(harness_resolver) else harness
+                refreshed = _refresh_one(store, selected_harness, workspace, binding)
                 if refreshed.get("pending"):
                     next_remaining.append(workstream_id)
                     continue
@@ -289,7 +292,7 @@ def refresh_projects(
                         start_bound_agent(
                             store,
                             workspace,
-                            harness,
+                            harness_resolver(workstream_id) if callable(harness_resolver) else harness,
                             current,
                             workstream_id=workstream_id,
                             project_id=str(current["project_id"]),
@@ -317,11 +320,11 @@ def refresh_projects(
     result["ok"] = not result["failed"]
     return result
 
-def refresh_bindings(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, workstream_ids: list[str] | tuple[str, ...] | set[str], *, wait_seconds: float = 300.0) -> dict[str, Any]:
+def refresh_bindings(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, workstream_ids: list[str] | tuple[str, ...] | set[str], *, wait_seconds: float = 300.0, harness_resolver: Any | None = None) -> dict[str, Any]:
     selected = {str(value) for value in workstream_ids}
     if not selected:
         return {"upgraded": [], "pending": [], "failed": [], "skipped": [], "ok": True}
-    marked = mark_stale_bindings(store, harness)
+    marked = mark_stale_bindings(store, harness, harness_resolver=harness_resolver)
     selected_marked = [item for item in marked["stale"] if str(item["workstreamId"]) in selected]
     result = {"generation": None, "upgraded": [], "pending": [], "skipped": [item for item in marked["current"] if str(item["workstreamId"]) in selected], "failed": [], "ok": True}
     deadline = time.monotonic() + float(wait_seconds)
@@ -336,7 +339,8 @@ def refresh_bindings(store: Any, harness: HarnessAdapter, workspace: WorkspaceAd
                 next_remaining.append(workstream_id)
                 continue
             try:
-                refreshed = _refresh_one(store, harness, workspace, binding)
+                selected_harness = harness_resolver(workstream_id) if callable(harness_resolver) else harness
+                refreshed = _refresh_one(store, selected_harness, workspace, binding)
                 if refreshed.get("pending"):
                     next_remaining.append(workstream_id)
                 else:

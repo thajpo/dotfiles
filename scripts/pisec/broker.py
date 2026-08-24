@@ -203,6 +203,28 @@ class BrokerDispatcher:
         self._reconcile_lock = threading.Lock()
         self._last_resume_attempt: dict[str, float] = {}
 
+    def _worker_route(self, model: str | None) -> tuple[HarnessAdapter, str | None, str | None, str]:
+        routing = self.config.get("workerRouting")
+        requested = model or (routing.get("defaultModel") if isinstance(routing, Mapping) else None)
+        if not isinstance(requested, str) or not requested:
+            return self.harness, None, None, self.harness.manifest.adapter_id
+        route = routing.get("routes", {}).get(requested) if isinstance(routing, Mapping) and isinstance(routing.get("routes"), Mapping) else None
+        if not isinstance(route, Mapping):
+            fallback = routing.get("fallbackHarness", self.harness.manifest.adapter_id) if isinstance(routing, Mapping) else self.harness.manifest.adapter_id
+            adapter = self.registry.resolve_harness(str(fallback))
+            return adapter, None, None, adapter.manifest.adapter_id
+        adapter = self.registry.resolve_harness(str(route["harness"]))
+        return adapter, str(route["model"]), str(route["reasoningEffort"]), adapter.manifest.adapter_id
+
+    def _harness_for_workstream(self, store: PiStore, workstream_id: str) -> HarnessAdapter:
+        row = store.conn.execute("SELECT harness_id FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("workstream was not found")
+        return self.registry.resolve_harness(str(row["harness_id"]))
+
+    def _harness_for_scope(self, scope: Mapping[str, Any]) -> HarnessAdapter:
+        return self.registry.resolve_harness(str(scope["harnessId"]))
+
     def wait_for_workspace(self, timeout: float = 30.0) -> None:
         deadline = time.monotonic() + timeout
         last_error: Exception | None = None
@@ -241,6 +263,7 @@ class BrokerDispatcher:
                 ).fetchone()
                 if current_row is None or current_row["refresh_pending"] or current_row["desired_state"] != "active" or current_row["provisioning_state"] not in {"bound", "needs_attention"}:
                     continue
+                current_harness = self.registry.resolve_harness(str(current_row["harness_id"]))
                 selected_generation = current_row["launch_generation_sha256"] or current_row["applied_generation_sha256"]
                 if not isinstance(selected_generation, str) or len(selected_generation) != 64:
                     continue
@@ -254,7 +277,7 @@ class BrokerDispatcher:
                 if observation is None:
                     continue
                 if observation.agent is not None:
-                    expected_names = {str(current_row["agent_name"]), self.harness.manifest.agent_kind}
+                    expected_names = {str(current_row["agent_name"]), current_harness.manifest.agent_kind}
                     if observation.agent.name not in expected_names:
                         now = utc_now()
                         with store.transaction():
@@ -296,7 +319,7 @@ class BrokerDispatcher:
                 result = start_bound_agent(
                     store,
                     self.workspace,
-                    self.harness,
+                    current_harness,
                     binding,
                     workstream_id=workstream_id,
                     project_id=str(current_row["project_id"]),
@@ -479,7 +502,9 @@ class BrokerDispatcher:
                 binding = self._first_mate_binding(store, payload)
                 return self._fleet(store, operation, str(binding["workstream_id"]), payload)
             if operation == "runtime.report":
-                return report_runtime(store, payload, self.harness, self.workspace)
+                workstream_id = payload.get("workstreamId")
+                harness = self._harness_for_workstream(store, str(workstream_id)) if isinstance(workstream_id, str) else self.harness
+                return report_runtime(store, payload, harness, self.workspace)
             return self._runtime(store, operation, payload)
 
     def _runtime(self, store: PiStore, operation: str, payload: dict[str, Any]) -> Any:
@@ -497,7 +522,7 @@ class BrokerDispatcher:
             return {"prepared": True}
         if operation == "session.switch.prepare":
             _exact(payload, auth_fields | {"reason", "targetSessionFile"})
-            return prepare_session_switch(store, payload, self.harness)
+            return prepare_session_switch(store, payload, self._harness_for_workstream(store, str(payload["workstreamId"])))
         if operation == "runtime.tool_failure":
             _exact(payload, auth_fields | {"toolName", "failureCode"})
             return record_runtime_tool_failure(store, payload)
@@ -630,7 +655,7 @@ class BrokerDispatcher:
         result["migration"] = migration
         result["errors"].extend({"workstreamId": item["workstreamId"], "code": "binding_migration_failed"} for item in migration["errors"])
         from .refresh import mark_stale_bindings
-        result["generations"] = mark_stale_bindings(store, self.harness)
+        result["generations"] = mark_stale_bindings(store, self.harness, harness_resolver=lambda workstream_id: self._harness_for_workstream(store, workstream_id))
         reconciler_payload = dict(payload)
         reconciler_payload["skipWorkstreams"] = [item["workstreamId"] for item in migration["migrated"]]
         resume_candidates = [
@@ -646,7 +671,7 @@ class BrokerDispatcher:
             )
         ]
         result["workspace"] = self.workspace.reconcile(store, reconciler_payload)
-        result["integrations"] = reconcile_integrations(store, self.workspace, self.harness)
+        result["integrations"] = reconcile_integrations(store, self.workspace, self.harness, harness_resolver=lambda workstream_id: self._harness_for_workstream(store, workstream_id))
         result["errors"].extend(result["integrations"].get("errors", []))
         result["resumed"].extend(
             self._resume_restored_agents(
@@ -673,7 +698,7 @@ class BrokerDispatcher:
                     scope = json.loads(operation["result_json"])
                     if not isinstance(scope, dict):
                         raise InvalidRequestError("durable workstream scope is invalid")
-                    applied = authorize_apply_workstream(store, scope=scope, harness=self.harness, workspace=self.workspace, git_objects=self.git_objects)
+                    applied = authorize_apply_workstream(store, scope=scope, harness=self._harness_for_scope(scope), workspace=self.workspace, git_objects=self.git_objects)
                     result["resumed"].append({"operationId": applied["operation"]["operation_id"], "state": applied["operation"]["state"]})
                 elif operation["kind"] == "secretary.ensure":
                     from .secretary import ensure_secretary
@@ -780,7 +805,7 @@ class BrokerDispatcher:
             wait_seconds = payload.get("waitSeconds", 300)
             from .refresh import refresh_projects
             with self._reconcile_lock:
-                return refresh_projects(store, self.harness, self.workspace, wait_seconds=wait_seconds)
+                return refresh_projects(store, self.harness, self.workspace, wait_seconds=wait_seconds, harness_resolver=lambda workstream_id: self._harness_for_workstream(store, workstream_id))
         if operation == "runtime.release.build":
             _exact(payload, set())
             from .releases import build_runtime_release
@@ -842,7 +867,7 @@ class BrokerDispatcher:
             return self._defer_reconcile(payload)
         if operation == "workstream.cleanup":
             _exact(payload, {"workstreamId", "confirm"}, {"project", "forceDirty"})
-            result = cleanup_workstream(store, payload, self.workspace, self.harness)
+            result = cleanup_workstream(store, payload, self.workspace, self._harness_for_workstream(store, str(payload["workstreamId"])))
             return {
                 "operation": _public_operation(result.get("operation")),
                 "workstream": _public_workstream(result["workstream"]),
@@ -924,13 +949,14 @@ class BrokerDispatcher:
             _exact(payload, {"workstreamId"})
             return _public_inspect(inspect_workstream(store, project_id, payload["workstreamId"]))
         if operation == "workstream.prepare":
-            _exact(payload, {"title", "purpose", "brief", "taskPacket", "idempotencyKey"}, {"targetRef", "executionProfile", "externalDomains", "pythonEnv", "workMode", "learningOverlay", "learningSeam", "decisionIds"})
+            _exact(payload, {"title", "purpose", "brief", "taskPacket", "idempotencyKey"}, {"targetRef", "executionProfile", "externalDomains", "pythonEnv", "workMode", "learningOverlay", "learningSeam", "decisionIds", "implementationModel"})
             profile = payload.get("executionProfile", "worker-default")
-            prepared = prepare_workstream(store, project_id=project_id, title=payload["title"], purpose=payload["purpose"], brief=payload["brief"], task_packet=payload["taskPacket"], idempotency_key=payload["idempotencyKey"], harness=self.harness, workspace=self.workspace, target_ref=payload.get("targetRef"), execution_profile=profile, work_mode=payload.get("workMode", "BUILD"), learning_overlay=payload.get("learningOverlay", "LIGHT"), learning_seam=payload.get("learningSeam"), decision_ids=payload.get("decisionIds", []), external_domains=payload.get("externalDomains", []), python_env=payload.get("pythonEnv"))
+            worker_harness, harness_model, reasoning_effort, _harness_id = self._worker_route(payload.get("implementationModel"))
+            prepared = prepare_workstream(store, project_id=project_id, title=payload["title"], purpose=payload["purpose"], brief=payload["brief"], task_packet=payload["taskPacket"], idempotency_key=payload["idempotencyKey"], harness=worker_harness, workspace=self.workspace, target_ref=payload.get("targetRef"), execution_profile=profile, work_mode=payload.get("workMode", "BUILD"), learning_overlay=payload.get("learningOverlay", "LIGHT"), learning_seam=payload.get("learningSeam"), decision_ids=payload.get("decisionIds", []), external_domains=payload.get("externalDomains", []), python_env=payload.get("pythonEnv"), implementation_model=payload.get("implementationModel") or self.config.get("workerRouting", {}).get("defaultModel"), harness_model=harness_model, reasoning_effort=reasoning_effort)
             return {"operation": _public_operation(prepared["operation"]), "workstream": _public_workstream(prepared["workstream"]), "approvalScope": prepared["approvalScope"]}
         if operation == "workstream.authorize_apply":
             _exact(payload, {"approvalScope"})
-            applied = authorize_apply_workstream(store, scope=payload["approvalScope"], harness=self.harness, workspace=self.workspace, git_objects=self.git_objects)
+            applied = authorize_apply_workstream(store, scope=payload["approvalScope"], harness=self._harness_for_scope(payload["approvalScope"]), workspace=self.workspace, git_objects=self.git_objects)
             return {"operation": _public_operation(applied["operation"]), "workstream": _public_workstream(applied["workstream"])}
         if operation == "workstream.send":
             _exact(payload, {"workstreamId", "text"})
@@ -1083,10 +1109,11 @@ class BrokerDispatcher:
             _exact(payload, {"projectId", "workstreamId"})
             return inspect_workstream_changes(store, self._fleet_project(store, payload), payload["workstreamId"])
         if operation == "fleet.workstream.prepare":
-            _exact(payload, {"projectId", "title", "purpose", "brief", "taskPacket", "idempotencyKey"}, {"targetRef", "executionProfile", "externalDomains", "pythonEnv"})
+            _exact(payload, {"projectId", "title", "purpose", "brief", "taskPacket", "idempotencyKey"}, {"targetRef", "executionProfile", "externalDomains", "pythonEnv", "implementationModel"})
             project_id = self._fleet_project(store, payload)
             profile = payload.get("executionProfile", "worker-default")
-            prepared = prepare_workstream(store, project_id=project_id, title=payload["title"], purpose=payload["purpose"], brief=payload["brief"], task_packet=payload["taskPacket"], idempotency_key=payload["idempotencyKey"], harness=self.harness, workspace=self.workspace, target_ref=payload.get("targetRef"), execution_profile=profile, external_domains=payload.get("externalDomains", []), python_env=payload.get("pythonEnv"))
+            worker_harness, harness_model, reasoning_effort, _harness_id = self._worker_route(payload.get("implementationModel"))
+            prepared = prepare_workstream(store, project_id=project_id, title=payload["title"], purpose=payload["purpose"], brief=payload["brief"], task_packet=payload["taskPacket"], idempotency_key=payload["idempotencyKey"], harness=worker_harness, workspace=self.workspace, target_ref=payload.get("targetRef"), execution_profile=profile, external_domains=payload.get("externalDomains", []), python_env=payload.get("pythonEnv"), implementation_model=payload.get("implementationModel") or self.config.get("workerRouting", {}).get("defaultModel"), harness_model=harness_model, reasoning_effort=reasoning_effort)
             return {"operation": _public_operation(prepared["operation"]), "workstream": _public_workstream(prepared["workstream"]), "approvalScope": prepared["approvalScope"]}
         if operation == "fleet.workstream.authorize_apply":
             _exact(payload, {"projectId", "approvalScope"})
@@ -1094,7 +1121,7 @@ class BrokerDispatcher:
             scope = payload["approvalScope"]
             if not isinstance(scope, Mapping) or scope.get("projectId") != project_id:
                 raise InvalidRequestError("fleet approval scope project does not match projectId")
-            applied = authorize_apply_workstream(store, scope=scope, harness=self.harness, workspace=self.workspace, git_objects=self.git_objects, actor="first_mate")
+            applied = authorize_apply_workstream(store, scope=scope, harness=self._harness_for_scope(scope), workspace=self.workspace, git_objects=self.git_objects, actor="first_mate")
             return {"operation": _public_operation(applied["operation"]), "workstream": _public_workstream(applied["workstream"])}
         if operation == "fleet.workstream.accept.prepare":
             _exact(payload, {"projectId", "workstreamId"})

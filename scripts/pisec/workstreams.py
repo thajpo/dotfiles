@@ -39,10 +39,10 @@ _FULL_SCOPE_FIELDS = frozenset({
     "targetRef", "baseCommitOid", "branchName",
     "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "agentName",
     "projectWorktreesDir", "projectGitObjectsDir",
-    "externalDomains", "dataDirs", "pythonEnv", "effects", "nonEffects", "taskPacket",
+    "externalDomains", "dataDirs", "pythonEnv", "implementationModel", "harnessModel", "reasoningEffort", "effects", "nonEffects", "taskPacket",
 })
 _PUBLIC_SCOPE_FIELDS = _FULL_SCOPE_FIELDS - {"privateGitObjectDir", "gitCommonObjectDir"}
-_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "projectWorktreesDir", "projectGitObjectsDir", "learningSeam", "decisionIds"})
+_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "projectWorktreesDir", "projectGitObjectsDir", "learningSeam", "decisionIds", "implementationModel", "harnessModel", "reasoningEffort"})
 _SCOPE_REQUIRED = _FULL_SCOPE_FIELDS - _OPTIONAL_SCOPE_FIELDS
 
 
@@ -117,6 +117,9 @@ def prepare_workstream(
     target_ref: str | None = None,
     external_domains: tuple[str, ...] | list[str] = (),
     python_env: str | None = None,
+    implementation_model: str | None = None,
+    harness_model: str | None = None,
+    reasoning_effort: str | None = None,
     work_root: Path | None = None,
     object_root: Path | None = None,
     failpoint: Failpoint | None = None,
@@ -154,6 +157,11 @@ def prepare_workstream(
         raise InvalidRequestError("work mode or learning overlay is invalid")
     if learning_overlay == "DEEP" and learning_seam is None:
         raise InvalidRequestError("DEEP learning requires a seam")
+    for value, name in ((implementation_model, "implementation model"), (harness_model, "harness model")):
+        if value is not None and (not isinstance(value, str) or not value or len(value) > 256 or any(ord(char) < 0x20 for char in value)):
+            raise InvalidRequestError(f"{name} is invalid")
+    if reasoning_effort is not None and reasoning_effort not in {"low", "medium", "high", "xhigh"}:
+        raise InvalidRequestError("reasoning effort is invalid")
     if not isinstance(decision_ids, (list, tuple)) or any(not isinstance(item, str) or not item for item in decision_ids):
         raise InvalidRequestError("decision ids are invalid")
     caller_request = {
@@ -173,6 +181,12 @@ def prepare_workstream(
         "externalDomains": domains,
         "pythonEnv": normalized_python_env,
     }
+    if implementation_model is not None:
+        caller_request["implementationModel"] = implementation_model
+    if harness_model is not None:
+        caller_request["harnessModel"] = harness_model
+    if reasoning_effort is not None:
+        caller_request["reasoningEffort"] = reasoning_effort
     request_sha = json_digest(caller_request)
     existing = store.conn.execute("SELECT * FROM operations WHERE idempotency_key=?", (idempotency_key,)).fetchone()
     if existing is not None:
@@ -225,6 +239,12 @@ def prepare_workstream(
         "nonEffects": ["no push", "no merge", "no cleanup", "no branch deletion"],
         "taskPacket": normalized_task_packet,
     }
+    if implementation_model is not None:
+        scope["implementationModel"] = implementation_model
+    if harness_model is not None:
+        scope["harnessModel"] = harness_model
+    if reasoning_effort is not None:
+        scope["reasoningEffort"] = reasoning_effort
     enforce_worker_creation_policy(store, project, scope)
     now = utc_now()
     with store.transaction():
@@ -257,6 +277,7 @@ def _wait_for_agent(
     workspace_id: str,
     view_id: str,
     surface_id: str,
+    allow_unidentified_agent: bool = False,
     timeout: float = 5.0,
 ) -> WorkspaceObservation:
     deadline = time.monotonic() + timeout
@@ -284,6 +305,8 @@ def _wait_for_agent(
                             raise NeedsAttentionError("workspace agent identity does not match the durable binding")
                         if agent.interactive_ready is True:
                             matched_observation = observed
+                    elif allow_unidentified_agent:
+                        matched_observation = observed
             if matched_observation is not None:
                 runtime = store.conn.execute(
                     "SELECT runtime_instance_id,report_seq FROM runtime_bindings WHERE workstream_id=?",
@@ -535,7 +558,7 @@ def _authorize_apply_workstream(
         except Exception as error:
             start_error = error
         try:
-            _wait_for_agent(store, workspace, workstream_id=workstream_id, path=scope["worktreePath"], agent_name=scope["agentName"], workspace_id=binding["workspace_id"], view_id=binding["workspace_view_id"], surface_id=binding["workspace_surface_id"])
+            _wait_for_agent(store, workspace, workstream_id=workstream_id, path=scope["worktreePath"], agent_name=scope["agentName"], workspace_id=binding["workspace_id"], view_id=binding["workspace_view_id"], surface_id=binding["workspace_surface_id"], allow_unidentified_agent=bool(getattr(harness, "allow_unidentified_agent", False)))
         except NeedsAttentionError as wait_error:
             _mark_attention(store, operation_id, workstream_id, str(wait_error))
             if start_error is not None:
@@ -546,20 +569,21 @@ def _authorize_apply_workstream(
         _hit(failpoint, "after_agent_start", scope)
         operation = _operation(store, operation_id)
     if _rank(operation["step"]) < _rank("brief_delivered"):
-        try:
-            _prompt_agent(workspace, binding["workspace_surface_id"], scope["brief"])
-        except Exception as error:
-            try:
-                after_prompt = workspace.observe_workstream(path=scope["worktreePath"], agent_name=scope["agentName"])
-            except Exception as observe_error:
-                raise RuntimeError("brief delivery is ambiguous") from observe_error
-            if after_prompt is not None and (after_prompt.workspace_id != binding["workspace_id"] or after_prompt.surface_id != binding["workspace_surface_id"] or (after_prompt.agent is not None and after_prompt.agent.surface_id != binding["workspace_surface_id"])):
-                _mark_attention(store, operation_id, workstream_id, "brief target identity does not match the binding")
-                raise NeedsAttentionError("brief target identity does not match the binding")
+        if not bool(getattr(harness, "launches_with_brief", False)):
             try:
                 _prompt_agent(workspace, binding["workspace_surface_id"], scope["brief"])
-            except Exception:
-                raise RuntimeError("brief delivery remained ambiguous") from error
+            except Exception as error:
+                try:
+                    after_prompt = workspace.observe_workstream(path=scope["worktreePath"], agent_name=scope["agentName"])
+                except Exception as observe_error:
+                    raise RuntimeError("brief delivery is ambiguous") from observe_error
+                if after_prompt is not None and (after_prompt.workspace_id != binding["workspace_id"] or after_prompt.surface_id != binding["workspace_surface_id"] or (after_prompt.agent is not None and after_prompt.agent.surface_id != binding["workspace_surface_id"])):
+                    _mark_attention(store, operation_id, workstream_id, "brief target identity does not match the binding")
+                    raise NeedsAttentionError("brief target identity does not match the binding")
+                try:
+                    _prompt_agent(workspace, binding["workspace_surface_id"], scope["brief"])
+                except Exception:
+                    raise RuntimeError("brief delivery remained ambiguous") from error
         with store.transaction():
             _checkpoint(store, operation_id, "brief_delivered")
         _hit(failpoint, "after_brief_delivery", scope)
