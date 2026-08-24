@@ -259,14 +259,14 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
     release = None
     materialized_scope = scope
     if _rank(operation["step"]) < _rank("profile_materialized"):
-        artifacts, release, materialized_scope = materialize_current_surface(store, harness, scope)
+        artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)
         with store.transaction():
             store.conn.execute("UPDATE operations SET state='applying',step=?,updated_at=? WHERE operation_id=?", ("profile_materialized", utc_now(), operation["operation_id"]))
         _hit(failpoint, "after_first_mate_profile_materialization", scope)
         operation = _operation(store, existing["workstream_id"])
     binding = _binding(store, existing["workstream_id"])
     if artifacts is None and binding is None:
-        artifacts, release, materialized_scope = materialize_current_surface(store, harness, scope)
+        artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)
     if artifacts is not None and binding is None:
         now = utc_now()
         with store.transaction():
@@ -282,7 +282,7 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         raise NeedsAttentionError("First Mate runtime binding was not persisted")
     if _rank(operation["step"]) < _rank("map_committed"):
         if artifacts is None:
-            artifacts, release, materialized_scope = materialize_current_surface(store, harness, scope)
+            artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)
         harness.commit_launch_binding(materialized_scope, artifacts, workspace_session_name=workspace.manifest.session_name, workspace_id=observed.workspace_id, workspace_view_id=observed.view_id, workspace_surface_id=observed.surface_id)
         with store.transaction():
             store.conn.execute("UPDATE operations SET state='applying',step=?,updated_at=? WHERE operation_id=?", ("map_committed", utc_now(), operation["operation_id"]))

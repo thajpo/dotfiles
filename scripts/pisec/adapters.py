@@ -78,11 +78,7 @@ class RuntimeSurfaceArtifacts:
             raise InvalidRequestError("runtime surface root is invalid")
 
 
-@dataclass(frozen=True)
-class RuntimeReleaseArtifacts:
-    content_sha256: str
-    manifest: Mapping[str, Any]
-    root_path: str | None = None
+RuntimeReleaseArtifacts = RuntimeSurfaceArtifacts
 
 def artifact_document(manifest: HarnessManifest, artifacts: HarnessArtifacts) -> str:
     if not isinstance(artifacts, HarnessArtifacts):
@@ -147,9 +143,7 @@ class HarnessAdapter(Protocol):
 
     def profile_domains(self, profile: str, additional_domains: Sequence[str]) -> tuple[str, ...]: ...
 
-    def build_runtime_release(self) -> RuntimeReleaseArtifacts: ...
-
-    def desired_generation(self, scope: Mapping[str, Any]) -> str: ...
+    def desired_generation(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> str: ...
 
     def commit_launch_binding(
         self,

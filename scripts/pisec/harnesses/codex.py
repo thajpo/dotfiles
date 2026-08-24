@@ -16,7 +16,7 @@ import stat
 import subprocess
 from typing import Any, Mapping, Sequence
 
-from ..adapters import AdapterHealth, HarnessArtifacts, HarnessManifest, RuntimeReleaseArtifacts, RuntimeSurfaceArtifacts
+from ..adapters import AdapterHealth, HarnessArtifacts, HarnessManifest, RuntimeSurfaceArtifacts
 from ..fsutil import _atomic_write, _read_runtime_secret, _secure_secret, _secure_tree
 from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canonical_json, validate_id
 from ..platform import runtime_root
@@ -135,22 +135,22 @@ class CodexHarnessAdapter:
             raise InvalidRequestError("approved external domains contain duplicates")
         return tuple(sorted(values))
 
-    def _release_root(self, scope: Mapping[str, Any]) -> Path:
+    def _surface_root(self, scope: Mapping[str, Any]) -> Path:
         root_value = scope.get("runtimeReleaseRoot")
         digest = scope.get("runtimeReleaseSha256")
         if not isinstance(root_value, str) or not isinstance(digest, str) or len(digest) != 64:
-            raise InvalidRequestError("Codex runtime release scope is incomplete")
+            raise InvalidRequestError("Codex runtime surface scope is incomplete")
         root = Path(root_value).absolute()
-        expected_parent = (self.state_root / "runtime-releases").absolute()
+        expected_parent = (self.state_root / "runtime-surfaces").absolute()
         if root.parent != expected_parent or root.name != digest or root.is_symlink() or not root.is_dir() or _tree_digest(root) != digest:
-            raise NeedsAttentionError("Codex runtime release root is invalid")
+            raise NeedsAttentionError("Codex runtime surface root is invalid")
         return root
 
-    def build_runtime_release(self) -> RuntimeReleaseArtifacts:
+    def prepare_runtime_surface(self) -> RuntimeSurfaceArtifacts:
         executable_path, node_path = self._executables()
-        releases_root = self.state_root / "runtime-releases"
-        _secure_tree(self.state_root, releases_root)
-        staged = releases_root / f".codex-staged-{secrets.token_hex(8)}"
+        surfaces_root = self.state_root / "runtime-surfaces"
+        _secure_tree(self.state_root, surfaces_root)
+        staged = surfaces_root / f".codex-staged-{secrets.token_hex(8)}"
         staged.mkdir(mode=0o700)
         try:
             managed = staged / "managed"
@@ -169,51 +169,54 @@ class CodexHarnessAdapter:
                 "nodeExecutableSha256": _codex_file_digest(Path(node_path)),
                 "fenceExecutableSha256": _file_digest(Path(str(self.root_config["fencePath"]))),
             }
-            _atomic_write(staged / "release.json", canonical_json(manifest) + "\n")
+            _atomic_write(staged / "surface.json", canonical_json(manifest) + "\n")
             _normalize_owner_tree(staged)
             digest = _tree_digest(staged)
-            target = releases_root / digest
+            target = surfaces_root / digest
             if target.exists():
                 if target.is_symlink() or not target.is_dir() or _tree_digest(target) != digest:
-                    raise PisecError("existing Codex runtime release is unsafe or corrupt")
+                    raise PisecError("existing Codex runtime surface is unsafe or corrupt")
                 shutil.rmtree(staged)
             else:
                 os.replace(staged, target)
-            return RuntimeReleaseArtifacts(digest, manifest, str(target.absolute()))
+            return RuntimeSurfaceArtifacts(digest, manifest, str(target.absolute()))
         except Exception:
             if staged.exists():
                 shutil.rmtree(staged)
             raise
-    def prepare_runtime_surface(self) -> RuntimeSurfaceArtifacts:
-        release = self.build_runtime_release()
-        return RuntimeSurfaceArtifacts(release.content_sha256, release.manifest, str(release.root_path))
 
+    def build_runtime_release(self) -> RuntimeSurfaceArtifacts:
+        return self.prepare_runtime_surface()
     def current_runtime_surface(self) -> RuntimeSurfaceArtifacts:
         return self.prepare_runtime_surface()
 
     def desired_generation(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> str:
+        if surface is None and not isinstance(scope.get("runtimeReleaseRoot"), str):
+            surface = self.current_runtime_surface()
         if surface is not None:
             scope = {**scope, "runtimeReleaseSha256": surface.content_sha256, "runtimeReleaseRoot": surface.root_path, "runtimeReleaseId": "surface_" + surface.content_sha256[:32]}
         profile = str(scope.get("executionProfile", ""))
         self.validate_execution_profile(profile, "worker")
-        release_root = self._release_root(scope)
+        surface_root = self._surface_root(scope)
         values = {
             "adapter": self.manifest.adapter_id,
             "adapterVersion": self.manifest.version_label,
             "scope": {key: scope.get(key) for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "externalDomains", "implementationModel", "harnessModel", "reasoningEffort", "pythonEnv")},
-            "runtimeReleaseId": scope.get("runtimeReleaseId"),
-            "runtimeReleaseSha256": scope.get("runtimeReleaseSha256"),
-            "runtimeReleaseRoot": str(release_root),
+            "runtimeSurfaceSha256": scope.get("runtimeReleaseSha256"),
+            "runtimeSurfaceRoot": str(surface_root),
         }
         return hashlib.sha256(canonical_json(values).encode()).hexdigest()
 
+
     def materialize_profile(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> HarnessArtifacts:
+        if surface is None and not isinstance(scope.get("runtimeReleaseRoot"), str):
+            surface = self.current_runtime_surface()
         if surface is not None:
             scope = {**scope, "runtimeReleaseSha256": surface.content_sha256, "runtimeReleaseRoot": surface.root_path, "runtimeReleaseId": "surface_" + surface.content_sha256[:32]}
         workstream_id = validate_id(scope["workstreamId"], prefix="ws")
         profile = str(scope.get("executionProfile"))
         self.validate_execution_profile(profile, "worker")
-        release_root = self._release_root(scope)
+        surface_root = self._surface_root(scope)
         executable_path, node_path = self._executables()
         home = self.state_root / "codex" / workstream_id
         _secure_tree(self.state_root, home)
@@ -235,8 +238,8 @@ class CodexHarnessAdapter:
         _secure_tree(self.state_root, runtime_root)
         mcp_path = runtime_root / "codex_mcp.py"
         hook_path = runtime_root / "codex_hook.py"
-        _copy_safe_entry(release_root / "managed" / "codex_mcp.py", mcp_path)
-        _copy_safe_entry(release_root / "managed" / "codex_hook.py", hook_path)
+        _copy_safe_entry(surface_root / "managed" / "codex_mcp.py", mcp_path)
+        _copy_safe_entry(surface_root / "managed" / "codex_hook.py", hook_path)
         os.chmod(mcp_path, 0o700)
         os.chmod(hook_path, 0o700)
         _atomic_write(
@@ -281,7 +284,7 @@ class CodexHarnessAdapter:
                 "WORKSPACE_CONFIG": codex_home,
             },
             baseline_domains=CODEX_BASELINE_DOMAINS,
-            template_root=release_root / "managed" / "fence",
+            template_root=surface_root / "managed" / "fence",
         )
         return HarnessArtifacts(
             harness_home=str(home),
@@ -301,8 +304,8 @@ class CodexHarnessAdapter:
                 "reasoningEffort": effort,
                 "gatewayTokenFile": self.harness_config["gateway"]["tokenFile"],
                 "gatewayBaseUrl": self.harness_config["gateway"]["baseUrl"],
-                "runtimeReleaseId": str(scope["runtimeReleaseId"]),
-                "launcherTemplate": str((release_root / "managed" / "codex").absolute()),
+                "runtimeSurfaceId": str(scope["runtimeReleaseId"]),
+                "launcherTemplate": str((surface_root / "managed" / "codex").absolute()),
             },
         )
 
@@ -346,7 +349,7 @@ class CodexHarnessAdapter:
             "gatewayBaseUrl": values["gatewayBaseUrl"],
             "policyPath": str(Path(artifacts.policy_path).absolute()),
             "policySha256": artifacts.policy_sha256,
-            "runtimeReleaseId": values["runtimeReleaseId"],
+            "runtimeSurfaceId": values["runtimeSurfaceId"],
             "generationSha256": artifacts.generation_sha256,
             "runtimeSocketPath": str((runtime_root() / "runtime" / "control.sock").absolute()),
             "launchSecretPath": str(Path(artifacts.launch_secret_path).absolute()),

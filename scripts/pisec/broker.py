@@ -18,7 +18,6 @@ from .adapters import AdapterRegistry, HarnessAdapter, WorkspaceAdapter
 from .cleanup import cleanup_workstream
 from .decisions import list_decisions, record_decision, resolve_decision
 from .events import list_events
-from .migration import migrate_legacy_bindings
 from .models import AuthorizationError, ConflictError, InvalidRequestError, NotFoundError, PisecError, ScopeMismatchError, UnsafeStateError, bounded_text, utc_now, validate_id
 from .pi_store import PiStore
 from .projects import assert_project_writable, fleet_activity, fleet_project_ids, get_project, list_fleet_projects, list_projects, project_activity, project_status, register_project, require_fleet_project, resolve_project, update_project_policy
@@ -651,13 +650,10 @@ class BrokerDispatcher:
 
     def _reconcile_locked(self, store: PiStore, payload: Mapping[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {"reconciled": False, "resumed": [], "errors": []}
-        migration = migrate_legacy_bindings(store, self.harness, self.workspace)
-        result["migration"] = migration
-        result["errors"].extend({"workstreamId": item["workstreamId"], "code": "binding_migration_failed"} for item in migration["errors"])
         from .refresh import mark_stale_bindings
         result["generations"] = mark_stale_bindings(store, self.harness, harness_resolver=lambda workstream_id: self._harness_for_workstream(store, workstream_id))
         reconciler_payload = dict(payload)
-        reconciler_payload["skipWorkstreams"] = [item["workstreamId"] for item in migration["migrated"]]
+        reconciler_payload["skipWorkstreams"] = []
         resume_candidates = [
             dict(row)
             for row in store.conn.execute(
@@ -870,8 +866,6 @@ class BrokerDispatcher:
         if operation == "project.status":
             _exact(payload, set())
             return _public_project_status(project_status(store, project_id))
-        if operation == "runtime.release.install":
-            return self._install_runtime_release(store, payload)
         if operation == "project.activity":
             _exact(payload, set(), {"after"})
             return project_activity(store, project_id, int(payload.get("after", 0)))

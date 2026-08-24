@@ -375,14 +375,14 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
     artifacts = None
     materialized_scope = scope
     if _rank(operation["step"]) < _rank("profile_materialized"):
-        artifacts, release, materialized_scope = materialize_current_surface(store, harness, scope)
+        artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)
         with store.transaction():
             _checkpoint(store, operation["operation_id"], "profile_materialized")
         _hit(failpoint, "after_secretary_profile_materialization", scope)
         operation = _operation(store, existing["workstream_id"])
     binding = _binding(store, existing["workstream_id"])
     if artifacts is None and binding is None:
-        artifacts, release, materialized_scope = materialize_current_surface(store, harness, scope)
+        artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)
     if artifacts is not None and binding is None and _rank(operation["step"]) < _rank("binding_committed"):
         now = utc_now()
         with store.transaction():
@@ -398,7 +398,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         raise NeedsAttentionError("secretary runtime binding was not persisted")
     if _rank(operation["step"]) < _rank("map_committed"):
         if artifacts is None:
-            artifacts, release, materialized_scope = materialize_current_surface(store, harness, scope)
+            artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)
         harness.commit_launch_binding(
             materialized_scope,
             artifacts,

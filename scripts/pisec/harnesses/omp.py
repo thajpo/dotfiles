@@ -14,7 +14,7 @@ import stat
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
-from ..adapters import AdapterHealth, HarnessAdapter, HarnessArtifacts, HarnessManifest, RuntimeReleaseArtifacts, RuntimeSurfaceArtifacts
+from ..adapters import AdapterHealth, HarnessAdapter, HarnessArtifacts, HarnessManifest, RuntimeSurfaceArtifacts
 from ..fsutil import _atomic_write, _read_runtime_secret, _secure_secret, _secure_tree
 from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canonical_json, validate_id
 
@@ -454,8 +454,8 @@ class OmpHarnessAdapter:
             raise InvalidRequestError("approved external domains contain duplicates")
         return tuple(sorted(values))
 
-    def build_runtime_release(self) -> RuntimeReleaseArtifacts:
-        releases_root = self.state_root / "runtime-releases"
+    def prepare_runtime_surface(self) -> RuntimeSurfaceArtifacts:
+        releases_root = self.state_root / "runtime-surfaces"
         _secure_tree(self.state_root, releases_root)
         staged = releases_root / f".staged-{secrets.token_hex(8)}"
         staged.mkdir(mode=0o700)
@@ -486,48 +486,47 @@ class OmpHarnessAdapter:
                 "harnessExecutableSha256": _file_digest(Path(self.harness_config["executablePath"])),
                 "fenceExecutableSha256": _file_digest(Path(str(self.config["fencePath"]))),
             }
-            _atomic_write(staged / "release.json", canonical_json(manifest, max_bytes=256 * 1024, max_text=64 * 1024) + "\n")
+            _atomic_write(staged / "surface.json", canonical_json(manifest, max_bytes=256 * 1024, max_text=64 * 1024) + "\n")
             _normalize_owner_tree(staged)
             digest = _tree_digest(staged)
             target = releases_root / digest
             if target.exists():
                 if target.is_symlink() or not target.is_dir() or _tree_digest(target) != digest:
-                    raise PisecError("existing runtime release is unsafe or corrupt")
+                    raise PisecError("existing runtime surface is unsafe or corrupt")
                 shutil.rmtree(staged)
             else:
                 os.replace(staged, target)
-            return RuntimeReleaseArtifacts(digest, manifest, str(target.absolute()))
+            return RuntimeSurfaceArtifacts(digest, manifest, str(target.absolute()))
         except Exception:
             if staged.exists():
                 shutil.rmtree(staged)
             raise
-    def prepare_runtime_surface(self) -> RuntimeSurfaceArtifacts:
-        release = self.build_runtime_release()
-        return RuntimeSurfaceArtifacts(release.content_sha256, release.manifest, str(release.root_path))
 
-    def current_runtime_surface(self) -> RuntimeSurfaceArtifacts:
+    def build_runtime_release(self) -> RuntimeSurfaceArtifacts:
         return self.prepare_runtime_surface()
 
-    def _release_root(self, scope: Mapping[str, Any]) -> Path:
+    def _surface_root(self, scope: Mapping[str, Any]) -> Path:
         root_value = scope.get("runtimeReleaseRoot")
         digest = scope.get("runtimeReleaseSha256")
         if not isinstance(root_value, str) or not isinstance(digest, str) or len(digest) != 64:
-            raise InvalidRequestError("runtime release scope is incomplete")
+            raise InvalidRequestError("runtime surface scope is incomplete")
         root = Path(root_value).absolute()
-        expected_parent = (self.state_root / "runtime-releases").absolute()
+        expected_parent = (self.state_root / "runtime-surfaces").absolute()
         if root.parent != expected_parent or root.name != digest or root.is_symlink() or not root.is_dir():
-            raise NeedsAttentionError("runtime release root is invalid")
+            raise NeedsAttentionError("runtime surface root is invalid")
         if _tree_digest(root) != digest:
-            raise NeedsAttentionError("runtime release contents do not match their digest")
+            raise NeedsAttentionError("runtime surface contents do not match their digest")
         return root
 
     def desired_generation(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> str:
+        if surface is None and not isinstance(scope.get("runtimeReleaseRoot"), str):
+            surface = self.current_runtime_surface()
         if surface is not None:
             scope = {**scope, "runtimeReleaseSha256": surface.content_sha256, "runtimeReleaseRoot": surface.root_path, "runtimeReleaseId": "surface_" + surface.content_sha256[:32]}
         profile = scope.get("executionProfile")
         role = _profile_role(str(profile))
         self.validate_execution_profile(str(profile), role)
-        release_root = self._release_root(scope)
+        surface_root = self._surface_root(scope)
         scope_dict = {
             key: scope.get(key)
             for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "fleetWorktreesDir", "fleetGitObjectsDir", "externalDomains", "implementationModel", "harnessModel", "reasoningEffort")
@@ -541,28 +540,29 @@ class OmpHarnessAdapter:
             "adapter": self.manifest.adapter_id,
             "adapterVersion": self.manifest.version_label,
             "scope": scope_dict,
-            "runtimeReleaseId": scope.get("runtimeReleaseId"),
-            "runtimeReleaseSha256": scope.get("runtimeReleaseSha256"),
-            "runtimeReleaseRoot": str(release_root),
+            "runtimeSurfaceSha256": scope.get("runtimeReleaseSha256"),
+            "runtimeSurfaceRoot": str(surface_root),
         }
-        return hashlib.sha256(canonical_json(manifest, max_bytes=256 * 1024, max_text=64 * 1024).encode("utf-8")).hexdigest()
+        return hashlib.sha256(canonical_json(manifest, max_bytes=256 * 1024, max_text=256 * 1024).encode("utf-8")).hexdigest()
 
     def _model_providers(self, profile: str, external_domains: Sequence[str] | None = None) -> dict[str, dict[str, str]]:
         del profile, external_domains
 
     def materialize_profile(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> HarnessArtifacts:
+        if surface is None and not isinstance(scope.get("runtimeReleaseRoot"), str):
+            surface = self.current_runtime_surface()
         if surface is not None:
             scope = {**scope, "runtimeReleaseSha256": surface.content_sha256, "runtimeReleaseRoot": surface.root_path, "runtimeReleaseId": "surface_" + surface.content_sha256[:32]}
         workstream_id = validate_id(scope["workstreamId"], prefix="ws")
         profile = scope.get("executionProfile")
         role = _profile_role(str(profile))
         self.validate_execution_profile(profile, role)
-        release_root = self._release_root(scope)
+        surface_root = self._surface_root(scope)
         generation_sha256 = self.desired_generation(scope)
         agent_dir = self.state_root / "omp" / workstream_id
         _secure_tree(self.state_root, agent_dir)
         _secure_tree(agent_dir, agent_dir / "sessions")
-        _copy_release_surface(release_root / "agent", agent_dir)
+        _copy_release_surface(surface_root / "agent", agent_dir)
         discovery_agent_dir = agent_dir / "agent"
         _secure_tree(self.state_root, discovery_agent_dir)
         _copy_release_surface(release_root / "agent", discovery_agent_dir)
@@ -614,7 +614,7 @@ class OmpHarnessAdapter:
                 "WORKSPACE_CONFIG": Path.home() / ".config" / "herdr",
             },
             baseline_domains=OMP_BASELINE_DOMAINS,
-            template_root=release_root / "managed" / "fence",
+            template_root=surface_root / "managed" / "fence",
         )
         extension_path = agent_dir / "extensions" / "pisec.ts"
         adapter_data = {
@@ -625,8 +625,8 @@ class OmpHarnessAdapter:
             "xdgConfigHome": plugin_info["xdg_config_home"],
             "pluginRoot": plugin_info["plugin_root"],
             "extensionPath": str(extension_path.absolute()),
-            "launcherTemplate": str((release_root / "managed" / "omp").absolute()),
-            "runtimeReleaseId": str(scope["runtimeReleaseId"]),
+            "launcherTemplate": str((surface_root / "managed" / "omp").absolute()),
+            "runtimeSurfaceId": str(scope["runtimeReleaseId"]),
         }
         return HarnessArtifacts(
             harness_home=str(agent_dir),
@@ -697,7 +697,7 @@ class OmpHarnessAdapter:
             "extensionPath": str(Path(_artifact_value(artifacts, "extensionPath")).absolute()),
             "policyPath": str(Path(artifacts.policy_path).absolute()),
             "policySha256": artifacts.policy_sha256,
-            "runtimeReleaseId": _artifact_value(artifacts, "runtimeReleaseId"),
+            "runtimeSurfaceId": _artifact_value(artifacts, "runtimeSurfaceId"),
             "generationSha256": artifacts.generation_sha256,
             "xdgDataHome": str(Path(_artifact_value(artifacts, "xdgDataHome")).absolute()),
             "xdgStateHome": str(Path(_artifact_value(artifacts, "xdgStateHome")).absolute()),
@@ -934,7 +934,6 @@ class OmpHarnessAdapter:
                     and descriptor.get("workspaceViewId") == binding.get("workspace_view_id")
                     and descriptor.get("workspaceSurfaceId") == binding.get("workspace_surface_id")
                     and descriptor.get("harnessHome") == str(Path(str(binding.get("harness_home", ""))).absolute())
-                    and descriptor.get("runtimeReleaseId") == binding.get("desired_release_id")
                     and descriptor.get("generationSha256") == binding.get("desired_generation_sha256")
                     and isinstance(identity_hash, str)
                     and hashlib.sha256(canonical_json(identity_payload, max_bytes=64 * 1024, max_text=8 * 1024).encode("utf-8")).hexdigest() == identity_hash
@@ -952,7 +951,7 @@ class OmpHarnessAdapter:
                 and artifact_document_value.get("adapterId") == self.manifest.adapter_id
                 and artifact_document_value.get("generationSha256") == binding.get("desired_generation_sha256")
                 and isinstance(values, Mapping)
-                and set(values) == {"overlayPath", "xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot", "extensionPath", "launcherTemplate", "runtimeReleaseId"}
+                and set(values) == {"overlayPath", "xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot", "extensionPath", "launcherTemplate", "runtimeSurfaceId"}
                 and all(isinstance(value, str) and value for value in values.values())
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):

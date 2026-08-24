@@ -517,7 +517,7 @@ def _authorize_apply_workstream(
         operation = _operation(store, operation_id)
 
     if _rank(operation["step"]) < _rank("profile_materialized"):
-        artifacts, release, materialized_scope = materialize_current_surface(store, harness, scope)
+        artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)
         artifact_json = artifact_document(harness.manifest, artifacts)
         now = utc_now()
         with store.transaction():

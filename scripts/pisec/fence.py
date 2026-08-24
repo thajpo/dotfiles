@@ -15,7 +15,7 @@ from .models import InvalidRequestError, NeedsAttentionError, canonical_json, va
 from .platform import is_macos, runtime_root
 
 DOMAIN_RE = re.compile(r"^(?:\*\.)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
-PROFILES = frozenset({"secretary-project", "first-mate", "worker-default"})
+_PYVENV_HOME_RE = re.compile(r"^\s*home\s*=\s*(.+?)\s*$")
 
 
 def _read_pyvenv_home(venv: Path) -> Path | None:

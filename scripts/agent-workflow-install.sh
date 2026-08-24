@@ -1086,50 +1086,11 @@ if [[ -z "${PISEC_COLLIE_PROBE_URL:-}" ]]; then
 fi
 verify_collie_surface
 
-printf '\nBuilding and activating the deployed Pisec runtime release\n'
-if ! release_output="$(python3 "$HOME/.local/bin/pisec" --json release build)"; then
-  die "Pisec runtime release build could not run"
+printf '\nInstalling and refreshing the deployed Pisec runtime\n'
+if ! update_output="$(python3 "$HOME/.local/bin/pisec" --json update --commit HEAD --wait-seconds 300)"; then
+  die "Pisec runtime update could not run"
 fi
-printf '%s\n' "$release_output"
-if ! release_id="$(RELEASE_OUTPUT="$release_output" python3 - <<'PY'
-import json
-import os
-
-value = json.loads(os.environ["RELEASE_OUTPUT"])
-release_id = value.get("release_id") if isinstance(value, dict) else None
-if not isinstance(release_id, str):
-    raise SystemExit("Pisec runtime release build returned an invalid result")
-print(release_id)
-PY
-)"; then
-  die "Pisec runtime release build returned an invalid result"
-fi
-if ! activate_output="$(python3 "$HOME/.local/bin/pisec" --json release activate "$release_id")"; then
-  die "Pisec runtime release activation could not run"
-fi
-printf '%s\n' "$activate_output"
-
-printf '\nRolling stale Pisec runtimes to the activated release\n'
-if ! refresh_output="$(python3 "$HOME/.local/bin/pisec" --json project refresh --all --wait-seconds 300)"; then
-  die "Pisec runtime refresh could not run"
-fi
-printf '%s\n' "$refresh_output"
-if ! REFRESH_OUTPUT="$refresh_output" python3 - <<'PY'
-import json
-import os
-
-try:
-    result = json.loads(os.environ["REFRESH_OUTPUT"])
-except (KeyError, json.JSONDecodeError):
-    raise SystemExit("Pisec runtime refresh returned invalid JSON")
-if not isinstance(result, dict) or not isinstance(result.get("upgraded"), list) or not isinstance(result.get("pending"), list):
-    raise SystemExit("Pisec runtime refresh returned an invalid result")
-if result.get("failed"):
-    raise SystemExit("Pisec runtime refresh reported failed bindings")
-PY
-then
-  die "Pisec runtime refresh reported failed bindings"
-fi
+printf '%s\n' "$update_output"
 
 printf '\nRunning final Pisec doctor\n'
 if ! doctor_output="$(python3 "$HOME/.local/bin/pisec" doctor --json)"; then
