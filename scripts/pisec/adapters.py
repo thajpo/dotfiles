@@ -10,6 +10,10 @@ from typing import Any, Mapping, Protocol, Sequence
 from .models import InvalidRequestError, NeedsAttentionError, canonical_json
 
 ADAPTER_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+def validate_adapter_id(value: Any) -> str:
+    if not isinstance(value, str) or ADAPTER_ID_RE.fullmatch(value) is None:
+        raise InvalidRequestError("adapter id is invalid")
+    return value
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,19 @@ class HarnessArtifacts:
             "generationSha256": self.generation_sha256,
             "adapterData": dict(self.adapter_data),
         }
+
+
+@dataclass(frozen=True)
+class RuntimeSurfaceArtifacts:
+    content_sha256: str
+    manifest: Mapping[str, Any]
+    root_path: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.content_sha256, str) or len(self.content_sha256) != 64:
+            raise InvalidRequestError("runtime surface digest is invalid")
+        if not isinstance(self.root_path, str) or not self.root_path:
+            raise InvalidRequestError("runtime surface root is invalid")
 
 
 @dataclass(frozen=True)
@@ -115,15 +132,17 @@ class AdapterHealth:
     detail: str
 
 
-def validate_adapter_id(value: Any) -> str:
-    if not isinstance(value, str) or ADAPTER_ID_RE.fullmatch(value) is None:
-        raise InvalidRequestError("adapter id is invalid")
-    return value
-
 
 class HarnessAdapter(Protocol):
     manifest: HarnessManifest
 
+    def prepare_runtime_surface(self) -> RuntimeSurfaceArtifacts: ...
+
+    def current_runtime_surface(self) -> RuntimeSurfaceArtifacts: ...
+
+    def desired_generation(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> str: ...
+
+    def materialize_profile(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> HarnessArtifacts: ...
     def validate_execution_profile(self, profile: str, role: str) -> None: ...
 
     def profile_domains(self, profile: str, additional_domains: Sequence[str]) -> tuple[str, ...]: ...

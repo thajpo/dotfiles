@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.pisec.models import IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, ScopeMismatchError
+from scripts.pisec.models import ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, ScopeMismatchError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.projects import _git, register_project
@@ -250,6 +250,28 @@ class WorkstreamTests(unittest.TestCase):
         changed_packet["residualRisk"] = "changed"
         with self.assertRaises(IdempotencyConflictError):
             checkpoint(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], phase="ready_review", summary="Implementation is verified.", next_action="Review the completion packet.", blocker_code=None, blocker=None, evidence=["fixture verification"], idempotency_key="ready-1", completion_packet=changed_packet)
+
+    def test_ready_checkpoint_rolls_back_when_completion_submission_fails(self):
+        temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
+        self.addCleanup(temp.cleanup)
+        self.addCleanup(store.close)
+        prepared = self.prepare(root, store, project, harness, workspace)
+        result = self.apply(prepared, store, harness, workspace, git_objects)
+        workstream = result["workstream"]
+        binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()
+        task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()
+        packet = {
+            "acceptance": [{"criterion": "Parser tests pass.", "status": "passed", "evidence": ["Test output."]}],
+            "verification": [{"command": "fixture verification", "result": "passed"}],
+            "sourceCommit": "0" * 40,
+            "taskPacketSha256": task["packet_sha256"],
+            "changedSurfaces": ["fixture"],
+            "residualRisk": "none",
+        }
+        with self.assertRaises(ConflictError):
+            checkpoint(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], phase="ready_review", summary="Implementation is verified.", next_action="Review the completion packet.", blocker_code=None, blocker=None, evidence=["fixture verification"], idempotency_key="ready-stale", completion_packet=packet)
+        self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM completion_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()[0], 0)
+        self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM workstream_checkpoints WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()[0], 0)
 
     def test_completion_and_retirement_retain_git_names(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()

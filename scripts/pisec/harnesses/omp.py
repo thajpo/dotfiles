@@ -14,7 +14,7 @@ import stat
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
-from ..adapters import AdapterHealth, HarnessAdapter, HarnessArtifacts, HarnessManifest, RuntimeReleaseArtifacts
+from ..adapters import AdapterHealth, HarnessAdapter, HarnessArtifacts, HarnessManifest, RuntimeReleaseArtifacts, RuntimeSurfaceArtifacts
 from ..fsutil import _atomic_write, _read_runtime_secret, _secure_secret, _secure_tree
 from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canonical_json, validate_id
 
@@ -501,6 +501,12 @@ class OmpHarnessAdapter:
             if staged.exists():
                 shutil.rmtree(staged)
             raise
+    def prepare_runtime_surface(self) -> RuntimeSurfaceArtifacts:
+        release = self.build_runtime_release()
+        return RuntimeSurfaceArtifacts(release.content_sha256, release.manifest, str(release.root_path))
+
+    def current_runtime_surface(self) -> RuntimeSurfaceArtifacts:
+        return self.prepare_runtime_surface()
 
     def _release_root(self, scope: Mapping[str, Any]) -> Path:
         root_value = scope.get("runtimeReleaseRoot")
@@ -515,7 +521,9 @@ class OmpHarnessAdapter:
             raise NeedsAttentionError("runtime release contents do not match their digest")
         return root
 
-    def desired_generation(self, scope: Mapping[str, Any]) -> str:
+    def desired_generation(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> str:
+        if surface is not None:
+            scope = {**scope, "runtimeReleaseSha256": surface.content_sha256, "runtimeReleaseRoot": surface.root_path, "runtimeReleaseId": "surface_" + surface.content_sha256[:32]}
         profile = scope.get("executionProfile")
         role = _profile_role(str(profile))
         self.validate_execution_profile(str(profile), role)
@@ -541,15 +549,10 @@ class OmpHarnessAdapter:
 
     def _model_providers(self, profile: str, external_domains: Sequence[str] | None = None) -> dict[str, dict[str, str]]:
         del profile, external_domains
-        gateway = self.harness_config["gateway"]
-        gateway_token = _secure_secret(Path(gateway["tokenFile"]))
-        roles = self.harness_config["modelRoles"]
-        return {
-            provider: {"baseUrl": gateway["baseUrl"], "apiKey": gateway_token, "transport": "pi-native"}
-            for provider in _provider_ids(roles)
-        }
 
-    def materialize_profile(self, scope: Mapping[str, Any]) -> HarnessArtifacts:
+    def materialize_profile(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> HarnessArtifacts:
+        if surface is not None:
+            scope = {**scope, "runtimeReleaseSha256": surface.content_sha256, "runtimeReleaseRoot": surface.root_path, "runtimeReleaseId": "surface_" + surface.content_sha256[:32]}
         workstream_id = validate_id(scope["workstreamId"], prefix="ws")
         profile = scope.get("executionProfile")
         role = _profile_role(str(profile))

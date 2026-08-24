@@ -125,7 +125,20 @@ def fleet_scope_paths(store: Any, scope: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def materialize_active_release(store: Any, harness: HarnessAdapter, scope: Mapping[str, Any]) -> tuple[Any, dict[str, Any], dict[str, Any]]:
-    release = active_runtime_release(store, harness)
-    bound_scope = fleet_scope_paths(store, release_scope(scope, release))
-    return harness.materialize_profile(bound_scope), release, bound_scope
+def materialize_current_surface(store: Any, harness: HarnessAdapter, scope: Mapping[str, Any]) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    del store
+    surface_getter = getattr(harness, "current_runtime_surface", None)
+    surface = surface_getter() if callable(surface_getter) else None
+    bound_scope = dict(scope)
+    materialize = getattr(harness, "materialize_profile")
+    try:
+        artifacts = materialize(bound_scope, surface)
+    except TypeError:
+        artifacts = materialize(bound_scope)
+    generation = getattr(artifacts, "generation_sha256", None)
+    if not isinstance(generation, str) or len(generation) != 64:
+        raise InvalidRequestError("harness returned an invalid runtime generation")
+    surface_digest = getattr(surface, "content_sha256", generation) if surface is not None else generation
+    release = {"release_id": "surface_" + str(surface_digest)[:32], "content_sha256": str(surface_digest), "root_path": getattr(surface, "root_path", None)}
+    return artifacts, release, bound_scope
+materialize_active_release = materialize_current_surface

@@ -216,7 +216,7 @@ def report_runtime(store: Any, payload_value: Mapping[str, Any], harness: Harnes
             workspace.report_state(surface_id, "unknown", None, workspace_seq, instance, harness.manifest)
         now = utc_now()
         store.conn.execute(
-            "UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=?,workspace_report_seq=?,native_session_kind=COALESCE(?,native_session_kind),native_session_value=COALESCE(?,native_session_value),observed_state=?,applied_release_id=CASE WHEN ?='session_start' THEN COALESCE(launch_release_id,applied_release_id) ELSE applied_release_id END,launch_release_id=CASE WHEN ?='session_start' THEN NULL ELSE launch_release_id END,applied_generation_sha256=CASE WHEN ?='session_start' THEN COALESCE(launch_generation_sha256,applied_generation_sha256) ELSE applied_generation_sha256 END,launch_generation_sha256=CASE WHEN ?='session_start' THEN NULL ELSE launch_generation_sha256 END,last_observed_at=?,updated_at=? WHERE workstream_id=?",
-            (instance, seq, workspace_seq, kind, value, state, event, event, event, event, now, now, workstream_id),
+            "UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=?,workspace_report_seq=?,native_session_kind=COALESCE(?,native_session_kind),native_session_value=COALESCE(?,native_session_value),observed_state=?,applied_generation_sha256=CASE WHEN ?='session_start' THEN COALESCE(launch_generation_sha256,applied_generation_sha256) ELSE applied_generation_sha256 END,launch_generation_sha256=CASE WHEN ?='session_start' THEN NULL ELSE launch_generation_sha256 END,last_observed_at=?,updated_at=? WHERE workstream_id=?",
+            (instance, seq, workspace_seq, kind, value, state, event, event, now, now, workstream_id),
         )
     return {"accepted": True, "workstreamId": workstream_id, "seq": seq, "reason": reason, "workspaceReportSeq": workspace_seq}

@@ -19,7 +19,7 @@ from .policies import enforce_worker_creation_policy
 from .projects import _git, assert_project_writable, get_project
 from .project_workspaces import ensure_project_workspace
 from .research import issue_task_packet_in_transaction, validate_task_packet
-from .releases import materialize_active_release
+from .releases import materialize_current_surface
 from .runtime import start_bound_agent
 APPLY_LOCK = threading.RLock()
 CHECKPOINTS = (
@@ -517,13 +517,13 @@ def _authorize_apply_workstream(
         operation = _operation(store, operation_id)
 
     if _rank(operation["step"]) < _rank("profile_materialized"):
-        artifacts, release, materialized_scope = materialize_active_release(store, harness, scope)
+        artifacts, release, materialized_scope = materialize_current_surface(store, harness, scope)
         artifact_json = artifact_document(harness.manifest, artifacts)
         now = utc_now()
         with store.transaction():
             store.conn.execute(
-                "INSERT OR REPLACE INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_release_id,applied_release_id,launch_release_id,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (workstream_id, workspace.manifest.adapter_id, workspace.manifest.session_name, observation.workspace_id, observation.view_id, observation.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_json, None, None, artifacts.launch_secret_path, scope["privateGitObjectDir"], artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, release["release_id"], None, release["release_id"], artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
+                "INSERT OR REPLACE INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (workstream_id, workspace.manifest.adapter_id, workspace.manifest.session_name, observation.workspace_id, observation.view_id, observation.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_json, None, None, artifacts.launch_secret_path, scope["privateGitObjectDir"], artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
             )
         harness.commit_launch_binding(
             materialized_scope,
@@ -674,7 +674,7 @@ def _lifecycle_operation(store: Any, *, kind: str, project_id: str, workstream_i
 
 def list_workstreams(store: Any, project_id: str) -> list[dict[str, Any]]:
     get_project(store, project_id)
-    return [dict(row) for row in store.conn.execute("SELECT w.*,r.observed_state,r.last_observed_at,r.agent_name,r.desired_release_id,r.applied_release_id,r.desired_generation_sha256,r.applied_generation_sha256,CASE WHEN r.desired_release_id IS NOT r.applied_release_id OR (r.desired_generation_sha256 IS NOT NULL AND r.desired_generation_sha256 IS NOT r.applied_generation_sha256) THEN 1 ELSE 0 END AS runtime_stale,t.task_packet_id,t.packet_sha256 AS task_packet_sha256 FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) LEFT JOIN task_packets t USING(workstream_id) WHERE w.project_id=? ORDER BY w.created_at,w.workstream_id", (project_id,))]
+    return [dict(row) for row in store.conn.execute("SELECT w.*,r.observed_state,r.last_observed_at,r.agent_name,r.desired_generation_sha256,r.applied_generation_sha256,CASE WHEN r.desired_generation_sha256 IS NOT r.applied_generation_sha256 THEN 1 ELSE 0 END AS runtime_stale,t.task_packet_id,t.packet_sha256 AS task_packet_sha256 FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) LEFT JOIN task_packets t USING(workstream_id) WHERE w.project_id=? ORDER BY w.created_at,w.workstream_id", (project_id,))]
 
 
 def inspect_workstream(store: Any, project_id: str, workstream_id: str) -> dict[str, Any]:

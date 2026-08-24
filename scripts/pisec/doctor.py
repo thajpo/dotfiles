@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 
 from .adapters import AdapterRegistry
 from .models import NeedsAttentionError, canonical_json
-from .pi_schema import MIGRATION_NAME, SCHEMA_NAME, SCHEMA_VERSION, schema_digest
+from .pi_schema import SCHEMA_NAME, SCHEMA_VERSION, schema_digest
 from .pi_store import default_state_root
 
 
@@ -191,12 +191,12 @@ def run_doctor(
 
     schema_identity = None
     if store is not None:
-        row = store.conn.execute("SELECT schema_name,schema_version,schema_sha256,migration_name FROM control_meta WHERE singleton=1").fetchone()
+        row = store.conn.execute("SELECT schema_name,schema_version,schema_sha256 FROM control_meta WHERE singleton=1").fetchone()
         if row is None:
             _check(checks, "Schema identity", False, "control metadata is missing")
         else:
             schema_identity = dict(row)
-            expected = {"schema_name": SCHEMA_NAME, "schema_version": SCHEMA_VERSION, "schema_sha256": schema_digest(), "migration_name": MIGRATION_NAME}
+            expected = {"schema_name": SCHEMA_NAME, "schema_version": SCHEMA_VERSION, "schema_sha256": schema_digest()}
             _check(checks, "Schema identity", schema_identity == expected, canonical_json(schema_identity))
         for row in store.conn.execute(
             "SELECT r.*,w.kind AS workstream_kind,w.desired_state AS workstream_desired_state,w.provisioning_state AS workstream_provisioning_state,w.execution_profile AS workstream_execution_profile,w.worktree_path AS workstream_worktree_path,w.harness_id AS workstream_harness_id,w.workspace_adapter_id AS workstream_workspace_adapter_id "
@@ -204,7 +204,7 @@ def run_doctor(
         ):
             ids_ok = registry is not None and row["harness_id"] in harness_ids and row["workspace_adapter_id"] in workspace_ids and row["workspace_adapter_id"] == selected_workspace_id and row["harness_id"] == row["workstream_harness_id"] and row["workspace_adapter_id"] == row["workstream_workspace_adapter_id"]
             _check(checks, f"Binding {row['workstream_id']}", ids_ok, f"harness={row['harness_id']} workspace={row['workspace_adapter_id']} state={row['observed_state']}")
-            generation_ok = row["workstream_desired_state"] != "active" or row["workstream_provisioning_state"] != "bound" or (isinstance(row["desired_release_id"], str) and row["applied_release_id"] == row["desired_release_id"] and isinstance(row["desired_generation_sha256"], str) and len(row["desired_generation_sha256"]) == 64 and row["applied_generation_sha256"] == row["desired_generation_sha256"])
+            generation_ok = row["workstream_desired_state"] != "active" or row["workstream_provisioning_state"] != "bound" or (isinstance(row["desired_generation_sha256"], str) and row["applied_generation_sha256"] == row["desired_generation_sha256"])
             _check(checks, f"Binding generation {row['workstream_id']}", generation_ok, "current" if generation_ok else "stale; run pisec project refresh --all")
             if ids_ok and registry is not None and row["workstream_desired_state"] == "active" and row["workstream_provisioning_state"] == "bound":
                 binding = dict(row)

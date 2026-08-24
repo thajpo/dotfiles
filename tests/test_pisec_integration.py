@@ -167,9 +167,11 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("new ready_review checkpoint", job["next_action"])
             self.assertIn("rebase", workspace.prompts[-1][1].lower())
             prompt_count = len(workspace.prompts)
+            attempt = store.conn.execute("SELECT attempt FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()["attempt"]
             replay = reconcile_integrations(store, workspace, harness)
             self.assertEqual(replay["processed"][0]["state"], "awaiting_worker")
             self.assertEqual(len(workspace.prompts), prompt_count)
+            self.assertEqual(store.conn.execute("SELECT attempt FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()["attempt"], attempt)
 
     def test_rebased_candidate_scopes_changes_against_refreshed_target(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,17 +1,17 @@
-"""Exact, revocable external read grants and runtime scope composition."""
+"""Project-wide read-only permission composition for runtime scopes."""
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from .fence import resolve_data_dirs
+from .fence import DOMAIN_RE, resolve_data_dirs
 from .models import ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, canonical_json, json_digest, new_id, utc_now
 from .platform import runtime_root
 
 _VIRTUAL_ROOTS = tuple(Path(value) for value in ("/proc", "/sys", "/dev", "/run"))
 _CREDENTIAL_ROOTS = tuple(Path.home() / value for value in (".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".config/gh"))
-
+_MAX_PERMISSION_ENTRIES = 64
 
 def _safe_external_path(path: str) -> str:
     if not isinstance(path, str) or not Path(path).is_absolute() or len(path) > 4096 or "\x00" in path:
@@ -188,17 +188,152 @@ def effective_runtime_scope(store: Any, binding: Mapping[str, Any]) -> dict[str,
     if row is None or row["result_json"] is None:
         raise NeedsAttentionError("runtime generation scope is missing")
     scope = json.loads(str(row["result_json"]))
-    project = store.conn.execute("SELECT repository_path,data_dirs FROM projects WHERE project_id=?", (binding["project_id"],)).fetchone()
+    project = store.conn.execute("SELECT repository_path,data_dirs,external_domains FROM projects WHERE project_id=?", (binding["project_id"],)).fetchone()
     data_dirs: list[str] = []
-    if project is not None and project["data_dirs"]:
-        data_dirs = resolve_data_dirs(json.loads(project["data_dirs"]), Path(project["repository_path"]))
-    grant_sources: dict[str, list[dict[str, str]]] = {}
-    if kind == "worker":
-        for grant in store.conn.execute("SELECT * FROM access_grants WHERE project_id=? AND state IN ('activating','active') AND (subject_kind='project_workers' OR workstream_id=?)", (binding["project_id"], binding["workstream_id"])):
-            data_dirs.append(str(grant["path"]))
-            grant_sources.setdefault(str(grant["path"]), []).append({"kind": "project_grant" if grant["subject_kind"] == "project_workers" else "workstream_grant", "sourceId": str(grant["grant_id"])})
+    domains: list[str] = []
+    if project is not None:
+        if project["data_dirs"]:
+            data_dirs = resolve_data_dirs(json.loads(project["data_dirs"]), Path(project["repository_path"]))
+        if project["external_domains"]:
+            domains = _canonical_domains(json.loads(project["external_domains"]))
     from .releases import fleet_scope_paths
     result = fleet_scope_paths(store, scope)
     result["dataDirs"] = sorted(set(data_dirs))
-    result["readPathSources"] = {path: ([{"kind": "project_data", "sourceId": str(binding["project_id"])}] if path in data_dirs and path not in grant_sources else []) + grant_sources.get(path, []) for path in result["dataDirs"]}
+    result["externalDomains"] = domains
+    result["readPathSources"] = {path: [{"kind": "project_data", "sourceId": str(binding["project_id"])}] for path in result["dataDirs"]}
     return result
+
+
+def _canonical_project_paths(store: Any, project: Mapping[str, Any], values: Any) -> list[str]:
+    if not isinstance(values, list) or len(values) > _MAX_PERMISSION_ENTRIES:
+        raise InvalidRequestError("project data dirs must be a list of at most 64 entries")
+    repository = Path(str(project["repository_path"])).resolve(strict=True)
+    canonical: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value or len(value) > 4096 or "\x00" in value:
+            raise InvalidRequestError("project data dir is invalid")
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = repository / candidate
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as error:
+            raise InvalidRequestError("project data dir must exist") from error
+        if resolved != candidate.resolve(strict=False) or not (resolved.is_file() or resolved.is_dir()):
+            raise InvalidRequestError("project data dir must use canonical spelling and be a regular file or directory")
+        protected = [*(_VIRTUAL_ROOTS), *(_CREDENTIAL_ROOTS), runtime_root()]
+        if any(resolved == root.resolve(strict=False) or resolved.is_relative_to(root.resolve(strict=False)) or root.resolve(strict=False).is_relative_to(resolved) for root in protected):
+            raise InvalidRequestError("project data dir overlaps a protected root")
+        canonical.append(str(resolved))
+    if len(canonical) != len(set(canonical)):
+        raise InvalidRequestError("project data dirs contain duplicates")
+    return sorted(canonical)
+
+
+def _canonical_domains(values: Any) -> list[str]:
+    if not isinstance(values, list) or len(values) > _MAX_PERMISSION_ENTRIES:
+        raise InvalidRequestError("project external domains must be a list of at most 64 entries")
+    if any(not isinstance(value, str) or DOMAIN_RE.fullmatch(value) is None for value in values):
+        raise InvalidRequestError("project external domain is invalid")
+    canonical = sorted(set(values))
+    if len(canonical) != len(values):
+        raise InvalidRequestError("project external domains contain duplicates")
+    return canonical
+
+
+def _project_permissions(store: Any, project_id: str) -> Mapping[str, Any]:
+    return _project(store, project_id)
+
+
+def prepare_project_permissions(
+    store: Any,
+    *,
+    project_id: str,
+    data_dirs: list[str],
+    external_domains: list[str],
+    issue_id: str | None,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    project = _project_permissions(store, project_id)
+    paths = _canonical_project_paths(store, project, data_dirs)
+    domains = _canonical_domains(external_domains)
+    if issue_id is not None:
+        issue = store.conn.execute("SELECT project_id,state FROM issues WHERE issue_id=?", (issue_id,)).fetchone()
+        if issue is None or issue["project_id"] != project_id or issue["state"] == "resolved":
+            raise ConflictError("issue is not an unresolved issue in the project")
+    previous = {
+        "dataDirs": _canonical_project_paths(store, project, json.loads(project["data_dirs"] or "[]")),
+        "externalDomains": _canonical_domains(json.loads(project["external_domains"] or "[]")),
+    }
+    request = {"projectId": project_id, "dataDirs": paths, "externalDomains": domains, "issueId": issue_id}
+    operation = _operation(store, kind="project.permissions.update", project_id=project_id, request=request, idempotency_key=idempotency_key)
+    scope = {
+        "kind": "project.permissions.update",
+        "operationId": operation["operation_id"],
+        "projectId": project_id,
+        "issueId": issue_id,
+        "previousPermissionsSha256": json_digest(previous),
+        "dataDirs": paths,
+        "externalDomains": domains,
+        "effects": ["replace project-wide read-only filesystem paths", "replace project-wide network domains", "refresh idle runtimes"],
+        "nonEffects": ["no filesystem write", "no runtime version selection", "no sibling-project access", "no secretary or First Mate authority"],
+    }
+    return {"operation": dict(operation), "approvalScope": scope, "reused": operation["state"] != "planned"}
+
+
+def authorize_apply_project_permissions(
+    store: Any,
+    *,
+    approval_scope: Mapping[str, Any],
+    harness_resolver: Any,
+    surface_resolver: Any,
+    workspace: Any,
+    actor: str,
+) -> dict[str, Any]:
+    if actor not in {"secretary", "first_mate"} or approval_scope.get("kind") != "project.permissions.update":
+        raise ScopeMismatchError("project permission approval scope is invalid")
+    project_id = str(approval_scope.get("projectId"))
+    project = _project_permissions(store, project_id)
+    current = {
+        "dataDirs": _canonical_project_paths(store, project, json.loads(project["data_dirs"] or "[]")),
+        "externalDomains": _canonical_domains(json.loads(project["external_domains"] or "[]")),
+    }
+    if json_digest(current) != approval_scope.get("previousPermissionsSha256"):
+        raise ScopeMismatchError("project permissions changed since approval")
+    paths = _canonical_project_paths(store, project, approval_scope.get("dataDirs"))
+    domains = _canonical_domains(approval_scope.get("externalDomains"))
+    operation = store.conn.execute(
+        "SELECT * FROM operations WHERE operation_id=? AND kind='project.permissions.update'",
+        (approval_scope.get("operationId"),),
+    ).fetchone()
+    if operation is None:
+        raise ScopeMismatchError("project permission operation was not found")
+    now = utc_now()
+    with store.transaction():
+        if store.conn.execute("SELECT 1 FROM authorizations WHERE operation_id=?", (operation["operation_id"],)).fetchone() is None:
+            store.conn.execute(
+                "INSERT INTO authorizations(authorization_id,operation_id,scope_sha256,kind,scope_json,actor,consumed_at) VALUES(?,?,?,?,?,?,?)",
+                (new_id("az"), operation["operation_id"], json_digest(approval_scope), "project.permissions.update", canonical_json(approval_scope), actor, now),
+            )
+        store.conn.execute(
+            "UPDATE projects SET data_dirs=?,external_domains=?,updated_at=? WHERE project_id=?",
+            (canonical_json(paths), canonical_json(domains), now, project_id),
+        )
+        issue_id = approval_scope.get("issueId")
+        if issue_id:
+            secretary = store.conn.execute("SELECT secretary_workstream_id FROM projects WHERE project_id=?", (project_id,)).fetchone()
+            actor_id = secretary["secretary_workstream_id"] if secretary and secretary["secretary_workstream_id"] else None
+            if actor_id:
+                payload = {"operationId": operation["operation_id"], "kind": "project.permissions.update"}
+                store.conn.execute(
+                    "INSERT OR IGNORE INTO issue_updates(issue_id,actor_id,update_kind,payload_json,payload_sha256,idempotency_key,created_at) VALUES(?,?, 'remediation_linked',?,?,?,?)",
+                    (issue_id, actor_id, canonical_json(payload), json_digest(payload), operation["operation_id"], now),
+                )
+            store.conn.execute("UPDATE issues SET state='remediating',updated_at=? WHERE issue_id=? AND state IN ('open','acknowledged')", (now, issue_id))
+        store.conn.execute(
+            "UPDATE operations SET state='succeeded',step='applied',result_json=?,updated_at=? WHERE operation_id=?",
+            (canonical_json({"projectId": project_id, "dataDirs": paths, "externalDomains": domains}), now, operation["operation_id"]),
+        )
+    from .refresh import refresh_runtimes
+    refresh = refresh_runtimes(store, harness_resolver(project_id) if callable(harness_resolver) else harness_resolver, workspace, wait_seconds=0, surface_resolver=surface_resolver, project_ids=(project_id,))
+    return {"operation": dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation["operation_id"],)).fetchone()), "refresh": refresh}

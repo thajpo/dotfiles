@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = ROOT / "omp" / "extensions" / "pisec.ts"
 SECRETARY_TOOL_OPERATIONS = [
     ("pisec_project_activity", "project.activity"),
+    ("pisec_refresh_project", "project.refresh"),
+    ("pisec_install_release", "runtime.release.install"),
     ("pisec_report_secretary_issue", "issue.report"),
     ("pisec_list_issues", "issue.list"),
     ("pisec_inspect_issue", "issue.inspect"),
@@ -70,6 +72,7 @@ FLEET_TOOL_OPERATIONS = [
 ]
 WORKER_TOOL_OPERATIONS = [
     ("pisec_checkpoint_workstream", "workstream.checkpoint"),
+    ("pisec_submit_completion", "workstream.completion.submit"),
     ("pisec_request_help", "help.request"),
     ("pisec_request_coordination", "coordination.request"),
     ("pisec_list_coordination", "coordination.list"),

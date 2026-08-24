@@ -8,11 +8,10 @@ SOCKET_OPERATIONS = {
         "project.register", "project.list", "project.open", "project.activity", "fleet.activity",
         "project.refresh", "project.deactivate", "project.activate", "secretary.ensure", "secretary.focus",
         "first_mate.ensure", "first_mate.focus", "workstream.focus", "workstream.cleanup", "system.status",
-        "system.reconcile", "system.doctor", "workspace.startup", "workspace.event", "presentation.snapshot",
-        "runtime.release.build", "runtime.release.list", "runtime.release.activate", "project.policy.update",
+        "system.reconcile", "system.doctor", "workspace.startup", "workspace.event", "presentation.snapshot", "project.policy.update",
     }),
     "secretary": frozenset({
-        "project.status", "project.activity", "issue.report", "secretary.issue.report", "issue.list", "issue.inspect", "issue.add_context", "issue.verify", "access.list", "git.status", "git.push", "git.workstream_changes",
+        "project.status", "project.activity", "project.refresh", "issue.report", "secretary.issue.report", "issue.list", "issue.inspect", "issue.add_context", "issue.verify", "access.list", "git.status", "git.push", "git.workstream_changes",
         "workstream.list", "workstream.inspect", "workstream.prepare", "workstream.accept.prepare", "workstream.accept.apply",
         "integration.list", "integration.inspect", "workstream.authorize_apply", "workstream.send", "workstream.focus",
         "workstream.retire", "coordination.list", "coordination.inspect", "coordination.answer", "decision.list",

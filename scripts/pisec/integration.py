@@ -485,9 +485,12 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
             return {"integrationId": integration_id, "state": "needs_attention", "reused": True}
         _set_job(store, integration_id, state="queued", next_action="retry after the target checkout was cleaned")
         job = {**dict(job), "state": "queued", "last_error": None}
-    with store.transaction():
-        store.conn.execute("UPDATE integration_jobs SET attempt=attempt+1,updated_at=? WHERE integration_id=?", (utc_now(), integration_id))
-    job = {**dict(job), "attempt": int(job["attempt"]) + 1}
+    if job["state"] != "awaiting_worker":
+        with store.transaction():
+            store.conn.execute("UPDATE integration_jobs SET attempt=attempt+1,updated_at=? WHERE integration_id=?", (utc_now(), integration_id))
+        job = {**dict(job), "attempt": int(job["attempt"]) + 1}
+    else:
+        job = {**dict(job), "attempt": int(job["attempt"])}
     acceptance = store.conn.execute("SELECT * FROM workstream_acceptances WHERE acceptance_id=?", (job["acceptance_id"],)).fetchone()
     if acceptance is None:
         _set_job(store, integration_id, state="needs_attention", error="acceptance record is missing", next_action="restore the immutable acceptance record")
@@ -507,7 +510,8 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
             candidate = _current_candidate(store, str(job["project_id"]), str(job["workstream_id"]), scope["taskPacketSha256"], accepted_paths, scope["acceptance"])
             if candidate is None:
                 _set_job(store, integration_id, state="awaiting_worker", error="worker branch moved without a matching verified completion packet", next_action="submit a new ready_review checkpoint for the current branch")
-                _prompt_worker(store, workspace, str(job["workstream_id"]), f"Pisec integration {integration_id} is waiting for a matching ready_review checkpoint. The worker branch moved after acceptance; submit a new checkpoint with the same task scope and refreshed verification.")
+                if job["state"] != "awaiting_worker":
+                    _prompt_worker(store, workspace, str(job["workstream_id"]), f"Pisec integration {integration_id} is waiting for a matching ready_review checkpoint. The worker branch moved after acceptance; submit a new checkpoint with the same task scope and refreshed verification.")
                 return {"integrationId": integration_id, "state": "awaiting_worker"}
             _set_job(store, integration_id, state="queued", candidate_packet=candidate["packet"]["packet_sha256"], candidate_source=candidate["sourceOid"], next_action="candidate refreshed after worker verification")
             job = {**dict(job), "state": "queued", "candidate_completion_packet_sha256": candidate["packet"]["packet_sha256"], "candidate_source_oid": candidate["sourceOid"]}

@@ -299,13 +299,13 @@ def checkpoint(store: Any, *, workstream_id: str, runtime_instance_id: str, phas
     now = utc_now()
     checkpoint_id = new_id("cp")
     with store.transaction():
+        if normalized_completion is not None:
+            _submit_completion_in_transaction(store, workstream_id=workstream_id, runtime_instance_id=runtime_instance_id, packet=normalized_completion)
         store.conn.execute(
             "INSERT INTO workstream_checkpoints(checkpoint_id,workstream_id,runtime_instance_id,sequence,idempotency_key,phase,summary,next_action,blocker_code,blocker,evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (checkpoint_id, workstream_id, runtime_instance_id, sequence, idempotency_key, phase, summary, next_action, blocker_code, blocker, evidence_json, now),
         )
         append_event_in_transaction(store.conn, kind="workstream.checkpointed", project_id=binding["project_id"], workstream_id=workstream_id, payload={"checkpointId": checkpoint_id, "sequence": sequence, "phase": phase})
-    if phase == "ready_review":
-        submit_completion(store, workstream_id=workstream_id, runtime_instance_id=runtime_instance_id, packet=completion_packet)
     return dict(store.conn.execute("SELECT * FROM workstream_checkpoints WHERE checkpoint_id=?", (checkpoint_id,)).fetchone())
 
 
@@ -333,7 +333,7 @@ def _completion_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
     return json.loads(canonical_json(dict(packet), max_bytes=65536, max_text=8192))
 
 
-def submit_completion(store: Any, *, workstream_id: str, runtime_instance_id: str, packet: Mapping[str, Any]) -> dict[str, Any]:
+def _submit_completion_in_transaction(store: Any, *, workstream_id: str, runtime_instance_id: str, packet: Mapping[str, Any]) -> dict[str, Any]:
     binding = _runtime_binding(store, workstream_id, runtime_instance_id)
     project_id = str(binding["project_id"])
     assert_project_writable(store, project_id)
@@ -353,13 +353,19 @@ def submit_completion(store: Any, *, workstream_id: str, runtime_instance_id: st
         return dict(existing)
     now = utc_now()
     packet_id = new_id("cmp")
-    with store.transaction():
-        store.conn.execute(
-            "INSERT INTO completion_packets(completion_packet_id,workstream_id,source_commit_oid,task_packet_sha256,packet_sha256,packet_json,submitted_at,accepted_at) VALUES(?,?,?,?,?,?,?,?)",
-            (packet_id, workstream_id, observed_source, task["packet_sha256"], packet_sha, canonical_json(normalized, max_bytes=65536, max_text=8192), now, None),
-        )
-        append_event_in_transaction(store.conn, kind="workstream.completion_submitted", project_id=project_id, workstream_id=workstream_id, payload={"completionPacketSha256": packet_sha, "sourceCommit": observed_source})
+    store.conn.execute(
+        "INSERT INTO completion_packets(completion_packet_id,workstream_id,source_commit_oid,task_packet_sha256,packet_sha256,packet_json,submitted_at,accepted_at) VALUES(?,?,?,?,?,?,?,?)",
+        (packet_id, workstream_id, observed_source, task["packet_sha256"], packet_sha, canonical_json(normalized, max_bytes=65536, max_text=8192), now, None),
+    )
+    append_event_in_transaction(store.conn, kind="workstream.completion_submitted", project_id=project_id, workstream_id=workstream_id, payload={"completionPacketSha256": packet_sha, "sourceCommit": observed_source})
     return dict(store.conn.execute("SELECT * FROM completion_packets WHERE completion_packet_id=?", (packet_id,)).fetchone())
+
+
+def submit_completion(store: Any, *, workstream_id: str, runtime_instance_id: str, packet: Mapping[str, Any]) -> dict[str, Any]:
+    with store.transaction():
+        return _submit_completion_in_transaction(store, workstream_id=workstream_id, runtime_instance_id=runtime_instance_id, packet=packet)
+
+
 
 
 def list_coordination(store: Any, *, project_id: str, workstream_id: str | None = None, include_resolved: bool = False) -> list[dict[str, Any]]:

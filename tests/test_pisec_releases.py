@@ -72,13 +72,28 @@ class RuntimeReleaseTests(unittest.TestCase):
         unchanged = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
         self.assertEqual(unchanged["upgraded"], [])
 
-        self.dispatcher.dispatch("admin", "runtime.release.activate", {"releaseId": built["release_id"]})
-        upgraded = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
-        self.assertEqual([item["workstreamId"] for item in upgraded["upgraded"]], [workstream_id])
+        activated = self.dispatcher.dispatch("admin", "runtime.release.activate", {"releaseId": built["release_id"], "waitSeconds": 0})
+        self.assertTrue(activated["activated"])
+        self.assertEqual([item["workstreamId"] for item in activated["refresh"]["upgraded"]], [workstream_id])
+        refreshed = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+        self.assertEqual(refreshed["upgraded"], [])
         with PiStore(self.root / "state") as store:
             binding = store.conn.execute("SELECT desired_release_id,applied_release_id FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()
             self.assertEqual(tuple(binding), (built["release_id"], built["release_id"]))
 
+
+    def test_install_runs_build_activation_refresh_and_reconcile(self):
+        project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "defaultRef": "main"})
+        opened = self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
+        workstream_id = opened["workstream"]["workstream_id"]
+        self.harness.release_version = 2
+
+        result = self.dispatcher.dispatch("admin", "runtime.release.install", {"waitSeconds": 0})
+
+        self.assertTrue(result["converged"])
+        self.assertTrue(result["refresh"]["ok"])
+        self.assertEqual([item["workstreamId"] for item in result["refresh"]["upgraded"]], [workstream_id])
+        self.assertTrue(result["reconcile"]["reconciled"])
 
 if __name__ == "__main__":
     unittest.main()

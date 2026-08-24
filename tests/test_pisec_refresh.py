@@ -28,10 +28,12 @@ class RuntimeRefreshTests(unittest.TestCase):
             git_objects=FixtureGitObjects(),
         )
         project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "defaultRef": "main"})
-        opened = self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
+        self.project_id = project["project_id"]
+        opened = self.dispatcher.dispatch("admin", "project.open", {"project": self.project_id})
         self.workstream_id = opened["workstream"]["workstream_id"]
         with PiStore(self.root / "state") as store:
             binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            self.secretary_token = Path(binding["launch_secret_path"]).read_text().strip()
             session = Path(binding["harness_home"]) / "sessions" / "retained.jsonl"
             session.write_text("retained session\n")
             session.chmod(0o600)
@@ -57,6 +59,31 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.assertEqual(second["upgraded"], [])
         self.assertEqual(len(second["skipped"]), 1)
         self.assertEqual(len([call for call in self.workspace.calls if call[0] == "stop"]), stop_count)
+
+    def test_secretary_refresh_is_limited_to_its_project(self):
+        other_repo = self.root / "other-repo"
+        make_repo(other_repo)
+        other_project = self.dispatcher.dispatch("admin", "project.register", {"path": str(other_repo), "defaultRef": "main"})
+        other_opened = self.dispatcher.dispatch("admin", "project.open", {"project": other_project["project_id"]})
+        other_workstream_id = other_opened["workstream"]["workstream_id"]
+        with PiStore(self.root / "state") as store:
+            store.conn.execute(
+                "UPDATE runtime_bindings SET applied_generation_sha256=?,observed_state='idle' WHERE workstream_id=?",
+                ("a" * 64, other_workstream_id),
+            )
+        result = self.dispatcher.dispatch(
+            "secretary",
+            "project.refresh",
+            {"authToken": self.secretary_token, "waitSeconds": 0},
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual([item["workstreamId"] for item in result["upgraded"]], [self.workstream_id])
+        with PiStore(self.root / "state") as store:
+            other_binding = store.conn.execute(
+                "SELECT applied_generation_sha256 FROM runtime_bindings WHERE workstream_id=?",
+                (other_workstream_id,),
+            ).fetchone()
+            self.assertEqual(other_binding["applied_generation_sha256"], "a" * 64)
 
     def test_refresh_recovers_stopped_stale_needs_attention_binding(self):
         with PiStore(self.root / "state") as store:

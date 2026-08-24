@@ -10,7 +10,7 @@ import stat
 from typing import Iterator
 
 from .models import SchemaError, UnsafeStateError, utc_now
-from .pi_schema import MIGRATION_NAME, SCHEMA_NAME, SCHEMA_VERSION, apply_schema, migrate_schema, schema_digest
+from .pi_schema import SCHEMA_NAME, SCHEMA_VERSION, apply_schema, migrate_schema, schema_digest
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
@@ -87,8 +87,8 @@ class PiStore:
             self.conn.execute("BEGIN IMMEDIATE")
             apply_schema(self.conn)
             self.conn.execute(
-                "INSERT INTO control_meta(singleton,schema_name,schema_version,schema_sha256,migration_name,created_at) VALUES(1,?,?,?,?,?)",
-                (SCHEMA_NAME, SCHEMA_VERSION, schema_digest(), MIGRATION_NAME, utc_now()),
+                "INSERT INTO control_meta(singleton,schema_name,schema_version,schema_sha256,created_at) VALUES(1,?,?,?,?)",
+                (SCHEMA_NAME, SCHEMA_VERSION, schema_digest(), utc_now()),
             )
             self.conn.commit()
         except Exception:
@@ -100,8 +100,8 @@ class PiStore:
             row = self.conn.execute("SELECT * FROM control_meta WHERE singleton=1").fetchone()
         except sqlite3.Error as error:
             raise SchemaError("Pisec schema metadata is missing") from error
-        expected = (SCHEMA_NAME, SCHEMA_VERSION, schema_digest(), MIGRATION_NAME)
-        actual = None if row is None else (row["schema_name"], row["schema_version"], row["schema_sha256"], row["migration_name"])
+        expected = (SCHEMA_NAME, SCHEMA_VERSION, schema_digest())
+        actual = None if row is None else (row["schema_name"], row["schema_version"], row["schema_sha256"])
         if actual != expected:
             raise SchemaError("Pisec schema identity does not match", detail={"expected": expected, "actual": actual})
 

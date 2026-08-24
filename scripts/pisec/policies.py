@@ -8,7 +8,7 @@ from typing import Any
 
 from .models import ConflictError, InvalidRequestError
 
-WORKER_PROFILES = frozenset({"worker-default", "worker-networked"})
+WORKER_PROFILES = frozenset({"worker-default"})
 WORK_MODES = frozenset({"FAST", "RIP", "BUILD", "MAJOR"})
 POLICY_DOMAIN_RE = re.compile(r"^(?:\*\.)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 
@@ -44,23 +44,16 @@ def _positive_int(value: Any, *, name: str, maximum: int) -> int:
 
 def normalize_worker_policy(mode: str, value: Any) -> dict[str, Any]:
     policy = _policy_object(value, "worker creation policy")
-    allowed = {"workerLimit", "approvedProfiles", "approvedWorkModes", "allowedExternalDomains"}
+    allowed = {"workerLimit", "approvedWorkModes"}
     if set(policy) - allowed:
         raise InvalidRequestError("worker creation policy contains unsupported fields")
     result: dict[str, Any] = {}
     if "workerLimit" in policy:
         result["workerLimit"] = _positive_int(policy["workerLimit"], name="workerLimit", maximum=128)
-    if "approvedProfiles" in policy:
-        result["approvedProfiles"] = _string_list(policy["approvedProfiles"], name="approvedProfiles", allowed=WORKER_PROFILES)
     if "approvedWorkModes" in policy:
         result["approvedWorkModes"] = _string_list(policy["approvedWorkModes"], name="approvedWorkModes", allowed=WORK_MODES)
-    if "allowedExternalDomains" in policy:
-        domains = _string_list(policy["allowedExternalDomains"], name="allowedExternalDomains", limit=64)
-        if any(POLICY_DOMAIN_RE.fullmatch(domain) is None for domain in domains):
-            raise InvalidRequestError("allowedExternalDomains contains an invalid domain")
-        result["allowedExternalDomains"] = domains
-    if mode == "bounded_auto" and ("workerLimit" not in result or "approvedProfiles" not in result):
-        raise InvalidRequestError("bounded_auto requires workerLimit and approvedProfiles")
+    if mode == "bounded_auto" and "workerLimit" not in result:
+        raise InvalidRequestError("bounded_auto requires workerLimit")
     return result
 
 
@@ -101,15 +94,11 @@ def enforce_worker_creation_policy(store: Any, project: Mapping[str, Any], scope
     ).fetchone()[0]
     if int(active) >= policy["workerLimit"]:
         raise ConflictError("bounded worker creation policy limit has been reached")
-    if scope.get("executionProfile") not in policy["approvedProfiles"]:
-        raise ConflictError("worker execution profile is outside the bounded project policy")
+    if scope.get("executionProfile", "worker-default") != "worker-default":
+        raise ConflictError("only the worker-default execution profile is supported")
     approved_modes = policy.get("approvedWorkModes")
     if approved_modes is not None and scope.get("workMode") not in approved_modes:
         raise ConflictError("worker mode is outside the bounded project policy")
-    allowed_domains = policy.get("allowedExternalDomains")
-    requested_domains = scope.get("externalDomains", [])
-    if allowed_domains is not None and (not isinstance(requested_domains, list) or not set(requested_domains).issubset(allowed_domains)):
-        raise ConflictError("worker external domains are outside the bounded project policy")
 
 
 def enforce_merge_policy(project: Mapping[str, Any], *, target_branch: str, completion_packet: Mapping[str, Any]) -> dict[str, Any]:

@@ -7,6 +7,7 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 import re
+import runpy
 import sys
 from typing import Any
 
@@ -60,9 +61,13 @@ def parser() -> argparse.ArgumentParser:
         dest="command",
         required=True,
         title="commands",
-        metavar="{project,release,status,reconcile,board,broker,doctor,workstream}",
+        metavar="{update,project,status,reconcile,board,broker,doctor,workstream}",
     )
 
+    update = commands.add_parser("update", help="install a committed Pisec bundle and refresh workers")
+    _add_json_argument(update)
+    update.add_argument("--commit", default="HEAD", metavar="REF")
+    update.add_argument("--wait-seconds", type=float, default=300.0, metavar="SECONDS")
     project = commands.add_parser(
         "project",
         **_parser_kwargs(
@@ -154,16 +159,6 @@ def parser() -> argparse.ArgumentParser:
     project_policy.add_argument("--merge-policy", choices=("review", "checked_auto"))
     project_policy.add_argument("--merge-policy-json", metavar="JSON", help="bounded JSON constraints for checked_auto")
 
-    release = commands.add_parser("release", help="build, list, or activate immutable runtime releases")
-    _add_json_argument(release)
-    release_commands = release.add_subparsers(dest="release_command", required=True, title="release commands")
-    release_build = release_commands.add_parser("build", help="snapshot current runtime software into an immutable release")
-    _add_json_argument(release_build)
-    release_list = release_commands.add_parser("list", help="list built runtime releases")
-    _add_json_argument(release_list)
-    release_activate = release_commands.add_parser("activate", help="select the release desired by new and refreshed runtimes")
-    _add_json_argument(release_activate)
-    release_activate.add_argument("release", metavar="RELEASE", help="runtime release id")
 
 
     status = commands.add_parser(
@@ -514,12 +509,6 @@ def _human_result(command: tuple[str, ...], result: Any) -> str:
                 rows = [(item.get("project", "-"), item.get("workstreamId", "-"), item.get("reason", item.get("state", item.get("generation", "-")))) for item in values if isinstance(item, Mapping)]
                 lines.extend(_table(("PROJECT", "WORKSTREAM", "RESULT"), rows))
         return "\n".join(lines)
-    if command == ("release", "list") and isinstance(result, Mapping):
-        releases = result.get("releases", [])
-        rows = [(item.get("release_id", "-"), item.get("content_sha256", "-"), "current" if item.get("release_id") == result.get("currentReleaseId") else "built") for item in releases if isinstance(item, Mapping)]
-        return "\n".join([f"Runtime releases ({len(rows)})", *_table(("RELEASE", "CONTENT", "STATE"), rows)])
-    if command in {("release", "build"), ("release", "activate")} and isinstance(result, Mapping):
-        return f"Runtime release: {_scalar_text(result.get('release_id'))}\nContent: {_scalar_text(result.get('content_sha256'))}"
     if command == ("reconcile",) and isinstance(result, Mapping):
         lines = ["Reconcile complete" if result.get("reconciled") else "Reconcile incomplete"]
         workspace = result.get("workspace")
@@ -585,6 +574,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     try:
         result: Any
+        deployment_failed = False
+        if args.command == "update":
+            updater = runpy.run_path(str(Path(__file__).parents[1] / "pisec-update.py"))
+            return int(updater["main"](["--commit", args.commit, "--wait-seconds", str(args.wait_seconds), *(["--json"] if args.json_output else [])]))
         if args.command == "project" and args.project_command == "register":
             payload = {"path": str(Path(args.path).expanduser())}
             if args.name is not None:
@@ -619,12 +612,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _call("project.policy.update", payload)
         elif args.command == "project" and args.project_command == "refresh":
             result = _call("project.refresh", {"all": bool(args.all), "waitSeconds": args.wait_seconds}, timeout=max(30.0, args.wait_seconds + 120.0))
-        elif args.command == "release" and args.release_command == "build":
-            result = _call("runtime.release.build", {})
-        elif args.command == "release" and args.release_command == "list":
-            result = _call("runtime.release.list", {})
-        elif args.command == "release" and args.release_command == "activate":
-            result = _call("runtime.release.activate", {"releaseId": args.release})
         elif args.command == "status":
             result = _call("system.status", {} if args.project is None else {"project": args.project})
         elif args.command == "reconcile":
@@ -638,7 +625,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             raise AssertionError("unhandled command")
         print(format_result(_command_path(args), result, as_json=bool(args.json_output)))
-        return 0
+        return 1 if deployment_failed else 0
     except (PisecError, OSError) as error:
         print(f"pisec: {error}", file=sys.stderr)
         return 1

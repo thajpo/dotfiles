@@ -79,9 +79,9 @@ _PUBLIC_WORKSTREAM_FIELDS = (
     "execution_profile", "target_ref", "base_commit_oid", "branch_name",
     "desired_state", "provisioning_state", "created_at", "updated_at", "completed_at", "retired_at",
     "observed_state", "last_observed_at", "agent_name", "task_packet_id", "task_packet_sha256",
-    "desired_release_id", "applied_release_id", "desired_generation_sha256", "applied_generation_sha256", "runtime_stale",
+    "desired_generation_sha256", "applied_generation_sha256", "runtime_stale",
 )
-_PUBLIC_BINDING_FIELDS = ("workstream_id", "workspace_adapter_id", "workspace_session_name", "harness_id", "agent_name", "desired_release_id", "applied_release_id", "observed_state", "runtime_instance_id", "last_observed_at", "updated_at")
+_PUBLIC_BINDING_FIELDS = ("workstream_id", "workspace_adapter_id", "workspace_session_name", "harness_id", "agent_name", "observed_state", "runtime_instance_id", "last_observed_at", "updated_at")
 _PUBLIC_OPERATION_FIELDS = ("operation_id", "kind", "project_id", "workstream_id", "idempotency_key", "request_sha256", "state", "step", "error_code", "created_at", "updated_at")
 
 
@@ -309,7 +309,7 @@ class BrokerDispatcher:
                 now = utc_now()
                 with store.transaction():
                     store.conn.execute(
-                        "UPDATE runtime_bindings SET observed_state='starting',launch_release_id=IFNULL(applied_release_id,launch_release_id),launch_generation_sha256=IFNULL(applied_generation_sha256,launch_generation_sha256),last_observed_at=?,updated_at=? WHERE workstream_id=?",
+                        "UPDATE runtime_bindings SET observed_state='starting',launch_generation_sha256=IFNULL(applied_generation_sha256,launch_generation_sha256),last_observed_at=?,updated_at=? WHERE workstream_id=?",
                         (now, now, workstream_id),
                     )
                     store.conn.execute(
@@ -711,6 +711,7 @@ class BrokerDispatcher:
                 result["errors"].append({"operationId": operation["operation_id"], "code": getattr(error, "code", "internal_error")})
         return result
 
+
     def _admin(self, store: PiStore, operation: str, payload: dict[str, Any]) -> Any:
         if operation == "project.register":
             _exact(payload, {"path"}, {"displayName", "defaultRef", "dataDirs"})
@@ -806,22 +807,6 @@ class BrokerDispatcher:
             from .refresh import refresh_projects
             with self._reconcile_lock:
                 return refresh_projects(store, self.harness, self.workspace, wait_seconds=wait_seconds, harness_resolver=lambda workstream_id: self._harness_for_workstream(store, workstream_id))
-        if operation == "runtime.release.build":
-            _exact(payload, set())
-            from .releases import build_runtime_release
-            return build_runtime_release(store, self.harness)
-        if operation == "runtime.release.list":
-            _exact(payload, set())
-            current = store.conn.execute("SELECT release_id,activated_at FROM runtime_release_channels WHERE channel='current'").fetchone()
-            return {
-                "currentReleaseId": None if current is None else current["release_id"],
-                "activatedAt": None if current is None else current["activated_at"],
-                "releases": [dict(row) for row in store.conn.execute("SELECT * FROM runtime_releases ORDER BY created_at DESC,release_id")],
-            }
-        if operation == "runtime.release.activate":
-            _exact(payload, {"releaseId"})
-            from .releases import activate_runtime_release
-            return activate_runtime_release(store, str(payload["releaseId"]))
         if operation == "secretary.ensure":
             _exact(payload, {"project"})
             from .secretary import ensure_secretary
@@ -885,9 +870,31 @@ class BrokerDispatcher:
         if operation == "project.status":
             _exact(payload, set())
             return _public_project_status(project_status(store, project_id))
+        if operation == "runtime.release.install":
+            return self._install_runtime_release(store, payload)
         if operation == "project.activity":
             _exact(payload, set(), {"after"})
             return project_activity(store, project_id, int(payload.get("after", 0)))
+        if operation == "project.refresh":
+            _exact(payload, set(), {"waitSeconds"})
+            wait_seconds = payload.get("waitSeconds", 300)
+            if not isinstance(wait_seconds, (int, float)) or isinstance(wait_seconds, bool) or not 0 <= wait_seconds <= 3600:
+                raise InvalidRequestError("refresh wait must be between 0 and 3600 seconds")
+            from .refresh import refresh_bindings
+            rows = store.conn.execute(
+                "SELECT workstream_id FROM workstreams WHERE project_id=? AND desired_state='active' AND provisioning_state='bound'",
+                (project_id,),
+            )
+            workstream_ids = [str(row["workstream_id"]) for row in rows]
+            with self._reconcile_lock:
+                return refresh_bindings(
+                    store,
+                    self.harness,
+                    self.workspace,
+                    workstream_ids,
+                    wait_seconds=wait_seconds,
+                    harness_resolver=lambda workstream_id: self._harness_for_workstream(store, workstream_id),
+                )
         if operation == "coordination.list":
             _exact(payload, set(), {"workstreamId", "includeResolved"})
             from .workflow import list_coordination
@@ -924,6 +931,15 @@ class BrokerDispatcher:
         if operation == "git.status":
             _exact(payload, set())
             return git_status(store, project_id)
+        if operation == "git.push":
+            _exact(payload, {"branch", "expectedLocalOid", "expectedRemoteOid"})
+            return push_branch(
+                store,
+                project_id,
+                branch=payload["branch"],
+                expected_local_oid=payload["expectedLocalOid"],
+                expected_remote_oid=payload["expectedRemoteOid"],
+            )
         if operation == "git.workstream_changes":
             _exact(payload, {"workstreamId"})
             return inspect_workstream_changes(store, project_id, payload["workstreamId"])
