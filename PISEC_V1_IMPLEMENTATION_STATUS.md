@@ -20,3 +20,7 @@
   - Commit OID: `0f46d8c`
   - Checks: `python3 -m unittest discover -s tests` passed (189, 1 skipped, Linux-capable run); `bun test omp/extensions/pisec.test.ts` passed (7/7); Phase 5 protocol/attention/integration suite passed (25); `python3 -m compileall -q scripts tests` passed; operation catalogue `--check` passed; `git diff --check` passed; stale compatibility/direct-send operation audit passed; no live-state cutover performed.
   - Current blocker: none.
+- Phase 6 status: complete; role-specific credential-free OMP/Codex surfaces, exact user-context snapshot exclusions, separate immutable surface and writable binding-state roots, loopback gateway/control-token boundaries, work/learning packet fields, semantic role contracts and approvals, deterministic task/runtime status projection, semantic Herdr board/CLI/doctor output, Collie presentation preservation, and exact adapter pins implemented.
+  - Commit OID: `f4d6845`
+  - Checks: `python3 -m unittest discover -s tests -q` passed (200, 1 skipped, Linux-capable run); adjacent Phase 6/Herdr/install/fence/adapter/project/CLI suite passed (73); `bun test omp/extensions/pisec.test.ts` passed (7/7); `python3 -m compileall -q scripts tests` passed; operation catalogue `--check` passed; `git diff --check` passed; stale config/range audit passed; no live-state cutover performed.
+  - Current blocker: none.
