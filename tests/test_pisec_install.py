@@ -661,9 +661,8 @@ exit 0
             self.assertFalse(path.exists() or path.is_symlink(), path)
         self.assertEqual(broker_token.read_bytes(), broker_token_before)
         archives = list((self.root / "state").glob("pisec.archive-*"))
-        self.assertEqual(len(archives), 1)
-        self.assertTrue(archives[0].is_dir())
-        self.assertTrue((self.root / "state" / "pisec").is_dir())
+        self.assertEqual(len(archives), 0)
+        self.assertTrue((self.root / "state" / "pisec" / "control.db").is_file())
         stable = self.home / ".local" / "lib" / "pisec" / "bin"
         self.assertFalse(any(stable.iterdir()) if stable.exists() else False)
         unit_dir = self.home / ".config" / "systemd" / "user"
