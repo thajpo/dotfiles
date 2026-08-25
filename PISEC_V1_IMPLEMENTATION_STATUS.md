@@ -12,3 +12,7 @@
   - Commit OID: `5707091`
   - Checks: `python3 -m compileall -q scripts tests` passed; `python3 -m unittest discover -s tests` passed (194, 1 skipped, Linux-capable run); focused Phase 3 suite passed (58, 1 skipped); `bun test omp/extensions/pisec.test.ts` passed (7/7, Linux-capable run); `git diff --check` passed; production split-object/alternate/private-field audit passed.
   - Current blocker: none.
+- Phase 4 status: complete; fresh `pisec-core-v1` schema, strict refusal-only store opening, explicit archive/reset, attention storage/indexing, simplified runtime sessions, lifecycle state, packet-ID relationships, and removed migration/policy surfaces implemented.
+  - Commit OID: `bbc5d16`
+  - Checks: `python3 -m compileall -q scripts tests` passed; full Python suite passed (186, 1 skipped, Linux-capable run); `bun test omp/extensions/pisec.test.ts` passed (7/7, Linux-capable run); operation catalogue `--check` passed; `git diff --check` passed; production removed-reference/predecessor/migration audit passed; no live-state cutover performed.
+  - Current blocker: none.
