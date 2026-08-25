@@ -258,11 +258,14 @@ def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdap
     if observed is not None:
         workspace.rename_tab(observed.view_id, f"Project: {project['display_name']}" if project.get("coordination_mode") == "fleet" else "Project chat")
     agent = observed.agent if observed is not None else None
-    ready = agent is not None and agent.surface_id == binding["workspace_surface_id"] and agent.identity_usable is True
+    runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+    if runtime.state == "unknown":
+        raise NeedsAttentionError("secretary runtime identity is ambiguous before start")
+    ready = runtime.state == "live" and agent is not None and agent.surface_id == binding["workspace_surface_id"] and agent.identity_usable is True
     if not ready:
         with store.transaction():
             now = utc_now()
-            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=IFNULL(applied_generation_sha256,launch_generation_sha256),observed_state='starting',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
+            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),session_start_event_sequence=NULL,session_start_report_seq=NULL,session_started_at=NULL,observed_state='starting',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
         start_error: Exception | None = None
         try:
@@ -312,6 +315,8 @@ def _repair_launch_binding(
     if runtime.state == "live":
         raise NeedsAttentionError("secretary binding repair requires a stopped runtime")
     artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
+    if artifacts.generation_sha256 != desired:
+        raise NeedsAttentionError("activated runtime generation does not match the captured surface")
     harness.commit_launch_binding(
         materialized_scope,
         artifacts,
@@ -324,7 +329,7 @@ def _repair_launch_binding(
     now = utc_now()
     with store.transaction():
         store.conn.execute(
-            "UPDATE runtime_bindings SET harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_generation_sha256=?,launch_generation_sha256=?,runtime_instance_id=NULL,report_seq=0,observed_state='starting',last_observed_at=NULL,updated_at=? WHERE workstream_id=?",
+            "UPDATE runtime_bindings SET harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_generation_sha256=?,applied_generation_sha256=NULL,launch_generation_sha256=?,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,runtime_instance_id=NULL,report_seq=0,session_start_event_sequence=NULL,session_start_report_seq=NULL,session_started_at=NULL,observed_state='starting',last_observed_at=NULL,updated_at=? WHERE workstream_id=?",
             (
                 artifacts.harness_home,
                 artifact_document(harness.manifest, artifacts),
@@ -428,12 +433,17 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         with store.transaction():
             if operation["state"] in {"needs_attention", "failed"}:
                 store.conn.execute("UPDATE operations SET state='applying',error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?", (now, operation["operation_id"]))
-            if existing["provisioning_state"] == "needs_attention":
-                store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, existing["workstream_id"]))
         operation = _operation(store, existing["workstream_id"])
         binding = _binding(store, existing["workstream_id"])
         if binding is not None and _rank(operation["step"]) >= _rank("map_committed"):
-            binding = _repair_launch_binding(store, workspace, harness, project, scope, binding)
+            try:
+                binding = _repair_launch_binding(store, workspace, harness, project, scope, binding)
+            except Exception as error:
+                _mark_attention(store, operation["operation_id"], existing["workstream_id"], str(error))
+                raise NeedsAttentionError("secretary binding repair requires attention") from error
+        if existing["provisioning_state"] == "needs_attention":
+            with store.transaction():
+                store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (utc_now(), existing["workstream_id"]))
     elif operation["state"] == "needs_attention" or existing["provisioning_state"] == "needs_attention":
         raise NeedsAttentionError("secretary ensure requires attention")
     if operation["state"] == "failed":

@@ -50,7 +50,7 @@ def capture_runtime_surface(harness: HarnessAdapter) -> RuntimeSurfaceArtifacts:
     value = harness.current_runtime_surface()
     if not isinstance(value, RuntimeSurfaceArtifacts):
         raise NeedsAttentionError("harness returned an invalid runtime surface")
-    manifest = json.loads(canonical_json(value.manifest, max_bytes=256 * 1024, max_text=64 * 1024))
+    manifest = json.loads(value.manifest_json)
     snapshot = RuntimeSurfaceArtifacts(value.content_sha256, manifest, str(Path(value.root_path).resolve()))
     return verify_surface(snapshot)
 

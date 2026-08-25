@@ -138,6 +138,53 @@ class SecretaryTests(unittest.TestCase):
                 self.assertIsNone(retried["workstream"]["attention_reason"])
                 self.assertEqual(harness.launch_replacements, [False, True])
                 self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='secretary.binding.repaired'").fetchone()[0], 1)
+                binding = store.conn.execute("SELECT desired_generation_sha256,applied_generation_sha256,launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()
+                self.assertEqual(binding["desired_generation_sha256"], binding["applied_generation_sha256"])
+                self.assertIsNone(binding["launch_generation_sha256"])
+
+    def test_inactive_retry_guard_failures_remain_needs_attention(self):
+        for runtime_state in ("live", "unknown"):
+            with self.subTest(runtime_state=runtime_state), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                repo = root / "repo"
+                make_repo(repo)
+                with PiStore(root / "state") as store:
+                    project = register_project(store, repo)
+                    harness = FixtureHarness(root)
+                    workspace = FixtureWorkspace(root, store)
+                    first = ensure_secretary(store, project["project_id"], harness, workspace)
+                    workstream_id = first["workstream"]["workstream_id"]
+                    surface_id = first["binding"]["workspace_surface_id"]
+                    workspace.agents.clear()
+                    workspace.runtime_states[surface_id] = runtime_state
+                    store.conn.execute("UPDATE projects SET active=0 WHERE project_id=?", (project["project_id"],))
+                    store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='stale launch' WHERE workstream_id=?", (workstream_id,))
+                    store.conn.execute("UPDATE operations SET state='applying',step='map_committed' WHERE workstream_id=?", (workstream_id,))
+                    store.conn.execute("UPDATE runtime_bindings SET desired_generation_sha256=? WHERE workstream_id=?", ("0" * 64, workstream_id))
+                    with self.assertRaisesRegex(NeedsAttentionError, "requires attention"):
+                        ensure_secretary(store, project["project_id"], harness, workspace)
+                    operation = store.conn.execute("SELECT state FROM operations WHERE workstream_id=?", (workstream_id,)).fetchone()
+                    workstream = store.conn.execute("SELECT provisioning_state,attention_reason FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone()
+                    self.assertEqual(operation["state"], "needs_attention")
+                    self.assertEqual(workstream["provisioning_state"], "needs_attention")
+                    expected_reason = "stopped runtime" if runtime_state == "live" else "ambiguous"
+                    self.assertIn(expected_reason, workstream["attention_reason"])
+
+    def test_recover_start_relaunches_stopped_runtime_with_stale_agent_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                first = ensure_secretary(store, project["project_id"], harness, workspace)
+                surface_id = first["binding"]["workspace_surface_id"]
+                workspace.runtime_states[surface_id] = "stopped"
+                second = ensure_secretary(store, project["project_id"], harness, workspace)
+                self.assertTrue(second["reused"])
+                self.assertEqual(len([call for call in workspace.calls if call[0] == "start"]), 2)
 
     def test_ensure_refuses_scope_identity_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:

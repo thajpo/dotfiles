@@ -85,31 +85,45 @@ class HarnessArtifacts:
 @dataclass(frozen=True)
 class RuntimeSurfaceArtifacts:
     content_sha256: str
-    manifest: Mapping[str, Any]
+    manifest: str | Mapping[str, Any]
     root_path: str
 
     def __post_init__(self) -> None:
         validate_sha256(self.content_sha256, "runtime surface digest")
         if not isinstance(self.root_path, str) or not self.root_path:
             raise InvalidRequestError("runtime surface root is invalid")
-        if not isinstance(self.manifest, Mapping):
+        try:
+            manifest_json = canonical_json(json.loads(self.manifest) if isinstance(self.manifest, str) else self.manifest, max_bytes=256 * 1024, max_text=64 * 1024)
+            manifest = json.loads(manifest_json)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise InvalidRequestError("runtime surface manifest is invalid") from error
+        if not isinstance(manifest, dict):
             raise InvalidRequestError("runtime surface manifest is invalid")
+        object.__setattr__(self, "manifest", manifest_json)
+
+    def _manifest_mapping(self) -> Mapping[str, Any]:
+        value = json.loads(self.manifest)
+        if not isinstance(value, dict):
+            raise InvalidRequestError("runtime surface manifest is invalid")
+        return value
 
     @property
     def adapter_id(self) -> str:
-        return str(self.manifest.get("adapter", self.manifest.get("adapterId", "")))
+        manifest = self._manifest_mapping()
+        return str(manifest.get("adapter", manifest.get("adapterId", "")))
 
     @property
     def interface_version(self) -> int:
-        return int(self.manifest.get("interfaceVersion", 1))
+        return int(self._manifest_mapping().get("interfaceVersion", 1))
 
     @property
     def version_label(self) -> str:
-        return str(self.manifest.get("adapterVersion", self.manifest.get("versionLabel", "")))
+        manifest = self._manifest_mapping()
+        return str(manifest.get("adapterVersion", manifest.get("versionLabel", "")))
 
     @property
     def manifest_json(self) -> str:
-        return canonical_json(self.manifest, max_bytes=256 * 1024, max_text=64 * 1024)
+        return self.manifest
 
 
 @dataclass(frozen=True)
