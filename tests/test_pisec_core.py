@@ -7,7 +7,7 @@ from scripts.pisec.events import append_event, list_events
 from scripts.pisec.models import IdempotencyConflictError, InvalidRequestError, SchemaError, UnsafeStateError, canonical_json, json_digest, new_id, parse_json_strict, validate_id
 from scripts.pisec.operations import create_operation, update_operation
 from scripts.pisec.pi_schema import SCHEMA_NAME, SCHEMA_VERSION, schema_digest
-from scripts.pisec.pi_store import PiStore
+from scripts.pisec.pi_store import PiStore, archive_and_reset_state
 
 
 class ModelTests(unittest.TestCase):
@@ -37,6 +37,11 @@ class ModelTests(unittest.TestCase):
 
 
 class StoreTests(unittest.TestCase):
+    def _tamper_schema(self, root: Path, *, name: str, version: int, digest: str) -> bytes:
+        with PiStore(root) as store:
+            store.conn.execute("UPDATE control_meta SET schema_name=?,schema_version=?,schema_sha256=?", (name, version, digest))
+        return (root / "control.db").read_bytes()
+
     def test_store_has_owner_only_modes_and_exact_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "state"
@@ -74,6 +79,31 @@ class StoreTests(unittest.TestCase):
                 store.conn.execute("UPDATE control_meta SET schema_sha256='f' || printf('%063d',0)")
             with self.assertRaises(SchemaError):
                 PiStore(root)
+
+    def test_store_rejects_unsupported_schema_identity_without_changes(self):
+        for name, version, digest in (("pisec-core", 15, "0" * 64), ("pisec-core", 16, "1" * 64), ("wrong", 1, schema_digest()), (SCHEMA_NAME, 2, schema_digest()), (SCHEMA_NAME, SCHEMA_VERSION, "f" * 64)):
+            with self.subTest(name=name, version=version):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp) / "state"
+                    before = self._tamper_schema(root, name=name, version=version, digest=digest)
+                    with self.assertRaises(SchemaError):
+                        PiStore(root)
+                    self.assertEqual(before, (root / "control.db").read_bytes())
+
+    def test_archive_reset_preserves_opaque_state_and_creates_fresh_v1(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            with PiStore(root) as store:
+                store.conn.execute("CREATE TABLE retained_test(value TEXT)")
+                store.conn.execute("INSERT INTO retained_test VALUES('opaque')")
+            archive = archive_and_reset_state(root)
+            self.assertIsNotNone(archive)
+            assert archive is not None
+            self.assertEqual((archive / "control.db").read_bytes()[:16], b"SQLite format 3\x00")
+            self.assertEqual(archive.stat().st_mode & 0o777, 0o700)
+            with PiStore(root) as store:
+                self.assertEqual(tuple(store.conn.execute("SELECT schema_name,schema_version,schema_sha256 FROM control_meta").fetchone()), (SCHEMA_NAME, SCHEMA_VERSION, schema_digest()))
+                self.assertIsNone(store.conn.execute("SELECT 1 FROM sqlite_master WHERE name='retained_test'").fetchone())
 
 
 class OperationEventTests(unittest.TestCase):

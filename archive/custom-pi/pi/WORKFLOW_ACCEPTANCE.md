@@ -1,5 +1,7 @@
 # Pi Harness Workflow Acceptance
 
+> Archived—do not follow for current Pisec.
+
 This document covers the agent-engineering behavior layered on top of the fresh
 Pi runtime. System release acceptance remains defined by
 [`control-plane/ACCEPTANCE_PLAN.md`](control-plane/ACCEPTANCE_PLAN.md).

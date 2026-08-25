@@ -1,5 +1,7 @@
 # Pi Harness Configuration
 
+> Archived—do not follow for current Pisec.
+
 This directory contains the reproducible, non-secret source for the Pi
 system described by [`PI_IMPLEMENTATION_PLAN.md`](../PI_IMPLEMENTATION_PLAN.md).
 

@@ -5,6 +5,8 @@ description: "Enforce issue-approved file touch scope in PRs and block out-of-sc
 
 # PR Scope Guard
 
+> Pisec routing: this skill is for generic GitHub workflows only; do not use it for a Pisec-managed workstream. Use the Pisec Secretary and brokered acceptance path instead.
+
 ## Usage
 - Internal helper skill.
 - Normally invoked by `$pr-iterate`, not directly by user.

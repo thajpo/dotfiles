@@ -5,6 +5,8 @@ description: "Manage one-issue-per-worktree lifecycle for branch isolation, PR t
 
 # Worktree Manager
 
+> Pisec routing: this skill is for generic GitHub workflows only; do not use it for a Pisec-managed workstream. Use the Pisec Secretary and brokered acceptance path instead.
+
 ## Pisec Exception
 Pisec worker worktrees are broker-owned bounded execution surfaces, not PR
 worktrees. Do not create a PR, request a second merge approval, delete the

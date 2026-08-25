@@ -470,7 +470,7 @@ class HerdrWorkspaceAdapter:
         harness_id, agent_kind = _harness_identity(harness)
         result = self._request("pane.release_agent", {"pane_id": surface_id, "source": _runtime_source(runtime_instance_id, harness_id), "agent": agent_kind, "seq": seq})
         if result.get("type") != "ok":
-            raise PisecError("workspace rejected the runtime release report")
+            raise PisecError("workspace rejected the runtime lifecycle report")
         return result
 
     def reconcile(self, store: Any, event: Mapping[str, Any] | None = None) -> dict[str, Any]:

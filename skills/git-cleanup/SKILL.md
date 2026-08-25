@@ -5,6 +5,8 @@ description: "Draft a concise commit message, then safely commit with a cross-ma
 
 # Git Cleanup
 
+> Pisec routing: this skill is for generic GitHub workflows only; do not use it for a Pisec-managed workstream. Use the Pisec Secretary and brokered acceptance path instead.
+
 ## Mode
 - `draft-then-ship` (default and only mode for now).
 

@@ -5,6 +5,8 @@ description: "Bootstrap a repo with lean planning, issue/PR workflow contracts, 
 
 # Repo Init
 
+> Pisec routing: this skill is for generic GitHub workflows only; do not use it for a Pisec-managed workstream. Use the Pisec Secretary and brokered acceptance path instead.
+
 ## Goal
 Create a zero-setup baseline so each repo is immediately compatible with lean spec -> issue -> PR workflows.
 

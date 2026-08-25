@@ -5,6 +5,8 @@ description: "Primary execution command. From a ready/issued spec or PR, create/
 
 # PR Iterate
 
+> Pisec routing: this skill is for generic GitHub workflows only; do not use it for a Pisec-managed workstream. Use the Pisec Secretary and brokered acceptance path instead.
+
 ## Goal
 Single entrypoint for execution: consume a ready/issued item or existing PR and drive it to merge-ready.
 

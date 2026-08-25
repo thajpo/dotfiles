@@ -103,7 +103,7 @@ def _scope(project: Mapping[str, Any], workstream: Mapping[str, Any], operation_
         "agentName": f"pisec-{workstream['workstream_id'][-12:]}",
         "externalDomains": ["*"],
         "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),
-        "effects": ["create execution workspace", "start fenced global coordinator", "read brokered project worker state and diffs", "send brokered messages to registered project secretaries"],
+        "effects": ["create execution workspace", "start fenced global coordinator", "read brokered project worker state and diffs", "route typed attention and workflow records to registered project secretaries"],
         "nonEffects": ["no host-secret access", "no project checkout or worker-worktree writes", "no raw push or publish", "no project registration or runtime administration", "no worker creation or workstream acceptance without exact user approval"],
     }
 

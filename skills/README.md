@@ -1,7 +1,8 @@
 # Local Skills Notes
 
 ## Workflow Rule
-- Any time we edit dotfiles/config repos, we should commit and push in the same session.
+- Any time we edit dotfiles/config repos, we should commit in the same session when requested; pushing is a separate explicit action.
+- Pisec workers never push. Ordinary work pushes only when explicitly requested, and separately owned synchronization automation is a different authority.
 - Preferred flow: `Use $git-cleanup draft-then-ship`.
 - If push should be skipped for a specific case, explicitly state that in the request.
 

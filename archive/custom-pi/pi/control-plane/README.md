@@ -1,5 +1,7 @@
 # Pi Control Plane Documents
 
+> Archived—do not follow for current Pisec.
+
 Owns: document catalog and conflict routing only.
 
 The canonical program is

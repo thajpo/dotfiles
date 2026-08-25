@@ -220,8 +220,9 @@ binding's private session home; they are not stored in `control.db`.
 The OMP harness is launched through the private `pisec/runtime-bin/omp`
 shim. Herdr workspace cold restore therefore re-enters Fence before OMP,
 rather than replaying an unfenced surface command. Each managed session
-snapshots `~/.omp/agent/config.yml` as its base OMP configuration, then loads
-the Pisec overlay for gateway, workspace, and search wiring. Pisec launches
+generates its role configuration from explicit safe inputs; it does not copy
+the host `~/.omp/agent/config.yml`. Pisec then loads the overlay for gateway,
+workspace, and search wiring. Pisec launches
 OMP in `yolo` tool-approval mode because Fence owns command, filesystem, and
 network enforcement; exact semantic Pisec approvals (such as workstream
 creation and workstream acceptance) remain separate extension-level checks.
@@ -262,8 +263,8 @@ provider credentials are not copied into worker sandboxes.
 Worker research is a durable, authenticated packet flow rather than a live
 cross-pane chat. A worker submits a bounded idempotent request without
 blocking; the broker derives its project/workstream from the runtime binding.
-Secretary wake-ups carry only the project and inbox generation, so concurrent
-requests coalesce without exposing packet bodies. Wake delivery is
+Secretary attention wakes carry only the project and attention revision, so
+concurrent requests coalesce without exposing packet bodies. Wake delivery is
 at-least-once; a repeated wake is safe because request claims and packets are
 idempotent. The secretary claims requests and launches the fixed
 `pisec-web-research` `@smol` child in one task batch; that child is read-only
@@ -276,7 +277,7 @@ Secretaries can durably escalate recurring access, permission, lifecycle, or
 tooling failures without widening authority:
 `pisec_report_secretary_issue` records a bounded category, severity, exact
 failure details, requested minimum action, and evidence under the authenticated
-project secretary. The First Mate can inspect the cross-project inbox through
+project secretary. The First Mate can inspect fleet issue records through
 `pisec_fleet_list_issues` and `pisec_fleet_inspect_issue`. Reports are
 idempotent and read-only for the First Mate; they never auto-grant paths,
 change Fence policy, or approve worker creation.

@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 from scripts.pisec import doctor
 from scripts.pisec.host_config import patch_herdr_config, patch_pisec_config, write_collie_env
-from scripts.pisec.pi_store import PiStore
+from scripts.pisec.pi_store import PiStore, archive_and_reset_state
 from scripts.pisec.adapters import AdapterHealth, AdapterRegistry, HarnessManifest, RuntimeSurfaceArtifacts, WorkspaceManifest
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "agent-workflow-install.sh"
@@ -601,6 +601,18 @@ exit 0
         self.assertIn("existing Pisec state is unsafe or has an unsupported schema", result.stderr)
         self.assertTrue(state.is_dir())
         self.assertFalse(list(self.root.glob("state/pisec.archive-*")))
+
+    def test_archive_reset_keeps_opaque_state_out_of_fresh_database(self):
+        state = self.root / "state" / "pisec"
+        with PiStore(state) as store:
+            store.conn.execute("CREATE TABLE retained_test(value TEXT)")
+            store.conn.execute("INSERT INTO retained_test VALUES('opaque')")
+        archive = archive_and_reset_state(state)
+        self.assertIsNotNone(archive)
+        assert archive is not None
+        self.assertTrue((archive / "control.db").is_file())
+        with PiStore(state) as store:
+            self.assertIsNone(store.conn.execute("SELECT 1 FROM sqlite_master WHERE name='retained_test'").fetchone())
 
     def test_late_failure_rolls_back_file_mutations(self):
         self._write_command("systemctl", r'''

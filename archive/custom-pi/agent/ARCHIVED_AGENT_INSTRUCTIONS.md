@@ -1,3 +1,5 @@
+# Archived—do not follow for current Pisec
+
 # Global Pi engineering policy
 
 ## Purpose

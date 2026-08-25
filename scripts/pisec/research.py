@@ -1,4 +1,4 @@
-"""Bounded immutable task packets and durable worker research threads."""
+"""Bounded immutable task packets and durable worker research packets."""
 
 from __future__ import annotations
 

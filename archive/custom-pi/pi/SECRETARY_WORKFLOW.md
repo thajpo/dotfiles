@@ -1,5 +1,7 @@
 # Pi Harness Secretary And Worker Workflow
 
+> Archived—do not follow for current Pisec.
+
 This document describes the intended first-release workflow. It is accepted
 only when exercised through the installed Pi harness launchers and controller.
 

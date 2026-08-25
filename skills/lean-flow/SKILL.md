@@ -5,6 +5,8 @@ description: "Chat-first planning workflow for Brainstormed -> Specd -> ready in
 
 # Lean Flow
 
+> Pisec routing: this skill is for generic GitHub workflows only; do not use it for a Pisec-managed workstream. Use the Pisec Secretary and brokered acceptance path instead.
+
 ## Goal
 Keep planning explicit and minimal, then hand off to GitHub issue/PR execution without ambiguity.
 
