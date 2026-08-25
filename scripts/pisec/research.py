@@ -261,17 +261,6 @@ def _single_packet(
         return dict(existing)
     return _packet_row(connection, request_id, actor, idempotency_key, payload, kind)
 
-def _increment_inbox(connection: Any, project_id: str) -> int:
-    now = utc_now()
-    row = connection.execute("SELECT generation FROM research_inbox WHERE project_id=?", (project_id,)).fetchone()
-    if row is None:
-        connection.execute("INSERT INTO research_inbox(project_id,generation,notified_generation,updated_at) VALUES(?,?,?,?)", (project_id, 1, 0, now))
-        return 1
-    generation = int(row["generation"]) + 1
-    connection.execute("UPDATE research_inbox SET generation=?,updated_at=? WHERE project_id=?", (generation, now, project_id))
-    return generation
-
-
 def _request_projection(store: Any, row: Mapping[str, Any], *, include_packets: bool = True) -> dict[str, Any]:
     result = {key: row[key] for key in ("request_id", "project_id", "workstream_id", "task_packet_id", "idempotency_key", "request_sha256", "state", "claimed_by_secretary_workstream_id", "created_at", "updated_at", "answered_at", "acknowledged_at")}
     packets = []
@@ -347,8 +336,7 @@ def request_research(store: Any, *, project_id: str, workstream_id: str, idempot
             (request_id, project_id, workstream_id, task["task_packet_id"], key, digest, "pending", now, now),
         )
         _packet_row(store.conn, request_id, "worker", key, normalized, "request")
-        generation = _increment_inbox(store.conn, project_id)
-        append_event_in_transaction(store.conn, kind="research.requested", project_id=project_id, workstream_id=workstream_id, payload={"requestId": request_id, "taskPacketId": task["task_packet_id"], "generation": generation})
+        append_event_in_transaction(store.conn, kind="research.requested", project_id=project_id, workstream_id=workstream_id, payload={"requestId": request_id, "taskPacketId": task["task_packet_id"]})
     row = store.conn.execute("SELECT * FROM research_requests WHERE request_id=?", (request_id,)).fetchone()
     return _request_projection(store, row)
 
@@ -429,8 +417,7 @@ def request_research_context(store: Any, *, project_id: str, secretary_workstrea
         if row["state"] != "needs_context":
             now = utc_now()
             store.conn.execute("UPDATE research_requests SET state='needs_context',claimed_by_secretary_workstream_id=?,updated_at=? WHERE request_id=?", (secretary_workstream_id, now, request_id))
-            generation = _increment_inbox(store.conn, row["project_id"])
-            append_event_in_transaction(store.conn, kind="research.context_requested", project_id=project_id, workstream_id=row["workstream_id"], payload={"requestId": request_id, "packetId": packet["packet_id"], "generation": generation})
+            append_event_in_transaction(store.conn, kind="research.context_requested", project_id=project_id, workstream_id=row["workstream_id"], payload={"requestId": request_id, "packetId": packet["packet_id"]})
         row = store.conn.execute("SELECT * FROM research_requests WHERE request_id=?", (request_id,)).fetchone()
     return _request_projection(store, row)
 
@@ -451,8 +438,7 @@ def add_research_context(store: Any, *, project_id: str, workstream_id: str, req
         packet = _packet_row(store.conn, request_id, "worker", key, normalized, "context")
         now = utc_now()
         store.conn.execute("UPDATE research_requests SET state='pending',claimed_by_secretary_workstream_id=NULL,updated_at=? WHERE request_id=?", (now, request_id))
-        generation = _increment_inbox(store.conn, project_id)
-        append_event_in_transaction(store.conn, kind="research.context_added", project_id=project_id, workstream_id=workstream_id, payload={"requestId": request_id, "packetId": packet["packet_id"], "generation": generation})
+        append_event_in_transaction(store.conn, kind="research.context_added", project_id=project_id, workstream_id=workstream_id, payload={"requestId": request_id, "packetId": packet["packet_id"]})
         row = store.conn.execute("SELECT * FROM research_requests WHERE request_id=?", (request_id,)).fetchone()
     return _request_projection(store, row)
 
@@ -523,15 +509,16 @@ def acknowledge_research(store: Any, *, project_id: str, workstream_id: str, req
 
 
 def pending_research_wakes(store: Any) -> list[dict[str, Any]]:
-    return [dict(row) for row in store.conn.execute("SELECT project_id,generation,notified_generation,updated_at FROM research_inbox WHERE generation>notified_generation ORDER BY project_id")]
+    return [dict(row) for row in store.conn.execute(
+        "SELECT project_id,COUNT(*) AS generation,0 AS notified_generation,MAX(updated_at) AS updated_at "
+        "FROM attention_items WHERE source_kind='research' GROUP BY project_id ORDER BY project_id"
+    )]
 
 
 def mark_research_wake_notified(store: Any, project_id: str, generation: int) -> bool:
     if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0:
         raise InvalidRequestError("research wake generation is invalid")
-    with store.transaction():
-        cursor = store.conn.execute("UPDATE research_inbox SET notified_generation=? WHERE project_id=? AND notified_generation<? AND generation>=?", (generation, project_id, generation, generation))
-    return cursor.rowcount == 1
+    return bool(store.conn.execute("SELECT 1 FROM projects WHERE project_id=?", (project_id,)).fetchone())
 
 
 def research_counts(store: Any, project_id: str, workstream_id: str | None = None) -> dict[str, int]:

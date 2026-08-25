@@ -1,15 +1,13 @@
 from pathlib import Path
 import os
-import sqlite3
 import tempfile
 import unittest
 
 from scripts.pisec.events import append_event, list_events
-from scripts.pisec.models import IdempotencyConflictError, InvalidRequestError, canonical_json, json_digest, new_id, parse_json_strict, validate_id
+from scripts.pisec.models import IdempotencyConflictError, InvalidRequestError, SchemaError, UnsafeStateError, canonical_json, json_digest, new_id, parse_json_strict, validate_id
 from scripts.pisec.operations import create_operation, update_operation
+from scripts.pisec.pi_schema import SCHEMA_NAME, SCHEMA_VERSION, schema_digest
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.models import SchemaError, UnsafeStateError
-from scripts.pisec.pi_schema import PREVIOUS_MIGRATION_NAME, PREVIOUS_SCHEMA_DIGEST
 
 
 class ModelTests(unittest.TestCase):
@@ -19,6 +17,9 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(len(value), 35)
         with self.assertRaises(InvalidRequestError):
             validate_id(value, prefix="prj")
+
+    def test_attention_ids_are_typed(self):
+        self.assertTrue(validate_id(new_id("att"), prefix="att"))
 
     def test_canonical_json_and_digest_are_stable(self):
         left = {"z": [3, 2, 1], "a": {"yes": True}}
@@ -31,17 +32,24 @@ class ModelTests(unittest.TestCase):
             parse_json_strict('{"x":1,"x":2}')
         with self.assertRaises(InvalidRequestError):
             parse_json_strict('{"x":NaN}')
-        deep = "[" * 34 + "0" + "]" * 34
         with self.assertRaises(InvalidRequestError):
-            parse_json_strict(deep)
+            parse_json_strict("[" * 34 + "0" + "]" * 34)
 
 
 class StoreTests(unittest.TestCase):
-    def test_store_has_owner_only_modes_and_schema(self):
+    def test_store_has_owner_only_modes_and_exact_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "state"
             with PiStore(root) as store:
-                self.assertEqual(store.conn.execute("SELECT schema_name FROM control_meta").fetchone()[0], "pisec-core")
+                self.assertEqual(tuple(store.conn.execute("SELECT schema_name,schema_version,schema_sha256 FROM control_meta").fetchone()), (SCHEMA_NAME, SCHEMA_VERSION, schema_digest()))
+                tables = {row[0] for row in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+                self.assertEqual(tables, {"control_meta", "projects", "project_workspaces", "workstreams", "runtime_bindings", "runtime_sessions", "retained_session_roots", "task_packets", "workstream_checkpoints", "completion_packets", "workstream_acceptances", "integration_jobs", "integration_reports", "merge_receipts", "coordination_requests", "coordination_packets", "research_requests", "research_packets", "decisions", "issues", "issue_updates", "issue_remediations", "operations", "authorizations", "events", "attention_items"})
+                indexes = {row[0] for row in store.conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")}
+                self.assertEqual(indexes, {"one_active_first_mate", "one_active_secretary_per_project", "one_issue_escalation_source", "one_authoritative_workstream_create", "attention_recipient_revision", "attention_due_order"})
+                self.assertEqual([row[1] for row in store.conn.execute("PRAGMA table_info(runtime_sessions)")], ["workstream_id", "session_key", "task_packet_presented_at", "last_turn_started_at", "updated_at"])
+                project_columns = {row[1] for row in store.conn.execute("PRAGMA table_info(projects)")}
+                self.assertNotIn("worker_creation_policy", project_columns)
+                self.assertNotIn("merge_policy", project_columns)
                 self.assertEqual(store.conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
             self.assertEqual(root.stat().st_mode & 0o777, 0o700)
             self.assertEqual((root / "control.db").stat().st_mode & 0o777, 0o600)
@@ -59,77 +67,11 @@ class StoreTests(unittest.TestCase):
             with self.assertRaises(UnsafeStateError):
                 PiStore(actual)
 
-    def test_store_rejects_database_mode_and_schema_digest_changes(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "state"
-            store = PiStore(root)
-            store.close()
-            database = root / "control.db"
-            os.chmod(database, 0o644)
-            with self.assertRaises(UnsafeStateError):
-                PiStore(root)
-            os.chmod(database, 0o600)
-            with PiStore(root) as store:
-                store.conn.execute("UPDATE control_meta SET schema_sha256='sha256:bad'")
-            with self.assertRaises(SchemaError):
-                PiStore(root)
-
-
-    def test_epoch_sixteen_fresh_store_uses_current_surface_and_permission_schema(self):
-        with tempfile.TemporaryDirectory() as tmp, PiStore(Path(tmp) / "state") as store:
-            metadata = store.conn.execute("SELECT schema_name,schema_version,schema_sha256 FROM control_meta").fetchone()
-            self.assertEqual(metadata["schema_name"], "pisec-core")
-            self.assertEqual(metadata["schema_version"], 16)
-            self.assertTrue(metadata["schema_sha256"].startswith("sha256:"))
-            binding_columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(runtime_bindings)")}
-            self.assertIn("desired_generation_sha256", binding_columns)
-            self.assertIn("applied_generation_sha256", binding_columns)
-            self.assertNotIn("desired_release_id", binding_columns)
-            self.assertNotIn("applied_release_id", binding_columns)
-            for table in ("runtime_releases", "runtime_release_channels", "access_grants", "deployment_actions"):
-                self.assertIsNone(store.conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone())
-            remediation_columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(issue_remediations)")}
-            self.assertEqual(remediation_columns, {"remediation_id", "issue_id", "kind", "workstream_id", "created_at"})
-            operation_sql = store.conn.execute("SELECT sql FROM sqlite_master WHERE name='operations'").fetchone()[0]
-            self.assertNotIn("'authorized'", operation_sql)
-
-    def test_epoch_fifteen_state_migration_requires_explicitly_safe_metadata(self):
+    def test_store_rejects_schema_digest_changes_as_unsupported_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "state"
             with PiStore(root) as store:
-                store.conn.execute("ALTER TABLE workstreams ADD COLUMN worker_creation_policy_json TEXT NOT NULL DEFAULT '{}'")
-                store.conn.execute("ALTER TABLE control_meta ADD COLUMN migration_name TEXT")
-                store.conn.execute(
-                    "UPDATE control_meta SET schema_version=15,schema_sha256=?,migration_name=?",
-                    (PREVIOUS_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME),
-                )
-            with PiStore(root) as migrated:
-                metadata = migrated.conn.execute("SELECT schema_version,schema_sha256 FROM control_meta").fetchone()
-                self.assertEqual(metadata["schema_version"], 16)
-                self.assertTrue(metadata["schema_sha256"].startswith("sha256:"))
-
-    def test_legacy_epoch_six_state_is_rejected_without_resetting_rows(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "state"
-            store = PiStore(root)
-            project_id = "prj_" + "a" * 32
-            store.conn.execute("INSERT INTO projects(project_id,display_name,repository_path,git_common_dir,default_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (project_id, "Project", "/repo", "/repo/.git", "main", "now", "now"))
-            store.conn.execute("ALTER TABLE control_meta ADD COLUMN migration_name TEXT")
-            store.conn.execute("UPDATE control_meta SET schema_version=6,schema_sha256=?,migration_name='pisec-core-epoch-6'", ("sha256:c00cd142b2cd4dd775c3d7878820c4fd69f945e9e4254cfd18414bc82877ca59",))
-            store.close()
-            with self.assertRaises(SchemaError):
-                PiStore(root)
-            connection = sqlite3.connect(root / "control.db")
-            try:
-                self.assertIsNotNone(connection.execute("SELECT project_id FROM projects WHERE project_id=?", (project_id,)).fetchone())
-            finally:
-                connection.close()
-    def test_epoch_fourteen_state_is_rejected_without_implicit_downgrade(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "state"
-            with PiStore(root) as store:
-                store.conn.execute("ALTER TABLE control_meta ADD COLUMN migration_name TEXT")
-                store.conn.execute("UPDATE control_meta SET schema_version=14,schema_sha256=?,migration_name='pisec-core-epoch-14'", (PREVIOUS_SCHEMA_DIGEST,))
+                store.conn.execute("UPDATE control_meta SET schema_sha256='f' || printf('%063d',0)")
             with self.assertRaises(SchemaError):
                 PiStore(root)
 

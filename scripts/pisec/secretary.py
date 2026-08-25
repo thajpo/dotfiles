@@ -295,8 +295,6 @@ def _recover_prompt(workspace: WorkspaceAdapter, project: Mapping[str, Any], sco
 
 def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, workspace: WorkspaceAdapter, failpoint: Any = None) -> dict[str, Any]:
     project = resolve_project(store, project_selector)
-    if not _project_active(project):
-        raise ConflictError("project is inactive; reactivate it before opening a coordinator")
     harness.validate_execution_profile("secretary-project", "secretary")
     external_domains = tuple(harness.profile_domains("secretary-project", ()))
     existing = _secretary(store, project["project_id"])
@@ -346,7 +344,11 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
                 store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (utc_now(), existing["workstream_id"]))
         workspace.focus_pane(binding["workspace_surface_id"])
         return {"project": resolve_project(store, project["project_id"]), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "binding": _binding(store, existing["workstream_id"]), "reused": True}
-    if operation["state"] == "needs_attention" or existing["provisioning_state"] == "needs_attention":
+    if operation["state"] == "needs_attention" and not project.get("active"):
+        with store.transaction():
+            store.conn.execute("UPDATE operations SET state='applying',error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?", (utc_now(), operation["operation_id"]))
+        operation = _operation(store, existing["workstream_id"])
+    elif operation["state"] == "needs_attention" or existing["provisioning_state"] == "needs_attention":
         raise NeedsAttentionError("secretary ensure requires attention")
     if operation["state"] == "failed":
         with store.transaction():
@@ -381,8 +383,8 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         now = utc_now()
         with store.transaction():
             store.conn.execute(
-                "INSERT INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (existing["workstream_id"], workspace.manifest.adapter_id, workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), None, None, artifacts.launch_secret_path, None, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
+                "INSERT INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (existing["workstream_id"], workspace.manifest.adapter_id, workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), None, None, artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
             )
             _checkpoint(store, operation["operation_id"], "binding_committed")
         _hit(failpoint, "after_secretary_binding_commit", scope)
@@ -430,7 +432,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         result = {"workstreamId": existing["workstream_id"], "projectId": project["project_id"], "workspaceId": binding["workspace_id"], "viewId": binding["workspace_view_id"], "surfaceId": binding["workspace_surface_id"], "agentName": binding["agent_name"]}
         with store.transaction():
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, existing["workstream_id"]))
-            store.conn.execute("UPDATE projects SET secretary_workstream_id=?,updated_at=? WHERE project_id=?", (existing["workstream_id"], now, project["project_id"]))
+            store.conn.execute("UPDATE projects SET secretary_workstream_id=?,active=1,lifecycle_attention_reason=NULL,deactivated_at=NULL,updated_at=? WHERE project_id=?", (existing["workstream_id"], now, project["project_id"]))
             store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(scope), now, operation["operation_id"]))
             append_event_in_transaction(store.conn, kind="secretary.bound", project_id=project["project_id"], workstream_id=existing["workstream_id"], operation_id=operation["operation_id"], payload={"workspaceId": binding["workspace_id"], "surfaceId": binding["workspace_surface_id"]})
     _hit(failpoint, "after_secretary_final_event_commit", scope)
@@ -450,7 +452,12 @@ def ensure_secretary(store: Any, project_selector: str, harness: HarnessAdapter,
                 operation = _operation(store, existing["workstream_id"])
                 if operation is not None and operation["state"] in {"planned", "applying"}:
                     with store.transaction():
-                        store.conn.execute("UPDATE operations SET state='failed',error_code='secretary_apply_failed',error_message=?,updated_at=? WHERE operation_id=?", (str(error)[:512], utc_now(), operation["operation_id"]))
+                        now = utc_now()
+                        store.conn.execute("UPDATE operations SET state='needs_attention',error_code='secretary_apply_failed',error_message=?,updated_at=? WHERE operation_id=?", (str(error)[:512], now, operation["operation_id"]))
+                        store.conn.execute("UPDATE projects SET active=0,lifecycle_attention_reason=?,updated_at=? WHERE project_id=?", (f"project open requires repair: {error}"[:2048], now, project["project_id"]))
+            else:
+                with store.transaction():
+                    store.conn.execute("UPDATE projects SET active=0,lifecycle_attention_reason=?,updated_at=? WHERE project_id=?", (f"project open requires repair: {error}"[:2048], utc_now(), project["project_id"]))
             raise
 
 

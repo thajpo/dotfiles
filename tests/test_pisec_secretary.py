@@ -7,7 +7,6 @@ from scripts.pisec.pi_store import PiStore
 from scripts.pisec.models import NeedsAttentionError, canonical_json
 from scripts.pisec.first_mate import ensure_first_mate
 from scripts.pisec.projects import register_project
-from scripts.pisec.projects import update_project_policy
 from scripts.pisec.secretary import ensure_secretary
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
@@ -31,10 +30,11 @@ class SecretaryTests(unittest.TestCase):
             make_repo(repo)
             with PiStore(root / "state") as store:
                 project = register_project(store, repo)
+                store.conn.execute("UPDATE projects SET active=1 WHERE project_id=?", (project["project_id"],))
                 harness = FixtureHarness(root)
                 workspace = FixtureWorkspace(root, store)
                 first_mate = ensure_first_mate(store, project["project_id"], harness, workspace)
-                update_project_policy(store, project["project_id"], coordination_mode="fleet")
+                store.conn.execute("UPDATE projects SET coordination_mode='fleet' WHERE project_id=?", (project["project_id"],))
                 secretary = ensure_secretary(store, project["project_id"], harness, workspace)
                 self.assertEqual(secretary["binding"]["workspace_id"], first_mate["binding"]["workspace_id"])
                 self.assertNotEqual(secretary["binding"]["workspace_view_id"], first_mate["binding"]["workspace_view_id"])

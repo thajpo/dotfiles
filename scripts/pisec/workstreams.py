@@ -15,7 +15,6 @@ from .adapters import HarnessAdapter, WorkspaceAdapter, WorkspaceObservation, ar
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .models import AuthorizationError, ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id
-from .policies import enforce_worker_creation_policy
 from .projects import _git, assert_project_writable, get_project
 from .project_workspaces import ensure_project_workspace
 from .research import issue_task_packet_in_transaction, validate_task_packet
@@ -234,7 +233,6 @@ def prepare_workstream(
         scope["harnessModel"] = harness_model
     if reasoning_effort is not None:
         scope["reasoningEffort"] = reasoning_effort
-    enforce_worker_creation_policy(store, project, scope)
     now = utc_now()
     with store.transaction():
         store.conn.execute(
@@ -395,7 +393,6 @@ def _authorize_apply_workstream(
         issue_task_packet_in_transaction(store.conn, scope=scope)
 
     project = get_project(store, scope["projectId"])
-    enforce_worker_creation_policy(store, project, scope)
     current_oid = _git(Path(project["repository_path"]), "rev-parse", "--verify", "--end-of-options", f"{scope['targetRef']}^{{commit}}").lower()
     if current_oid != scope["baseCommitOid"]:
         _mark_attention(store, operation_id, workstream_id, "approved target ref moved")
@@ -510,8 +507,8 @@ def _authorize_apply_workstream(
         now = utc_now()
         with store.transaction():
             store.conn.execute(
-                "INSERT OR REPLACE INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (workstream_id, workspace.manifest.adapter_id, workspace.manifest.session_name, observation.workspace_id, observation.view_id, observation.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_json, None, None, artifacts.launch_secret_path, None, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
+                "INSERT OR REPLACE INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (workstream_id, workspace.manifest.adapter_id, workspace.manifest.session_name, observation.workspace_id, observation.view_id, observation.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_json, None, None, artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
             )
         harness.commit_launch_binding(
             materialized_scope,
@@ -713,8 +710,8 @@ def complete_workstream(
     if packet is None:
         raise ConflictError("completion packet was not found")
     accepted = store.conn.execute(
-        "SELECT 1 FROM workstream_acceptances a LEFT JOIN integration_jobs j ON j.acceptance_id=a.acceptance_id AND j.candidate_completion_packet_sha256=? WHERE a.workstream_id=? AND (a.completion_packet_sha256=? OR j.integration_id IS NOT NULL) LIMIT 1",
-        (completion_packet_sha256, workstream_id, completion_packet_sha256),
+        "SELECT 1 FROM workstream_acceptances a LEFT JOIN integration_jobs j ON j.acceptance_id=a.acceptance_id AND j.candidate_completion_packet_id=? WHERE a.workstream_id=? AND (a.completion_packet_id=? OR j.integration_id IS NOT NULL) LIMIT 1",
+        (packet["completion_packet_id"], workstream_id, packet["completion_packet_id"]),
     ).fetchone()
     if accepted is None:
         raise ConflictError("completion packet has not been accepted")
@@ -724,12 +721,6 @@ def complete_workstream(
     ).fetchone()
     if blockers is not None:
         raise ConflictError("workstream has unresolved blocking coordination")
-    latest_checkpoint = store.conn.execute(
-        "SELECT phase FROM workstream_checkpoints WHERE workstream_id=? ORDER BY sequence DESC LIMIT 1",
-        (workstream_id,),
-    ).fetchone()
-    if latest_checkpoint is not None and latest_checkpoint["phase"] == "needs_input":
-        raise ConflictError("workstream has an unresolved checkpoint blocker")
     if row["desired_state"] == "retired":
         raise ConflictError("retired workstream cannot be completed")
     if row["desired_state"] == "completed":

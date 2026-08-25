@@ -37,7 +37,6 @@ ALLOWLIST = (
     "systemd/user/",
 )
 REQUIRED = ("bin/pisec", "scripts/pisec-update.py", "scripts/pisec", "pisec")
-EPOCH15_DIGEST = "sha256:912a55b54f861a9715676baf4d0d86c8762b0236232204e175ea3f62ee976dd2"
 
 
 def now() -> str:
@@ -143,7 +142,7 @@ def _schema_digest(repo: Path, commit: str) -> str:
     value = next((node.value for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "SCHEMA_SQL" for target in node.targets)), None)
     if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
         raise RuntimeError("staged schema SQL is unavailable")
-    return "sha256:" + hashlib.sha256(value.value.encode("utf-8")).hexdigest()
+    return hashlib.sha256(value.value.encode("utf-8")).hexdigest()
 
 
 def _preflight_state(state_root: Path, expected_digest: str) -> None:
@@ -154,25 +153,11 @@ def _preflight_state(state_root: Path, expected_digest: str) -> None:
     connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(control_meta)")}
-        if columns == {"singleton", "schema_name", "schema_version", "schema_sha256", "created_at"}:
-            row = connection.execute("SELECT schema_name,schema_version,schema_sha256 FROM control_meta WHERE singleton=1").fetchone()
-            if row is None or row != ("pisec-core", 16, expected_digest):
-                raise ValueError("unsupported Pisec state schema")
-            return
-        if columns != {"singleton", "schema_name", "schema_version", "schema_sha256", "migration_name", "created_at"}:
-            raise ValueError("unsupported Pisec state schema")
-        row = connection.execute("SELECT schema_name,schema_version,schema_sha256,migration_name FROM control_meta WHERE singleton=1").fetchone()
-        if row != ("pisec-core", 15, EPOCH15_DIGEST, "pisec-core-epoch-15"):
-            raise ValueError("unsupported Pisec state schema")
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if "access_grants" not in tables:
-            return
-        workstream = connection.execute("SELECT grant_id FROM access_grants WHERE subject_kind='workstream' AND state <> 'revoked' LIMIT 1").fetchone()
-        if workstream:
-            raise PermissionError(f"non-revoked workstream grant blocks migration: {workstream[0]}")
-        ambiguous = connection.execute("SELECT grant_id FROM access_grants WHERE subject_kind='project_workers' AND state IN ('proposed','revoking') LIMIT 1").fetchone()
-        if ambiguous:
-            raise PermissionError(f"in-flight project grant blocks migration: {ambiguous[0]}")
+        if columns != {"singleton", "schema_name", "schema_version", "schema_sha256", "created_at"}:
+            raise ValueError("unsupported Pisec state schema; review it and select explicit archive/reset")
+        row = connection.execute("SELECT schema_name,schema_version,schema_sha256 FROM control_meta WHERE singleton=1").fetchone()
+        if row != ("pisec-core-v1", 1, expected_digest):
+            raise ValueError("unsupported Pisec state schema; review it and select explicit archive/reset")
     finally:
         connection.close()
 

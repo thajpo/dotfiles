@@ -10,7 +10,6 @@ from typing import Any, Mapping
 from .cleanup import cleanup_workstream
 from .events import append_event_in_transaction
 from .models import ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id, validate_sha256
-from .policies import enforce_merge_policy
 from .projects import get_project
 from .secretary_git import _oid, _primary_state, _repository, _run_git
 from .worker_repo import project_git_lock, validate_worker_repository
@@ -30,7 +29,6 @@ _ACCEPTANCE_SCOPE_FIELDS = frozenset({
     "acceptance",
     "verification",
     "conflictPolicy",
-    "mergePolicy",
     "effects",
     "nonEffects",
 })
@@ -182,7 +180,6 @@ def _candidate(
             scope_changed_paths = _changed_paths(repository, target_revision, source_oid)
     if expected_paths is not None and not set(scope_changed_paths).issubset(expected_paths):
         raise ScopeMismatchError("replacement completion packet changed paths outside the accepted scope")
-    policy = enforce_merge_policy(project, target_branch=target_branch, completion_packet=packet_value)
     return {
         "project": project,
         "workstream": workstream,
@@ -195,7 +192,6 @@ def _candidate(
         "taskSha256": task_sha256,
         "changedPaths": changed_paths,
         "patchSha256": patch_sha256,
-        "mergePolicy": policy,
     }
 
 
@@ -213,7 +209,6 @@ def _approval_scope(candidate: Mapping[str, Any]) -> dict[str, Any]:
         "acceptance": packet["acceptance"],
         "verification": packet["verification"],
         "conflictPolicy": "bounded-worker-reconciliation",
-        "mergePolicy": candidate["mergePolicy"],
         "effects": [
             f"accept completion packet {candidate['packet']['packet_sha256']}",
             f"allow the secretary to refresh {candidate['targetBranch']} and fast-forward it",
@@ -258,8 +253,8 @@ def _validate_scope(scope_value: Mapping[str, Any]) -> dict[str, Any]:
 def prepare_workstream_acceptance(store: Any, project_id: str, workstream_id: str) -> dict[str, Any]:
     with project_git_lock(store.state_root, project_id):
         candidate = _candidate(store, project_id, workstream_id)
-    existing = store.conn.execute("SELECT completion_packet_sha256 FROM workstream_acceptances WHERE workstream_id=?", (workstream_id,)).fetchone()
-    if existing is not None and existing["completion_packet_sha256"] != candidate["packet"]["packet_sha256"]:
+    existing = store.conn.execute("SELECT a.completion_packet_id,cp.packet_sha256 FROM workstream_acceptances a JOIN completion_packets cp ON cp.completion_packet_id=a.completion_packet_id WHERE a.workstream_id=?", (workstream_id,)).fetchone()
+    if existing is not None and existing["packet_sha256"] != candidate["packet"]["packet_sha256"]:
         raise ConflictError("workstream already has an acceptance; use its existing integration")
     scope = _approval_scope(candidate)
     return {
@@ -272,7 +267,7 @@ def prepare_workstream_acceptance(store: Any, project_id: str, workstream_id: st
 
 def _acceptance_row(store: Any, workstream_id: str, packet_sha256: str) -> dict[str, Any] | None:
     row = store.conn.execute(
-        "SELECT * FROM workstream_acceptances WHERE workstream_id=? AND completion_packet_sha256=?",
+        "SELECT a.* FROM workstream_acceptances a JOIN completion_packets cp ON cp.completion_packet_id=a.completion_packet_id WHERE a.workstream_id=? AND cp.packet_sha256=?",
         (workstream_id, packet_sha256),
     ).fetchone()
     return None if row is None else dict(row)
@@ -296,8 +291,8 @@ def apply_workstream_acceptance(store: Any, project_id: str, scope_value: Mappin
         if job is None:
             raise NeedsAttentionError("accepted completion packet has no integration job")
         return {"acceptance": existing, "integration": job, "reused": True}
-    existing = store.conn.execute("SELECT completion_packet_sha256 FROM workstream_acceptances WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
-    if existing is not None and existing["completion_packet_sha256"] != scope["completionPacketSha256"]:
+    existing = store.conn.execute("SELECT a.completion_packet_id,cp.packet_sha256 FROM workstream_acceptances a JOIN completion_packets cp ON cp.completion_packet_id=a.completion_packet_id WHERE a.workstream_id=?", (scope["workstreamId"],)).fetchone()
+    if existing is not None and existing["packet_sha256"] != scope["completionPacketSha256"]:
         raise ConflictError("workstream already has an acceptance; use its existing integration")
     with project_git_lock(store.state_root, project_id):
         candidate = _candidate(
@@ -317,14 +312,14 @@ def apply_workstream_acceptance(store: Any, project_id: str, scope_value: Mappin
     scope_json = canonical_json(scope, max_bytes=65536, max_text=8192)
     with store.transaction():
         store.conn.execute(
-            "INSERT INTO workstream_acceptances(acceptance_id,project_id,workstream_id,completion_packet_sha256,source_commit_oid,target_branch,candidate_patch_sha256,changed_paths_json,scope_json,scope_sha256,accepted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (acceptance_id, project_id, scope["workstreamId"], scope["completionPacketSha256"], candidate["sourceOid"], scope["targetBranch"], scope["candidatePatchSha256"], canonical_json(scope["changedPaths"]), scope_json, scope_sha256, now),
+            "INSERT INTO workstream_acceptances(acceptance_id,project_id,workstream_id,completion_packet_id,source_commit_oid,target_branch,candidate_patch_sha256,changed_paths_json,scope_json,scope_sha256,accepted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (acceptance_id, project_id, scope["workstreamId"], candidate["packet"]["completion_packet_id"], candidate["sourceOid"], scope["targetBranch"], scope["candidatePatchSha256"], canonical_json(scope["changedPaths"]), scope_json, scope_sha256, now),
         )
         store.conn.execute(
-            "INSERT INTO integration_jobs(integration_id,acceptance_id,project_id,workstream_id,state,target_branch,candidate_completion_packet_sha256,candidate_source_oid,attempt,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (integration_id, acceptance_id, project_id, scope["workstreamId"], "queued", scope["targetBranch"], scope["completionPacketSha256"], candidate["sourceOid"], 0, now, now),
+            "INSERT INTO integration_jobs(integration_id,acceptance_id,project_id,workstream_id,state,target_branch,candidate_completion_packet_id,candidate_source_oid,attempt,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (integration_id, acceptance_id, project_id, scope["workstreamId"], "queued", scope["targetBranch"], candidate["packet"]["completion_packet_id"], candidate["sourceOid"], 0, now, now),
         )
-        store.conn.execute("UPDATE completion_packets SET accepted_at=? WHERE packet_sha256=? AND accepted_at IS NULL", (now, scope["completionPacketSha256"]))
+        store.conn.execute("UPDATE completion_packets SET accepted_at=? WHERE completion_packet_id=? AND accepted_at IS NULL", (now, candidate["packet"]["completion_packet_id"]))
         append_event_in_transaction(
             store.conn,
             kind="workstream.accepted",
@@ -377,7 +372,7 @@ def _set_job(store: Any, integration_id: str, *, state: str, next_action: str | 
         assignments.append("integrated_at=COALESCE(integrated_at,?)")
         values.append(now)
     if candidate_packet is not None:
-        assignments.append("candidate_completion_packet_sha256=?")
+        assignments.append("candidate_completion_packet_id=?")
         values.append(candidate_packet)
     if candidate_source is not None:
         assignments.append("candidate_source_oid=?")
@@ -481,7 +476,10 @@ def _closeout(store: Any, job: Mapping[str, Any], workspace: Any | None, harness
     workstream_id = str(job["workstream_id"])
     project_id = str(job["project_id"])
     inspected = inspect_workstream(store, project_id, workstream_id)
-    packet_sha256 = str(job["candidate_completion_packet_sha256"])
+    packet_row = store.conn.execute("SELECT packet_sha256 FROM completion_packets WHERE completion_packet_id=?", (job["candidate_completion_packet_id"],)).fetchone()
+    if packet_row is None:
+        raise NeedsAttentionError("integration candidate completion packet is missing")
+    packet_sha256 = str(packet_row["packet_sha256"])
     if inspected["workstream"]["desired_state"] == "active":
         if workspace is None:
             raise NeedsAttentionError("integrated workstream requires a runtime workspace for closeout")
@@ -524,7 +522,10 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
             raise NeedsAttentionError("acceptance scope is invalid")
         accepted_paths = json.loads(str(acceptance["changed_paths_json"]))
         try:
-            candidate = _candidate(store, str(job["project_id"]), str(job["workstream_id"]), packet_sha256=str(job["candidate_completion_packet_sha256"]), expected_paths=accepted_paths, expected_acceptance=scope["acceptance"])
+            packet_row = store.conn.execute("SELECT packet_sha256 FROM completion_packets WHERE completion_packet_id=?", (job["candidate_completion_packet_id"],)).fetchone()
+            if packet_row is None:
+                raise NeedsAttentionError("integration candidate completion packet is missing")
+            candidate = _candidate(store, str(job["project_id"]), str(job["workstream_id"]), packet_sha256=str(packet_row["packet_sha256"]), expected_paths=accepted_paths, expected_acceptance=scope["acceptance"])
         except ConflictError as error:
             if "source commit is stale" not in str(error):
                 raise
@@ -534,13 +535,13 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
                 if job["state"] != "awaiting_worker":
                     _prompt_worker(store, workspace, str(job["workstream_id"]), f"Pisec integration {integration_id} is waiting for a matching ready_review checkpoint. The worker branch moved after acceptance; submit a new checkpoint with the same task scope and refreshed verification.")
                 return {"integrationId": integration_id, "state": "awaiting_worker"}
-            _set_job(store, integration_id, state="queued", candidate_packet=candidate["packet"]["packet_sha256"], candidate_source=candidate["sourceOid"], next_action="candidate refreshed after worker verification")
-            job = {**dict(job), "state": "queued", "candidate_completion_packet_sha256": candidate["packet"]["packet_sha256"], "candidate_source_oid": candidate["sourceOid"]}
+            _set_job(store, integration_id, state="queued", candidate_packet=candidate["packet"]["completion_packet_id"], candidate_source=candidate["sourceOid"], next_action="candidate refreshed after worker verification")
+            job = {**dict(job), "state": "queued", "candidate_completion_packet_id": candidate["packet"]["completion_packet_id"], "candidate_source_oid": candidate["sourceOid"]}
         replacement = _latest_replacement(store, candidate, json.loads(str(acceptance["changed_paths_json"])), scope["acceptance"])
         if replacement is not None:
             candidate = replacement
-            _set_job(store, integration_id, state="queued", candidate_packet=candidate["packet"]["packet_sha256"], candidate_source=candidate["sourceOid"], next_action="candidate refreshed after worker verification")
-            job = {**dict(job), "state": "queued", "candidate_completion_packet_sha256": candidate["packet"]["packet_sha256"], "candidate_source_oid": candidate["sourceOid"]}
+            _set_job(store, integration_id, state="queued", candidate_packet=candidate["packet"]["completion_packet_id"], candidate_source=candidate["sourceOid"], next_action="candidate refreshed after worker verification")
+            job = {**dict(job), "state": "queued", "candidate_completion_packet_id": candidate["packet"]["completion_packet_id"], "candidate_source_oid": candidate["sourceOid"]}
         _set_job(store, integration_id, state="refreshing", next_action="inspect target and candidate")
         with project_git_lock(store.state_root, str(job["project_id"])):
             _project, repository, target_branch, target_oid, porcelain = _primary_state(store, str(job["project_id"]))

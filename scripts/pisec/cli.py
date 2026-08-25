@@ -71,7 +71,7 @@ def parser() -> argparse.ArgumentParser:
     project = commands.add_parser(
         "project",
         **_parser_kwargs(
-            help="register, list, open, refresh, deactivate, or reactivate Git projects",
+            help="register, list, open, refresh, or deactivate Git projects",
             description="Manage the projects known to the Pisec broker.",
             epilog="Examples:\n  pisec project register --path ~/src/project\n  pisec project list\n  pisec project open ~/src/project\n  pisec project deactivate ~/src/project --confirm ~/src/project\n  pisec project activate ~/src/project",
         ),
@@ -133,34 +133,6 @@ def parser() -> argparse.ArgumentParser:
     _add_json_argument(project_deactivate)
     project_deactivate.add_argument("project", metavar="PROJECT", help="repository path, display name, or project id")
     project_deactivate.add_argument("--confirm", required=True, metavar="PROJECT", help="repeat the exact PROJECT selector")
-    project_activate = project_commands.add_parser(
-        "activate",
-        **_parser_kwargs(
-            help="reactivate an inactive project",
-            description="Mark a previously deactivated project active again; open a fresh coordinator with `pisec project open`.",
-            epilog="Example:\n  pisec project activate ~/src/project",
-        ),
-    )
-    _add_json_argument(project_activate)
-    project_activate.add_argument("project", metavar="PROJECT", help="repository path, display name, or project id")
-
-    project_policy = project_commands.add_parser(
-        "policy",
-        **_parser_kwargs(
-            help="set explicit project coordination and automation policy",
-            description="Update durable project policy. Defaults are review-only; automatic behavior must be selected explicitly.",
-        ),
-    )
-    _add_json_argument(project_policy)
-    project_policy.add_argument("project", metavar="PROJECT", help="repository path, display name, or project id")
-    project_policy.add_argument("--coordination-mode", choices=("fleet", "project", "direct"))
-    project_policy.add_argument("--worker-creation-policy", choices=("review", "bounded_auto"))
-    project_policy.add_argument("--worker-policy-json", metavar="JSON", help="bounded JSON constraints for bounded_auto")
-    project_policy.add_argument("--merge-policy", choices=("review", "checked_auto"))
-    project_policy.add_argument("--merge-policy-json", metavar="JSON", help="bounded JSON constraints for checked_auto")
-
-
-
     status = commands.add_parser(
         "status",
         **_parser_kwargs(
@@ -467,25 +439,8 @@ def _human_result(command: tuple[str, ...], result: Any) -> str:
             lines.append(f"Retired coordinator: {_scalar_text(result.get('workstreamId'))}")
         if result.get("retainedSessionRoot"):
             lines.append(f"Retained session root: {_scalar_text(result.get('retainedSessionRoot'))}")
-        lines.append("Registration: retained (reactivate with `pisec project activate`)")
+        lines.append("Registration: retained; reopen through `pisec project open`")
         return "\n".join(lines)
-    if command == ("project", "activate") and isinstance(result, Mapping):
-        project = result.get("project")
-        heading = "Project already active" if result.get("reused") else "Project activated"
-        lines = [heading]
-        if isinstance(project, Mapping):
-            lines.append(f"Project: {_scalar_text(project.get('display_name'))} ({_scalar_text(project.get('project_id'))})")
-        lines.append("Open a fresh coordinator with `pisec project open`.")
-        return "\n".join(lines)
-    if command == ("project", "policy") and isinstance(result, Mapping):
-        return "\n".join(
-            [
-                "Project policy updated" if not result.get("reused") else "Project policy unchanged",
-                f"Coordination mode: {_scalar_text(result.get('coordination_mode'))}",
-                f"Worker creation: {_scalar_text(result.get('worker_creation_policy'))}",
-                f"Merge: {_scalar_text(result.get('merge_policy'))}",
-            ]
-        )
     if command == ("status",):
         return "\n".join(_status_lines(result, "Pisec status"))
     if command == ("board",):
@@ -539,7 +494,7 @@ def _human_result(command: tuple[str, ...], result: Any) -> str:
         lines.extend(_table(("STATUS", "CHECK", "DETAIL"), rows))
         schema = result.get("schema")
         if isinstance(schema, Mapping):
-            lines.append(f"Schema: {_scalar_text(schema.get('name'))} v{_scalar_text(schema.get('version'))} ({_scalar_text(schema.get('migration'))})")
+            lines.append(f"Schema: {_scalar_text(schema.get('name'))} v{_scalar_text(schema.get('version'))}")
         adapters = result.get("adapters")
         if isinstance(adapters, Mapping):
             lines.append(f"Adapters: harness={_scalar_text(adapters.get('harness'))}; workspace={_scalar_text(adapters.get('workspace'))}")
@@ -598,23 +553,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _call("project.open", {"project": args.project})
         elif args.command == "project" and args.project_command == "deactivate":
             result = _call("project.deactivate", {"project": args.project, "confirm": args.confirm})
-        elif args.command == "project" and args.project_command == "activate":
-            result = _call("project.activate", {"project": args.project})
-        elif args.command == "project" and args.project_command == "policy":
-            payload = {"project": args.project}
-            for argument, field in (
-                ("coordination_mode", "coordinationMode"),
-                ("worker_creation_policy", "workerCreationPolicy"),
-                ("merge_policy", "mergePolicy"),
-            ):
-                value = getattr(args, argument)
-                if value is not None:
-                    payload[field] = value
-            for argument, field in (("worker_policy_json", "workerCreationPolicyJson"), ("merge_policy_json", "mergePolicyJson")):
-                value = getattr(args, argument)
-                if value is not None:
-                    payload[field] = json.loads(value)
-            result = _call("project.policy.update", payload)
         elif args.command == "project" and args.project_command == "refresh":
             result = _call("project.refresh", {"all": bool(args.all), "waitSeconds": args.wait_seconds}, timeout=max(30.0, args.wait_seconds + 120.0))
         elif args.command == "status":

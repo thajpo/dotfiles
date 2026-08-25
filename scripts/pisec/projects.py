@@ -10,13 +10,10 @@ from typing import Any
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, bounded_text, canonical_json, new_id, utc_now, validate_git_oid, validate_id, validate_remote_url
-from .policies import normalize_merge_policy, normalize_worker_policy
 from .research import research_counts
 from .git_runner import git_text
 
-COORDINATION_MODES = frozenset({"fleet", "project", "direct"})
-WORKER_CREATION_POLICIES = frozenset({"review", "bounded_auto"})
-MERGE_POLICIES = frozenset({"review", "checked_auto"})
+COORDINATION_MODES = frozenset({"fleet", "project"})
 FLEET_COORDINATION_MODE = "fleet"
 
 
@@ -61,9 +58,8 @@ def get_project(store: Any, project_id: str) -> dict[str, Any]:
     value = dict(row)
     raw_data = value.get("data_dirs")
     value["data_dirs"] = json.loads(raw_data) if raw_data else []
-    for field in ("worker_creation_policy_json", "merge_policy_json"):
-        raw_policy = value.get(field)
-        value[field] = json.loads(raw_policy) if isinstance(raw_policy, str) and raw_policy else {}
+    raw_domains = value.get("external_domains")
+    value["external_domains"] = json.loads(raw_domains) if raw_domains else []
     return value
 
 
@@ -83,10 +79,17 @@ def resolve_project(store: Any, selector: str) -> dict[str, Any]:
     return dict(row)
 
 
-def register_project(store: Any, path: str | Path, *, display_name: str | None = None, default_ref: str | None = None, data_dirs: Any = None) -> dict[str, Any]:
+def register_project(store: Any, path: str | Path, *, display_name: str | None = None, default_ref: str | None = None, data_dirs: Any = None, external_domains: Any = None) -> dict[str, Any]:
     observed = observe_project(path, default_ref)
     resolved_data = resolve_data_dirs(data_dirs, Path(observed["repository_path"]))
-    data_json = json.dumps(resolved_data, sort_keys=True) if resolved_data else None
+    if external_domains is None:
+        resolved_domains: list[str] = []
+    elif not isinstance(external_domains, list) or any(not isinstance(item, str) or not item.strip() for item in external_domains):
+        raise InvalidRequestError("external_domains must be a list of non-empty strings")
+    else:
+        resolved_domains = sorted(set(external_domains))
+    data_json = json.dumps(sorted(set(resolved_data)), separators=(",", ":"))
+    domains_json = json.dumps(resolved_domains, separators=(",", ":"))
     existing = store.conn.execute("SELECT * FROM projects WHERE git_common_dir=?", (observed["git_common_dir"],)).fetchone()
     if existing is not None:
         value = dict(existing)
@@ -101,11 +104,14 @@ def register_project(store: Any, path: str | Path, *, display_name: str | None =
             return get_project(store, value["project_id"])
         if registered_remote != observed_remote:
             raise InvalidRequestError("registered project origin remote drifted")
-        if data_dirs is not None and value.get("data_dirs") != data_json:
+        if data_dirs is not None or external_domains is not None:
+            old_domains = value.get("external_domains")
+            if value.get("data_dirs") == data_json and old_domains == domains_json:
+                return get_project(store, value["project_id"])
             with store.transaction():
                 store.conn.execute(
-                    "UPDATE projects SET data_dirs=?,updated_at=? WHERE project_id=?",
-                    (data_json, utc_now(), value["project_id"]),
+                    "UPDATE projects SET data_dirs=?,external_domains=?,updated_at=? WHERE project_id=?",
+                    (data_json, domains_json, utc_now(), value["project_id"]),
                 )
             return get_project(store, value["project_id"])
         return value
@@ -114,8 +120,8 @@ def register_project(store: Any, path: str | Path, *, display_name: str | None =
     now = utc_now()
     with store.transaction():
         store.conn.execute(
-            "INSERT INTO projects(project_id,display_name,repository_path,git_common_dir,default_ref,remote_url,data_dirs,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-            (project_id, name, observed["repository_path"], observed["git_common_dir"], observed["default_ref"], observed["remote_url"], data_json, now, now),
+            "INSERT INTO projects(project_id,display_name,repository_path,git_common_dir,default_ref,remote_url,data_dirs,external_domains,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (project_id, name, observed["repository_path"], observed["git_common_dir"], observed["default_ref"], observed["remote_url"], data_json, domains_json, now, now),
         )
         append_event_in_transaction(store.conn, kind="project.registered", project_id=project_id, payload={"displayName": name, "repositoryPath": observed["repository_path"], "gitCommonDir": observed["git_common_dir"], "defaultRef": observed["default_ref"]})
     return get_project(store, project_id)
@@ -150,72 +156,6 @@ def require_fleet_project(store: Any, project_id: str) -> dict[str, Any]:
     return project
 
 
-def update_project_policy(
-    store: Any,
-    selector: str,
-    *,
-    coordination_mode: str | None = None,
-    worker_creation_policy: str | None = None,
-    worker_creation_policy_json: Mapping[str, Any] | None = None,
-    merge_policy: str | None = None,
-    merge_policy_json: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    project = resolve_project(store, selector)
-    values = {
-        "coordination_mode": coordination_mode,
-        "worker_creation_policy": worker_creation_policy,
-        "worker_creation_policy_json": worker_creation_policy_json,
-        "merge_policy": merge_policy,
-        "merge_policy_json": merge_policy_json,
-    }
-    if all(value is None for value in values.values()):
-        raise InvalidRequestError("project policy update must change at least one policy")
-    if coordination_mode is not None and coordination_mode not in COORDINATION_MODES:
-        raise InvalidRequestError("coordination mode is invalid")
-    if worker_creation_policy is not None and worker_creation_policy not in WORKER_CREATION_POLICIES:
-        raise InvalidRequestError("worker creation policy is invalid")
-    if merge_policy is not None and merge_policy not in MERGE_POLICIES:
-        raise InvalidRequestError("merge policy is invalid")
-    current = get_project(store, project["project_id"])
-    if current["coordination_mode"] == "fleet" and coordination_mode is not None and coordination_mode != "fleet":
-        shared = store.conn.execute(
-            "SELECT 1 FROM project_workspaces pw JOIN runtime_bindings r ON r.workspace_id=pw.workspace_id "
-            "JOIN workstreams w ON w.workstream_id=r.workstream_id WHERE pw.project_id=? AND w.kind='first_mate' AND w.desired_state='active' LIMIT 1",
-            (project["project_id"],),
-        ).fetchone()
-        if shared is not None:
-            raise ConflictError("deactivate the fleet project before changing its coordination mode")
-    selected_worker_policy = worker_creation_policy or current["worker_creation_policy"]
-    selected_worker_document = worker_creation_policy_json if worker_creation_policy_json is not None else current["worker_creation_policy_json"]
-    normalized_worker = normalize_worker_policy(selected_worker_policy, selected_worker_document)
-    selected_merge_policy = merge_policy or current["merge_policy"]
-    selected_merge_document = merge_policy_json if merge_policy_json is not None else current["merge_policy_json"]
-    normalized_merge = normalize_merge_policy(selected_merge_policy, selected_merge_document)
-    updates: dict[str, Any] = {}
-    for name, value in values.items():
-        if value is None:
-            continue
-        if name.endswith("_json"):
-            updates[name] = canonical_json(dict(value), max_bytes=16 * 1024, max_text=4096)
-        else:
-            updates[name] = value
-    if worker_creation_policy is not None or worker_creation_policy_json is not None:
-        updates["worker_creation_policy_json"] = canonical_json(normalized_worker, max_bytes=16 * 1024, max_text=4096)
-    if merge_policy is not None or merge_policy_json is not None:
-        updates["merge_policy_json"] = canonical_json(normalized_merge, max_bytes=16 * 1024, max_text=4096)
-    changed = {name: value for name, value in updates.items() if current.get(name) != (json.loads(value) if name.endswith("_json") else value)}
-    if not changed:
-        return {**current, "reused": True}
-    assignments = ",".join(f"{name}=?" for name in updates)
-    params = [updates[name] for name in updates]
-    now = utc_now()
-    params.extend((now, project["project_id"]))
-    with store.transaction():
-        store.conn.execute(f"UPDATE projects SET {assignments},updated_at=? WHERE project_id=?", params)
-        append_event_in_transaction(store.conn, kind="project.policy.updated", project_id=project["project_id"], payload={"changed": sorted(changed), "coordinationMode": coordination_mode, "workerCreationPolicy": worker_creation_policy, "mergePolicy": merge_policy})
-    return {**get_project(store, project["project_id"]), "reused": False}
-
-
 def _project_lifecycle_state(store: Any, project: Mapping[str, Any]) -> bool:
     value = project.get("active")
     return True if value is None else bool(value)
@@ -225,6 +165,8 @@ def assert_project_writable(store: Any, project_id: str) -> None:
     project = get_project(store, project_id)
     if not _project_lifecycle_state(store, project):
         raise ConflictError("project is inactive")
+    if project.get("lifecycle_attention_reason"):
+        raise NeedsAttentionError("project lifecycle requires repair")
     operation = store.conn.execute(
         "SELECT state FROM operations WHERE project_id=? AND kind='project.deactivate' ORDER BY created_at DESC LIMIT 1",
         (project_id,),
@@ -280,6 +222,11 @@ def deactivate_project(store: Any, selector: str, workspace: Any, harness: Any) 
         or binding["workspace_adapter_id"] != workspace.manifest.adapter_id
         or binding["harness_id"] != harness.manifest.adapter_id
     ):
+        now = utc_now()
+        reason = "configured adapter does not match the durable coordinator binding"
+        with store.transaction():
+            store.conn.execute("UPDATE operations SET state='needs_attention',error_code='deactivation_binding_mismatch',error_message=?,updated_at=? WHERE operation_id=?", (reason, now, operation_id))
+            store.conn.execute("UPDATE projects SET active=1,lifecycle_attention_reason=?,updated_at=? WHERE project_id=?", (reason, now, project_id))
         raise NeedsAttentionError("configured adapter does not match the durable coordinator binding")
 
     retained_root = None
@@ -339,24 +286,11 @@ def deactivate_project(store: Any, selector: str, workspace: Any, harness: Any) 
         raise
     except Exception as error:
         with store.transaction():
-            store.conn.execute("UPDATE operations SET state='needs_attention',error_code='deactivation_step_failed',error_message=?,updated_at=? WHERE operation_id=?", (str(error)[:512], utc_now(), operation_id))
+            now = utc_now()
+            store.conn.execute("UPDATE operations SET state='needs_attention',error_code='deactivation_step_failed',error_message=?,updated_at=? WHERE operation_id=?", (str(error)[:512], now, operation_id))
+            store.conn.execute("UPDATE projects SET active=1,lifecycle_attention_reason=?,updated_at=? WHERE project_id=?", (f"project deactivation requires repair: {error}"[:2048], now, project_id))
         raise NeedsAttentionError("project deactivation requires retry") from error
 
-
-def activate_project(store: Any, selector: str) -> dict[str, Any]:
-    project = resolve_project(store, selector)
-    project = get_project(store, project["project_id"])
-    if _project_lifecycle_state(store, project):
-        return {"projectId": project["project_id"], "displayName": project["display_name"], "reused": True}
-    now = utc_now()
-    with store.transaction():
-        store.conn.execute(
-            "UPDATE projects SET active=1,deactivated_at=NULL,updated_at=? WHERE project_id=?",
-            (now, project["project_id"]),
-        )
-        result = {"projectId": project["project_id"]}
-        append_event_in_transaction(store.conn, kind="project.activated", project_id=project["project_id"], payload=result)
-    return {"projectId": project["project_id"], "displayName": project["display_name"], **result, "reused": False}
 
 def project_activity(store: Any, project_id: str, after: int = 0) -> dict[str, Any]:
     project = get_project(store, project_id)
@@ -365,7 +299,7 @@ def project_activity(store: Any, project_id: str, after: int = 0) -> dict[str, A
     rows = store.conn.execute(
         """
         SELECT w.workstream_id,w.title,w.kind,w.desired_state,w.completed_at,
-               cp.phase,cp.summary,cp.next_action,cp.blocker_code,cp.blocker,cp.sequence AS checkpoint_sequence,
+               cp.phase,cp.summary,cp.next_action,cp.sequence AS checkpoint_sequence,
                (SELECT COUNT(*) FROM research_requests rr WHERE rr.workstream_id=w.workstream_id AND rr.state NOT IN ('answered','declined','acknowledged')) AS research_open,
                (SELECT COUNT(*) FROM coordination_requests cr WHERE cr.workstream_id=w.workstream_id AND cr.state <> 'acknowledged') AS coordination_open,
                (SELECT COUNT(*) FROM decisions d WHERE d.workstream_id=w.workstream_id AND d.state='open') AS decisions_open,
@@ -382,7 +316,7 @@ def project_activity(store: Any, project_id: str, after: int = 0) -> dict[str, A
     for row in rows:
         if after and (row["changed_sequence"] is None or int(row["changed_sequence"]) <= after):
             continue
-        attention = row["blocker"] or ("review requested" if row["phase"] == "ready_review" else None)
+        attention = "review requested" if row["phase"] == "ready_review" else None
         cards.append({
             "workstreamId": row["workstream_id"],
             "outcome": row["title"],

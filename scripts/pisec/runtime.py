@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from .adapters import HarnessAdapter, WorkspaceAdapter
 from .events import append_event_in_transaction
+from .attention import list_open_attention, present_attention_in_transaction
 from .worker_repo import validate_worker_resume_git
 from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, bounded_text, validate_id, validate_sha256
 from .models import utc_now
@@ -161,6 +162,37 @@ def prepare_session_switch(store: Any, payload: Mapping[str, Any], harness: Harn
         "workstreamId": str(binding["workstream_id"]),
         "reason": reason,
     }
+
+
+def prepare_runtime_turn(store: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Present the current immutable packet and attention in one durable turn."""
+    binding = verify_runtime_binding(store, payload, worker_only=False)
+    session_key = bounded_text(payload.get("sessionKey"), name="sessionKey", limit=256)
+    if binding["refresh_pending"] or binding["launch_generation_sha256"] is not None:
+        raise ConflictError("runtime is reserved for a generation refresh")
+    if binding["applied_generation_sha256"] is None or binding["applied_generation_sha256"] != binding["desired_generation_sha256"]:
+        raise ConflictError("runtime generation is not usable")
+    if not binding["runtime_instance_id"] or int(binding["report_seq"]) < 1 or binding["session_start_event_sequence"] is None or binding["session_start_report_seq"] != binding["report_seq"]:
+        raise ConflictError("runtime has not authenticated its session start")
+    workstream_id = str(binding["workstream_id"])
+    with store.transaction():
+        now = utc_now()
+        session = store.conn.execute("SELECT * FROM runtime_sessions WHERE workstream_id=? AND session_key=?", (workstream_id, session_key)).fetchone()
+        if session is None:
+            store.conn.execute("INSERT INTO runtime_sessions(workstream_id,session_key,last_turn_started_at,updated_at) VALUES(?,?,?,?)", (workstream_id, session_key, now, now))
+            session = store.conn.execute("SELECT * FROM runtime_sessions WHERE workstream_id=? AND session_key=?", (workstream_id, session_key)).fetchone()
+        else:
+            store.conn.execute("UPDATE runtime_sessions SET last_turn_started_at=?,updated_at=? WHERE workstream_id=? AND session_key=?", (now, now, workstream_id, session_key))
+        packet = store.conn.execute("SELECT * FROM task_packets WHERE workstream_id=?", (workstream_id,)).fetchone()
+        packet_value = None
+        if packet is not None and session["task_packet_presented_at"] is None:
+            store.conn.execute("UPDATE runtime_sessions SET task_packet_presented_at=?,updated_at=? WHERE workstream_id=? AND session_key=?", (now, now, workstream_id, session_key))
+            packet_value = {"taskPacketId": packet["task_packet_id"], "projectId": packet["project_id"], "workstreamId": packet["workstream_id"], "scopeSha256": packet["scope_sha256"], "packetSha256": packet["packet_sha256"], "issuedAt": packet["issued_at"], "packet": __import__("json").loads(packet["packet_json"])}
+        attention = list_open_attention(store, recipient_workstream_id=workstream_id)
+        presented = []
+        for item in attention:
+            presented.append(present_attention_in_transaction(store.conn, recipient_workstream_id=workstream_id, attention_id=item["attention_id"], revision=int(item["source_event_sequence"])))
+    return {"prepared": True, "sessionKey": session_key, "taskPacket": packet_value, "attention": presented}
 
 
 def report_runtime(store: Any, payload_value: Mapping[str, Any], harness: HarnessAdapter, workspace: WorkspaceAdapter) -> dict[str, Any]:

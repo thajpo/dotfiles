@@ -8,7 +8,7 @@ from scripts.pisec.models import ConflictError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import _git, register_project
 from scripts.pisec.secretary import ensure_secretary
-from scripts.pisec.workflow import checkpoint
+from scripts.pisec.workflow import submit_completion
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
 from scripts.pisec.git_runner import run_git
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
@@ -54,26 +54,14 @@ class IntegrationTests(unittest.TestCase):
         source = git_worker(worktree, "rev-parse", "HEAD").lower()
         binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
         task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
-        checkpoint(
-            store,
-            workstream_id=scope["workstreamId"],
-            runtime_instance_id=binding["runtime_instance_id"],
-            phase="ready_review",
-            summary="Implementation is verified.",
-            next_action="Review the candidate.",
-            blocker_code=None,
-            blocker=None,
-            evidence=["fixture verification"],
-            idempotency_key="integration-ready",
-            completion_packet={
+        submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
                 "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Fixture output."]}],
                 "verification": [{"command": "fixture verification", "result": "passed"}],
                 "sourceCommit": source,
                 "taskPacketSha256": task["packet_sha256"],
                 "changedSurfaces": ["fixture"],
                 "residualRisk": "none",
-            },
-        )
+            })
         return store, project, harness, workspace, workstream, scope, repo, worktree, None, source
 
     def test_acceptance_is_the_only_user_gate_and_secretary_closes_out(self):
@@ -96,26 +84,14 @@ class IntegrationTests(unittest.TestCase):
                 store.conn.execute("UPDATE workstream_acceptances SET scope_json=? WHERE acceptance_id=?", ("{}", accepted["acceptance"]["acceptance_id"]))
             binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
             task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
-            checkpoint(
-                store,
-                workstream_id=scope["workstreamId"],
-                runtime_instance_id=binding["runtime_instance_id"],
-                phase="ready_review",
-                summary="Verification was rerun.",
-                next_action="Continue existing integration.",
-                blocker_code=None,
-                blocker=None,
-                evidence=["rerun verification"],
-                idempotency_key="integration-ready-rerun",
-                completion_packet={
+            submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
                     "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Fixture output."]}],
                     "verification": [{"command": "fixture verification rerun", "result": "passed"}],
                     "sourceCommit": source,
                     "taskPacketSha256": task["packet_sha256"],
                     "changedSurfaces": ["fixture"],
                     "residualRisk": "none",
-                },
-            )
+                })
             with self.assertRaises(ConflictError):
                 prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
             dirty = repo / "unrelated-untracked.txt"
@@ -178,26 +154,14 @@ class IntegrationTests(unittest.TestCase):
             rebased_source = git_worker(worktree, "rev-parse", "HEAD").lower()
             binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
             task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
-            checkpoint(
-                store,
-                workstream_id=scope["workstreamId"],
-                runtime_instance_id=binding["runtime_instance_id"],
-                phase="ready_review",
-                summary="Rebased implementation is verified.",
-                next_action="Review the refreshed candidate.",
-                blocker_code=None,
-                blocker=None,
-                evidence=["rebased fixture verification"],
-                idempotency_key="integration-ready-rebased",
-                completion_packet={
+            submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
                     "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Fixture output."]}],
                     "verification": [{"command": "fixture verification", "result": "passed"}],
                     "sourceCommit": rebased_source,
                     "taskPacketSha256": task["packet_sha256"],
                     "changedSurfaces": ["fixture"],
                     "residualRisk": "none",
-                },
-            )
+                })
 
             result = reconcile_integrations(store, workspace, harness)
 

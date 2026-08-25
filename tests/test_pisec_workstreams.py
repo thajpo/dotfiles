@@ -234,15 +234,15 @@ class WorkstreamTests(unittest.TestCase):
             "changedSurfaces": ["fixture"],
             "residualRisk": "none",
         }
-        checkpoint(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], phase="ready_review", summary="Implementation is verified.", next_action="Review the completion packet.", blocker_code=None, blocker=None, evidence=["fixture verification"], idempotency_key="ready-1", completion_packet=packet)
+        submit_completion(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], packet=packet)
         self.assertEqual(store.conn.execute("SELECT count(*) FROM completion_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()[0], 1)
         self.assertEqual(store.conn.execute("SELECT phase FROM workstream_checkpoints WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()["phase"], "ready_review")
-        checkpoint(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], phase="ready_review", summary="Implementation is verified.", next_action="Review the completion packet.", blocker_code=None, blocker=None, evidence=["fixture verification"], idempotency_key="ready-1", completion_packet=packet)
+        submit_completion(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], packet=packet)
         self.assertEqual(store.conn.execute("SELECT count(*) FROM completion_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()[0], 1)
         changed_packet = dict(packet)
         changed_packet["residualRisk"] = "changed"
-        with self.assertRaises(IdempotencyConflictError):
-            checkpoint(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], phase="ready_review", summary="Implementation is verified.", next_action="Review the completion packet.", blocker_code=None, blocker=None, evidence=["fixture verification"], idempotency_key="ready-1", completion_packet=changed_packet)
+        submit_completion(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], packet=changed_packet)
+        self.assertEqual(store.conn.execute("SELECT count(*) FROM completion_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()[0], 2)
 
     def test_ready_checkpoint_rolls_back_when_completion_submission_fails(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
@@ -262,7 +262,7 @@ class WorkstreamTests(unittest.TestCase):
             "residualRisk": "none",
         }
         with self.assertRaises(ConflictError):
-            checkpoint(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], phase="ready_review", summary="Implementation is verified.", next_action="Review the completion packet.", blocker_code=None, blocker=None, evidence=["fixture verification"], idempotency_key="ready-stale", completion_packet=packet)
+            submit_completion(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], packet=packet)
         self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM completion_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()[0], 0)
         self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM workstream_checkpoints WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()[0], 0)
 

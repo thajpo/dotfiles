@@ -8,7 +8,7 @@ from scripts.pisec.decisions import list_decisions, record_decision, resolve_dec
 from scripts.pisec.models import ConflictError, InvalidRequestError
 from scripts.pisec.first_mate import ensure_first_mate
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.projects import activate_project, deactivate_project, list_projects, observe_project, register_project, update_project_policy
+from scripts.pisec.projects import deactivate_project, list_projects, observe_project, register_project
 from scripts.pisec.secretary import ensure_secretary
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace
 
@@ -33,10 +33,11 @@ class ProjectTests(unittest.TestCase):
             with PiStore(root / "state") as store:
                 control = register_project(store, control_repo)
                 fleet = register_project(store, fleet_repo)
+                store.conn.execute("UPDATE projects SET active=1 WHERE project_id IN (?,?)", (control["project_id"], fleet["project_id"]))
                 harness = FixtureHarness(root)
                 workspace = FixtureWorkspace(root, store)
                 first_mate = ensure_first_mate(store, control["project_id"], harness, workspace)
-                update_project_policy(store, fleet["project_id"], coordination_mode="fleet")
+                store.conn.execute("UPDATE projects SET coordination_mode='fleet' WHERE project_id=?", (fleet["project_id"],))
                 secretary = ensure_secretary(store, fleet["project_id"], harness, workspace)
                 store.conn.execute("UPDATE runtime_bindings SET observed_state='idle' WHERE workstream_id=?", (secretary["workstream"]["workstream_id"],))
 
@@ -91,6 +92,7 @@ class ProjectTests(unittest.TestCase):
             make_repo(repo)
             with PiStore(root / "state") as store:
                 project = register_project(store, repo, default_ref="main")
+                store.conn.execute("UPDATE projects SET active=1 WHERE project_id=?", (project["project_id"],))
 
                 class _Workspace:
                     manifest = type("M", (), {"adapter_id": "herdr", "session_name": "herdr"})()
@@ -108,12 +110,10 @@ class ProjectTests(unittest.TestCase):
                 self.assertTrue(reused["reused"])
                 events = store.conn.execute("SELECT kind FROM events WHERE project_id=? ORDER BY sequence", (project["project_id"],)).fetchall()
                 self.assertEqual([event[0] for event in events], ["project.registered", "project.deactivated"])
-                activated = activate_project(store, project["display_name"])
-                self.assertFalse(activated["reused"])
-                self.assertEqual([item["project_id"] for item in list_projects(store)], [project["project_id"]])
-                state = store.conn.execute("SELECT active,deactivated_at FROM projects WHERE project_id=?", (project["project_id"],)).fetchone()
-                self.assertEqual(state[0], 1)
-                self.assertIsNone(state[1])
+                state = store.conn.execute("SELECT active,deactivated_at,lifecycle_attention_reason FROM projects WHERE project_id=?", (project["project_id"],)).fetchone()
+                self.assertEqual(state[0], 0)
+                self.assertIsNotNone(state[1])
+                self.assertIsNone(state[2])
 
     def test_deactivate_refuses_active_worker_workstreams(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -122,6 +122,7 @@ class ProjectTests(unittest.TestCase):
             make_repo(repo)
             with PiStore(root / "state") as store:
                 project = register_project(store, repo, default_ref="main")
+                store.conn.execute("UPDATE projects SET active=1 WHERE project_id=?", (project["project_id"],))
                 now = "2026-08-21T00:00:00Z"
                 store.conn.execute(
                     "INSERT INTO workstreams(workstream_id,project_id,kind,title,purpose,brief,harness_id,workspace_adapter_id,execution_profile,target_ref,base_commit_oid,branch_name,worktree_path,desired_state,provisioning_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

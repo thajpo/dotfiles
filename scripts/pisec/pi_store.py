@@ -7,13 +7,31 @@ import os
 from pathlib import Path
 import sqlite3
 import stat
+from datetime import datetime, timezone
 from typing import Iterator
 
 from .models import SchemaError, UnsafeStateError, utc_now
-from .pi_schema import SCHEMA_NAME, SCHEMA_VERSION, apply_schema, migrate_schema, schema_digest
+from .pi_schema import SCHEMA_NAME, SCHEMA_VERSION, apply_schema, schema_digest
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
+
+
+def archive_and_reset_state(state_root: Path | str | None = None) -> Path | None:
+    """Explicitly archive an owner-only state root; never import or mutate it."""
+    root = Path(state_root) if state_root is not None else default_state_root()
+    if not root.exists() and not root.is_symlink():
+        return None
+    _check_dir(root, create=False)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive = root.with_name(f"{root.name}.archive-{stamp}")
+    suffix = 0
+    while archive.exists() or archive.is_symlink():
+        suffix += 1
+        archive = root.with_name(f"{root.name}.archive-{stamp}-{suffix}")
+    os.replace(root, archive)
+    os.chmod(archive, DIR_MODE)
+    return archive
 
 
 def default_state_root() -> Path:
@@ -70,11 +88,9 @@ class PiStore:
         if initialize and not existed:
             self._initialize()
         elif existed:
-            try:
-                migrate_schema(self.conn)
-            except sqlite3.DatabaseError as error:
-                raise SchemaError("Pisec schema migration is unsupported", detail={"error": str(error)}) from error
-        self._verify_schema()
+            # Existing state is opaque until it proves the exact v1 identity.
+            # There is deliberately no in-place migration path.
+            self._verify_schema()
         for suffix in ("-wal", "-shm"):
             sidecar = Path(str(self.path) + suffix)
             if sidecar.exists() or sidecar.is_symlink():
@@ -103,7 +119,10 @@ class PiStore:
         expected = (SCHEMA_NAME, SCHEMA_VERSION, schema_digest())
         actual = None if row is None else (row["schema_name"], row["schema_version"], row["schema_sha256"])
         if actual != expected:
-            raise SchemaError("Pisec schema identity does not match", detail={"expected": expected, "actual": actual})
+            raise SchemaError(
+                "Pisec state is unsupported; review it and rerun with explicit archive/reset",
+                detail={"expected": expected, "actual": actual},
+            )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

@@ -15,7 +15,6 @@ from .events import append_event_in_transaction
 from .git_runner import run_git
 from .models import ConflictError, InvalidRequestError, NeedsAttentionError, ScopeMismatchError, bounded_text, new_id, utc_now, validate_git_oid, validate_id, validate_sha256
 from .operations import authoritative_workstream_creation
-from .policies import enforce_merge_policy
 from .projects import get_project
 from .worker_repo import project_git_lock, validate_worker_repository
 
@@ -215,16 +214,6 @@ def prepare_workstream_merge(store: Any, project_id: str, workstream_id: str) ->
     if packet is None or packet["source_commit_oid"] != source_oid:
         raise ConflictError("completion packet source commit is stale")
     completion_packet = json.loads(str(packet["packet_json"]))
-    project = get_project(store, project_id)
-    policy = enforce_merge_policy(project, target_branch=target_branch, completion_packet=completion_packet)
-    if "maxChangedFiles" in policy:
-        _code, names = _run_git(worker, "diff", "--name-only", "--no-ext-diff", target_oid, source_oid, max_bytes=128 * 1024)
-        if len([line for line in names.splitlines() if line]) > policy["maxChangedFiles"]:
-            raise ConflictError("merge exceeds the checked project changed-file limit")
-    if "maxDiffBytes" in policy:
-        _code, patch = _run_git(worker, "diff", "--no-ext-diff", "--no-color", target_oid, source_oid, max_bytes=policy["maxDiffBytes"] + 1)
-        if len(patch.encode()) > policy["maxDiffBytes"]:
-            raise ConflictError("merge exceeds the checked project diff-size limit")
     return {"kind": "git.merge.ff-only", "projectId": project_id, "workstreamId": workstream_id, "targetBranch": target_branch, "targetCommitOid": target_oid, "sourceBranch": source_branch, "sourceCommitOid": source_oid, "strategy": "ff-only", "completionPacketSha256": packet["packet_sha256"], "completionSourceCommitOid": packet["source_commit_oid"], "effects": [f"advance refs/heads/{target_branch} from {target_oid} to {source_oid}"], "nonEffects": ["no push", "no branch deletion", "no worktree cleanup", "no conflict resolution"]}
 
 

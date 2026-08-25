@@ -26,6 +26,9 @@ def append_event_in_transaction(
         (eid, kind, project_id, workstream_id, operation_id, canonical_json(payload), created),
     )
     row = connection.execute("SELECT * FROM events WHERE sequence=?", (cursor.lastrowid,)).fetchone()
+    from .attention import index_event_in_transaction
+
+    index_event_in_transaction(connection, dict(row))
     return dict(row)
 
 

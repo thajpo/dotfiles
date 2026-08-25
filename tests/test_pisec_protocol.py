@@ -11,7 +11,7 @@ from scripts.pisec.adapters import AdapterRegistry, AgentObservation, WorkspaceO
 from scripts.pisec.broker import BrokerDispatcher, BrokerService
 from scripts.pisec.models import AuthorizationError, InvalidRequestError, PisecError, new_id
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.projects import register_project, update_project_policy
+from scripts.pisec.projects import register_project
 from scripts.pisec.protocol import decode_request, request, success_response
 from scripts.pisec.secretary import ensure_secretary
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
@@ -75,7 +75,7 @@ class BrokerSocketTests(unittest.TestCase):
             with self.assertRaises(AuthorizationError):
                 dispatcher._fleet(store, "fleet.status", "ws_00000000000000000000000000000000", {"projectId": self.project_id})
             self.assertEqual(dispatcher._fleet(store, "fleet.status", "ws_00000000000000000000000000000000", {})["projects"], [])
-            update_project_policy(store, self.project_id, coordination_mode="fleet")
+            store.conn.execute("UPDATE projects SET coordination_mode='fleet' WHERE project_id=?", (self.project_id,))
             self.assertEqual([item["project"]["project_id"] for item in dispatcher._fleet(store, "fleet.status", "ws_00000000000000000000000000000000", {})["projects"]], [self.project_id])
     def test_secretary_issue_report_is_durable_and_idempotent(self):
         payload = {"authToken": self.token, "category": "permission", "severity": "blocking", "summary": "Worker cannot read approved source", "details": "The fenced worker received permission denied for the approved Herdr excerpt.", "requestedAction": "Review the minimum read-only source scope.", "evidence": ["PermissionError: denied"], "idempotencyKey": "source-read-1"}
@@ -83,7 +83,7 @@ class BrokerSocketTests(unittest.TestCase):
         replay = request(self.service.paths["secretary"], "issue.report", payload)
         self.assertEqual(first["issue_id"], replay["issue_id"])
         with PiStore(self.state) as store:
-            row = store.conn.execute("SELECT category,severity,state FROM secretary_issue_reports WHERE issue_id=?", (first["issue_id"],)).fetchone()
+            row = store.conn.execute("SELECT category,severity,state FROM issues WHERE issue_id=?", (first["issue_id"],)).fetchone()
             self.assertEqual(tuple(row), ("permission", "blocking", "open"))
         with self.assertRaises(PisecError) as denied:
             request(self.service.paths["admin"], "issue.report", {key: value for key, value in payload.items() if key != "authToken"})
@@ -240,9 +240,11 @@ class BrokerSocketTests(unittest.TestCase):
         self.workspace.runtime_states[self.binding["workspace_surface_id"]] = "stopped"
         desired = "b" * 64
         with PiStore(self.state) as store:
+            from scripts.pisec.operations import create_operation
+            refresh_operation, _ = create_operation(store, kind="runtime.refresh", project_id=self.project_id, workstream_id=self.binding["workstream_id"], idempotency_key="protocol-refresh-reservation", request={"workstreamId": self.binding["workstream_id"]})
             store.conn.execute(
-                "UPDATE runtime_bindings SET observed_state='starting',refresh_pending=1,desired_generation_sha256=?,launch_generation_sha256=? WHERE workstream_id=?",
-                (desired, desired, self.binding["workstream_id"]),
+                "UPDATE runtime_bindings SET observed_state='starting',refresh_pending=1,refresh_operation_id=?,refresh_started_at=?,desired_generation_sha256=?,launch_generation_sha256=? WHERE workstream_id=?",
+                (refresh_operation.operation_id, "2026-08-25T00:00:00Z", desired, desired, self.binding["workstream_id"]),
             )
         result = self.service.dispatcher.startup_reconcile()
         self.assertEqual(result["resumed"], [])

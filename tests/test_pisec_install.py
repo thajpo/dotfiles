@@ -577,7 +577,7 @@ exit 0
             self.home / ".local" / "lib" / "pisec",
         ):
             self.assertFalse(path.exists() or path.is_symlink(), path)
-    def test_epoch_one_state_requires_explicit_reset(self):
+    def test_legacy_unsupported_state_requires_explicit_reset(self):
         state = self.root / "state" / "pisec"
         database = state / "control.db"
         database.unlink()

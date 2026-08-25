@@ -9,7 +9,7 @@ from unittest.mock import patch
 import scripts.pisec.secretary_git as secretary_git_module
 from scripts.pisec.models import ConflictError, InvalidRequestError, NeedsAttentionError, ScopeMismatchError
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.projects import register_project, update_project_policy
+from scripts.pisec.projects import register_project
 from scripts.pisec.secretary_git import apply_workstream_merge, git_status, inspect_workstream_changes, prepare_workstream_merge, push_branch
 from scripts.pisec.workflow import checkpoint
 from scripts.pisec.integration import apply_workstream_acceptance, prepare_workstream_acceptance
@@ -42,7 +42,7 @@ def make_repo(path: Path) -> None:
 
 
 class SecretaryGitTests(unittest.TestCase):
-    def fixture(self, root: Path, merge_policy: dict[str, object] | None = None, accept_candidate: bool = True):
+    def fixture(self, root: Path, accept_candidate: bool = True):
         repo = root / "repo"
         make_repo(repo)
         store = PiStore(root / "state")
@@ -50,8 +50,6 @@ class SecretaryGitTests(unittest.TestCase):
         harness = FixtureHarness(root)
         workspace = FixtureWorkspace(root, store)
         project = register_project(store, repo, default_ref="main")
-        if merge_policy is not None:
-            update_project_policy(store, project["project_id"], merge_policy="checked_auto", merge_policy_json=merge_policy)
         ensure_secretary(store, project["project_id"], harness, workspace)
         proposal = prepare_workstream(
             store,
@@ -81,26 +79,15 @@ class SecretaryGitTests(unittest.TestCase):
         source_commit = git_worker(worktree, "rev-parse", "HEAD").lower()
         binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
         task_packet = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
-        checkpoint(
-            store,
-            workstream_id=scope["workstreamId"],
-            runtime_instance_id=binding["runtime_instance_id"],
-            phase="ready_review",
-            summary="Implementation is verified.",
-            next_action="Review the completion packet.",
-            blocker_code=None,
-            blocker=None,
-            evidence=["fixture verification"],
-            idempotency_key="ready-for-merge",
-            completion_packet={
+        from scripts.pisec.workflow import submit_completion
+        submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
                 "acceptance": [{"criterion": "Fast-forward merge succeeds.", "status": "passed", "evidence": ["Fixture commit."]}],
                 "verification": [{"command": "fixture verification", "result": "passed"}],
                 "sourceCommit": source_commit,
                 "taskPacketSha256": task_packet["packet_sha256"],
                 "changedSurfaces": ["fixture"],
                 "residualRisk": "none",
-            },
-        )
+            })
         completion = store.conn.execute("SELECT packet_sha256 FROM completion_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
         if accept_candidate:
             acceptance = prepare_workstream_acceptance(store, project["project_id"], scope["workstreamId"])
@@ -166,21 +153,11 @@ class SecretaryGitTests(unittest.TestCase):
             with self.assertRaisesRegex(ConflictError, "fast-forward"):
                 prepare_workstream_merge(store, project["project_id"], scope["workstreamId"])
 
-    def test_checked_merge_policy_requires_allowed_branch_and_completion_check(self):
+    def test_acceptance_uses_the_invariant_candidate_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), {"allowedTargetBranches": ["develop"]}, accept_candidate=False)
-            with self.assertRaisesRegex(ConflictError, "target branch"):
-                prepare_workstream_acceptance(store, project["project_id"], scope["workstreamId"])
-
-        with tempfile.TemporaryDirectory() as tmp:
-            store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), {"allowedTargetBranches": ["main"], "requiredChecks": ["missing check"]}, accept_candidate=False)
-            with self.assertRaisesRegex(ConflictError, "missing required merge checks"):
-                prepare_workstream_acceptance(store, project["project_id"], scope["workstreamId"])
-
-        with tempfile.TemporaryDirectory() as tmp:
-            store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), {"allowedTargetBranches": ["main"], "requiredChecks": ["fixture verification"], "maxChangedFiles": 1})
-            approval = prepare_workstream_merge(store, project["project_id"], scope["workstreamId"])
-            self.assertEqual(approval["targetBranch"], "main")
+            store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), accept_candidate=False)
+            approval = prepare_workstream_acceptance(store, project["project_id"], scope["workstreamId"])
+            self.assertEqual(approval["approvalScope"]["targetBranch"], "main")
 
     def push_fixture(self, root: Path):
         remote = root / "remote.git"

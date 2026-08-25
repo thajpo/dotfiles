@@ -15,12 +15,13 @@ import stat
 import threading
 from typing import Any, Callable, Mapping
 from .adapters import AdapterRegistry, HarnessAdapter, WorkspaceAdapter
+from .attention import ATTENTION_WAKE_PROMPT, list_open_attention
 from .cleanup import cleanup_workstream
 from .decisions import list_decisions, record_decision, resolve_decision
 from .events import list_events
 from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, PisecError, ScopeMismatchError, UnsafeStateError, bounded_text, utc_now, validate_id
 from .pi_store import PiStore
-from .projects import assert_project_writable, fleet_activity, fleet_project_ids, get_project, list_fleet_projects, list_projects, project_activity, project_status, register_project, require_fleet_project, resolve_project, update_project_policy
+from .projects import assert_project_writable, fleet_activity, fleet_project_ids, get_project, list_fleet_projects, list_projects, project_activity, project_status, register_project, require_fleet_project, resolve_project
 from .protocol import MAX_MESSAGE_BYTES, decode_request, error_response, success_response
 from .research import (
     acknowledge_research,
@@ -37,7 +38,7 @@ from .research import (
     request_research,
     request_research_context,
 )
-from .runtime import WORKSPACE_RUNTIME_MISSING, prepare_session_switch, record_runtime_tool_failure, report_runtime, start_bound_agent, verify_runtime_binding
+from .runtime import WORKSPACE_RUNTIME_MISSING, prepare_runtime_turn, prepare_session_switch, record_runtime_tool_failure, report_runtime, start_bound_agent, verify_runtime_binding
 from .first_mate import ensure_first_mate, focus_first_mate
 from .secretary_git import git_status, inspect_workstream_changes, push_branch
 from .integration import apply_workstream_acceptance, inspect_integration, list_integrations, prepare_workstream_acceptance, reconcile_integrations
@@ -73,7 +74,7 @@ def _exact(payload: Mapping[str, Any], required: set[str], optional: set[str] = 
         raise InvalidRequestError("payload fields do not match the operation contract")
 
 
-_PUBLIC_PROJECT_FIELDS = ("project_id", "display_name", "default_ref", "data_dirs", "secretary_workstream_id", "coordination_mode", "worker_creation_policy", "worker_creation_policy_json", "merge_policy", "merge_policy_json", "active", "created_at", "updated_at", "deactivated_at")
+_PUBLIC_PROJECT_FIELDS = ("project_id", "display_name", "default_ref", "data_dirs", "external_domains", "secretary_workstream_id", "coordination_mode", "active", "lifecycle_attention_reason", "created_at", "updated_at", "deactivated_at")
 _PUBLIC_WORKSTREAM_FIELDS = (
     "workstream_id", "project_id", "kind", "title", "purpose", "brief", "harness_id", "workspace_adapter_id",
     "execution_profile", "target_ref", "base_commit_oid", "branch_name",
@@ -377,9 +378,7 @@ class BrokerDispatcher:
             with self.store_factory() as store:
                 for row in pending_research_wakes(store):
                     self._queue_research_wake(row["project_id"])
-                for row in store.conn.execute(
-                    "SELECT DISTINCT w.project_id FROM issue_inbox i JOIN workstreams w ON w.workstream_id=i.workstream_id WHERE i.generation>i.notified_generation"
-                ):
+                for row in store.conn.execute("SELECT DISTINCT project_id FROM attention_items"):
                     self._queue_research_wake(row["project_id"])
         except BaseException:
             logger.exception("could not queue durable notification wakes")
@@ -418,30 +417,16 @@ class BrokerDispatcher:
             project = store.conn.execute("SELECT coordination_mode FROM projects WHERE project_id=? AND active=1", (project_id,)).fetchone()
             if project is None or project["coordination_mode"] != "fleet":
                 return
-            issue = store.conn.execute(
-                "SELECT i.workstream_id,i.generation,r.workspace_surface_id FROM issue_inbox i JOIN workstreams w ON w.workstream_id=i.workstream_id JOIN runtime_bindings r ON r.workstream_id=w.workstream_id WHERE w.project_id=? AND w.desired_state='active' AND i.generation>i.notified_generation ORDER BY i.updated_at LIMIT 1",
-                (project_id,),
-            ).fetchone()
-            if issue is not None:
-                self.workspace.prompt_agent_nowait(issue["workspace_surface_id"], f"Pending Pisec remediation issue notification for project {project_id}; list and inspect issues through Pisec.")
-                with store.transaction():
-                    store.conn.execute("UPDATE issue_inbox SET notified_generation=?,updated_at=? WHERE workstream_id=? AND generation=?", (issue["generation"], utc_now(), issue["workstream_id"], issue["generation"]))
+            recipients = [dict(row) for row in store.conn.execute("SELECT workstream_id FROM workstreams WHERE project_id=? AND kind='secretary' AND desired_state='active'", (project_id,))]
+            recipients.extend(dict(row) for row in store.conn.execute("SELECT workstream_id FROM workstreams WHERE kind='first_mate' AND desired_state='active'"))
+            for recipient in recipients:
+                items = list_open_attention(store, recipient_workstream_id=recipient["workstream_id"], limit=1)
+                if not items:
+                    continue
+                binding = store.conn.execute("SELECT workspace_surface_id FROM runtime_bindings WHERE workstream_id=?", (recipient["workstream_id"],)).fetchone()
+                if binding is not None:
+                    self.workspace.prompt_agent_nowait(binding["workspace_surface_id"], ATTENTION_WAKE_PROMPT)
                 return
-            row = store.conn.execute(
-                "SELECT i.generation FROM research_inbox i JOIN workstreams w ON w.project_id=i.project_id AND w.kind='secretary' AND w.desired_state='active' JOIN runtime_bindings r ON r.workstream_id=w.workstream_id WHERE i.project_id=? AND i.generation>i.notified_generation ORDER BY w.created_at LIMIT 1",
-                (project_id,),
-            ).fetchone()
-            if row is None:
-                return
-            binding = store.conn.execute(
-                "SELECT workspace_surface_id FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE w.project_id=? AND w.kind='secretary' AND w.desired_state='active' LIMIT 1",
-                (project_id,),
-            ).fetchone()
-            if binding is None:
-                return
-            text = f"Pending worker research for project {project_id}; generation {int(row['generation'])}. List all pending requests through Pisec."
-            self.workspace.prompt_agent_nowait(binding["workspace_surface_id"], text)
-            mark_research_wake_notified(store, project_id, int(row["generation"]))
 
     def _defer_reconcile(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         try:
@@ -524,16 +509,8 @@ class BrokerDispatcher:
     def _runtime(self, store: PiStore, operation: str, payload: dict[str, Any]) -> Any:
         auth_fields = {"workstreamId", "runtimeInstanceId", "surfaceId", "token", "generation"}
         if operation == "runtime.turn.prepare":
-            _exact(payload, auth_fields)
-            binding = verify_runtime_binding(store, payload)
-            with store.transaction():
-                prepared = store.conn.execute(
-                    "UPDATE runtime_bindings SET observed_state='working',updated_at=? WHERE workstream_id=? AND runtime_instance_id=? AND refresh_pending=0",
-                    (utc_now(), binding["workstream_id"], binding["runtime_instance_id"]),
-                ).rowcount
-            if prepared != 1:
-                raise PisecError("runtime is reserved for a generation refresh")
-            return {"prepared": True}
+            _exact(payload, auth_fields | {"sessionKey"})
+            return prepare_runtime_turn(store, payload)
         if operation == "session.switch.prepare":
             _exact(payload, auth_fields | {"reason", "targetSessionFile"})
             return prepare_session_switch(store, payload, self._harness_for_workstream(store, str(payload["workstreamId"])))
@@ -543,6 +520,15 @@ class BrokerDispatcher:
         binding = verify_runtime_binding(store, payload, worker_only=True)
         project_id = str(binding["project_id"])
         workstream_id = str(binding["workstream_id"])
+        if operation == "attention.list":
+            _exact(payload, auth_fields, {"limit"})
+            return {"items": list_open_attention(store, recipient_workstream_id=workstream_id, limit=int(payload.get("limit", 32)))}
+        if operation == "attention.inspect":
+            _exact(payload, auth_fields | {"attentionId"})
+            row = store.conn.execute("SELECT * FROM attention_items WHERE attention_id=? AND recipient_workstream_id=?", (payload["attentionId"], workstream_id)).fetchone()
+            if row is None:
+                raise NotFoundError("attention item was not found")
+            return dict(row)
         if operation in {"issue.report", "secretary.issue.report"}:
             _exact(payload, auth_fields | {"category", "severity", "summary", "details", "requestedAction", "evidence", "idempotencyKey"})
             return report_issue(store, project_id=project_id, reporter_workstream_id=workstream_id, category=payload["category"], severity=payload["severity"], summary=payload["summary"], details=payload["details"], requested_action=payload["requestedAction"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
@@ -567,36 +553,9 @@ class BrokerDispatcher:
             from .access import effective_runtime_scope
             scope = effective_runtime_scope(store, binding)
             return {"workstreamId": workstream_id, "readPaths": [{"path": path, "sources": scope.get("readPathSources", {}).get(path, [])} for path in scope.get("dataDirs", [])], "pythonEnv": scope.get("pythonEnv")}
-        if operation == "runtime.bootstrap.get":
-            _exact(payload, auth_fields | {"sessionFile"})
-            session_file = str(payload["sessionFile"])
-            packet = get_task_packet(store, project_id, workstream_id)
-            from .access import effective_runtime_scope
-            scope = effective_runtime_scope(store, binding)
-            runtime_scope = {"pythonEnv": scope.get("pythonEnv"), "readPaths": [{"path": path, "sources": scope.get("readPathSources", {}).get(path, [])} for path in scope.get("dataDirs", [])]}
-            row = store.conn.execute("SELECT * FROM runtime_bootstrap_sessions WHERE workstream_id=? AND session_file=?", (workstream_id, session_file)).fetchone()
-            full = row is None
-            if row is None:
-                now = utc_now()
-                with store.transaction():
-                    store.conn.execute("INSERT INTO runtime_bootstrap_sessions(workstream_id,session_file,task_packet_delivered,bootstrap_generation,acknowledged_generation,last_event_sequence,updated_at) VALUES(?,?,0,1,0,0,?)", (workstream_id, session_file, now))
-                row = store.conn.execute("SELECT * FROM runtime_bootstrap_sessions WHERE workstream_id=? AND session_file=?", (workstream_id, session_file)).fetchone()
-            if row is None:
-                raise PisecError("runtime bootstrap session could not be created")
-            full = full or not bool(row["task_packet_delivered"])
-            latest_event = store.conn.execute("SELECT COALESCE(MAX(sequence),0) FROM events WHERE workstream_id=?", (workstream_id,)).fetchone()[0]
-            changed = int(latest_event) > int(row["last_event_sequence"])
-            if full:
-                return {"sessionFile": session_file, "generation": row["bootstrap_generation"], "fullPacket": packet, "runtimeScope": runtime_scope, "changed": True}
-            return {"sessionFile": session_file, "generation": row["bootstrap_generation"], "fullPacket": None, "runtimeScope": runtime_scope, "changed": bool(changed), "coordination": [], "research": []}
-        if operation == "runtime.bootstrap.ack":
-            _exact(payload, auth_fields | {"sessionFile", "generation"})
-            with store.transaction():
-                store.conn.execute("UPDATE runtime_bootstrap_sessions SET task_packet_delivered=1,acknowledged_generation=?,last_event_sequence=(SELECT COALESCE(MAX(sequence),0) FROM events WHERE workstream_id=?),updated_at=? WHERE workstream_id=? AND session_file=?", (int(payload["generation"]), workstream_id, utc_now(), workstream_id, str(payload["sessionFile"])))
-            return {"acknowledged": True, "generation": int(payload["generation"])}
         if operation == "workstream.checkpoint":
-            _exact(payload, auth_fields | {"idempotencyKey", "phase", "summary", "nextAction", "evidence"}, {"blockerCode", "blocker", "completionPacket"})
-            result = checkpoint(store, workstream_id=workstream_id, runtime_instance_id=str(payload["runtimeInstanceId"]), phase=payload["phase"], summary=payload["summary"], next_action=payload["nextAction"], blocker_code=payload.get("blockerCode"), blocker=payload.get("blocker"), evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"], completion_packet=payload.get("completionPacket"))
+            _exact(payload, auth_fields | {"idempotencyKey", "phase", "summary", "nextAction", "evidence"}, {"remediationIssueId"})
+            result = checkpoint(store, workstream_id=workstream_id, runtime_instance_id=str(payload["runtimeInstanceId"]), phase=payload["phase"], summary=payload["summary"], next_action=payload["nextAction"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"], remediation_issue_id=payload.get("remediationIssueId"))
             return {"checkpoint": result}
         if operation == "workstream.completion.submit":
             _exact(payload, auth_fields | {"completionPacket"})
@@ -722,21 +681,8 @@ class BrokerDispatcher:
 
     def _admin(self, store: PiStore, operation: str, payload: dict[str, Any]) -> Any:
         if operation == "project.register":
-            _exact(payload, {"path"}, {"displayName", "defaultRef", "dataDirs"})
-            return _public_project(register_project(store, payload["path"], display_name=payload.get("displayName"), default_ref=payload.get("defaultRef"), data_dirs=payload.get("dataDirs")))
-        if operation == "project.policy.update":
-            _exact(payload, {"project"}, {"coordinationMode", "workerCreationPolicy", "workerCreationPolicyJson", "mergePolicy", "mergePolicyJson"})
-            with self._reconcile_lock:
-                project = update_project_policy(
-                    store,
-                    str(payload["project"]),
-                    coordination_mode=payload.get("coordinationMode"),
-                    worker_creation_policy=payload.get("workerCreationPolicy"),
-                    worker_creation_policy_json=payload.get("workerCreationPolicyJson"),
-                    merge_policy=payload.get("mergePolicy"),
-                    merge_policy_json=payload.get("mergePolicyJson"),
-                )
-            return _public_project(project)
+            _exact(payload, {"path"}, {"displayName", "defaultRef", "dataDirs", "externalDomains"})
+            return _public_project(register_project(store, payload["path"], display_name=payload.get("displayName"), default_ref=payload.get("defaultRef"), data_dirs=payload.get("dataDirs"), external_domains=payload.get("externalDomains")))
         if operation == "project.list":
             _exact(payload, set(), {"includeInactive"})
             include_inactive = payload.get("includeInactive") is True
@@ -771,8 +717,8 @@ class BrokerDispatcher:
                 "projects": every_project if include_inactive else active_projects,
                 "inactiveProjects": [row for row in every_project if not row.get("active")],
                 "firstMate": _first_mate_summary(store),
-                "schema": "pisec-core",
-                "version": 16,
+                "schema": "pisec-core-v1",
+                "version": 1,
                 "operationContracts": operation_manifest(),
             }
         if operation == "project.open":
@@ -801,12 +747,6 @@ class BrokerDispatcher:
                 "retainedSessionRoot": result.get("retainedSessionRoot"),
                 "reused": bool(result.get("reused", False)),
             }
-        if operation == "project.activate":
-            _exact(payload, {"project"})
-            from .projects import activate_project
-            result = activate_project(store, str(payload["project"]))
-            project = get_project(store, result["projectId"])
-            return {"project": _public_project(project), "reused": bool(result.get("reused", False))}
         if operation == "runtime.ensure":
             _exact(payload, {"workstreamId"}, {"waitSeconds"})
             workstream_id = str(payload["workstreamId"])
@@ -893,6 +833,15 @@ class BrokerDispatcher:
         raise InvalidRequestError("unsupported admin operation")
 
     def _secretary(self, store: PiStore, operation: str, project_id: str, secretary_workstream_id: str, payload: dict[str, Any]) -> Any:
+        if operation == "attention.list":
+            _exact(payload, set(), {"limit"})
+            return {"items": list_open_attention(store, recipient_workstream_id=secretary_workstream_id, limit=int(payload.get("limit", 32)))}
+        if operation == "attention.inspect":
+            _exact(payload, {"attentionId"})
+            row = store.conn.execute("SELECT * FROM attention_items WHERE attention_id=? AND recipient_workstream_id=?", (payload["attentionId"], secretary_workstream_id)).fetchone()
+            if row is None:
+                raise NotFoundError("attention item was not found")
+            return dict(row)
         if operation not in {"project.status", "project.activity", "issue.list", "issue.inspect", "git.status", "git.workstream_changes", "workstream.list", "workstream.inspect", "workstream.accept.prepare", "integration.list", "integration.inspect", "coordination.list", "coordination.inspect", "decision.list", "research.list", "research.inspect"}:
             assert_project_writable(store, project_id)
         if operation == "project.status":
@@ -1078,6 +1027,19 @@ class BrokerDispatcher:
         return str(require_fleet_project(store, project_id)["project_id"])
 
     def _fleet(self, store: PiStore, operation: str, first_mate_workstream_id: str, payload: dict[str, Any]) -> Any:
+        if operation == "attention.list":
+            _exact(payload, set(), {"limit", "projectId"})
+            recipients = [first_mate_workstream_id]
+            items = []
+            for recipient in recipients:
+                items.extend(list_open_attention(store, recipient_workstream_id=recipient, limit=int(payload.get("limit", 32))))
+            return {"items": items}
+        if operation == "attention.inspect":
+            _exact(payload, {"attentionId"})
+            row = store.conn.execute("SELECT * FROM attention_items WHERE attention_id=? AND recipient_workstream_id=?", (payload["attentionId"], first_mate_workstream_id)).fetchone()
+            if row is None:
+                raise NotFoundError("attention item was not found")
+            return dict(row)
         if operation == "fleet.activity":
             _exact(payload, set(), {"after"})
             return fleet_activity(store, int(payload.get("after", 0)))

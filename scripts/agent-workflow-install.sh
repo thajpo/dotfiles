@@ -377,7 +377,7 @@ from pathlib import Path
 import os
 import sqlite3
 
-from scripts.pisec.pi_schema import PREVIOUS_SCHEMA_DIGEST, PREVIOUS_SCHEMA_NAME, PREVIOUS_SCHEMA_VERSION, PREVIOUS_MIGRATION_NAME, SCHEMA_NAME, SCHEMA_VERSION, schema_digest
+from scripts.pisec.pi_schema import SCHEMA_NAME, SCHEMA_VERSION, schema_digest
 
 root = Path(os.environ["PISEC_STATE_CHECK_ROOT"])
 if not root.exists() and not root.is_symlink():
@@ -392,20 +392,12 @@ connection = None
 try:
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=2.0)
     columns = {item[1] for item in connection.execute("PRAGMA table_info(control_meta)")}
-    if columns == {"singleton", "schema_name", "schema_version", "schema_sha256", "created_at"}:
-        row = connection.execute("SELECT schema_name,schema_version,schema_sha256 FROM control_meta WHERE singleton=1").fetchone()
-        if row == (SCHEMA_NAME, SCHEMA_VERSION, schema_digest()):
-            print("current")
-        else:
-            print("stale")
-            raise SystemExit(2)
-    elif columns == {"singleton", "schema_name", "schema_version", "schema_sha256", "migration_name", "created_at"}:
-        row = connection.execute("SELECT schema_name,schema_version,schema_sha256,migration_name FROM control_meta WHERE singleton=1").fetchone()
-        if row == (PREVIOUS_SCHEMA_NAME, PREVIOUS_SCHEMA_VERSION, PREVIOUS_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME):
-            print("migratable")
-        else:
-            print("stale")
-            raise SystemExit(2)
+    if columns != {"singleton", "schema_name", "schema_version", "schema_sha256", "created_at"}:
+        print("stale")
+        raise SystemExit(2)
+    row = connection.execute("SELECT schema_name,schema_version,schema_sha256 FROM control_meta WHERE singleton=1").fetchone()
+    if row == (SCHEMA_NAME, SCHEMA_VERSION, schema_digest()):
+        print("current")
     else:
         print("stale")
         raise SystemExit(2)

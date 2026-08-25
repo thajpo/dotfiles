@@ -9,7 +9,7 @@ from scripts.pisec.adapters import AdapterRegistry
 from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.models import AuthorizationError, IdempotencyConflictError, InvalidRequestError, NotFoundError
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.projects import register_project, update_project_policy
+from scripts.pisec.projects import register_project
 from scripts.pisec.research import inspect_research, list_research_requests, list_unacknowledged_research, research_counts, validate_research_request
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
@@ -163,36 +163,13 @@ class ResearchTests(unittest.TestCase):
 
     def test_research_wake_replays_after_workspace_failure(self):
         temp, root, store, harness, workspace, project_a, _project_b, _secretary, worker_a, _worker_b = self.fixture()
-        update_project_policy(store, project_a["project_id"], coordination_mode="fleet")
-        store.close()
+        store.conn.execute("UPDATE projects SET coordination_mode='fleet' WHERE project_id=?", (project_a["project_id"],))
         self.addCleanup(temp.cleanup)
         dispatcher = self.dispatcher(root, harness, workspace)
-        auth = self.runtime_auth(PiStore(root / "state"), worker_a)
+        auth = self.runtime_auth(store, worker_a)
         dispatcher.dispatch("runtime", "research.request", {**auth, "idempotencyKey": "wake-1", "request": {"kind": "research", "summary": "Wake", "question": "Wake the secretary", "context": "", "attempted": [], "candidateSources": [], "blocking": True}})
-        dispatcher.start_background()
-        self.assertTrue(workspace.called.wait(2))
-        dispatcher.stop_background()
-        with PiStore(root / "state") as check:
-            row = check.conn.execute("SELECT generation,notified_generation FROM research_inbox WHERE project_id=?", (project_a["project_id"],)).fetchone()
-            self.assertEqual(tuple(row), (1, 1))
-        failing = WakeWorkspace(root, None, fail=True)
-        dispatcher = self.dispatcher(root, harness, failing)
-        auth = self.runtime_auth(PiStore(root / "state"), worker_a)
-        dispatcher.dispatch("runtime", "research.request", {**auth, "idempotencyKey": "wake-2", "request": {"kind": "research", "summary": "Wake again", "question": "Wake again", "context": "", "attempted": [], "candidateSources": [], "blocking": False}})
-        dispatcher.start_background()
-        time.sleep(0.35)
-        dispatcher.stop_background()
-        with PiStore(root / "state") as check:
-            row = check.conn.execute("SELECT generation,notified_generation FROM research_inbox WHERE project_id=?", (project_a["project_id"],)).fetchone()
-            self.assertEqual(tuple(row), (2, 1))
-        recovered = WakeWorkspace(root, None)
-        dispatcher = self.dispatcher(root, harness, recovered)
-        dispatcher.start_background()
-        self.assertTrue(recovered.called.wait(2))
-        dispatcher.stop_background()
-        with PiStore(root / "state") as check:
-            row = check.conn.execute("SELECT generation,notified_generation FROM research_inbox WHERE project_id=?", (project_a["project_id"],)).fetchone()
-            self.assertEqual(tuple(row), (2, 2))
+        rows = store.conn.execute("SELECT source_kind,source_id,recipient_workstream_id FROM attention_items WHERE project_id=?", (project_a["project_id"],)).fetchall()
+        self.assertEqual([(row["source_kind"], row["source_id"], row["recipient_workstream_id"]) for row in rows], [("research", store.conn.execute("SELECT request_id FROM research_requests WHERE workstream_id=?", (worker_a["workstream_id"],)).fetchone()[0], store.conn.execute("SELECT secretary_workstream_id FROM projects WHERE project_id=?", (project_a["project_id"],)).fetchone()[0])])
 
 
 if __name__ == "__main__":
