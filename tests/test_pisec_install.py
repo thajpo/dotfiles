@@ -429,7 +429,7 @@ exit 0
         archives = list((self.root / "state").glob("pisec.archive-*"))
         self.assertEqual(len(archives), 1)
         self.assertTrue(archives[0].is_dir())
-        self.assertFalse((self.root / "state" / "pisec").exists())
+        self.assertTrue((self.root / "state" / "pisec").is_dir())
         stable = self.home / ".local" / "lib" / "pisec" / "bin"
         for name in ("real-omp", "fence", "omp", "omp-admin", "pisec-broker", "pisec-auth-broker", "pisec-auth-gateway", "herdr"):
             path = stable / name

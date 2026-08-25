@@ -233,12 +233,6 @@ transaction_rollback() {
     done
     rm -rf -- "$INSTALL_TRANSACTION_ROOT"
     INSTALL_TRANSACTION_ACTIVE=0
-    if [[ -n "$INSTALL_RESET_STATE_ARCHIVE" && -d "$INSTALL_RESET_STATE_ARCHIVE" ]]; then
-      rm -rf -- "$INSTALL_RESET_STATE_ROOT"
-      mkdir -p "$(dirname "$INSTALL_RESET_STATE_ROOT")"
-      cp -a -- "$INSTALL_RESET_STATE_ARCHIVE" "$INSTALL_RESET_STATE_ROOT"
-      chmod 0700 "$INSTALL_RESET_STATE_ROOT"
-    fi
     for unit in "${INSTALL_TRANSACTION_LEGACY_SERVICES[@]}"; do
       systemctl --user enable --now "$unit" >/dev/null 2>&1 || true
     done
@@ -419,26 +413,6 @@ stop_for_pisec_services() {
       systemctl --user disable "$unit" >/dev/null 2>&1 || true
     fi
   done
-}
-
-archive_and_reset_pisec_state() {
-  local root="$1"
-  INSTALL_RESET_STATE_ROOT="$root"
-  stop_for_pisec_services
-  if [[ ! -e "$root" && ! -L "$root" ]]; then
-    printf 'reset: no existing Pisec state at %s\n' "$root"
-    return
-  fi
-  local archive="${root}.archive-$(date -u +%Y%m%dT%H%M%SZ)"
-  local suffix=0
-  while [[ -e "$archive" || -L "$archive" ]]; do
-    suffix=$((suffix + 1))
-    archive="${root}.archive-$(date -u +%Y%m%dT%H%M%SZ)-$suffix"
-  done
-  mv -- "$root" "$archive"
-  chmod 0700 "$archive"
-  INSTALL_RESET_STATE_ARCHIVE="$archive"
-  printf 'archive: %s\n' "$archive"
 }
 
 collie_plugin_state() {
@@ -813,9 +787,6 @@ PY
   if [[ "$state_epoch_status" -ne 0 && ( "$RESET_PISEC_STATE" -eq 0 || "$state_epoch_status" -ne 2 ) ]]; then
     die "existing Pisec state is unsafe or has an unsupported schema; rerun with --reset-pisec-state only after reviewing the state"
   fi
-  if [[ "$RESET_PISEC_STATE" -eq 1 ]]; then
-    archive_and_reset_pisec_state "$pisec_state"
-  fi
   stage_treehouse
   printf 'ok: real OMP %s\n' "$REAL_OMP_PATH"
   printf 'ok: %s\n' "$herdr_version"
@@ -1092,7 +1063,13 @@ fi
 verify_collie_surface
 
 printf '\nInstalling and refreshing the deployed Pisec runtime\n'
-if ! update_output="$(python3 "$HOME/.local/bin/pisec" --json update --commit HEAD --wait-seconds 300)"; then
+if [[ "$RESET_PISEC_STATE" -eq 1 ]]; then
+  systemctl --user stop pisec-broker.service >/dev/null 2>&1 || die "unable to quiesce Pisec broker for archive/reset"
+  update_command=(python3 "$PISC_BIN_DIR/pisec-update" --archive-reset-state --repo "$DOTFILES_DIR" --ref HEAD --wait-seconds 300 --json)
+else
+  update_command=(python3 "$HOME/.local/bin/pisec" --json update --commit HEAD --wait-seconds 300)
+fi
+if ! update_output="$("${update_command[@]}")"; then
   printf '%s\n' "$update_output" >&2
   die "Pisec runtime update could not run"
 fi
