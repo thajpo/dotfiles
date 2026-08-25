@@ -328,7 +328,7 @@ def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdap
     if not ready:
         with store.transaction():
             now = utc_now()
-            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=?,session_start_event_sequence=NULL,session_start_report_seq=NULL,session_started_at=NULL,observed_state='starting',updated_at=? WHERE workstream_id=?", (desired_generation, now, scope["workstreamId"]))
+            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,applied_generation_sha256=?,launch_generation_sha256=NULL,session_start_event_sequence=NULL,session_start_report_seq=NULL,session_started_at=NULL,observed_state='starting',updated_at=? WHERE workstream_id=?", (desired_generation, now, scope["workstreamId"]))
         start_error: Exception | None = None
         try:
             start_bound_agent(
@@ -661,7 +661,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         with store.transaction():
             store.conn.execute(
                 "INSERT INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (existing["workstream_id"], workspace.manifest.adapter_id, workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), None, None, artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
+                (existing["workstream_id"], workspace.manifest.adapter_id, workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), None, None, artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, artifacts.generation_sha256, None, None, "starting", 0, 0, None, now),
             )
             _checkpoint(store, operation["operation_id"], "binding_committed")
         _hit(failpoint, "after_secretary_binding_commit", scope)

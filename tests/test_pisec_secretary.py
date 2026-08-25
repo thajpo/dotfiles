@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.models import NeedsAttentionError, PisecError, canonical_json
@@ -23,6 +24,31 @@ class CrashOnce:
 
 
 class SecretaryTests(unittest.TestCase):
+    def test_initial_secretary_binding_uses_applied_generation_for_session_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                captured = []
+
+                def launch(*args, **kwargs):
+                    del args, kwargs
+                    workstream_id = store.conn.execute("SELECT workstream_id FROM workstreams WHERE project_id=? AND kind='secretary'", (project["project_id"],)).fetchone()[0]
+                    binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()
+                    captured.append((binding["applied_generation_sha256"], binding["launch_generation_sha256"]))
+                    workspace.start_agent(binding["workspace_surface_id"], binding["agent_name"], harness.manifest.agent_kind)
+
+                with patch("scripts.pisec.secretary.start_bound_agent", side_effect=launch):
+                    ensure_secretary(store, project["project_id"], harness, workspace)
+
+                self.assertEqual(len(captured), 1)
+                self.assertIsNotNone(captured[0][0])
+                self.assertIsNone(captured[0][1], captured)
+
     def test_fleet_secretary_is_a_tab_in_first_mate_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
