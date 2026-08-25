@@ -103,7 +103,7 @@ CREATE TABLE runtime_bindings (
     session_start_report_seq INTEGER CHECK(session_start_report_seq IS NULL OR session_start_report_seq > 0),
     session_started_at TEXT,
     runtime_instance_id TEXT,
-    observed_state TEXT NOT NULL CHECK(observed_state IN ('unknown','starting','working','blocked','idle','done','stopped','missing','error')),
+    observed_state TEXT NOT NULL CHECK(observed_state IN ('unknown','starting','working','blocked','idle','stopped','missing','error')),
     report_seq INTEGER NOT NULL DEFAULT 0 CHECK(report_seq >= 0),
     workspace_report_seq INTEGER NOT NULL DEFAULT 0 CHECK(workspace_report_seq >= 0),
     last_observed_at TEXT,

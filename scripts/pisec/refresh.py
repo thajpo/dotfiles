@@ -168,7 +168,7 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
         observation = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
         if observation.state == "unknown":
             raise NeedsAttentionError("runtime process identity is ambiguous before refresh reservation")
-        if observation.state == "live" and binding.get("observed_state") not in {"idle", "stopped", "done"}:
+        if observation.state == "live" and binding.get("observed_state") not in {"idle", "stopped"}:
             raise ConflictError("runtime became busy before refresh reservation")
     with store.transaction():
         operation = store.conn.execute("SELECT * FROM operations WHERE idempotency_key=?", (key,)).fetchone()
@@ -191,7 +191,7 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
         if current["refresh_pending"] and current["refresh_operation_id"] is None:
             raise NeedsAttentionError("runtime binding has an ownerless refresh reservation")
         cursor = store.conn.execute(
-            "UPDATE runtime_bindings SET refresh_pending=1,refresh_operation_id=?,refresh_started_at=?,launch_generation_sha256=?,updated_at=? WHERE workstream_id=? AND refresh_pending=0 AND observed_state IN ('idle','stopped','done') AND desired_generation_sha256=? AND runtime_instance_id IS ? AND report_seq=? AND applied_generation_sha256 IS ? AND launch_generation_sha256 IS ?",
+            "UPDATE runtime_bindings SET refresh_pending=1,refresh_operation_id=?,refresh_started_at=?,launch_generation_sha256=?,updated_at=? WHERE workstream_id=? AND refresh_pending=0 AND observed_state IN ('idle','stopped') AND desired_generation_sha256=? AND runtime_instance_id IS ? AND report_seq=? AND applied_generation_sha256 IS ? AND launch_generation_sha256 IS ?",
             (operation_id, now, desired, now, workstream_id, desired, binding.get("runtime_instance_id"), binding.get("report_seq"), binding.get("applied_generation_sha256"), binding.get("launch_generation_sha256")),
         )
         if cursor.rowcount != 1 and not (int(current["refresh_pending"]) and current["refresh_operation_id"] == operation_id):
@@ -204,7 +204,7 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
     if runtime.state == "unknown":
         raise NeedsAttentionError("runtime process identity is ambiguous")
     if runtime.state == "live":
-        if binding["observed_state"] not in {"idle", "stopped", "done"}:
+        if binding["observed_state"] not in {"idle", "stopped"}:
             return {"pending": True, "reason": f"runtime is {binding['observed_state']}"}
         _reserve_refresh(store, binding, desired, workspace)
         workspace.stop_runtime(str(binding["workspace_surface_id"]))
@@ -252,7 +252,7 @@ def refresh_runtimes(store: Any, harness: HarnessAdapter, workspace: WorkspaceAd
             try:
                 surface = operation_surface(str(binding["harness_id"]))
                 runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
-                if runtime.state == "live" and binding["observed_state"] not in {"idle", "stopped", "done"}:
+                if runtime.state == "live" and binding["observed_state"] not in {"idle", "stopped"}:
                     result["pending"].append(_item(binding, desired, state=str(binding["observed_state"])))
                     next_remaining.append(workstream_id)
                     continue
@@ -308,7 +308,7 @@ def ensure_runtime(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdap
                 return {"workstreamId": workstream_id, "action": "already_live", "state": "live", "generation": desired, "reason": None}
             return {"workstreamId": workstream_id, "action": "startup_in_progress", "state": "starting", "generation": desired, "reason": "startup attestation is still pending"}
         if runtime.state == "live":
-            if binding["observed_state"] not in {"idle", "done", "stopped"}:
+            if binding["observed_state"] not in {"idle", "stopped"}:
                 return {"workstreamId": workstream_id, "action": "pending_refresh", "state": str(binding["observed_state"]), "generation": desired, "reason": "runtime is busy"}
             refreshed = refresh_runtimes(store, harness, workspace, wait_seconds=wait_seconds, harness_resolver=harness_resolver, surface_resolver=lambda harness_id: surface_cache.get(str(harness_id), surface), workstream_ids=(workstream_id,))
             if refreshed["upgraded"]:

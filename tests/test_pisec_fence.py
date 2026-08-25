@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from scripts.pisec.adapters import RuntimeSurfaceArtifacts, artifact_document
 from scripts.pisec.fence import render_policy
-from scripts.pisec.models import AuthorizationError, ConflictError, NeedsAttentionError, new_id
+from scripts.pisec.models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, new_id
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
 from scripts.pisec.runtime import report_runtime
@@ -859,6 +859,12 @@ class RuntimeReportTests(unittest.TestCase):
         self.assertEqual([call[0] for call in self.workspace.calls if call[0] in {"report_session", "report_state", "release"}], ["report_session", "report_state", "report_state", "release"])
         with self.assertRaises(ConflictError):
             report_runtime(self.store, self.payload(seq=2, event="lifecycle", state="idle", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
+
+    def test_done_is_not_an_authenticated_pisec_runtime_state(self):
+        report_runtime(self.store, self.payload(), self.harness, self.workspace)
+        with self.assertRaises(InvalidRequestError):
+            report_runtime(self.store, self.payload(seq=2, event="lifecycle", state="done", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
+        self.assertEqual(self.store.conn.execute("SELECT observed_state FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()[0], "starting")
 
     def test_token_surface_instance_and_session_scope_fail_closed(self):
         for changes in ({"token": "x" * 48}, {"surfaceId": "other"}, {"nativeSessionValue": "/tmp/escape"}):

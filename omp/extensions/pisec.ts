@@ -5,7 +5,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { PISEC_OPERATION_CATALOGUE } from "./pisec-operation-catalogue.generated";
 
 type JsonObject = Record<string, unknown>;
-type RuntimeState = "starting" | "working" | "blocked" | "idle" | "done" | "stopped" | "missing" | "error" | "unknown";
+type RuntimeState = "starting" | "working" | "blocked" | "idle" | "stopped" | "missing" | "error" | "unknown";
 type SessionSwitchReason = "new" | "resume" | "fork" | "handoff";
 type SessionReference = { kind: "path" | "id" | null; value: string | null };
 type RuntimeContext = { hasUI: boolean; sessionManager: { getSessionFile?: () => string | undefined } };

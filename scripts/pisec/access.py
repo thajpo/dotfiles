@@ -118,7 +118,7 @@ def authorize_apply_project_permissions(store: Any, *, approval_scope: Mapping[s
     surfaces: dict[str, Any] = {}
     try:
         for binding in bindings:
-            if int(binding.get("refresh_pending", 0)) or binding.get("observed_state") not in {"idle", "stopped", "done"}:
+            if int(binding.get("refresh_pending", 0)) or binding.get("observed_state") not in {"idle", "stopped"}:
                 raise ConflictError("project permission replacement requires every affected runtime to be idle or stopped", detail={"workstreamId": binding["workstream_id"]})
             workstream_id = str(binding["workstream_id"])
             selected_harness = harness_resolver(workstream_id) if callable(harness_resolver) else harness_resolver
