@@ -38,6 +38,12 @@ class PisecCliTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser().parse_args(["secretary", "ensure", "demo"])
 
+    def test_reconcile_allows_the_full_live_project_set_to_converge(self):
+        with patch("scripts.pisec.cli._call", return_value={"reconciled": True}) as call:
+            result = main(["reconcile", "--json"])
+        self.assertEqual(result, 0)
+        call.assert_called_once_with("system.reconcile", {}, timeout=300.0)
+
     def test_status_has_human_readable_default(self):
         output = format_result(
             ("status",),

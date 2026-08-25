@@ -546,7 +546,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "status":
             result = _call("system.status", {} if args.project is None else {"project": args.project})
         elif args.command == "reconcile":
-            result = _call("system.reconcile", {})
+            result = _call("system.reconcile", {}, timeout=300.0)
         elif args.command == "board":
             result = _call("fleet.activity", {})
         elif args.command == "doctor":
