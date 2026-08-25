@@ -563,6 +563,7 @@ class OmpHarnessAdapter:
                 "schemaVersion": 1,
                 "adapter": self.manifest.adapter_id,
                 "adapterVersion": self.manifest.version_label,
+                "interfaceVersion": 1,
                 "config": self.config,
                 "userContext": user_context,
                 "harnessExecutableSha256": _file_digest(Path(self.harness_config["executablePath"])),

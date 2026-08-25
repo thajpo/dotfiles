@@ -217,6 +217,7 @@ class CodexHarnessAdapter:
                 "schemaVersion": 1,
                 "adapter": self.manifest.adapter_id,
                 "adapterVersion": self.manifest.version_label,
+                "interfaceVersion": 1,
                 "config": {"harnesses": {"codex": self.harness_config}},
                 "harnessExecutableSha256": _codex_file_digest(Path(executable_path)),
                 "nodeExecutableSha256": _codex_file_digest(Path(node_path)),

@@ -340,7 +340,7 @@ class FixtureWorkspace:
         self._runtime_counter += 1
         runtime_instance = f"fixture-runtime-{self._runtime_counter}-{secrets.token_hex(4)}"
         def attest(store: Any) -> None:
-            row = store.conn.execute("SELECT workstream_id,project_id,desired_generation_sha256,launch_generation_sha256 FROM runtime_bindings WHERE workspace_surface_id=?", (surface_id,)).fetchone()
+            row = store.conn.execute("SELECT r.workstream_id,w.project_id,r.desired_generation_sha256,r.launch_generation_sha256 FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workspace_surface_id=?", (surface_id,)).fetchone()
             if row is None:
                 return
             generation = row["launch_generation_sha256"] or row["desired_generation_sha256"]
