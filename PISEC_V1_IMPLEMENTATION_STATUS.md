@@ -24,3 +24,7 @@
   - Commit OID: `f4d6845`
   - Checks: `python3 -m unittest discover -s tests -q` passed (200, 1 skipped, Linux-capable run); adjacent Phase 6/Herdr/install/fence/adapter/project/CLI suite passed (73); `bun test omp/extensions/pisec.test.ts` passed (7/7); `python3 -m compileall -q scripts tests` passed; operation catalogue `--check` passed; `git diff --check` passed; stale config/range audit passed; no live-state cutover performed.
   - Current blocker: none.
+- Phase 7 status: complete; obsolete deployment/release/migration/launchd/probe surfaces and tests removed, current refusal/archive-reset coverage retained, active routing and archive warnings cleaned up, and obsolete active terminology removed.
+  - Commit OID: `a277a67`
+  - Checks: `python3 -m unittest discover -s tests -q` passed (196, 1 skipped, Linux-capable run); `bun test omp/extensions/pisec.test.ts` passed (7/7); `python3 -m compileall -q scripts tests` passed; operation catalogue `--check` passed; `bash -n scripts/pisec-macos-install.sh` passed; macOS stub exited 1 without probe reference or home mutation path; exact deletion/import/reference/archive/inventory audits passed; `git diff --check` passed; no live-state cutover performed.
+  - Current blocker: none.
