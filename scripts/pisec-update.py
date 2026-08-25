@@ -995,7 +995,8 @@ def recover_previous(state_root: Path, install_root: Path, wait_seconds: float) 
 
 
 def _paths_from_environment() -> tuple[Path, Path]:
-    state_root = Path(os.environ.get("PISEC_STATE_ROOT", Path.home() / ".local" / "state" / "pisec")).expanduser()
+    default_state_root = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "pisec"
+    state_root = Path(os.environ.get("PISEC_STATE_ROOT", default_state_root)).expanduser()
     install_root = Path(os.environ.get("PISEC_INSTALL_ROOT", Path.home() / ".local" / "lib" / "pisec")).expanduser()
     return state_root, install_root
 
