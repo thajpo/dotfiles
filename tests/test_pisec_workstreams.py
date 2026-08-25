@@ -216,6 +216,19 @@ class WorkstreamTests(unittest.TestCase):
                     store.close()
                     temp.cleanup()
 
+    def test_worker_replay_reuses_persisted_surface_snapshot(self):
+        temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
+        self.addCleanup(temp.cleanup)
+        self.addCleanup(store.close)
+        prepared = self.prepare(root, store, project, harness, workspace, key="surface-replay")
+        with self.assertRaises(RuntimeError):
+            self.apply(prepared, store, harness, workspace, git_objects, failpoint=CrashOnce("after_worker_repo_creation"))
+        self.assertEqual(harness.surface_calls, 2)
+        (root / "runtime-surface" / "changed.txt").write_text("changed\n")
+        with self.assertRaises(NeedsAttentionError):
+            self.apply(prepared, store, harness, workspace, git_objects)
+        self.assertEqual(harness.surface_calls, 2)
+
     def test_ready_checkpoint_submits_completion_automatically(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
         self.addCleanup(temp.cleanup)

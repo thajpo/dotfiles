@@ -107,7 +107,7 @@ class RuntimeSurfaceArtifacts:
         version_label = manifest.get("adapterVersion")
         if not isinstance(adapter_id, str) or ADAPTER_ID_RE.fullmatch(adapter_id) is None:
             raise InvalidRequestError("runtime surface manifest adapter is invalid")
-        if isinstance(interface_version, bool) or interface_version != 1:
+        if isinstance(interface_version, bool) or not isinstance(interface_version, int) or interface_version != 1:
             raise InvalidRequestError("runtime surface manifest interface version must be 1")
         if not isinstance(version_label, str) or not version_label:
             raise InvalidRequestError("runtime surface manifest adapter version is invalid")

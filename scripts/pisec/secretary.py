@@ -213,7 +213,7 @@ def _surface_from_scope(scope: Mapping[str, Any]) -> RuntimeSurfaceArtifacts | N
         if scope["runtimeSurfaceId"] != "surface_" + surface.content_sha256[:32]:
             raise NeedsAttentionError("secretary ensure runtime surface identity is invalid")
         return surface
-    except (KeyError, TypeError, ValueError) as error:
+    except Exception as error:
         raise NeedsAttentionError("secretary ensure runtime surface snapshot is invalid") from error
 
 
@@ -499,6 +499,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
                 store.conn.execute("UPDATE projects SET active=1,lifecycle_attention_reason=NULL,deactivated_at=NULL,secretary_workstream_id=?,updated_at=? WHERE project_id=?", (existing["workstream_id"], now, project["project_id"]))
         workspace.focus_pane(binding["workspace_surface_id"])
         return {"project": resolve_project(store, project["project_id"]), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "binding": _binding(store, existing["workstream_id"]), "reused": True}
+    scope, surface = _ensure_surface_snapshot(store, operation["operation_id"], scope, harness)
     if not project.get("active") and (
         operation["state"] in {"needs_attention", "failed"}
         or existing["provisioning_state"] == "needs_attention"
@@ -511,7 +512,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         binding = _binding(store, existing["workstream_id"])
         if binding is not None and _rank(operation["step"]) >= _rank("map_committed"):
             try:
-                binding = _repair_launch_binding(store, workspace, harness, project, scope, binding)
+                binding = _repair_launch_binding(store, workspace, harness, project, scope, binding, surface=surface)
             except Exception as error:
                 _mark_attention(store, operation["operation_id"], existing["workstream_id"], str(error))
                 raise NeedsAttentionError("secretary binding repair requires attention") from error
@@ -538,7 +539,6 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
     artifacts = None
     materialized_scope = scope
     if _rank(operation["step"]) < _rank("profile_materialized"):
-        scope, surface = _ensure_surface_snapshot(store, operation["operation_id"], scope, harness)
         artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
         with store.transaction():
             _checkpoint(store, operation["operation_id"], "profile_materialized", scope)
@@ -546,7 +546,6 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         operation = _operation(store, existing["workstream_id"])
     binding = _binding(store, existing["workstream_id"])
     if artifacts is None and binding is None:
-        scope, surface = _ensure_surface_snapshot(store, operation["operation_id"], scope, harness)
         artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
     if artifacts is not None and binding is None and _rank(operation["step"]) < _rank("binding_committed"):
         now = utc_now()
@@ -563,7 +562,6 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         raise NeedsAttentionError("secretary runtime binding was not persisted")
     if _rank(operation["step"]) < _rank("map_committed"):
         if artifacts is None:
-            scope, surface = _ensure_surface_snapshot(store, operation["operation_id"], scope, harness)
             artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
         harness.commit_launch_binding(
             materialized_scope,
@@ -620,7 +618,16 @@ def ensure_secretary(store: Any, project_selector: str, harness: HarnessAdapter,
             from .attention import backfill_attention
             backfill_attention(store, recipient_workstream_id=str(result["workstream"]["workstream_id"]), limit=128)
             return result
-        except NeedsAttentionError:
+        except NeedsAttentionError as error:
+            try:
+                project = resolve_project(store, project_selector)
+                existing = _secretary(store, project["project_id"])
+                if existing is not None:
+                    operation = _operation(store, existing["workstream_id"])
+                    if operation is not None:
+                        _mark_attention(store, operation["operation_id"], existing["workstream_id"], str(error))
+            except Exception:
+                pass
             raise
         except Exception as error:
             project = resolve_project(store, project_selector)

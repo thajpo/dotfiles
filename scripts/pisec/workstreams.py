@@ -11,14 +11,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
-from .adapters import HarnessAdapter, WorkspaceAdapter, WorkspaceObservation, artifact_document
+from .adapters import HarnessAdapter, RuntimeSurfaceArtifacts, WorkspaceAdapter, WorkspaceObservation, artifact_document
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .models import AuthorizationError, ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id
 from .projects import _git, assert_project_writable, get_project
 from .project_workspaces import ensure_project_workspace
 from .research import issue_task_packet_in_transaction, validate_task_packet
-from .runtime_surface import materialize_current_surface
+from .runtime_surface import capture_runtime_surface, materialize_current_surface, verify_surface
 from .runtime import start_bound_agent
 from .worker_repo import create_worker_repository, project_git_lock, project_target_state, validate_worker_repository
 APPLY_LOCK = threading.RLock()
@@ -39,10 +39,12 @@ _FULL_SCOPE_FIELDS = frozenset({
     "targetRef", "targetBranchRef", "baseCommitOid", "branchName",
     "worktreePath", "agentName",
     "dataDirs", "pythonEnv", "implementationModel", "harnessModel", "reasoningEffort", "effects", "nonEffects", "taskPacket",
+    "runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest",
 })
 _PUBLIC_SCOPE_FIELDS = _FULL_SCOPE_FIELDS
-_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "learningSeam", "decisionIds", "implementationModel", "harnessModel", "reasoningEffort"})
+_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "learningSeam", "decisionIds", "implementationModel", "harnessModel", "reasoningEffort", "runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest"})
 _SCOPE_REQUIRED = _FULL_SCOPE_FIELDS - _OPTIONAL_SCOPE_FIELDS
+_SURFACE_SCOPE_FIELDS = frozenset({"runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest"})
 
 
 def _public_scope(scope: Mapping[str, Any]) -> dict[str, Any]:
@@ -66,7 +68,45 @@ def _resolve_scope(store: Any, operation: Mapping[str, Any], supplied: Mapping[s
             raise ScopeMismatchError("approval scope differs from the immutable proposal")
     else:
         raise ScopeMismatchError("approval scope fields do not match the proposal contract")
-    return proposal
+    return {key: value for key, value in proposal.items() if key not in _SURFACE_SCOPE_FIELDS}
+
+
+def _surface_scope(scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts) -> dict[str, Any]:
+    return {
+        **scope,
+        "runtimeSurfaceSha256": surface.content_sha256,
+        "runtimeSurfaceRoot": surface.root_path,
+        "runtimeSurfaceId": "surface_" + surface.content_sha256[:32],
+        "runtimeSurfaceManifest": surface.manifest_json,
+    }
+
+
+def _surface_from_operation(operation: Mapping[str, Any], scope: Mapping[str, Any]) -> RuntimeSurfaceArtifacts | None:
+    try:
+        stored = json.loads(str(operation["result_json"]))
+    except (TypeError, json.JSONDecodeError) as error:
+        raise NeedsAttentionError("workstream operation snapshot is invalid") from error
+    if not isinstance(stored, dict):
+        raise NeedsAttentionError("workstream operation snapshot is invalid")
+    if not (_SURFACE_SCOPE_FIELDS & set(stored)):
+        return None
+    try:
+        surface = RuntimeSurfaceArtifacts(str(stored["runtimeSurfaceSha256"]), str(stored["runtimeSurfaceManifest"]), str(stored["runtimeSurfaceRoot"]))
+        if stored["runtimeSurfaceId"] != "surface_" + surface.content_sha256[:32]:
+            raise NeedsAttentionError("workstream runtime surface identity is invalid")
+        return verify_surface(surface)
+    except Exception as error:
+        raise NeedsAttentionError("workstream runtime surface snapshot is invalid") from error
+
+
+def _ensure_surface_snapshot(store: Any, operation: Mapping[str, Any], scope: Mapping[str, Any], harness: HarnessAdapter) -> tuple[dict[str, Any], RuntimeSurfaceArtifacts]:
+    surface = _surface_from_operation(operation, scope)
+    if surface is None:
+        surface = capture_runtime_surface(harness)
+        persisted = _surface_scope(scope, surface)
+        with store.transaction():
+            store.conn.execute("UPDATE operations SET result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(persisted), utc_now(), operation["operation_id"]))
+    return dict(scope), surface
 
 
 
@@ -254,6 +294,30 @@ def _checkpoint(store: Any, operation_id: str, step: str) -> None:
 def _rank(step: str) -> int:
     return CHECKPOINTS.index(step) if step in CHECKPOINTS else -1
 
+
+def _session_attestation_matches(store: Any, runtime: Mapping[str, Any]) -> bool:
+    event_sequence = runtime.get("session_start_event_sequence")
+    report_seq = runtime.get("session_start_report_seq")
+    if event_sequence is None or report_seq != runtime.get("report_seq") or not runtime.get("runtime_instance_id") or int(runtime.get("report_seq") or 0) < 1:
+        return False
+    event = store.conn.execute("SELECT kind,workstream_id,payload_json FROM events WHERE sequence=?", (event_sequence,)).fetchone()
+    if event is None or event["kind"] != "runtime.session_started" or event["workstream_id"] is None:
+        return False
+    try:
+        payload = json.loads(event["payload_json"])
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return (
+        event["workstream_id"] == runtime["workstream_id"]
+        and isinstance(payload, dict)
+        and payload.get("runtimeInstanceId") == runtime["runtime_instance_id"]
+        and payload.get("generationSha256") == runtime["applied_generation_sha256"]
+        and payload.get("reportSeq") == runtime["session_start_report_seq"]
+        and runtime["applied_generation_sha256"] == runtime["desired_generation_sha256"]
+        and runtime["launch_generation_sha256"] is None
+        and not runtime["refresh_pending"]
+    )
+
 def _wait_for_agent(
     store: Any,
     workspace: WorkspaceAdapter,
@@ -296,15 +360,12 @@ def _wait_for_agent(
                         matched_observation = observed
             if matched_observation is not None:
                 runtime = store.conn.execute(
-                    "SELECT runtime_instance_id,report_seq FROM runtime_bindings WHERE workstream_id=?",
+                    "SELECT * FROM runtime_bindings WHERE workstream_id=?",
                     (workstream_id,),
                 ).fetchone()
-                if runtime is not None and runtime["runtime_instance_id"] and int(runtime["report_seq"]) >= 1:
+                if runtime is not None and _session_attestation_matches(store, dict(runtime)):
                     return matched_observation
         except NeedsAttentionError as error:
-            with store.transaction():
-                store.conn.execute("UPDATE operations SET state='needs_attention',error_code='retire_ambiguous',error_message=?,updated_at=? WHERE operation_id=?", (str(error)[:512], utc_now(), operation_id))
-                store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason=?,updated_at=? WHERE workstream_id=?", (str(error)[:512], utc_now(), workstream_id))
             raise
         except Exception as error:
             last_error = error
@@ -395,6 +456,8 @@ def _authorize_apply_workstream(
     with store.transaction():
         issue_task_packet_in_transaction(store.conn, scope=scope)
 
+    scope, surface = _ensure_surface_snapshot(store, operation, scope, harness)
+    operation = _operation(store, operation_id)
     project = get_project(store, scope["projectId"])
     current_oid = _git(Path(project["repository_path"]), "rev-parse", "--verify", "--end-of-options", f"{scope['targetRef']}^{{commit}}").lower()
     if current_oid != scope["baseCommitOid"]:
@@ -505,7 +568,8 @@ def _authorize_apply_workstream(
         raise NeedsAttentionError("worker tab observation is incomplete")
 
     if _rank(operation["step"]) < _rank("profile_materialized"):
-        artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)
+        scope, surface = _ensure_surface_snapshot(store, operation, scope, harness)
+        artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
         artifact_json = artifact_document(harness.manifest, artifacts)
         now = utc_now()
         with store.transaction():

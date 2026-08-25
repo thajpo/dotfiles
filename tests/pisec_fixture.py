@@ -20,6 +20,7 @@ from scripts.pisec.adapters import (
     WorkspaceManifest,
     WorkspaceObservation,
 )
+from scripts.pisec.events import append_event_in_transaction
 
 
 def make_repo(path: Path) -> None:
@@ -338,14 +339,20 @@ class FixtureWorkspace:
         self.runtime_states.pop(surface_id, None)
         self._runtime_counter += 1
         runtime_instance = f"fixture-runtime-{self._runtime_counter}-{secrets.token_hex(4)}"
+        def attest(store: Any) -> None:
+            row = store.conn.execute("SELECT workstream_id,project_id,desired_generation_sha256,launch_generation_sha256 FROM runtime_bindings WHERE workspace_surface_id=?", (surface_id,)).fetchone()
+            if row is None:
+                return
+            generation = row["launch_generation_sha256"] or row["desired_generation_sha256"]
+            with store.transaction():
+                event = append_event_in_transaction(store.conn, kind="runtime.session_started", project_id=row["project_id"], workstream_id=row["workstream_id"], payload={"runtimeInstanceId": runtime_instance, "generationSha256": generation, "reportSeq": 1})
+                store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_generation_sha256=?,launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,session_start_event_sequence=?,session_start_report_seq=1,session_started_at=? WHERE workstream_id=?", (runtime_instance, generation, event["sequence"], "fixture", row["workstream_id"]))
         if self.store is None:
             from scripts.pisec.pi_store import PiStore
             with PiStore(self.root / "state") as store:
-                store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL WHERE workspace_surface_id=?", (runtime_instance, surface_id))
+                attest(store)
         else:
-            row = self.store.conn.execute("SELECT workstream_id FROM runtime_bindings WHERE workspace_surface_id=?", (surface_id,)).fetchone()
-            if row is not None:
-                self.store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL WHERE workstream_id=?", (runtime_instance, row["workstream_id"]))
+            attest(self.store)
         return {"started": True, "name": name, "surfaceId": surface_id}
 
     def run_command(self, surface_id: str, argv: Sequence[str], env: Mapping[str, str] | None = None) -> Mapping[str, Any]:

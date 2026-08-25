@@ -39,8 +39,10 @@ def _tree_digest(root: Path) -> str:
 def verify_surface(surface: RuntimeSurfaceArtifacts) -> RuntimeSurfaceArtifacts:
     """Verify the captured root without recapturing a newer surface."""
     validate_sha256(surface.content_sha256, "runtime surface digest")
-    root = Path(surface.root_path).resolve()
-    if root.is_symlink() or not root.is_dir() or _tree_digest(root) != surface.content_sha256:
+    raw_root = Path(surface.root_path)
+    if raw_root.is_symlink() or not raw_root.is_absolute() or raw_root.resolve(strict=False) != raw_root:
+        raise NeedsAttentionError("runtime surface root was replaced or is not canonical")
+    if not raw_root.is_dir() or _tree_digest(raw_root) != surface.content_sha256:
         raise NeedsAttentionError("runtime surface changed during the operation")
     return surface
 
@@ -50,8 +52,11 @@ def capture_runtime_surface(harness: HarnessAdapter) -> RuntimeSurfaceArtifacts:
     value = harness.current_runtime_surface()
     if not isinstance(value, RuntimeSurfaceArtifacts):
         raise NeedsAttentionError("harness returned an invalid runtime surface")
+    raw_root = Path(value.root_path)
+    if raw_root.is_symlink() or not raw_root.is_absolute() or raw_root.resolve(strict=False) != raw_root:
+        raise NeedsAttentionError("harness returned a non-canonical runtime surface root")
     manifest = json.loads(value.manifest_json)
-    snapshot = RuntimeSurfaceArtifacts(value.content_sha256, manifest, str(Path(value.root_path).resolve()))
+    snapshot = RuntimeSurfaceArtifacts(value.content_sha256, manifest, str(raw_root))
     return verify_surface(snapshot)
 
 
@@ -79,5 +84,8 @@ def materialize_current_surface(
     artifacts = harness.activate_profile(materialized_scope, staged)
     if not hasattr(artifacts, "generation_sha256"):
         raise InvalidRequestError("harness activation returned invalid artifacts")
+    desired = harness.desired_generation(materialized_scope, surface)
+    if artifacts.generation_sha256 != desired:
+        raise NeedsAttentionError("activated runtime generation does not match the captured surface")
     verify_surface(surface)
     return artifacts, surface, materialized_scope

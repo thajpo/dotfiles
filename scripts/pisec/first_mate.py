@@ -127,7 +127,7 @@ def _surface_from_scope(scope: Mapping[str, Any]) -> RuntimeSurfaceArtifacts | N
         if scope["runtimeSurfaceId"] != "surface_" + surface.content_sha256[:32]:
             raise NeedsAttentionError("First Mate runtime surface identity is invalid")
         return surface
-    except (KeyError, TypeError, ValueError) as error:
+    except Exception as error:
         raise NeedsAttentionError("First Mate runtime surface snapshot is invalid") from error
 
 
@@ -354,6 +354,7 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         with store.transaction():
             store.conn.execute("UPDATE operations SET state='applying',error_code=NULL,error_message=?,updated_at=? WHERE operation_id=? AND state='failed'", ("retrying durable First Mate saga", utc_now(), operation["operation_id"]))
         operation = _operation(store, existing["workstream_id"])
+    scope, surface = _ensure_surface_snapshot(store, operation["operation_id"], scope, harness)
     if _rank(operation["step"]) < _rank("workspace_observed_or_created"):
         observed = _recover_workspace(workspace, scope)
         with store.transaction():
@@ -368,7 +369,6 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
     artifacts = None
     materialized_scope = scope
     if _rank(operation["step"]) < _rank("profile_materialized"):
-        scope, surface = _ensure_surface_snapshot(store, operation["operation_id"], scope, harness)
         artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
         with store.transaction():
             store.conn.execute("UPDATE operations SET state='applying',step=?,result_json=?,updated_at=? WHERE operation_id=?", ("profile_materialized", canonical_json(scope), utc_now(), operation["operation_id"]))
@@ -376,7 +376,6 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         operation = _operation(store, existing["workstream_id"])
     binding = _binding(store, existing["workstream_id"])
     if artifacts is None and binding is None:
-        scope, surface = _ensure_surface_snapshot(store, operation["operation_id"], scope, harness)
         artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
     if artifacts is not None and binding is None:
         now = utc_now()
@@ -440,7 +439,15 @@ def ensure_first_mate(store: Any, control_project_selector: str, harness: Harnes
             from .attention import backfill_attention
             backfill_attention(store, recipient_workstream_id=str(result["workstream"]["workstream_id"]), limit=128)
             return result
-        except NeedsAttentionError:
+        except NeedsAttentionError as error:
+            try:
+                existing = _first_mate(store)
+                if existing is not None:
+                    operation = _operation(store, existing["workstream_id"])
+                    if operation is not None:
+                        _mark_attention(store, operation["operation_id"], existing["workstream_id"], str(error))
+            except Exception:
+                pass
             raise
         except Exception as error:
             existing = _first_mate(store)

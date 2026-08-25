@@ -17,6 +17,7 @@ class RuntimeSurfaceTests(unittest.TestCase):
                 {"adapter": "fixture", "interfaceVersion": 1},
                 {"adapter": "fixture", "adapterVersion": "", "interfaceVersion": 1},
                 {"adapter": "fixture", "adapterVersion": "1.0", "interfaceVersion": 2},
+                {"adapter": "fixture", "adapterVersion": "1.0", "interfaceVersion": 1.0},
             ):
                 with self.subTest(manifest=manifest), self.assertRaises(InvalidRequestError):
                     RuntimeSurfaceArtifacts(digest, manifest, str(root.resolve()))
