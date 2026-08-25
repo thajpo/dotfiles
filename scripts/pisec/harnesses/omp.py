@@ -1014,6 +1014,9 @@ class OmpHarnessAdapter:
                 _normalize_owner_tree(path, readonly=False)
             shutil.rmtree(path)
         elif stat.S_ISREG(info.st_mode) and not info.st_mode & 0o022:
+            if "binding-surfaces" in path.parts:
+                _safe_owned_tree(path.parent, readonly=True)
+                _normalize_owner_tree(path.parent, readonly=False)
             path.unlink()
         else:
             raise NeedsAttentionError("OMP cleanup path is unsupported")

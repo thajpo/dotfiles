@@ -68,6 +68,22 @@ def stage_and_activate(adapter: OmpHarnessAdapter, scope: dict):
 
 
 class RuntimeMaterializationTests(unittest.TestCase):
+    def test_cleanup_unseals_readonly_policy_parent_before_unlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            workstream = "ws_" + "0" * 32
+            policy = state / "binding-surfaces" / "omp" / workstream / "fence" / (workstream + ".json")
+            policy.parent.mkdir(parents=True)
+            policy.write_text("policy\n")
+            os.chmod(policy.parent, 0o500)
+            os.chmod(policy, 0o400)
+            adapter = OmpHarnessAdapter(state_root=state, config=make_config(root))
+
+            adapter._remove_state_path(str(policy))
+
+            self.assertFalse(policy.exists())
+
     def test_surface_isolated_from_later_user_surface_edits(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
