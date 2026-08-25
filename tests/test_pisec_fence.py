@@ -10,11 +10,13 @@ import unittest
 from unittest.mock import patch
 
 from scripts.pisec.adapters import RuntimeSurfaceArtifacts, artifact_document
+from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.fence import render_policy
 from scripts.pisec.models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, new_id
 from scripts.pisec.pi_store import PiStore
+from scripts.pisec.operations import create_operation
 from scripts.pisec.projects import register_project
-from scripts.pisec.runtime import report_runtime
+from scripts.pisec.runtime import prepare_runtime_turn, report_runtime, usable_runtime_binding
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
 from scripts.pisec.harnesses.omp import OmpHarnessAdapter, _copy_user_surface
@@ -877,7 +879,7 @@ class RuntimeReportTests(unittest.TestCase):
         with self.assertRaises(ConflictError):
             report_runtime(self.store, self.payload(seq=2, event="lifecycle", state="idle", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
 
-    def test_session_start_can_complete_a_reserved_needs_attention_launch(self):
+    def test_session_start_requires_a_owned_refresh_reservation(self):
         self.store.conn.execute(
             "UPDATE workstreams SET provisioning_state='needs_attention' WHERE workstream_id=?",
             (self.workstream_id,),
@@ -887,12 +889,41 @@ class RuntimeReportTests(unittest.TestCase):
             (self.workstream_id,),
         )
         self.assertIsNotNone(self.store.conn.execute("SELECT launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()[0])
+        with self.assertRaises(AuthorizationError):
+            report_runtime(self.store, self.payload(), self.harness, self.workspace)
+
+        operation, _created = create_operation(self.store, kind="runtime.refresh", project_id=self.store.conn.execute("SELECT project_id FROM workstreams WHERE workstream_id=?", (self.workstream_id,)).fetchone()[0], workstream_id=self.workstream_id, idempotency_key="reserved-session-start", request={"workstreamId": self.workstream_id, "desiredGenerationSha256": self.binding["desired_generation_sha256"]})
+        self.store.conn.execute("UPDATE runtime_bindings SET refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-25T00:00:00Z' WHERE workstream_id=?", (operation.operation_id, self.workstream_id))
         result = report_runtime(self.store, self.payload(), self.harness, self.workspace)
         self.assertEqual(result["workstreamId"], self.workstream_id)
 
         self.store.conn.execute("UPDATE runtime_bindings SET launch_generation_sha256=NULL WHERE workstream_id=?", (self.workstream_id,))
         with self.assertRaises(AuthorizationError):
             report_runtime(self.store, self.payload(runtimeInstanceId="instance-2"), self.harness, self.workspace)
+
+    def test_usable_runtime_requires_idle_state_and_exact_session_event(self):
+        report_runtime(self.store, self.payload(state="idle"), self.harness, self.workspace)
+        turn = {
+            "workstreamId": self.workstream_id,
+            "runtimeInstanceId": "instance-1",
+            "surfaceId": self.binding["workspace_surface_id"],
+            "token": self.token,
+            "generation": self.binding["desired_generation_sha256"],
+            "sessionKey": "runtime-contract-test",
+        }
+        self.assertTrue(usable_runtime_binding(self.store, self.workstream_id, self.workspace, self.harness))
+        project_id = self.store.conn.execute("SELECT project_id FROM workstreams WHERE workstream_id=?", (self.workstream_id,)).fetchone()[0]
+        forged = append_event_in_transaction(self.store.conn, kind="runtime.session_started", project_id=project_id, workstream_id=self.workstream_id, payload={"generationSha256": "f" * 64, "reportSeq": 1, "runtimeInstanceId": "forged-runtime"})
+        self.store.conn.execute("UPDATE runtime_bindings SET session_start_event_sequence=? WHERE workstream_id=?", (forged["sequence"], self.workstream_id))
+        self.assertFalse(usable_runtime_binding(self.store, self.workstream_id, self.workspace, self.harness))
+        with self.assertRaises(ConflictError):
+            prepare_runtime_turn(self.store, turn, self.workspace, self.harness)
+
+    def test_runtime_turn_rejects_working_binding(self):
+        report_runtime(self.store, self.payload(state="idle"), self.harness, self.workspace)
+        report_runtime(self.store, self.payload(seq=2, event="lifecycle", state="working", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
+        with self.assertRaises(ConflictError):
+            prepare_runtime_turn(self.store, {"workstreamId": self.workstream_id, "runtimeInstanceId": "instance-1", "surfaceId": self.binding["workspace_surface_id"], "token": self.token, "generation": self.binding["desired_generation_sha256"], "sessionKey": "working-runtime-contract-test"}, self.workspace, self.harness)
 
     def test_done_is_not_an_authenticated_pisec_runtime_state(self):
         report_runtime(self.store, self.payload(), self.harness, self.workspace)

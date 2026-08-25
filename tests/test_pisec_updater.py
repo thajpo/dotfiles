@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.pisec.pi_store import PiStore
+from scripts.pisec.operations import create_operation
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -128,6 +129,14 @@ class UpdaterContractTests(unittest.TestCase):
             self.assertEqual(verified_before, (install / "verified" / "deploy-old.json").read_bytes())
             self.assertEqual(result["state"], "needs_attention")
             self.assertFalse((install / "stable-updater.json").exists())
+
+    def test_semantic_health_rejects_needs_attention_operations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            with PiStore(state) as store:
+                create_operation(store, kind="runtime.refresh", idempotency_key="needs-attention-health", request={"workstreamId": "ws_" + "a" * 32}, state="needs_attention", step="attention")
+            with self.assertRaisesRegex(RuntimeError, "needs_attention"):
+                self.updater["_semantic_state_health"](state)
 
     def test_successful_update_records_verification_then_manual_recovery_marker(self):
         with tempfile.TemporaryDirectory() as tmp:

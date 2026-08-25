@@ -184,6 +184,13 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
   assert.ok(events.includes("session_shutdown"));
 });
 
+test("checkpoint schema contains only the v1 semantic phases and fields", async () => {
+  const source = await Bun.file(new URL("./pisec.ts", import.meta.url)).text();
+  assert.match(source, /phase: z\.enum\(\["investigating", "implementing", "verifying", "ready_review"\]\)/);
+  assert.doesNotMatch(source, /needs_input|blocker_code|blockerCode/);
+  assert.doesNotMatch(source, /nextAction: params\.next_action, \(\.\.\.params\.blocker/);
+});
+
 test("first mate exposes the exact fleet surface", () => {
   const output = runProbe(`
     const records = { tools: [], events: [], labels: [] };

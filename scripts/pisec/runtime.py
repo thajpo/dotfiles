@@ -114,10 +114,14 @@ def verify_runtime_binding(store: Any, payload: Mapping[str, Any], *, worker_onl
     session_start_pending = (
         allow_session_start
         and row is not None
-        and row["provisioning_state"] == "needs_attention"
         and row["launch_generation_sha256"] is not None
+        and int(row["refresh_pending"]) == 1
+        and row["refresh_operation_id"] is not None
+        and row["refresh_started_at"] is not None
     )
     if row is None or row["desired_state"] == "retired" or (
+        allow_session_start and row["launch_generation_sha256"] is not None and not session_start_pending
+    ) or (
         row["provisioning_state"] not in {"bound", "creating"} and not session_start_pending
     ):
         raise AuthorizationError("runtime binding is inactive")
@@ -133,6 +137,82 @@ def verify_runtime_binding(store: Any, payload: Mapping[str, Any], *, worker_onl
     if expected_generation != generation:
         raise ConflictError("runtime generation is stale or does not match the reserved launch")
     return dict(row)
+
+
+def usable_runtime_binding(
+    store: Any,
+    workstream_id: str,
+    workspace: WorkspaceAdapter,
+    harness: HarnessAdapter | None = None,
+    *,
+    allowed_states: set[str] | frozenset[str] = frozenset({"idle"}),
+    require_prompt_eligible: bool = False,
+) -> bool:
+    """Apply the common live, attested, unreserved binding predicate."""
+    row = store.conn.execute(
+        "SELECT w.desired_state,w.provisioning_state,w.worktree_path,r.refresh_pending,r.refresh_operation_id,r.refresh_started_at,r.launch_generation_sha256,r.desired_generation_sha256,r.applied_generation_sha256,r.observed_state,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,r.agent_name,r.policy_path,r.runtime_instance_id,r.report_seq,r.session_start_event_sequence,r.session_start_report_seq,r.session_started_at "
+        "FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=?",
+        (workstream_id,),
+    ).fetchone()
+    if row is None or row["desired_state"] != "active" or row["provisioning_state"] != "bound":
+        return False
+    if (
+        int(row["refresh_pending"])
+        or row["refresh_operation_id"] is not None
+        or row["refresh_started_at"] is not None
+        or row["launch_generation_sha256"] is not None
+        or row["observed_state"] not in allowed_states
+        or row["desired_generation_sha256"] is None
+        or row["applied_generation_sha256"] != row["desired_generation_sha256"]
+        or row["runtime_instance_id"] is None
+        or row["report_seq"] is None
+        or int(row["report_seq"]) < 1
+        or row["session_start_event_sequence"] is None
+        or row["session_start_report_seq"] is None
+        or not 1 <= int(row["session_start_report_seq"]) <= int(row["report_seq"])
+        or row["session_started_at"] is None
+    ):
+        return False
+    event = store.conn.execute(
+        "SELECT kind,workstream_id,payload_json FROM events WHERE sequence=?",
+        (row["session_start_event_sequence"],),
+    ).fetchone()
+    expected_event = {
+        "generationSha256": str(row["applied_generation_sha256"]),
+        "reportSeq": int(row["session_start_report_seq"]),
+        "runtimeInstanceId": str(row["runtime_instance_id"]),
+    }
+    if event is None or event["kind"] != "runtime.session_started" or event["workstream_id"] != workstream_id:
+        return False
+    try:
+        event_payload = __import__("json").loads(str(event["payload_json"]))
+    except (TypeError, ValueError):
+        return False
+    if event_payload != expected_event or canonical_json(event_payload) != str(event["payload_json"]):
+        return False
+    try:
+        observed = workspace.observe_surface(
+            workspace_id=str(row["workspace_id"]),
+            view_id=str(row["workspace_view_id"]),
+            surface_id=str(row["workspace_surface_id"]),
+            cwd=str(row["worktree_path"]),
+        )
+        if observed is None or observed.agent is None:
+            return False
+        expected_names = {str(row["agent_name"])}
+        if harness is not None:
+            expected_names.add(str(harness.manifest.agent_kind))
+        if (
+            observed.agent.surface_id != str(row["workspace_surface_id"])
+            or observed.agent.name not in expected_names
+            or not observed.agent.identity_usable
+        ):
+            return False
+        if require_prompt_eligible and not workspace.prompt_eligible(observed.agent):
+            return False
+        return workspace.observe_runtime(str(row["workspace_surface_id"]), str(row["policy_path"])).state == "live"
+    except Exception:
+        return False
 
 
 def record_runtime_tool_failure(store: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -172,16 +252,16 @@ def prepare_session_switch(store: Any, payload: Mapping[str, Any], harness: Harn
     }
 
 
-def prepare_runtime_turn(store: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+def prepare_runtime_turn(store: Any, payload: Mapping[str, Any], workspace: WorkspaceAdapter, harness: HarnessAdapter) -> dict[str, Any]:
     """Present the current immutable packet and attention in one durable turn."""
     binding = verify_runtime_binding(store, payload, worker_only=False)
+    if not usable_runtime_binding(store, str(binding["workstream_id"]), workspace, harness, allowed_states={"idle"}, require_prompt_eligible=True):
+        raise ConflictError("runtime is not a usable idle attested binding")
     session_key = bounded_text(payload.get("sessionKey"), name="sessionKey", limit=256)
     if binding["refresh_pending"] or binding["launch_generation_sha256"] is not None:
         raise ConflictError("runtime is reserved for a generation refresh")
     if binding["applied_generation_sha256"] is None or binding["applied_generation_sha256"] != binding["desired_generation_sha256"]:
         raise ConflictError("runtime generation is not usable")
-    if not binding["runtime_instance_id"] or int(binding["report_seq"]) < 1 or binding["session_start_event_sequence"] is None or binding["session_start_report_seq"] != binding["report_seq"]:
-        raise ConflictError("runtime has not authenticated its session start")
     workstream_id = str(binding["workstream_id"])
     with store.transaction():
         now = utc_now()

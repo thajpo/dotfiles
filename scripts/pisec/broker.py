@@ -36,7 +36,7 @@ from .research import (
     request_research,
     request_research_context,
 )
-from .runtime import WORKSPACE_RUNTIME_MISSING, prepare_runtime_turn, prepare_session_switch, record_runtime_tool_failure, report_runtime, start_bound_agent, verify_runtime_binding
+from .runtime import WORKSPACE_RUNTIME_MISSING, prepare_runtime_turn, prepare_session_switch, record_runtime_tool_failure, report_runtime, start_bound_agent, usable_runtime_binding, verify_runtime_binding
 from .first_mate import ensure_first_mate, focus_first_mate
 from .secretary_git import git_status, inspect_workstream_changes, push_branch
 from .integration import apply_workstream_acceptance, inspect_integration, list_integrations, prepare_workstream_acceptance, reconcile_integrations
@@ -378,29 +378,9 @@ class BrokerDispatcher:
             self._attention_wake_deadlines.pop(workstream_id, None)
 
     def _attention_runtime_ready(self, store: PiStore, row: Mapping[str, Any]) -> bool:
-        if row["observed_state"] != "idle" or row["refresh_pending"] or row["launch_generation_sha256"] is not None:
-            return False
-        if row["runtime_instance_id"] is None or row["report_seq"] is None or int(row["report_seq"]) < 1:
-            return False
-        if row["applied_generation_sha256"] is None or row["applied_generation_sha256"] != row["desired_generation_sha256"]:
-            return False
-        if row["session_start_event_sequence"] is None or row["session_start_report_seq"] != row["report_seq"]:
-            return False
         try:
             harness = self.registry.resolve_harness(str(row["harness_id"]))
-            observation = self.workspace.observe_surface(
-                workspace_id=str(row["workspace_id"]),
-                view_id=str(row["workspace_view_id"]),
-                surface_id=str(row["workspace_surface_id"]),
-                cwd=str(row["worktree_path"]),
-            )
-            if observation is None or observation.agent is None:
-                return False
-            if observation.agent.surface_id != str(row["workspace_surface_id"]) or observation.agent.name not in {str(row["agent_name"]), str(harness.manifest.agent_kind)} or not observation.agent.identity_usable:
-                return False
-            if not self.workspace.prompt_eligible(observation.agent):
-                return False
-            return self.workspace.observe_runtime(str(row["workspace_surface_id"]), str(row["policy_path"])).state == "live"
+            return usable_runtime_binding(store, str(row["workstream_id"]), self.workspace, harness, allowed_states={"idle"}, require_prompt_eligible=True)
         except BaseException:
             return False
 
@@ -522,7 +502,8 @@ class BrokerDispatcher:
         auth_fields = {"workstreamId", "runtimeInstanceId", "surfaceId", "token", "generation"}
         if operation == "runtime.turn.prepare":
             _exact(payload, auth_fields | {"sessionKey"})
-            result = prepare_runtime_turn(store, payload)
+            binding = verify_runtime_binding(store, payload, worker_only=False)
+            result = prepare_runtime_turn(store, payload, self.workspace, self.registry.resolve_harness(str(binding["harness_id"])))
             self._clear_attention_wake(str(payload["workstreamId"]))
             return result
         if operation == "session.switch.prepare":

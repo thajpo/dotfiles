@@ -80,41 +80,11 @@ def resolve_project(store: Any, selector: str) -> dict[str, Any]:
 
 
 def _bound_runtime_is_usable(store: Any, workstream_id: str, workspace: Any) -> bool:
-    row = store.conn.execute(
-        "SELECT w.desired_state,w.provisioning_state,w.worktree_path,r.refresh_pending,r.launch_generation_sha256,r.applied_generation_sha256,r.desired_generation_sha256,r.observed_state,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,r.agent_name,r.policy_path,r.runtime_instance_id,r.report_seq,r.session_start_event_sequence,r.session_start_report_seq "
-        "FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=?",
-        (workstream_id,),
-    ).fetchone()
-    if row is None or row["desired_state"] != "active" or row["provisioning_state"] != "bound":
-        return False
-    if int(row["refresh_pending"]) or row["launch_generation_sha256"] is not None or row["observed_state"] != "idle":
-        return False
-    if row["applied_generation_sha256"] is None or row["applied_generation_sha256"] != row["desired_generation_sha256"]:
-        return False
-    if (
-        row["runtime_instance_id"] is None
-        or row["report_seq"] is None
-        or int(row["report_seq"]) < 1
-        or row["session_start_event_sequence"] is None
-        or row["session_start_report_seq"] != row["report_seq"]
-    ):
-        return False
-    if workspace is None:
-        return False
     try:
-        observed = workspace.observe_surface(
-            workspace_id=str(row["workspace_id"]),
-            view_id=str(row["workspace_view_id"]),
-            surface_id=str(row["workspace_surface_id"]),
-            cwd=str(row["worktree_path"]),
-        )
-        if observed is None or observed.agent is None:
+        from .runtime import usable_runtime_binding
+        if workspace is None:
             return False
-        if observed.agent.surface_id != str(row["workspace_surface_id"]) or observed.agent.name != str(row["agent_name"]):
-            return False
-        if not observed.agent.identity_usable or not workspace.prompt_eligible(observed.agent):
-            return False
-        return workspace.observe_runtime(str(row["workspace_surface_id"]), str(row["policy_path"])).state == "live"
+        return usable_runtime_binding(store, workstream_id, workspace, allowed_states={"idle", "working", "blocked"})
     except Exception:
         return False
 

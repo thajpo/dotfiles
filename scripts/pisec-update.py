@@ -505,7 +505,7 @@ def _semantic_state_health(state_root: Path) -> None:
     connection = sqlite3.connect(str(database))
     connection.row_factory = sqlite3.Row
     try:
-        nonterminal = connection.execute("SELECT kind,state,COUNT(*) AS count FROM operations WHERE state IN ('planned','applying') GROUP BY kind,state").fetchall()
+        nonterminal = connection.execute("SELECT kind,state,COUNT(*) AS count FROM operations WHERE state IN ('planned','applying','needs_attention') GROUP BY kind,state").fetchall()
         attention = connection.execute("SELECT COUNT(*) FROM workstreams WHERE desired_state='active' AND provisioning_state='needs_attention'").fetchone()[0]
         lifecycle_attention = connection.execute("SELECT COUNT(*) FROM projects WHERE active=1 AND lifecycle_attention_reason IS NOT NULL").fetchone()[0]
         reserved = connection.execute("SELECT COUNT(*) FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE w.desired_state='active' AND (r.refresh_pending=1 OR r.launch_generation_sha256 IS NOT NULL OR r.observed_state='starting')").fetchone()[0]
