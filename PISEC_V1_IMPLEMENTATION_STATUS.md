@@ -28,3 +28,7 @@
   - Commit OID: `a277a67`
   - Checks: `python3 -m unittest discover -s tests -q` passed (196, 1 skipped, Linux-capable run); `bun test omp/extensions/pisec.test.ts` passed (7/7); `python3 -m compileall -q scripts tests` passed; operation catalogue `--check` passed; `bash -n scripts/pisec-macos-install.sh` passed; macOS stub exited 1 without probe reference or home mutation path; exact deletion/import/reference/archive/inventory audits passed; `git diff --check` passed; no live-state cutover performed.
   - Current blocker: none.
+- Phase 8 status: complete; immutable committed bundles with exact Collie patch provenance, external verification/LKG metadata, ordered health-gated updates, committed-source updater bootstrap, explicit archive/reset with opaque pre-v1 quarantine, manual previous recovery, owner-only install metadata, and fail-closed tamper/refusal paths implemented.
+  - Commit OID: `e7a8869`
+  - Checks: clean owner-only checkout at `e7a8869`: `python3 -m unittest discover -s tests -q` passed (206, 1 skipped); `bun test omp/extensions/pisec.test.ts` passed (7/7); `python3 -m compileall -q scripts tests` passed; operation catalogue `--check` passed; `bash -n scripts/*.sh` passed; `git diff --check` passed; focused updater/CLI/core/install tests and fail-first recovery matrix passed; static allowlist/status-root/marker/archive/current-link audits passed; no live-state cutover performed.
+  - Current blocker: none.
