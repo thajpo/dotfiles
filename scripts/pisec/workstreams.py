@@ -105,7 +105,7 @@ def _ensure_surface_snapshot(store: Any, operation: Mapping[str, Any], scope: Ma
         surface = capture_runtime_surface(harness)
         persisted = _surface_scope(scope, surface)
         with store.transaction():
-            store.conn.execute("UPDATE operations SET result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(persisted), utc_now(), operation["operation_id"]))
+            store.conn.execute("UPDATE operations SET result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(persisted, max_bytes=256 * 1024, max_text=64 * 1024), utc_now(), operation["operation_id"]))
     return dict(scope), surface
 
 
@@ -281,7 +281,7 @@ def prepare_workstream(
         )
         store.conn.execute(
             "INSERT INTO operations(operation_id,kind,project_id,workstream_id,idempotency_key,request_json,request_sha256,state,step,result_json,created_at,updated_at) VALUES(?,'workstream.create',?,?,?,?,?,'planned','planned',?,?,?)",
-            (operation_id, project_id, workstream_id, idempotency_key, canonical_json(caller_request), request_sha, canonical_json(scope), now, now),
+            (operation_id, project_id, workstream_id, idempotency_key, canonical_json(caller_request), request_sha, canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), now, now),
         )
     _hit(failpoint, "after_proposal_commit", scope)
     return {"operation": _operation(store, operation_id), "workstream": _workstream(store, workstream_id), "approvalScope": _public_scope(scope)}
@@ -446,7 +446,7 @@ def _authorize_apply_workstream(
             if existing_receipt is None:
                 store.conn.execute(
                     "INSERT INTO authorizations(authorization_id,operation_id,kind,scope_json,scope_sha256,actor,consumed_at) VALUES(?,?,'workstream.create',?,?,?,?)",
-                    (new_id("az"), operation_id, canonical_json(scope), json_digest(scope), actor, now),
+                    (new_id("az"), operation_id, canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), json_digest(scope), actor, now),
                 )
             issue_task_packet_in_transaction(store.conn, scope=scope)
             _checkpoint(store, operation_id, "authorized")

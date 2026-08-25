@@ -46,6 +46,7 @@ class FixtureHarness:
         self.launch_replacements: list[bool] = []
         self.cleaned: list[str] = []
         self.surface_calls = 0
+        self.surface_extra = ""
 
     def validate_execution_profile(self, profile: str, role: str) -> None:
         self.calls.append(("validate", (profile, role)))
@@ -64,7 +65,10 @@ class FixtureHarness:
         root = self.root / "runtime-surface"
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         from scripts.pisec.runtime_surface import _tree_digest
-        return RuntimeSurfaceArtifacts(_tree_digest(root), {"adapter": self.manifest.adapter_id, "adapterVersion": self.manifest.version_label, "interfaceVersion": 1}, str(root.resolve()))
+        manifest = {"adapter": self.manifest.adapter_id, "adapterVersion": self.manifest.version_label, "interfaceVersion": 1}
+        if self.surface_extra:
+            manifest["surfaceExtra"] = self.surface_extra
+        return RuntimeSurfaceArtifacts(_tree_digest(root), manifest, str(root.resolve()))
 
     def prepare_runtime_surface(self) -> RuntimeSurfaceArtifacts:
         return self.current_runtime_surface()
@@ -418,17 +422,14 @@ class FixtureWorkspace:
 
 class UnattestedFixtureWorkspace(FixtureWorkspace):
     def start_agent(self, surface_id: str, name: str, agent_kind: str) -> Mapping[str, Any]:
-        self.calls.append(("start", (surface_id, name, agent_kind)))
-        self.agents[name] = AgentObservation(name, surface_id, True, "working")
         row = self.store.conn.execute(
             "SELECT w.kind FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workspace_surface_id=?",
             (surface_id,),
         ).fetchone()
         if row is not None and row["kind"] == "secretary":
-            self.store.conn.execute(
-                "UPDATE runtime_bindings SET runtime_instance_id='fixture-runtime',report_seq=1,observed_state='idle',applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL WHERE workspace_surface_id=?",
-                (surface_id,),
-            )
+            return super().start_agent(surface_id, name, agent_kind)
+        self.calls.append(("start", (surface_id, name, agent_kind)))
+        self.agents[name] = AgentObservation(name, surface_id, True, "working")
         return {"started": True, "name": name, "surfaceId": surface_id}
 
 

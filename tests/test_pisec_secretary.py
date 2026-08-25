@@ -207,6 +207,23 @@ class SecretaryTests(unittest.TestCase):
                     ensure_secretary(store, project["project_id"], harness, workspace)
                 self.assertEqual(harness.surface_calls, 1)
 
+    def test_secretary_persists_production_sized_surface_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                harness.surface_extra = "x" * 5000
+                workspace = FixtureWorkspace(root, store)
+                result = ensure_secretary(store, project["project_id"], harness, workspace)
+                self.assertEqual(result["workstream"]["provisioning_state"], "bound")
+                operation = store.conn.execute("SELECT result_json FROM operations WHERE kind='secretary.ensure'").fetchone()
+                snapshot = json.loads(operation["result_json"])
+                self.assertGreater(len(snapshot["runtimeSurfaceManifest"]), 4096)
+                self.assertEqual(json.loads(snapshot["runtimeSurfaceManifest"])["surfaceExtra"], "x" * 5000)
+
     def test_recover_start_relaunches_stopped_runtime_with_stale_agent_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

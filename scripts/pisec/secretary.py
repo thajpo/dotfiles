@@ -188,7 +188,7 @@ def _checkpoint(store: Any, operation_id: str, step: str, scope: Mapping[str, An
     if scope is None:
         store.conn.execute("UPDATE operations SET state='applying',step=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?", (step, utc_now(), operation_id))
     else:
-        store.conn.execute("UPDATE operations SET state='applying',step=?,result_json=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?", (step, canonical_json(scope), utc_now(), operation_id))
+        store.conn.execute("UPDATE operations SET state='applying',step=?,result_json=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?", (step, canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), utc_now(), operation_id))
 
 
 def _surface_scope(scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts) -> dict[str, Any]:
@@ -223,7 +223,7 @@ def _ensure_surface_snapshot(store: Any, operation_id: str, scope: Mapping[str, 
         surface = capture_runtime_surface(harness)
         scope = _surface_scope(scope, surface)
         with store.transaction():
-            store.conn.execute("UPDATE operations SET result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(scope), utc_now(), operation_id))
+            store.conn.execute("UPDATE operations SET result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), utc_now(), operation_id))
     return dict(scope), surface
 
 
@@ -455,7 +455,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
             request = {"projectId": project["project_id"], "kind": "secretary.ensure"}
             store.conn.execute(
                 "INSERT INTO operations(operation_id,kind,project_id,workstream_id,idempotency_key,request_json,request_sha256,state,step,result_json,created_at,updated_at) VALUES(?,'secretary.ensure',?,?,?,?,?,'applying','planned',?,?,?)",
-                (operation_id, project["project_id"], workstream_id, f"secretary.ensure:{project['project_id']}", canonical_json(request), json_digest(request), canonical_json(scope), now, now),
+                (operation_id, project["project_id"], workstream_id, f"secretary.ensure:{project['project_id']}", canonical_json(request), json_digest(request), canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), now, now),
             )
         _hit(failpoint, "after_secretary_proposal_commit", scope)
         existing = created
@@ -515,7 +515,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
                 binding = _repair_launch_binding(store, workspace, harness, project, scope, binding, surface=surface)
             except Exception as error:
                 _mark_attention(store, operation["operation_id"], existing["workstream_id"], str(error))
-                raise NeedsAttentionError("secretary binding repair requires attention") from error
+                raise NeedsAttentionError(f"secretary binding repair requires attention: {error}") from error
     elif operation["state"] == "needs_attention" or existing["provisioning_state"] == "needs_attention":
         raise NeedsAttentionError("secretary ensure requires attention")
     if operation["state"] == "failed":
@@ -605,7 +605,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         with store.transaction():
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, existing["workstream_id"]))
             store.conn.execute("UPDATE projects SET secretary_workstream_id=?,active=1,lifecycle_attention_reason=NULL,deactivated_at=NULL,updated_at=? WHERE project_id=?", (existing["workstream_id"], now, project["project_id"]))
-            store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(scope), now, operation["operation_id"]))
+            store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), now, operation["operation_id"]))
             append_event_in_transaction(store.conn, kind="secretary.bound", project_id=project["project_id"], workstream_id=existing["workstream_id"], operation_id=operation["operation_id"], payload={"workspaceId": binding["workspace_id"], "surfaceId": binding["workspace_surface_id"]})
     _hit(failpoint, "after_secretary_final_event_commit", scope)
     return {"project": resolve_project(store, project["project_id"]), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "binding": dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "reused": False}

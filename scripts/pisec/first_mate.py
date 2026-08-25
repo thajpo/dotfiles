@@ -137,7 +137,7 @@ def _ensure_surface_snapshot(store: Any, operation_id: str, scope: Mapping[str, 
         surface = capture_runtime_surface(harness)
         scope = _surface_scope(scope, surface)
         with store.transaction():
-            store.conn.execute("UPDATE operations SET result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(scope), utc_now(), operation_id))
+            store.conn.execute("UPDATE operations SET result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), utc_now(), operation_id))
     return dict(scope), surface
 
 
@@ -308,7 +308,7 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
             request = {"projectId": project["project_id"], "kind": "first_mate.ensure"}
             store.conn.execute(
                 "INSERT INTO operations(operation_id,kind,project_id,workstream_id,idempotency_key,request_json,request_sha256,state,step,result_json,created_at,updated_at) VALUES(?,'first_mate.ensure',?,?,?,?,?,'applying','planned',?,?,?)",
-                (operation_id, project["project_id"], workstream_id, "first_mate.ensure", canonical_json(request), json_digest(request), canonical_json(scope), now, now),
+                (operation_id, project["project_id"], workstream_id, "first_mate.ensure", canonical_json(request), json_digest(request), canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), now, now),
             )
         _hit(failpoint, "after_first_mate_proposal_commit", scope)
         existing = created
@@ -371,7 +371,7 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
     if _rank(operation["step"]) < _rank("profile_materialized"):
         artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
         with store.transaction():
-            store.conn.execute("UPDATE operations SET state='applying',step=?,result_json=?,updated_at=? WHERE operation_id=?", ("profile_materialized", canonical_json(scope), utc_now(), operation["operation_id"]))
+            store.conn.execute("UPDATE operations SET state='applying',step=?,result_json=?,updated_at=? WHERE operation_id=?", ("profile_materialized", canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), utc_now(), operation["operation_id"]))
         _hit(failpoint, "after_first_mate_profile_materialization", scope)
         operation = _operation(store, existing["workstream_id"])
     binding = _binding(store, existing["workstream_id"])
@@ -426,7 +426,7 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         now = utc_now()
         with store.transaction():
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, existing["workstream_id"]))
-            store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(scope), now, operation["operation_id"]))
+            store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), now, operation["operation_id"]))
             append_event_in_transaction(store.conn, kind="first_mate.bound", project_id=project["project_id"], workstream_id=existing["workstream_id"], operation_id=operation["operation_id"], payload={"workspaceId": binding["workspace_id"], "surfaceId": binding["workspace_surface_id"]})
     _hit(failpoint, "after_first_mate_final_event_commit", scope)
     return {"project": resolve_project(store, project["project_id"]), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "binding": _binding(store, existing["workstream_id"]), "reused": False}
