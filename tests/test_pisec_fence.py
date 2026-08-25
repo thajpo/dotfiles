@@ -727,6 +727,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertEqual(captured["argv"][3], str(root / "real-omp"))
             self.assertEqual(captured["env"]["PISEC_RUNTIME_SOCKET"], entry["runtimeSocketPath"])
             self.assertEqual(captured["env"]["PISEC_SECRETARY_SOCKET"], entry["secretarySocketPath"])
+            self.assertEqual(captured["env"]["PI_CODING_AGENT_DIR"], entry["harnessHome"])
             self.assertNotIn("OPENAI_API_KEY", captured["env"])
             os.chmod(Path(entry["canonicalRoot"]), 0o775)
             unsafe_root = subprocess.run([str(launcher), f"--resume={Path(entry['harnessHome']) / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)

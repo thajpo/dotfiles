@@ -315,7 +315,7 @@ def main() -> None:
             "HOME": str(state_root),
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "HERDR_AGENT": "omp",
-            "PI_CODING_AGENT_DIR": str(agent_dir),
+            "PI_CODING_AGENT_DIR": str(state_root),
             "XDG_DATA_HOME": str(descriptor["xdgDataHome"]),
             "XDG_STATE_HOME": str(descriptor["xdgStateHome"]),
             "XDG_CACHE_HOME": str(descriptor["xdgCacheHome"]),

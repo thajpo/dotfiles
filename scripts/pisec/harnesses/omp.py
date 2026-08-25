@@ -1196,7 +1196,7 @@ class OmpHarnessAdapter:
                 and artifact_document_value.get("adapterId") == self.manifest.adapter_id
                 and artifact_document_value.get("generationSha256") == binding.get("desired_generation_sha256")
             and isinstance(values, Mapping)
-            and set(values) == {"overlayPath", "xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot", "extensionPath", "agentRoot", "surfaceRoot", "launcherTemplate", "runtimeSurfaceId"}
+            and set(values) == {"overlayPath", "xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot", "extensionPath", "agentRoot", "surfaceRoot", "launcherTemplate", "runtimeSurfaceId", "tmpDir"}
                 and all(isinstance(value, str) and value for value in values.values())
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -1212,6 +1212,8 @@ class OmpHarnessAdapter:
                 path = Path(str(values[name]))
                 expected_root = surface_root if name in {"xdgDataHome", "pluginRoot"} else harness_home
                 copied_ok = copied_ok and (path.is_relative_to(expected_root) or path == expected_root) and owner_directory(path, readonly=name in {"xdgDataHome", "pluginRoot"})
+            tmp_dir = Path(str(values["tmpDir"]))
+            copied_ok = copied_ok and tmp_dir.is_relative_to(self.state_root) and owner_directory(tmp_dir)
             plugin_ok = copied_ok and owner_directory(Path(str(values["pluginRoot"])), readonly=True)
             overlay_path = Path(str(values["overlayPath"]))
             extension_path = Path(str(values["extensionPath"]))
