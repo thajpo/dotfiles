@@ -56,6 +56,19 @@ class UpdaterContractTests(unittest.TestCase):
             self.assertEqual(manifest["filesystemSha256"], self.updater["_opaque_archive_digest"](archive))
             self.assertTrue((install / "archive-manifests" / f"{archive.name}.json").is_file())
 
+    def test_broker_health_wait_requires_ready_admin_socket(self):
+        module_globals = self.updater["_wait_for_broker"].__globals__
+        old_ready = module_globals["_broker_ready"]
+        old_sleep = module_globals["time"].sleep
+        states = iter((False, True))
+        module_globals["_broker_ready"] = lambda: next(states)
+        module_globals["time"].sleep = lambda _seconds: None
+        try:
+            self.updater["_wait_for_broker"](1)
+        finally:
+            module_globals["_broker_ready"] = old_ready
+            module_globals["time"].sleep = old_sleep
+
     def test_unsupported_state_writes_status_outside_state_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

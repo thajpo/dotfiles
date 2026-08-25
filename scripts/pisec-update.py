@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
 
 
@@ -455,10 +456,45 @@ def _systemctl(action: str) -> None:
     subprocess.run(["systemctl", "--user", action, "pisec-broker.service"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
 
+def _broker_runtime_root() -> Path:
+    configured = os.environ.get("PISEC_RUNTIME_ROOT")
+    if configured:
+        return Path(configured).expanduser()
+    return Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.geteuid()}")) / "pisec"
+
+
+def _broker_ready() -> bool:
+    active = subprocess.run(
+        ["systemctl", "--user", "is-active", "--quiet", "pisec-broker.service"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+    if not active:
+        return False
+    socket_path = _broker_runtime_root() / "admin" / "control.sock"
+    try:
+        info = socket_path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISSOCK(info.st_mode) and info.st_uid == os.geteuid() and not (info.st_mode & 0o077)
+
+
+def _wait_for_broker(wait_seconds: float) -> None:
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while True:
+        if _broker_ready():
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("Pisec broker did not become ready before the health deadline")
+        time.sleep(min(0.1, remaining))
+
+
 def _post_switch(current: Path, wait_seconds: float) -> dict:
     environment = dict(os.environ)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     _systemctl("start")
+    _wait_for_broker(wait_seconds)
     doctor = subprocess.run([str(current / "bin" / "pisec"), "doctor", "--json"], env=environment, text=True, capture_output=True)
     if doctor.returncode:
         raise RuntimeError(f"doctor failed: {doctor.stdout[-512:]}{doctor.stderr[-512:]}")
