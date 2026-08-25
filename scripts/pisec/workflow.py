@@ -42,11 +42,11 @@ def _active_reporter(store: Any, project_id: str, workstream_id: str) -> dict[st
     return dict(row)
 
 
-def _report_digest(category: str, severity: str, summary: str, details: str, requested_action: str, evidence: Any) -> str:
-    return json_digest({"category": category, "severity": severity, "summary": summary, "details": details, "requestedAction": requested_action, "evidence": evidence})
+def _report_digest(category: str, severity: str, summary: str, details: str, requested_action: str, evidence: Any, escalated_from_issue_id: str | None) -> str:
+    return json_digest({"category": category, "severity": severity, "summary": summary, "details": details, "requestedAction": requested_action, "evidence": evidence, "escalatedFromIssueId": escalated_from_issue_id})
 
 
-def report_issue(store: Any, *, project_id: str, reporter_workstream_id: str, category: str, severity: str, summary: str, details: str, requested_action: str, evidence: Any, idempotency_key: str) -> dict[str, Any]:
+def report_issue(store: Any, *, project_id: str, reporter_workstream_id: str, category: str, severity: str, summary: str, details: str, requested_action: str, evidence: Any, idempotency_key: str, escalated_from_issue_id: str | None = None) -> dict[str, Any]:
     assert_project_writable(store, project_id)
     reporter = _active_reporter(store, project_id, reporter_workstream_id)
     if category not in ISSUE_CATEGORIES or severity not in ISSUE_SEVERITIES:
@@ -61,7 +61,18 @@ def report_issue(store: Any, *, project_id: str, reporter_workstream_id: str, ca
         bounded_text(requested_action, name="requested_action", limit=4096),
     )
     evidence_json = canonical_json(evidence, max_bytes=32768, max_text=4096)
-    digest = _report_digest(category, severity, text[0], text[1], text[2], evidence)
+    if escalated_from_issue_id is not None:
+        if reporter["kind"] != "secretary":
+            raise ConflictError("only a project Secretary may create an escalation")
+        project = get_project(store, project_id)
+        if project["coordination_mode"] != "fleet" or not project["active"]:
+            raise ConflictError("issue escalation requires an active fleet project")
+        underlying = _issue_row(store, escalated_from_issue_id, project_id)
+        if underlying["reporter_kind"] != "worker" or underlying["escalated_from_issue_id"] is not None:
+            raise ConflictError("escalation source must be an un-escalated worker issue")
+        if store.conn.execute("SELECT 1 FROM issues WHERE escalated_from_issue_id=?", (escalated_from_issue_id,)).fetchone() is not None:
+            raise ConflictError("worker issue already has an escalation")
+    digest = _report_digest(category, severity, text[0], text[1], text[2], evidence, escalated_from_issue_id)
     existing = store.conn.execute("SELECT * FROM issues WHERE reporter_workstream_id=? AND idempotency_key=?", (reporter_workstream_id, idempotency_key)).fetchone()
     if existing is not None:
         if existing["report_sha256"] != digest:
@@ -71,10 +82,11 @@ def report_issue(store: Any, *, project_id: str, reporter_workstream_id: str, ca
     now = utc_now()
     with store.transaction():
         store.conn.execute(
-            "INSERT INTO issues(issue_id,project_id,reporter_workstream_id,reporter_kind,category,severity,summary,details,requested_action,evidence_json,idempotency_key,report_sha256,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (issue_id, project_id, reporter_workstream_id, reporter["kind"], category, severity, text[0], text[1], text[2], evidence_json, idempotency_key, digest, "open", now, now),
+            "INSERT INTO issues(issue_id,project_id,reporter_workstream_id,reporter_kind,category,severity,summary,details,requested_action,evidence_json,idempotency_key,report_sha256,state,escalated_from_issue_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (issue_id, project_id, reporter_workstream_id, reporter["kind"], category, severity, text[0], text[1], text[2], evidence_json, idempotency_key, digest, "open", escalated_from_issue_id, now, now),
         )
-        append_event_in_transaction(store.conn, kind="issue.reported", project_id=project_id, workstream_id=reporter_workstream_id, payload={"issueId": issue_id, "reporterKind": reporter["kind"], "severity": severity})
+        event_kind = "issue.escalated" if escalated_from_issue_id is not None else "issue.reported"
+        append_event_in_transaction(store.conn, kind=event_kind, project_id=project_id, workstream_id=reporter_workstream_id, payload={"issueId": issue_id, "reporterKind": reporter["kind"], "severity": severity, "escalatedFromIssueId": escalated_from_issue_id})
     return inspect_issue(store, issue_id=issue_id, project_id=project_id)
 
 
@@ -137,10 +149,10 @@ def _append_issue_update(store: Any, *, issue: Mapping[str, Any], actor_kind: st
 
 def _issue_actor(store: Any, project_id: str, actor_id: str, *, kinds: set[str]) -> dict[str, Any]:
     row = store.conn.execute(
-        "SELECT w.workstream_id,w.project_id,w.kind,w.desired_state,w.provisioning_state FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=? AND w.project_id=? AND w.desired_state='active' AND w.provisioning_state='bound'",
-        (actor_id, project_id),
+        "SELECT w.workstream_id,w.project_id,w.kind,w.desired_state,w.provisioning_state FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=? AND w.desired_state='active' AND w.provisioning_state='bound'",
+        (actor_id,),
     ).fetchone()
-    if row is None or row["kind"] not in kinds:
+    if row is None or row["kind"] not in kinds or (row["kind"] != "first_mate" and row["project_id"] != project_id):
         raise ConflictError("issue actor is not authorized")
     return dict(row)
 
@@ -148,15 +160,23 @@ def _issue_actor(store: Any, project_id: str, actor_id: str, *, kinds: set[str])
 def add_issue_context(store: Any, *, project_id: str, issue_id: str, actor_id: str, context: Any, idempotency_key: str) -> dict[str, Any]:
     issue = _issue_row(store, issue_id, project_id)
     actor = _issue_actor(store, project_id, actor_id, kinds={"worker", "secretary", "first_mate"})
+    if actor["kind"] == "first_mate" and (issue["reporter_kind"] != "secretary" or issue["escalated_from_issue_id"] is None or get_project(store, project_id)["coordination_mode"] != "fleet"):
+        raise ConflictError("First Mate context is limited to fleet escalation issues")
     with store.transaction():
-        _append_issue_update(store, issue=issue, actor_kind=actor["kind"], actor_id=actor_id, update_kind="context", payload=context, idempotency_key=idempotency_key)
-        store.conn.execute("UPDATE issues SET updated_at=? WHERE issue_id=?", (utc_now(), issue_id))
+        changed = _append_issue_update(store, issue=issue, actor_kind=actor["kind"], actor_id=actor_id, update_kind="context", payload=context, idempotency_key=idempotency_key)
+        if changed:
+            store.conn.execute("UPDATE issues SET updated_at=? WHERE issue_id=?", (utc_now(), issue_id))
+            append_event_in_transaction(store.conn, kind="issue.context_added", project_id=project_id, workstream_id=actor_id, payload={"issueId": issue_id})
     return inspect_issue(store, issue_id=issue_id, project_id=project_id)
 
 
 def acknowledge_issue(store: Any, *, project_id: str, issue_id: str, actor_id: str) -> dict[str, Any]:
     issue = _issue_row(store, issue_id, project_id)
-    actor = _issue_actor(store, project_id, actor_id, kinds={"first_mate"})
+    actor = _issue_actor(store, project_id, actor_id, kinds={"secretary", "first_mate"})
+    if actor["kind"] == "secretary" and issue["reporter_kind"] != "worker":
+        raise ConflictError("Secretary may acknowledge only worker issues")
+    if actor["kind"] == "first_mate" and (issue["reporter_kind"] != "secretary" or issue["escalated_from_issue_id"] is None or get_project(store, project_id)["coordination_mode"] != "fleet"):
+        raise ConflictError("First Mate may acknowledge only fleet escalation issues")
     if issue["state"] not in {"open", "acknowledged"}:
         raise ConflictError("issue cannot be acknowledged in its current state")
     now = utc_now()
@@ -164,6 +184,7 @@ def acknowledge_issue(store: Any, *, project_id: str, issue_id: str, actor_id: s
         if issue["state"] == "open":
             store.conn.execute("UPDATE issues SET state='acknowledged',acknowledged_at=?,updated_at=? WHERE issue_id=?", (now, now, issue_id))
             _append_issue_update(store, issue=issue, actor_kind=actor["kind"], actor_id=actor_id, update_kind="acknowledged", payload={}, idempotency_key=f"ack:{issue_id}")
+            append_event_in_transaction(store.conn, kind="issue.acknowledged", project_id=project_id, workstream_id=actor_id, payload={"issueId": issue_id})
     return inspect_issue(store, issue_id=issue_id, project_id=project_id)
 
 
@@ -189,7 +210,10 @@ def link_issue_remediation(store: Any, *, project_id: str, issue_id: str, actor_
     ).fetchone()
     if target is None:
         raise ConflictError("remediation target is not an active bound project worker")
-    if not _task_covers_remediation(store, workstream_id=target_id, issue=issue):
+    underlying = _issue_row(store, str(issue["escalated_from_issue_id"]), project_id) if issue["escalated_from_issue_id"] is not None else issue
+    if underlying["reporter_kind"] != "worker":
+        raise ConflictError("remediation must be rooted in a worker issue")
+    if not _task_covers_remediation(store, workstream_id=target_id, issue=underlying):
         raise ConflictError("worker task packet does not cover the requested remediation")
     for table in ("completion_packets", "workstream_acceptances", "integration_jobs", "merge_receipts"):
         if store.conn.execute(f"SELECT 1 FROM {table} WHERE workstream_id=? LIMIT 1", (target_id,)).fetchone() is not None:
@@ -198,9 +222,6 @@ def link_issue_remediation(store: Any, *, project_id: str, issue_id: str, actor_
         raise ConflictError("resolved issue cannot be remediated")
     linked_issues = [issue]
     if issue["escalated_from_issue_id"] is not None:
-        underlying = _issue_row(store, str(issue["escalated_from_issue_id"]), project_id)
-        if underlying["reporter_kind"] != "worker":
-            raise ConflictError("escalation does not point to a worker issue")
         linked_issues.insert(0, underlying)
     with store.transaction():
         for linked in linked_issues:
@@ -225,40 +246,107 @@ def link_issue_remediation(store: Any, *, project_id: str, issue_id: str, actor_
     return inspect_issue(store, issue_id=issue_id, project_id=project_id)
 
 
-def request_issue_verification(store: Any, *, project_id: str, issue_id: str, actor_id: str, evidence: Any, idempotency_key: str) -> dict[str, Any]:
+def request_issue_remediation(store: Any, *, project_id: str, issue_id: str, actor_id: str, outcome: str, allowed_paths: Any, verification: Any, non_effects: Any, idempotency_key: str) -> dict[str, Any]:
     issue = _issue_row(store, issue_id, project_id)
     actor = _issue_actor(store, project_id, actor_id, kinds={"first_mate"})
-    if issue["state"] != "remediating":
+    project = get_project(store, project_id)
+    if project["coordination_mode"] != "fleet" or not project["active"] or actor["kind"] != "first_mate":
+        raise ConflictError("remediation request requires the global First Mate and an active fleet project")
+    if issue["reporter_kind"] != "secretary" or issue["escalated_from_issue_id"] is None:
+        raise ConflictError("remediation request requires a Secretary escalation")
+    if not isinstance(allowed_paths, list) or len(allowed_paths) > 64 or not isinstance(verification, list) or len(verification) > 32 or not isinstance(non_effects, list) or len(non_effects) > 32:
+        raise InvalidRequestError("remediation bounds must be lists")
+    for values, name in ((allowed_paths, "allowedPaths"), (verification, "verification"), (non_effects, "nonEffects")):
+        if any(not isinstance(value, str) or not value or len(value.encode("utf-8")) > 4096 for value in values):
+            raise InvalidRequestError(f"{name} contains invalid bounded text")
+    payload = {
+        "outcome": bounded_text(outcome, name="outcome", limit=4096),
+        "allowedPaths": allowed_paths,
+        "verification": verification,
+        "nonEffects": non_effects,
+    }
+    canonical_json(payload, max_bytes=32768, max_text=4096)
+    existing_update = store.conn.execute("SELECT update_kind,payload_sha256 FROM issue_updates WHERE issue_id=? AND actor_id=? AND idempotency_key=?", (issue_id, actor_id, idempotency_key)).fetchone()
+    if existing_update is not None:
+        if existing_update["update_kind"] != "remediation_requested" or existing_update["payload_sha256"] != json_digest(payload):
+            raise IdempotencyConflictError("remediation request differs for the idempotency key")
+        return inspect_issue(store, issue_id=issue_id, project_id=project_id)
+    if issue["state"] not in {"open", "acknowledged"}:
+        raise ConflictError("remediation request requires an open Secretary escalation")
+    with store.transaction():
+        changed = _append_issue_update(store, issue=issue, actor_kind=actor["kind"], actor_id=actor_id, update_kind="remediation_requested", payload=payload, idempotency_key=idempotency_key)
+        if changed:
+            store.conn.execute("UPDATE issues SET state='remediating',updated_at=? WHERE issue_id=?", (utc_now(), issue_id))
+            append_event_in_transaction(store.conn, kind="issue.remediation_requested", project_id=project_id, workstream_id=actor_id, payload={"issueId": issue_id})
+    return inspect_issue(store, issue_id=issue_id, project_id=project_id)
+
+
+def request_issue_verification(store: Any, *, project_id: str, issue_id: str, actor_id: str, evidence: Any, idempotency_key: str) -> dict[str, Any]:
+    issue = _issue_row(store, issue_id, project_id)
+    actor = _issue_actor(store, project_id, actor_id, kinds={"secretary", "first_mate"})
+    if actor["kind"] == "secretary":
+        if issue["reporter_kind"] != "worker" or issue["escalated_from_issue_id"] is not None:
+            raise ConflictError("Secretary may request verification only for a worker issue")
+    elif issue["reporter_kind"] != "secretary" or issue["escalated_from_issue_id"] is None or get_project(store, project_id)["coordination_mode"] != "fleet":
+        raise ConflictError("only the First Mate may request verification for a fleet escalation")
+    payload = {"evidence": evidence}
+    existing_update = store.conn.execute("SELECT update_kind,payload_sha256 FROM issue_updates WHERE issue_id=? AND actor_id=? AND idempotency_key=?", (issue_id, actor_id, idempotency_key)).fetchone()
+    if existing_update is not None:
+        if existing_update["update_kind"] != "verification_requested" or existing_update["payload_sha256"] != json_digest(payload):
+            raise IdempotencyConflictError("verification request differs for the idempotency key")
+        return inspect_issue(store, issue_id=issue_id, project_id=project_id)
+    if store.conn.execute("SELECT 1 FROM issue_updates WHERE issue_id=? AND update_kind='remediation_completed'", (issue_id,)).fetchone() is None:
+        raise ConflictError("issue has no linked completed remediation to verify")
+    if issue["state"] not in {"acknowledged", "remediating"}:
         raise ConflictError("issue is not ready for verification")
     now = utc_now()
     with store.transaction():
         store.conn.execute("UPDATE issues SET state='verifying',updated_at=? WHERE issue_id=?", (now, issue_id))
-        _append_issue_update(store, issue=issue, actor_kind=actor["kind"], actor_id=actor_id, update_kind="verification_requested", payload={"evidence": evidence}, idempotency_key=idempotency_key)
+        changed = _append_issue_update(store, issue=issue, actor_kind=actor["kind"], actor_id=actor_id, update_kind="verification_requested", payload=payload, idempotency_key=idempotency_key)
+        if changed:
+            append_event_in_transaction(store.conn, kind="issue.verification_requested", project_id=project_id, workstream_id=actor_id, payload={"issueId": issue_id})
     return inspect_issue(store, issue_id=issue_id, project_id=project_id)
 
 
 def verify_issue(store: Any, *, project_id: str, issue_id: str, actor_id: str, status: str, evidence: Any, idempotency_key: str) -> dict[str, Any]:
     issue = _issue_row(store, issue_id, project_id)
     actor = _issue_actor(store, project_id, actor_id, kinds={"worker", "secretary"})
-    if actor_id != issue["reporter_workstream_id"] and actor["kind"] != "secretary":
-        raise ConflictError("only the reporter or project secretary may verify an issue")
-    if issue["state"] != "verifying":
-        raise ConflictError("issue is not awaiting verification")
+    if actor_id != issue["reporter_workstream_id"]:
+        raise ConflictError("only the original issue reporter may verify an issue")
     if status not in {"fixed", "still_blocked"}:
         raise InvalidRequestError("invalid issue verification status")
+    expected_kind = "verification_passed" if status == "fixed" else "verification_failed"
+    expected_payload = {"status": status, "evidence": evidence}
+    existing_update = store.conn.execute("SELECT update_kind,payload_sha256 FROM issue_updates WHERE issue_id=? AND actor_id=? AND idempotency_key=?", (issue_id, actor_id, idempotency_key)).fetchone()
+    if existing_update is not None:
+        if existing_update["update_kind"] != expected_kind or existing_update["payload_sha256"] != json_digest(expected_payload):
+            raise IdempotencyConflictError("issue verification differs for the idempotency key")
+        return inspect_issue(store, issue_id=issue_id, project_id=project_id)
+    if issue["state"] != "verifying":
+        raise ConflictError("issue is not awaiting verification")
     now = utc_now()
     with store.transaction():
         update_kind = "verification_passed" if status == "fixed" else "verification_failed"
         state = "resolved" if status == "fixed" else "acknowledged"
         disposition = "fixed" if status == "fixed" else None
-        store.conn.execute("UPDATE issues SET state=?,disposition=?,resolution=?,resolved_at=?,updated_at=? WHERE issue_id=?", (state, disposition, None if status != "fixed" else "verified by reporter", now if status == "fixed" else None, now, issue_id))
-        _append_issue_update(store, issue=issue, actor_kind=actor["kind"], actor_id=actor_id, update_kind=update_kind, payload={"status": status, "evidence": evidence}, idempotency_key=idempotency_key)
+        related = [issue]
+        if issue["escalated_from_issue_id"] is not None:
+            related.append(_issue_row(store, str(issue["escalated_from_issue_id"]), project_id))
+        for related_issue in related:
+            store.conn.execute("UPDATE issues SET state=?,disposition=?,resolution=?,resolved_at=?,updated_at=? WHERE issue_id=?", (state, disposition, None if status != "fixed" else "verified by reporter", now if status == "fixed" else None, now, related_issue["issue_id"]))
+            changed = _append_issue_update(store, issue=related_issue, actor_kind=actor["kind"], actor_id=actor_id, update_kind=update_kind, payload=expected_payload, idempotency_key=f"{idempotency_key}:{related_issue['issue_id']}" if len(related) > 1 else idempotency_key)
+            if changed:
+                append_event_in_transaction(store.conn, kind=f"issue.{update_kind}", project_id=project_id, workstream_id=actor_id, payload={"issueId": related_issue["issue_id"]})
     return inspect_issue(store, issue_id=issue_id, project_id=project_id)
 
 
 def resolve_issue(store: Any, *, project_id: str, issue_id: str, actor_id: str, disposition: str, reason: str, decision_id: str) -> dict[str, Any]:
     issue = _issue_row(store, issue_id, project_id)
-    actor = _issue_actor(store, project_id, actor_id, kinds={"first_mate"})
+    actor = _issue_actor(store, project_id, actor_id, kinds={"secretary", "first_mate"})
+    if actor["kind"] == "secretary" and issue["reporter_kind"] != "worker":
+        raise ConflictError("Secretary may resolve only worker issues")
+    if actor["kind"] == "first_mate" and (issue["reporter_kind"] != "secretary" or issue["escalated_from_issue_id"] is None or get_project(store, project_id)["coordination_mode"] != "fleet"):
+        raise ConflictError("First Mate may resolve only fleet escalation issues")
     if disposition not in {"declined", "duplicate", "not_reproducible"} or not reason.strip():
         raise InvalidRequestError("non-fix issue resolution requires a disposition and reason")
     decision = store.conn.execute("SELECT * FROM decisions WHERE decision_id=? AND project_id=? AND state='resolved'", (decision_id, project_id)).fetchone()
@@ -271,21 +359,15 @@ def resolve_issue(store: Any, *, project_id: str, issue_id: str, actor_id: str, 
     now = utc_now()
     with store.transaction():
         text = bounded_text(reason, name="reason", limit=4096)
-        store.conn.execute("UPDATE issues SET state='resolved',disposition=?,resolution=?,resolved_decision_id=?,resolved_at=?,updated_at=? WHERE issue_id=?", (disposition, text, decision_id, now, now, issue_id))
-        _append_issue_update(store, issue=issue, actor_kind=actor["kind"], actor_id=actor_id, update_kind="resolved", payload={"disposition": disposition, "reason": reason, "decisionId": decision_id}, idempotency_key=f"resolve:{decision_id}")
+        related = [issue]
+        if issue["escalated_from_issue_id"] is not None:
+            related.append(_issue_row(store, str(issue["escalated_from_issue_id"]), project_id))
+        for related_issue in related:
+            store.conn.execute("UPDATE issues SET state='resolved',disposition=?,resolution=?,resolved_decision_id=?,resolved_at=?,updated_at=? WHERE issue_id=?", (disposition, text, decision_id, now, now, related_issue["issue_id"]))
+            changed = _append_issue_update(store, issue=related_issue, actor_kind=actor["kind"], actor_id=actor_id, update_kind="resolved", payload={"disposition": disposition, "reason": reason, "decisionId": decision_id}, idempotency_key=f"resolve:{decision_id}:{related_issue['issue_id']}" if len(related) > 1 else f"resolve:{decision_id}")
+            if changed:
+                append_event_in_transaction(store.conn, kind="issue.resolved", project_id=project_id, workstream_id=actor_id, payload={"issueId": related_issue["issue_id"]})
     return inspect_issue(store, issue_id=issue_id, project_id=project_id)
-
-
-def report_secretary_issue(store: Any, **kwargs: Any) -> dict[str, Any]:
-    return report_issue(store, reporter_workstream_id=kwargs.pop("secretary_workstream_id"), **kwargs)
-
-
-def list_secretary_issues(store: Any, **kwargs: Any) -> list[dict[str, Any]]:
-    return list_issues(store, **kwargs)
-
-
-def inspect_secretary_issue(store: Any, **kwargs: Any) -> dict[str, Any]:
-    return inspect_issue(store, **kwargs)
 
 
 def _runtime_binding(store: Any, workstream_id: str, runtime_instance_id: str) -> dict[str, Any]:
@@ -313,6 +395,9 @@ def checkpoint(store: Any, *, workstream_id: str, runtime_instance_id: str, phas
         validate_id(remediation_issue_id, prefix="iss")
         if store.conn.execute("SELECT 1 FROM issue_remediations WHERE issue_id=? AND workstream_id=?", (remediation_issue_id, workstream_id)).fetchone() is None:
             raise ConflictError("checkpoint remediation issue is not linked to this worker")
+        linked_issue = _issue_row(store, remediation_issue_id, str(binding["project_id"]))
+        if linked_issue["reporter_kind"] != "worker" or linked_issue["escalated_from_issue_id"] is not None:
+            raise ConflictError("checkpoint remediation issue must be the underlying worker issue")
     summary = bounded_text(summary, name="summary", limit=1024)
     next_action = bounded_text(next_action, name="next_action", limit=1024)
     evidence_json = canonical_json(evidence, max_bytes=32768, max_text=4096)
@@ -330,6 +415,12 @@ def checkpoint(store: Any, *, workstream_id: str, runtime_instance_id: str, phas
                 "INSERT INTO workstream_checkpoints(checkpoint_id,workstream_id,runtime_instance_id,sequence,idempotency_key,phase,summary,next_action,remediation_issue_id,evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (checkpoint_id, workstream_id, runtime_instance_id, sequence, idempotency_key, phase, summary, next_action, remediation_issue_id, evidence_json, now),
             )
+            if remediation_issue_id is not None:
+                issue = _issue_row(store, remediation_issue_id, str(binding["project_id"]))
+                started = store.conn.execute("SELECT 1 FROM issue_updates WHERE issue_id=? AND actor_id=? AND update_kind='remediation_started'", (remediation_issue_id, workstream_id)).fetchone()
+                if started is None:
+                    _append_issue_update(store, issue=issue, actor_kind="worker", actor_id=workstream_id, update_kind="remediation_started", payload={"checkpointId": checkpoint_id}, idempotency_key=f"remediation-started:{workstream_id}:{remediation_issue_id}")
+                    append_event_in_transaction(store.conn, kind="issue.remediation_started", project_id=binding["project_id"], workstream_id=workstream_id, payload={"issueId": remediation_issue_id, "checkpointId": checkpoint_id})
         if existing is None:
             append_event_in_transaction(store.conn, kind="workstream.checkpointed", project_id=binding["project_id"], workstream_id=workstream_id, payload={"checkpointId": checkpoint_id, "sequence": sequence, "phase": phase, "remediationIssueId": remediation_issue_id})
     return dict(store.conn.execute("SELECT * FROM workstream_checkpoints WHERE checkpoint_id=?", (checkpoint_id,)).fetchone())
@@ -399,6 +490,21 @@ def _submit_completion_in_transaction(store: Any, *, workstream_id: str, runtime
         "INSERT INTO completion_packets(completion_packet_id,workstream_id,sequence,source_commit_oid,task_packet_sha256,packet_sha256,packet_json,submitted_at,accepted_at) VALUES(?,?,?,?,?,?,?,?,?)",
         (packet_id, workstream_id, sequence, observed_source, task["packet_sha256"], packet_sha, canonical_json(normalized, max_bytes=65536, max_text=8192), now, None),
     )
+    linked_checkpoint = store.conn.execute(
+        "SELECT remediation_issue_id FROM workstream_checkpoints WHERE workstream_id=? AND remediation_issue_id IS NOT NULL ORDER BY sequence DESC LIMIT 1",
+        (workstream_id,),
+    ).fetchone()
+    if linked_checkpoint is not None:
+        issue = _issue_row(store, str(linked_checkpoint["remediation_issue_id"]), project_id)
+        linked_issues = [issue]
+        if issue["escalated_from_issue_id"] is not None:
+            linked_issues.append(_issue_row(store, str(issue["escalated_from_issue_id"]), project_id))
+        for linked in linked_issues:
+            update_key = f"remediation-completed:{packet_id}:{linked['issue_id']}"
+            changed = _append_issue_update(store, issue=linked, actor_kind="worker", actor_id=workstream_id, update_kind="remediation_completed", payload={"completionPacketId": packet_id}, idempotency_key=update_key)
+            if changed:
+                store.conn.execute("UPDATE issues SET state='acknowledged',updated_at=? WHERE issue_id=?", (now, linked["issue_id"]))
+                append_event_in_transaction(store.conn, kind="issue.remediation_completed", project_id=project_id, workstream_id=workstream_id, payload={"issueId": linked["issue_id"], "completionPacketId": packet_id})
     append_event_in_transaction(store.conn, kind="workstream.completion_submitted", project_id=project_id, workstream_id=workstream_id, payload={"completionPacketId": packet_id, "completionPacketSha256": packet_sha, "sourceCommit": observed_source})
     return dict(store.conn.execute("SELECT * FROM completion_packets WHERE completion_packet_id=?", (packet_id,)).fetchone())
 
@@ -406,13 +512,15 @@ def _submit_completion_in_transaction(store: Any, *, workstream_id: str, runtime
 def submit_completion(store: Any, *, workstream_id: str, runtime_instance_id: str, packet: Mapping[str, Any]) -> dict[str, Any]:
     with store.transaction():
         result = _submit_completion_in_transaction(store, workstream_id=workstream_id, runtime_instance_id=runtime_instance_id, packet=packet)
-        existing_checkpoint = store.conn.execute("SELECT * FROM workstream_checkpoints WHERE workstream_id=? AND phase='ready_review' AND remediation_issue_id IS NULL ORDER BY sequence DESC LIMIT 1", (workstream_id,)).fetchone()
+        existing_checkpoint = store.conn.execute("SELECT * FROM workstream_checkpoints WHERE workstream_id=? AND phase='ready_review' AND idempotency_key=?", (workstream_id, f"completion:{result['packet_sha256']}")).fetchone()
         if existing_checkpoint is None:
             checkpoint_id = new_id("cp")
             checkpoint_sequence = int(store.conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM workstream_checkpoints WHERE workstream_id=?", (workstream_id,)).fetchone()[0])
+            linked = store.conn.execute("SELECT remediation_issue_id FROM workstream_checkpoints WHERE workstream_id=? AND remediation_issue_id IS NOT NULL ORDER BY sequence DESC LIMIT 1", (workstream_id,)).fetchone()
+            linked_issue_id = None if linked is None else linked["remediation_issue_id"]
             store.conn.execute(
-                "INSERT INTO workstream_checkpoints(checkpoint_id,workstream_id,runtime_instance_id,sequence,idempotency_key,phase,summary,next_action,evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (checkpoint_id, workstream_id, runtime_instance_id, checkpoint_sequence, f"completion:{result['packet_sha256']}", "ready_review", "Completion packet submitted for review", "Secretary must review the immutable completion packet", "[]", result["submitted_at"]),
+                "INSERT INTO workstream_checkpoints(checkpoint_id,workstream_id,runtime_instance_id,sequence,idempotency_key,phase,summary,next_action,remediation_issue_id,evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (checkpoint_id, workstream_id, runtime_instance_id, checkpoint_sequence, f"completion:{result['packet_sha256']}", "ready_review", "Completion packet submitted for review", "Secretary must review the immutable completion packet", linked_issue_id, "[]", result["submitted_at"]),
             )
             binding = _runtime_binding(store, workstream_id, runtime_instance_id)
             append_event_in_transaction(store.conn, kind="workstream.checkpointed", project_id=binding["project_id"], workstream_id=workstream_id, payload={"checkpointId": checkpoint_id, "sequence": checkpoint_sequence, "phase": "ready_review", "completionPacketId": result["completion_packet_id"]})

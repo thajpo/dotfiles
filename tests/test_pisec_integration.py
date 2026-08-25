@@ -129,7 +129,9 @@ class IntegrationTests(unittest.TestCase):
             job = store.conn.execute("SELECT state,next_action FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()
             self.assertEqual(job["state"], "awaiting_worker")
             self.assertIn("new ready_review checkpoint", job["next_action"])
-            self.assertIn("rebase", workspace.prompts[-1][1].lower())
+            self.assertFalse(any("rebase" in prompt.lower() for _surface, prompt in workspace.prompts))
+            attention = store.conn.execute("SELECT source_kind FROM attention_items WHERE source_kind='integration' AND source_id=?", (accepted["integration"]["integration_id"],)).fetchone()
+            self.assertIsNotNone(attention)
             prompt_count = len(workspace.prompts)
             attempt = store.conn.execute("SELECT attempt FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()["attempt"]
             replay = reconcile_integrations(store, workspace, harness)

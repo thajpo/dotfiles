@@ -15,7 +15,7 @@ import stat
 import threading
 from typing import Any, Callable, Mapping
 from .adapters import AdapterRegistry, HarnessAdapter, WorkspaceAdapter
-from .attention import ATTENTION_WAKE_PROMPT, list_open_attention
+from .attention import ATTENTION_WAKE_PROMPT, compact_attention, list_open_attention, wait_for_attention_hint
 from .cleanup import cleanup_workstream
 from .decisions import list_decisions, record_decision, resolve_decision
 from .events import list_events
@@ -33,8 +33,6 @@ from .research import (
     inspect_research,
     list_research_requests,
     list_unacknowledged_research,
-    mark_research_wake_notified,
-    pending_research_wakes,
     request_research,
     request_research_context,
 )
@@ -42,8 +40,8 @@ from .runtime import WORKSPACE_RUNTIME_MISSING, prepare_runtime_turn, prepare_se
 from .first_mate import ensure_first_mate, focus_first_mate
 from .secretary_git import git_status, inspect_workstream_changes, push_branch
 from .integration import apply_workstream_acceptance, inspect_integration, list_integrations, prepare_workstream_acceptance, reconcile_integrations
-from .workflow import acknowledge_coordination, acknowledge_issue, add_issue_context, answer_coordination, checkpoint, inspect_issue, link_issue_remediation, list_issues, request_coordination, request_help, request_issue_verification, report_issue, resolve_issue, submit_completion, verify_issue
-from .workstreams import authorize_apply_workstream, focus_workstream, inspect_workstream, list_workstreams, prepare_workstream, retire_workstream, send_workstream
+from .workflow import acknowledge_coordination, acknowledge_issue, add_issue_context, answer_coordination, checkpoint, inspect_issue, link_issue_remediation, list_issues, request_help, request_issue_remediation, request_issue_verification, report_issue, resolve_issue, submit_completion, verify_issue
+from .workstreams import authorize_apply_workstream, focus_workstream, inspect_workstream, list_workstreams, prepare_workstream, retire_workstream
 from .operation_contracts import SOCKET_OPERATIONS
 ADMIN_OPERATIONS = SOCKET_OPERATIONS["admin"]
 SECRETARY_OPERATIONS = SOCKET_OPERATIONS["secretary"]
@@ -54,7 +52,6 @@ from .runtime_surface import capture_runtime_surface
 WORKSPACE_RECONCILE_INTERVAL_SECONDS = 5.0
 WORKSPACE_STARTUP_GRACE_SECONDS = 2.0
 RUNTIME_RESTART_BACKOFF_SECONDS = 30.0
-RESEARCH_WAKE_DEBOUNCE_SECONDS = 0.1
 logger = logging.getLogger(__name__)
 
 
@@ -196,10 +193,11 @@ class BrokerDispatcher:
         self.workspace = workspace
         self.config = dict(config or {})
         self._reconcile_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
-        self._wake_queue: queue.Queue[str] = queue.Queue(maxsize=256)
         self._reconcile_stop = threading.Event()
         self._reconcile_thread: threading.Thread | None = None
-        self._wake_thread: threading.Thread | None = None
+        self._attention_thread: threading.Thread | None = None
+        self._attention_wake_deadlines: dict[str, float] = {}
+        self._attention_wake_lock = threading.Lock()
         self._reconcile_lock = threading.Lock()
         self._last_resume_attempt: dict[str, float] = {}
         self._surfaces: dict[str, Any] = {}
@@ -360,73 +358,86 @@ class BrokerDispatcher:
             return
         self._reconcile_stop.clear()
         self._reconcile_thread = threading.Thread(target=self._run_reconcile_queue, name="pisec-reconcile", daemon=True)
-        self._wake_thread = threading.Thread(target=self._run_research_wakes, name="pisec-research-wake", daemon=True)
+        self._attention_thread = threading.Thread(target=self._run_attention_watcher, name="pisec-attention-watcher", daemon=True)
         self._reconcile_thread.start()
-        self._wake_thread.start()
-        self._queue_all_research_wakes()
+        self._attention_thread.start()
+
     def stop_background(self) -> None:
         self._reconcile_stop.set()
         thread = self._reconcile_thread
-        wake_thread = self._wake_thread
+        attention_thread = self._attention_thread
         if thread is not None:
             thread.join(timeout=5)
-        if wake_thread is not None:
-            wake_thread.join(timeout=5)
+        if attention_thread is not None:
+            attention_thread.join(timeout=5)
         self._reconcile_thread = None
-    def _queue_all_research_wakes(self) -> None:
+
+    def _clear_attention_wake(self, workstream_id: str) -> None:
+        with self._attention_wake_lock:
+            self._attention_wake_deadlines.pop(workstream_id, None)
+
+    def _attention_runtime_ready(self, store: PiStore, row: Mapping[str, Any]) -> bool:
+        if row["observed_state"] != "idle" or row["refresh_pending"] or row["launch_generation_sha256"] is not None:
+            return False
+        if row["runtime_instance_id"] is None or row["report_seq"] is None or int(row["report_seq"]) < 1:
+            return False
+        if row["applied_generation_sha256"] is None or row["applied_generation_sha256"] != row["desired_generation_sha256"]:
+            return False
+        if row["session_start_event_sequence"] is None or row["session_start_report_seq"] != row["report_seq"]:
+            return False
         try:
-            with self.store_factory() as store:
-                for row in pending_research_wakes(store):
-                    self._queue_research_wake(row["project_id"])
-                for row in store.conn.execute("SELECT DISTINCT project_id FROM attention_items"):
-                    self._queue_research_wake(row["project_id"])
+            harness = self.registry.resolve_harness(str(row["harness_id"]))
+            observation = self.workspace.observe_surface(
+                workspace_id=str(row["workspace_id"]),
+                view_id=str(row["workspace_view_id"]),
+                surface_id=str(row["workspace_surface_id"]),
+                cwd=str(row["worktree_path"]),
+            )
+            if observation is None or observation.agent is None:
+                return False
+            if observation.agent.surface_id != str(row["workspace_surface_id"]) or observation.agent.name not in {str(row["agent_name"]), str(harness.manifest.agent_kind)} or not observation.agent.identity_usable:
+                return False
+            if not self.workspace.prompt_eligible(observation.agent):
+                return False
+            return self.workspace.observe_runtime(str(row["workspace_surface_id"]), str(row["policy_path"])).state == "live"
         except BaseException:
-            logger.exception("could not queue durable notification wakes")
+            return False
 
-    def _queue_research_wake(self, project_id: str) -> None:
-        try:
-            self._wake_queue.put_nowait(project_id)
-        except queue.Full:
-            pass
-
-    def _run_research_wakes(self) -> None:
+    def _run_attention_watcher(self) -> None:
         while not self._reconcile_stop.is_set():
+            wait_for_attention_hint(1.0)
             try:
-                project_id = self._wake_queue.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            projects = {project_id}
-            if self._reconcile_stop.wait(RESEARCH_WAKE_DEBOUNCE_SECONDS):
-                self._wake_queue.task_done()
-                break
-            while True:
-                try:
-                    projects.add(self._wake_queue.get_nowait())
-                    self._wake_queue.task_done()
-                except queue.Empty:
-                    break
-            for selected in projects:
-                try:
-                    self._wake_project(selected)
-                except BaseException:
-                    logger.exception("research wake failed")
-            self._wake_queue.task_done()
+                self._scan_attention()
+            except BaseException:
+                logger.exception("attention watcher scan failed")
 
-    def _wake_project(self, project_id: str) -> None:
+    def _scan_attention(self) -> None:
+        now_monotonic = time.monotonic()
         with self.store_factory() as store:
-            project = store.conn.execute("SELECT coordination_mode FROM projects WHERE project_id=? AND active=1", (project_id,)).fetchone()
-            if project is None or project["coordination_mode"] != "fleet":
-                return
-            recipients = [dict(row) for row in store.conn.execute("SELECT workstream_id FROM workstreams WHERE project_id=? AND kind='secretary' AND desired_state='active'", (project_id,))]
-            recipients.extend(dict(row) for row in store.conn.execute("SELECT workstream_id FROM workstreams WHERE kind='first_mate' AND desired_state='active'"))
-            for recipient in recipients:
-                items = list_open_attention(store, recipient_workstream_id=recipient["workstream_id"], limit=1)
-                if not items:
+            recipients = store.conn.execute(
+                "SELECT DISTINCT a.recipient_workstream_id FROM attention_items a JOIN workstreams w ON w.workstream_id=a.recipient_workstream_id WHERE w.desired_state='active' AND w.provisioning_state='bound'"
+            ).fetchall()
+            due: list[tuple[int, str, str]] = []
+            for recipient_row in recipients:
+                recipient_id = str(recipient_row["recipient_workstream_id"])
+                items = list_open_attention(store, recipient_workstream_id=recipient_id, limit=32, due_only=True)
+                if items:
+                    item = sorted(items, key=lambda value: (int(value["priority"]), str(value["revision_at"]), recipient_id))[0]
+                    due.append((int(item["priority"]), str(item["revision_at"]), recipient_id))
+            for _priority, _revision, recipient_id in sorted(due):
+                with self._attention_wake_lock:
+                    deadline = self._attention_wake_deadlines.get(recipient_id)
+                    if deadline is not None and deadline > now_monotonic:
+                        continue
+                binding = store.conn.execute(
+                    "SELECT r.*,w.worktree_path FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=? AND w.desired_state='active' AND w.provisioning_state='bound'",
+                    (recipient_id,),
+                ).fetchone()
+                if binding is None or not self._attention_runtime_ready(store, binding):
                     continue
-                binding = store.conn.execute("SELECT workspace_surface_id FROM runtime_bindings WHERE workstream_id=?", (recipient["workstream_id"],)).fetchone()
-                if binding is not None:
-                    self.workspace.prompt_agent_nowait(binding["workspace_surface_id"], ATTENTION_WAKE_PROMPT)
-                return
+                self.workspace.prompt_agent_nowait(str(binding["workspace_surface_id"]), ATTENTION_WAKE_PROMPT)
+                with self._attention_wake_lock:
+                    self._attention_wake_deadlines[recipient_id] = time.monotonic() + 30.0
 
     def _defer_reconcile(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         try:
@@ -510,7 +521,9 @@ class BrokerDispatcher:
         auth_fields = {"workstreamId", "runtimeInstanceId", "surfaceId", "token", "generation"}
         if operation == "runtime.turn.prepare":
             _exact(payload, auth_fields | {"sessionKey"})
-            return prepare_runtime_turn(store, payload)
+            result = prepare_runtime_turn(store, payload)
+            self._clear_attention_wake(str(payload["workstreamId"]))
+            return result
         if operation == "session.switch.prepare":
             _exact(payload, auth_fields | {"reason", "targetSessionFile"})
             return prepare_session_switch(store, payload, self._harness_for_workstream(store, str(payload["workstreamId"])))
@@ -522,14 +535,14 @@ class BrokerDispatcher:
         workstream_id = str(binding["workstream_id"])
         if operation == "attention.list":
             _exact(payload, auth_fields, {"limit"})
-            return {"items": list_open_attention(store, recipient_workstream_id=workstream_id, limit=int(payload.get("limit", 32)))}
+            return {"items": [compact_attention(item) for item in list_open_attention(store, recipient_workstream_id=workstream_id, limit=int(payload.get("limit", 32)))]}
         if operation == "attention.inspect":
             _exact(payload, auth_fields | {"attentionId"})
             row = store.conn.execute("SELECT * FROM attention_items WHERE attention_id=? AND recipient_workstream_id=?", (payload["attentionId"], workstream_id)).fetchone()
             if row is None:
                 raise NotFoundError("attention item was not found")
             return dict(row)
-        if operation in {"issue.report", "secretary.issue.report"}:
+        if operation == "issue.report":
             _exact(payload, auth_fields | {"category", "severity", "summary", "details", "requestedAction", "evidence", "idempotencyKey"})
             return report_issue(store, project_id=project_id, reporter_workstream_id=workstream_id, category=payload["category"], severity=payload["severity"], summary=payload["summary"], details=payload["details"], requested_action=payload["requestedAction"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
         if operation == "help.request":
@@ -560,9 +573,6 @@ class BrokerDispatcher:
         if operation == "workstream.completion.submit":
             _exact(payload, auth_fields | {"completionPacket"})
             return {"completionPacket": submit_completion(store, workstream_id=workstream_id, runtime_instance_id=str(payload["runtimeInstanceId"]), packet=payload["completionPacket"])}
-        if operation == "coordination.request":
-            _exact(payload, auth_fields | {"kind", "summary", "question", "blocking", "idempotencyKey"})
-            return request_coordination(store, project_id=project_id, workstream_id=workstream_id, kind=payload["kind"], summary=payload["summary"], question=payload["question"], blocking=bool(payload["blocking"]), idempotency_key=payload["idempotencyKey"])
         if operation in {"coordination.list", "coordination.inspect"}:
             if operation == "coordination.list":
                 _exact(payload, auth_fields, {"includeResolved"})
@@ -596,9 +606,7 @@ class BrokerDispatcher:
             return result
         if operation == "research.request":
             _exact(payload, auth_fields | {"idempotencyKey", "request"})
-            result = request_research(store, project_id=project_id, workstream_id=workstream_id, idempotency_key=payload["idempotencyKey"], request=payload["request"])
-            self._queue_research_wake(project_id)
-            return result
+            return request_research(store, project_id=project_id, workstream_id=workstream_id, idempotency_key=payload["idempotencyKey"], request=payload["request"])
         if operation == "research.list":
             _exact(payload, auth_fields, {"state", "limit"})
             states = None if payload.get("state") is None else {payload["state"]}
@@ -608,9 +616,7 @@ class BrokerDispatcher:
             return inspect_research(store, project_id=project_id, workstream_id=workstream_id, request_id=payload["requestId"])
         if operation == "research.add_context":
             _exact(payload, auth_fields | {"requestId", "idempotencyKey", "context"})
-            result = add_research_context(store, project_id=project_id, workstream_id=workstream_id, request_id=payload["requestId"], idempotency_key=payload["idempotencyKey"], context=payload["context"])
-            self._queue_research_wake(project_id)
-            return result
+            return add_research_context(store, project_id=project_id, workstream_id=workstream_id, request_id=payload["requestId"], idempotency_key=payload["idempotencyKey"], context=payload["context"])
         if operation == "research.acknowledge":
             _exact(payload, auth_fields | {"requestId"})
             return acknowledge_research(store, project_id=project_id, workstream_id=workstream_id, request_id=payload["requestId"])
@@ -621,6 +627,9 @@ class BrokerDispatcher:
 
     def _reconcile_locked(self, store: PiStore, payload: Mapping[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {"reconciled": False, "resumed": [], "errors": []}
+        from .attention import backfill_attention
+        for supervisor in store.conn.execute("SELECT workstream_id FROM workstreams WHERE kind IN ('secretary','first_mate') AND desired_state='active' AND provisioning_state='bound'"):
+            backfill_attention(store, recipient_workstream_id=str(supervisor["workstream_id"]), limit=128)
         from .refresh import mark_stale_bindings
         result["generations"] = mark_stale_bindings(store, self.harness, harness_resolver=lambda workstream_id: self._harness_for_workstream(store, workstream_id), surface_resolver=self._surface_for_harness)
         reconciler_payload = dict(payload)
@@ -648,8 +657,6 @@ class BrokerDispatcher:
             )
         )
         result["reconciled"] = True
-        for wake in pending_research_wakes(store):
-            self._queue_research_wake(wake["project_id"])
         rows = store.conn.execute(
             "SELECT o.*, EXISTS(SELECT 1 FROM authorizations a WHERE a.operation_id=o.operation_id) AS has_authorization, "
             "(SELECT p.active FROM projects p WHERE p.project_id=o.project_id) AS project_active "
@@ -835,7 +842,7 @@ class BrokerDispatcher:
     def _secretary(self, store: PiStore, operation: str, project_id: str, secretary_workstream_id: str, payload: dict[str, Any]) -> Any:
         if operation == "attention.list":
             _exact(payload, set(), {"limit"})
-            return {"items": list_open_attention(store, recipient_workstream_id=secretary_workstream_id, limit=int(payload.get("limit", 32)))}
+            return {"items": [compact_attention(item) for item in list_open_attention(store, recipient_workstream_id=secretary_workstream_id, limit=int(payload.get("limit", 32)))]}
         if operation == "attention.inspect":
             _exact(payload, {"attentionId"})
             row = store.conn.execute("SELECT * FROM attention_items WHERE attention_id=? AND recipient_workstream_id=?", (payload["attentionId"], secretary_workstream_id)).fetchone()
@@ -914,9 +921,9 @@ class BrokerDispatcher:
             _exact(payload, {"approvalScope"})
             from .access import authorize_apply_project_permissions
             return authorize_apply_project_permissions(store, approval_scope=payload["approvalScope"], harness_resolver=lambda value: self._harness_for_workstream(store, value), surface_resolver=self._surface_for_harness, workspace=self.workspace, actor="secretary")
-        if operation in {"issue.report", "secretary.issue.report"}:
-            _exact(payload, {"category", "severity", "summary", "details", "requestedAction", "evidence", "idempotencyKey"})
-            return report_issue(store, project_id=project_id, reporter_workstream_id=secretary_workstream_id, category=payload["category"], severity=payload["severity"], summary=payload["summary"], details=payload["details"], requested_action=payload["requestedAction"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
+        if operation == "issue.report":
+            _exact(payload, {"category", "severity", "summary", "details", "requestedAction", "evidence", "idempotencyKey"}, {"escalatedFromIssueId"})
+            return report_issue(store, project_id=project_id, reporter_workstream_id=secretary_workstream_id, category=payload["category"], severity=payload["severity"], summary=payload["summary"], details=payload["details"], requested_action=payload["requestedAction"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"], escalated_from_issue_id=payload.get("escalatedFromIssueId"))
         if operation == "issue.list":
             _exact(payload, set(), {"state", "limit"})
             return {"issues": list_issues(store, project_id=project_id, state=payload.get("state"), limit=int(payload.get("limit", 100)))}
@@ -926,6 +933,18 @@ class BrokerDispatcher:
         if operation == "issue.add_context":
             _exact(payload, {"issueId", "context", "idempotencyKey"})
             return add_issue_context(store, project_id=project_id, issue_id=payload["issueId"], actor_id=secretary_workstream_id, context=payload["context"], idempotency_key=payload["idempotencyKey"])
+        if operation == "issue.acknowledge":
+            _exact(payload, {"issueId"})
+            return acknowledge_issue(store, project_id=project_id, issue_id=payload["issueId"], actor_id=secretary_workstream_id)
+        if operation == "issue.link_remediation":
+            _exact(payload, {"issueId", "workstreamId", "idempotencyKey"})
+            return link_issue_remediation(store, project_id=project_id, issue_id=payload["issueId"], actor_id=secretary_workstream_id, target_id=payload["workstreamId"], idempotency_key=payload["idempotencyKey"])
+        if operation == "issue.request_verification":
+            _exact(payload, {"issueId", "evidence", "idempotencyKey"})
+            return request_issue_verification(store, project_id=project_id, issue_id=payload["issueId"], actor_id=secretary_workstream_id, evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
+        if operation == "issue.resolve":
+            _exact(payload, {"issueId", "disposition", "reason", "decisionId"})
+            return resolve_issue(store, project_id=project_id, issue_id=payload["issueId"], actor_id=secretary_workstream_id, disposition=payload["disposition"], reason=payload["reason"], decision_id=payload["decisionId"])
         if operation == "issue.verify":
             _exact(payload, {"issueId", "status", "evidence", "idempotencyKey"})
             return verify_issue(store, project_id=project_id, issue_id=payload["issueId"], actor_id=secretary_workstream_id, status=payload["status"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
@@ -975,16 +994,15 @@ class BrokerDispatcher:
             _exact(payload, {"approvalScope"})
             applied = authorize_apply_workstream(store, scope=payload["approvalScope"], harness=self._harness_for_scope(payload["approvalScope"]), workspace=self.workspace)
             return {"operation": _public_operation(applied["operation"]), "workstream": _public_workstream(applied["workstream"])}
-        if operation == "workstream.send":
-            _exact(payload, {"workstreamId", "text"})
-            result = send_workstream(store, project_id, payload["workstreamId"], payload["text"], self.workspace)
-            return {"workstreamId": result["workstreamId"], "delivered": result["delivered"]}
         if operation == "workstream.focus":
             _exact(payload, {"workstreamId"})
             return focus_workstream(store, project_id, payload["workstreamId"], self.workspace)
         if operation == "workstream.retire":
-            _exact(payload, {"workstreamId"})
-            return _public_workstream(retire_workstream(store, project_id, payload["workstreamId"], self.workspace))
+            _exact(payload, {"workstreamId"}, {"remediationIssueId", "failureReason", "idempotencyKey"})
+            failure_keys = {"remediationIssueId", "failureReason", "idempotencyKey"} & set(payload)
+            if failure_keys and failure_keys != {"remediationIssueId", "failureReason", "idempotencyKey"}:
+                raise InvalidRequestError("remediation-failure retirement requires all exact fields")
+            return _public_workstream(retire_workstream(store, project_id, payload["workstreamId"], self.workspace, actor_workstream_id=secretary_workstream_id, remediation_issue_id=payload.get("remediationIssueId"), failure_reason=payload.get("failureReason"), idempotency_key=payload.get("idempotencyKey")))
         if operation == "decision.list":
             _exact(payload, set(), {"state"})
             return {"decisions": list_decisions(store, project_id, state=payload.get("state"))}
@@ -1006,18 +1024,14 @@ class BrokerDispatcher:
             return claim_research(store, project_id=project_id, secretary_workstream_id=secretary_workstream_id, request_id=payload["requestId"])
         if operation == "research.request_context":
             _exact(payload, {"requestId", "idempotencyKey", "contextRequest"})
-            result = request_research_context(store, project_id=project_id, secretary_workstream_id=secretary_workstream_id, request_id=payload["requestId"], idempotency_key=payload["idempotencyKey"], context_request=payload["contextRequest"])
-            self._queue_research_wake(project_id)
-            return result
+            return request_research_context(store, project_id=project_id, secretary_workstream_id=secretary_workstream_id, request_id=payload["requestId"], idempotency_key=payload["idempotencyKey"], context_request=payload["contextRequest"])
         if operation == "research.answer":
             _exact(payload, {"requestId", "idempotencyKey", "result"})
             result = answer_research(store, project_id=project_id, secretary_workstream_id=secretary_workstream_id, request_id=payload["requestId"], idempotency_key=payload["idempotencyKey"], result=payload["result"])
-            self._notify_worker_research(store, result, "answered")
             return result
         if operation == "research.decline":
             _exact(payload, {"requestId", "idempotencyKey", "decline"})
             result = decline_research(store, project_id=project_id, secretary_workstream_id=secretary_workstream_id, request_id=payload["requestId"], idempotency_key=payload["idempotencyKey"], decline=payload["decline"])
-            self._notify_worker_research(store, result, "declined")
             return result
         raise InvalidRequestError("unsupported secretary operation")
     def _fleet_project(self, store: PiStore, payload: Mapping[str, Any]) -> str:
@@ -1033,7 +1047,7 @@ class BrokerDispatcher:
             items = []
             for recipient in recipients:
                 items.extend(list_open_attention(store, recipient_workstream_id=recipient, limit=int(payload.get("limit", 32))))
-            return {"items": items}
+            return {"items": [compact_attention(item) for item in items]}
         if operation == "attention.inspect":
             _exact(payload, {"attentionId"})
             row = store.conn.execute("SELECT * FROM attention_items WHERE attention_id=? AND recipient_workstream_id=?", (payload["attentionId"], first_mate_workstream_id)).fetchone()
@@ -1073,47 +1087,22 @@ class BrokerDispatcher:
             _exact(payload, {"projectId", "issueId"})
             project_id = self._fleet_project(store, payload)
             return acknowledge_issue(store, project_id=project_id, issue_id=payload["issueId"], actor_id=first_mate_workstream_id)
+        if operation == "fleet.issue.request_remediation":
+            _exact(payload, {"projectId", "issueId", "outcome", "allowedPaths", "verification", "nonEffects", "idempotencyKey"})
+            project_id = self._fleet_project(store, payload)
+            return request_issue_remediation(store, project_id=project_id, issue_id=payload["issueId"], actor_id=first_mate_workstream_id, outcome=payload["outcome"], allowed_paths=payload["allowedPaths"], verification=payload["verification"], non_effects=payload["nonEffects"], idempotency_key=payload["idempotencyKey"])
+        if operation == "fleet.issue.request_verification":
+            _exact(payload, {"projectId", "issueId", "evidence", "idempotencyKey"})
+            project_id = self._fleet_project(store, payload)
+            return request_issue_verification(store, project_id=project_id, issue_id=payload["issueId"], actor_id=first_mate_workstream_id, evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
         if operation == "fleet.issue.resolve":
             _exact(payload, {"projectId", "issueId", "disposition", "reason", "decisionId"})
             project_id = self._fleet_project(store, payload)
             return resolve_issue(store, project_id=project_id, issue_id=payload["issueId"], actor_id=first_mate_workstream_id, disposition=payload["disposition"], reason=payload["reason"], decision_id=payload["decisionId"])
-        if operation == "fleet.project.permissions.prepare":
-            _exact(payload, {"projectId", "dataDirs", "externalDomains", "idempotencyKey"}, {"issueId"})
-            from .access import prepare_project_permissions
-            return prepare_project_permissions(store, project_id=self._fleet_project(store, payload), data_dirs=payload["dataDirs"], external_domains=payload["externalDomains"], issue_id=payload.get("issueId"), idempotency_key=payload["idempotencyKey"])
-        if operation == "fleet.project.permissions.apply":
-            _exact(payload, {"projectId", "approvalScope"})
-            from .access import authorize_apply_project_permissions
-            project_id = self._fleet_project(store, payload)
-            scope = payload["approvalScope"]
-            if not isinstance(scope, Mapping) or scope.get("projectId") != project_id:
-                raise ScopeMismatchError("project permission project does not match the selected project")
-            return authorize_apply_project_permissions(store, approval_scope=scope, harness_resolver=lambda value: self._harness_for_workstream(store, value), surface_resolver=self._surface_for_harness, workspace=self.workspace, actor="first_mate")
-        if operation == "fleet.runtime.ensure":
-            _exact(payload, {"projectId", "workstreamId"}, {"waitSeconds"})
-            project_id = self._fleet_project(store, payload)
-            workstream_id = str(payload["workstreamId"])
-            if store.conn.execute("SELECT 1 FROM workstreams WHERE workstream_id=? AND project_id=? AND desired_state='active'", (workstream_id, project_id)).fetchone() is None:
-                raise NotFoundError("active fleet project workstream was not found")
-            from .refresh import ensure_runtime
-            with self._reconcile_lock:
-                return ensure_runtime(store, self._harness_for_workstream(store, workstream_id), self.workspace, workstream_id=workstream_id, wait_seconds=payload.get("waitSeconds", 30.0), harness_resolver=lambda value: self._harness_for_workstream(store, value), surface_resolver=self._surface_for_harness)
         if operation == "fleet.events":
             _exact(payload, set(), {"after", "limit"})
             rows = list_events(store, after=int(payload.get("after", 0)), limit=int(payload.get("limit", 256)), project_ids=fleet_project_ids(store))
             return {"events": [{"sequence": row["sequence"], "eventId": row["event_id"], "kind": row["kind"], "projectId": row["project_id"], "workstreamId": row["workstream_id"], "operationId": row["operation_id"], "createdAt": row["created_at"]} for row in rows]}
-        if operation == "fleet.secretary.send":
-            _exact(payload, {"projectId", "text"}, {"workstreamId"})
-            project_id = self._fleet_project(store, payload)
-            project = get_project(store, project_id)
-            workstream_id = payload.get("workstreamId") or project.get("secretary_workstream_id")
-            if not isinstance(workstream_id, str):
-                raise NotFoundError("project has no secretary")
-            secretary = store.conn.execute("SELECT kind,desired_state FROM workstreams WHERE project_id=? AND workstream_id=?", (project_id, workstream_id)).fetchone()
-            if secretary is None or secretary["kind"] != "secretary" or secretary["desired_state"] == "retired":
-                raise NotFoundError("project secretary was not found")
-            result = send_workstream(store, project_id, workstream_id, payload["text"], self.workspace)
-            return {"projectId": project_id, "workstreamId": result["workstreamId"], "delivered": result["delivered"]}
         if operation == "fleet.workstream.list":
             _exact(payload, {"projectId"})
             return {"workstreams": [_public_workstream(row) for row in list_workstreams(store, self._fleet_project(store, payload))]}
@@ -1123,32 +1112,6 @@ class BrokerDispatcher:
         if operation == "fleet.git.workstream_changes":
             _exact(payload, {"projectId", "workstreamId"})
             return inspect_workstream_changes(store, self._fleet_project(store, payload), payload["workstreamId"])
-        if operation == "fleet.workstream.prepare":
-            _exact(payload, {"projectId", "title", "purpose", "brief", "taskPacket", "idempotencyKey"}, {"targetRef", "executionProfile", "pythonEnv", "implementationModel"})
-            project_id = self._fleet_project(store, payload)
-            profile = payload.get("executionProfile", "worker-default")
-            worker_harness, harness_model, reasoning_effort, _harness_id = self._worker_route(payload.get("implementationModel"))
-            prepared = prepare_workstream(store, project_id=project_id, title=payload["title"], purpose=payload["purpose"], brief=payload["brief"], task_packet=payload["taskPacket"], idempotency_key=payload["idempotencyKey"], harness=worker_harness, workspace=self.workspace, target_ref=payload.get("targetRef"), execution_profile=profile, python_env=payload.get("pythonEnv"), implementation_model=payload.get("implementationModel") or self.config.get("workerRouting", {}).get("defaultModel"), harness_model=harness_model, reasoning_effort=reasoning_effort)
-            return {"operation": _public_operation(prepared["operation"]), "workstream": _public_workstream(prepared["workstream"]), "approvalScope": prepared["approvalScope"]}
-        if operation == "fleet.workstream.authorize_apply":
-            _exact(payload, {"projectId", "approvalScope"})
-            project_id = self._fleet_project(store, payload)
-            scope = payload["approvalScope"]
-            if not isinstance(scope, Mapping) or scope.get("projectId") != project_id:
-                raise InvalidRequestError("fleet approval scope project does not match projectId")
-            applied = authorize_apply_workstream(store, scope=scope, harness=self._harness_for_scope(scope), workspace=self.workspace, actor="first_mate")
-            return {"operation": _public_operation(applied["operation"]), "workstream": _public_workstream(applied["workstream"])}
-        if operation == "fleet.workstream.accept.prepare":
-            _exact(payload, {"projectId", "workstreamId"})
-            project_id = self._fleet_project(store, payload)
-            return prepare_workstream_acceptance(store, project_id, payload["workstreamId"])
-        if operation == "fleet.workstream.accept.apply":
-            _exact(payload, {"projectId", "approvalScope"})
-            project_id = self._fleet_project(store, payload)
-            scope = payload["approvalScope"]
-            if not isinstance(scope, Mapping) or scope.get("projectId") != project_id:
-                raise InvalidRequestError("fleet acceptance scope project does not match projectId")
-            return apply_workstream_acceptance(store, project_id, scope)
         if operation == "fleet.integration.list":
             _exact(payload, {"projectId"}, {"state"})
             project_id = self._fleet_project(store, payload)
@@ -1159,20 +1122,6 @@ class BrokerDispatcher:
             project_id = self._fleet_project(store, payload)
             return inspect_integration(store, project_id, payload["integrationId"])
         raise InvalidRequestError("unsupported fleet operation")
-
-    def _notify_worker_research(self, store: PiStore, result: Mapping[str, Any], disposition: str) -> None:
-        workstream_id = result.get("workstream_id")
-        request_id = result.get("request_id")
-        if not isinstance(workstream_id, str) or not isinstance(request_id, str):
-            return
-        binding = store.conn.execute("SELECT workspace_surface_id FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()
-        if binding is None:
-            return
-        try:
-            self.workspace.prompt_agent(binding["workspace_surface_id"], f"Secretary {disposition} research request {request_id}; retrieve it through Pisec.", ("working", "blocked", "idle"), 30000)
-        except Exception:
-            logger.exception("best-effort worker research delivery failed")
-
 
 class _UnixServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True

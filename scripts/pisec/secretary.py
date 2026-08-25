@@ -442,7 +442,10 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
 def ensure_secretary(store: Any, project_selector: str, harness: HarnessAdapter, workspace: WorkspaceAdapter, failpoint: Any = None) -> dict[str, Any]:
     with APPLY_LOCK:
         try:
-            return _ensure_locked(store, project_selector, harness, workspace, failpoint)
+            result = _ensure_locked(store, project_selector, harness, workspace, failpoint)
+            from .attention import backfill_attention
+            backfill_attention(store, recipient_workstream_id=str(result["workstream"]["workstream_id"]), limit=128)
+            return result
         except NeedsAttentionError:
             raise
         except Exception as error:

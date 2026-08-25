@@ -9,12 +9,16 @@ import socket
 import sys
 from typing import Any
 
+try:
+    from .operation_catalogue_generated import SOCKET_OPERATIONS
+except ImportError:
+    from operation_catalogue_generated import SOCKET_OPERATIONS
+
 
 TOOLS = {
     "pisec_show_task_packet": ("task.get", {}),
     "pisec_checkpoint_workstream": ("workstream.checkpoint", {"type": "object"}),
     "pisec_request_help": ("help.request", {"type": "object"}),
-    "pisec_request_coordination": ("coordination.request", {"type": "object"}),
     "pisec_list_coordination": ("coordination.list", {"type": "object"}),
     "pisec_inspect_coordination": ("coordination.inspect", {"type": "object"}),
     "pisec_request_secretary_research": ("research.request", {"type": "object"}),
@@ -22,12 +26,17 @@ TOOLS = {
     "pisec_inspect_secretary_research": ("research.inspect", {"type": "object"}),
     "pisec_add_secretary_research_context": ("research.add_context", {"type": "object"}),
     "pisec_acknowledge_secretary_research": ("research.acknowledge", {"type": "object"}),
+    "pisec_list_attention": ("attention.list", {"type": "object"}),
+    "pisec_inspect_attention": ("attention.inspect", {"type": "object"}),
     "pisec_report_issue": ("issue.report", {"type": "object"}),
     "pisec_list_issues": ("issue.list", {"type": "object"}),
     "pisec_inspect_issue": ("issue.inspect", {"type": "object"}),
     "pisec_add_issue_context": ("issue.add_context", {"type": "object"}),
     "pisec_verify_issue": ("issue.verify", {"type": "object"}),
 }
+
+if any(operation not in SOCKET_OPERATIONS["runtime"] for operation, _schema in TOOLS.values()):
+    raise RuntimeError("Codex Pisec MCP tools are absent from the generated operation catalogue")
 
 
 def _request(operation: str, params: dict[str, Any]) -> Any:

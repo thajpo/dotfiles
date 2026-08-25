@@ -194,6 +194,7 @@ class CodexHarnessAdapter:
             managed.mkdir(mode=0o700)
             _copy_safe_entry(_repo_root() / "pisec" / "runtime-bin" / "codex", managed / "codex")
             _copy_safe_entry(_repo_root() / "scripts" / "pisec" / "codex_mcp.py", managed / "codex_mcp.py")
+            _copy_safe_entry(_repo_root() / "scripts" / "pisec" / "operation_catalogue_generated.py", managed / "operation_catalogue_generated.py")
             _copy_safe_entry(_repo_root() / "scripts" / "pisec" / "codex_hook.py", managed / "codex_hook.py")
             fence = managed / "fence"
             _copy_safe_entry(_repo_root() / "pisec" / "fence", fence)
@@ -300,6 +301,7 @@ class CodexHarnessAdapter:
         mcp_path = runtime_root / "codex_mcp.py"
         hook_path = runtime_root / "codex_hook.py"
         _copy_safe_entry(surface_root / "managed" / "codex_mcp.py", mcp_path)
+        _copy_safe_entry(surface_root / "managed" / "operation_catalogue_generated.py", runtime_root / "operation_catalogue_generated.py")
         _copy_safe_entry(surface_root / "managed" / "codex_hook.py", hook_path)
         os.chmod(mcp_path, 0o700)
         os.chmod(hook_path, 0o700)

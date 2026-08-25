@@ -508,19 +508,6 @@ def acknowledge_research(store: Any, *, project_id: str, workstream_id: str, req
     return _request_projection(store, row)
 
 
-def pending_research_wakes(store: Any) -> list[dict[str, Any]]:
-    return [dict(row) for row in store.conn.execute(
-        "SELECT project_id,COUNT(*) AS generation,0 AS notified_generation,MAX(updated_at) AS updated_at "
-        "FROM attention_items WHERE source_kind='research' GROUP BY project_id ORDER BY project_id"
-    )]
-
-
-def mark_research_wake_notified(store: Any, project_id: str, generation: int) -> bool:
-    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0:
-        raise InvalidRequestError("research wake generation is invalid")
-    return bool(store.conn.execute("SELECT 1 FROM projects WHERE project_id=?", (project_id,)).fetchone())
-
-
 def research_counts(store: Any, project_id: str, workstream_id: str | None = None) -> dict[str, int]:
     clauses = ["project_id=?"]
     args: list[Any] = [project_id]

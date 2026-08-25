@@ -365,6 +365,9 @@ def list_integrations(store: Any, project_id: str, *, states: set[str] | None = 
 
 
 def _set_job(store: Any, integration_id: str, *, state: str, next_action: str | None = None, error: str | None = None, candidate_packet: str | None = None, candidate_source: str | None = None, target_oid: str | None = None, integration_source: str | None = None) -> None:
+    current = store.conn.execute("SELECT project_id,workstream_id,state FROM integration_jobs WHERE integration_id=?", (integration_id,)).fetchone()
+    if current is None:
+        raise NotFoundError("integration job was not found")
     now = utc_now()
     assignments = ["state=?", "next_action=?", "last_error=?", "updated_at=?"]
     values: list[Any] = [state, next_action, error, now]
@@ -386,19 +389,8 @@ def _set_job(store: Any, integration_id: str, *, state: str, next_action: str | 
     values.append(integration_id)
     with store.transaction():
         store.conn.execute(f"UPDATE integration_jobs SET {','.join(assignments)} WHERE integration_id=?", values)
-
-
-def _prompt_worker(store: Any, workspace: Any | None, workstream_id: str, message: str) -> bool:
-    if workspace is None:
-        return False
-    binding = store.conn.execute("SELECT workspace_surface_id FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()
-    if binding is None or not binding["workspace_surface_id"]:
-        return False
-    try:
-        workspace.prompt_agent_nowait(binding["workspace_surface_id"], message)
-        return True
-    except Exception:
-        return False
+        if current["state"] != state and state in {"awaiting_worker", "needs_attention"}:
+            append_event_in_transaction(store.conn, kind=f"integration.{state}", project_id=current["project_id"], workstream_id=current["workstream_id"], payload={"integrationId": integration_id, "state": state, "nextAction": next_action})
 
 
 def _latest_replacement(store: Any, candidate: Mapping[str, Any], accepted_paths: list[str], accepted_criteria: Any) -> dict[str, Any] | None:
@@ -532,8 +524,6 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
             candidate = _current_candidate(store, str(job["project_id"]), str(job["workstream_id"]), scope["taskPacketSha256"], accepted_paths, scope["acceptance"])
             if candidate is None:
                 _set_job(store, integration_id, state="awaiting_worker", error="worker branch moved without a matching verified completion packet", next_action="submit a new ready_review checkpoint for the current branch")
-                if job["state"] != "awaiting_worker":
-                    _prompt_worker(store, workspace, str(job["workstream_id"]), f"Pisec integration {integration_id} is waiting for a matching ready_review checkpoint. The worker branch moved after acceptance; submit a new checkpoint with the same task scope and refreshed verification.")
                 return {"integrationId": integration_id, "state": "awaiting_worker"}
             _set_job(store, integration_id, state="queued", candidate_packet=candidate["packet"]["completion_packet_id"], candidate_source=candidate["sourceOid"], next_action="candidate refreshed after worker verification")
             job = {**dict(job), "state": "queued", "candidate_completion_packet_id": candidate["packet"]["completion_packet_id"], "candidate_source_oid": candidate["sourceOid"]}
@@ -569,8 +559,6 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
             ancestor_code, _output = _run_git(repository, "merge-base", "--is-ancestor", target_oid, candidate_ref, accepted=frozenset({0, 1}))
             if ancestor_code != 0:
                 _set_job(store, integration_id, state="awaiting_worker", target_oid=target_oid, error="target advanced beyond the accepted candidate", next_action="rebase onto the current target, resolve conflicts within the accepted paths, rerun verification, and submit a new ready_review checkpoint")
-                if job["state"] != "awaiting_worker":
-                    _prompt_worker(store, workspace, str(job["workstream_id"]), f"Pisec integration {integration_id} needs bounded reconciliation. The target branch {target_branch} advanced. Rebase this workstream onto the current target, resolve conflicts only within the accepted paths, rerun the completion verification, and submit a new ready_review checkpoint. Do not change the task scope.")
                 return {"integrationId": integration_id, "state": "awaiting_worker"}
             target_paths = _changed_paths(repository, target_oid, candidate_ref)
             target_patch_sha256 = _patch_digest(repository, target_oid, candidate_ref)

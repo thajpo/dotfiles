@@ -301,7 +301,10 @@ def _wait_for_agent(
                 ).fetchone()
                 if runtime is not None and runtime["runtime_instance_id"] and int(runtime["report_seq"]) >= 1:
                     return matched_observation
-        except NeedsAttentionError:
+        except NeedsAttentionError as error:
+            with store.transaction():
+                store.conn.execute("UPDATE operations SET state='needs_attention',error_code='retire_ambiguous',error_message=?,updated_at=? WHERE operation_id=?", (str(error)[:512], utc_now(), operation_id))
+                store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason=?,updated_at=? WHERE workstream_id=?", (str(error)[:512], utc_now(), workstream_id))
             raise
         except Exception as error:
             last_error = error
@@ -674,15 +677,6 @@ def inspect_workstream(store: Any, project_id: str, workstream_id: str) -> dict[
     return {"workstream": row, "binding": None if binding is None else dict(binding), "operation": None if operation is None else dict(operation)}
 
 
-def send_workstream(store: Any, project_id: str, workstream_id: str, text: str, workspace: WorkspaceAdapter) -> dict[str, Any]:
-    row = inspect_workstream(store, project_id, workstream_id)
-    if row["binding"] is None or row["workstream"]["desired_state"] != "active":
-        raise ConflictError("workstream is not active and bound")
-    message = bounded_text(text, name="message", limit=4096)
-    result = dict(workspace.prompt_agent(row["binding"]["workspace_surface_id"], message, ("working", "blocked", "idle"), 30000))
-    return {"workstreamId": workstream_id, "delivered": True, "workspace": result}
-
-
 def focus_workstream(store: Any, project_id: str, workstream_id: str, workspace: WorkspaceAdapter) -> dict[str, Any]:
     row = inspect_workstream(store, project_id, workstream_id)
     if row["binding"] is None or row["workstream"]["provisioning_state"] != "bound":
@@ -759,11 +753,76 @@ def complete_workstream(
         raise NeedsAttentionError("workstream completion requires attention") from error
 
 
-def retire_workstream(store: Any, project_id: str, workstream_id: str, workspace: WorkspaceAdapter) -> dict[str, Any]:
+def retire_workstream(store: Any, project_id: str, workstream_id: str, workspace: WorkspaceAdapter, *, actor_workstream_id: str | None = None, remediation_issue_id: str | None = None, failure_reason: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
     inspected = inspect_workstream(store, project_id, workstream_id)
     row = inspected["workstream"]
     if row["kind"] != "worker":
         raise ConflictError("secretary workstreams cannot be retired through the semantic tool")
+    failure_form = any(value is not None for value in (remediation_issue_id, failure_reason, idempotency_key))
+    if failure_form and not all(isinstance(value, str) and value for value in (remediation_issue_id, failure_reason, idempotency_key)):
+        raise InvalidRequestError("remediation-failure retirement requires all exact fields")
+    if failure_form:
+        from .workflow import _append_issue_update, _issue_row
+        if actor_workstream_id is None or store.conn.execute("SELECT 1 FROM projects WHERE project_id=? AND secretary_workstream_id=? AND active=1", (project_id, actor_workstream_id)).fetchone() is None:
+            raise ConflictError("only the active project Secretary may use remediation-failure retirement")
+        failure_reason = bounded_text(failure_reason, name="failureReason", limit=4096)
+        issue = _issue_row(store, str(remediation_issue_id), project_id)
+        if issue["reporter_kind"] != "worker" or store.conn.execute("SELECT 1 FROM issue_remediations WHERE issue_id=? AND workstream_id=?", (remediation_issue_id, workstream_id)).fetchone() is None:
+            raise ConflictError("remediation issue is not immutably linked to this worker")
+        for table in ("completion_packets", "workstream_acceptances", "integration_jobs", "merge_receipts"):
+            if store.conn.execute(f"SELECT 1 FROM {table} WHERE workstream_id=? LIMIT 1", (workstream_id,)).fetchone() is not None:
+                raise ConflictError("remediation-failure retirement requires an unaccepted worker")
+        request = {"kind": "workstream.retire", "projectId": project_id, "workstreamId": workstream_id, "remediationIssueId": remediation_issue_id, "failureReason": failure_reason}
+        request_sha = json_digest(request)
+        existing_operation = store.conn.execute("SELECT * FROM operations WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+        if existing_operation is not None:
+            if existing_operation["request_sha256"] != request_sha:
+                raise IdempotencyConflictError("retirement idempotency key is bound to another failure payload")
+            if existing_operation["state"] == "succeeded":
+                return _workstream(store, workstream_id)
+            raise NeedsAttentionError("remediation-failure retirement operation requires attention")
+        operation_id = new_id("op")
+        now = utc_now()
+        with store.transaction():
+            store.conn.execute("INSERT INTO operations(operation_id,kind,project_id,workstream_id,idempotency_key,request_json,request_sha256,state,step,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'applying','planned',?,?)", (operation_id, "workstream.retire", project_id, workstream_id, idempotency_key, canonical_json(request), request_sha, now, now))
+        binding = inspected["binding"]
+        if binding is None or binding["provisioning_state"] != "bound" or binding["observed_state"] in {"starting", "working", "blocked"}:
+            with store.transaction():
+                store.conn.execute("UPDATE operations SET state='needs_attention',error_code='retire_ambiguous',error_message=?,updated_at=? WHERE operation_id=?", ("remediation-failure retirement requires a confirmed stopped runtime", utc_now(), operation_id))
+                store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason=?,updated_at=? WHERE workstream_id=?", ("remediation-failure retirement requires a confirmed stopped runtime", utc_now(), workstream_id))
+            raise NeedsAttentionError("remediation-failure retirement requires a confirmed stopped runtime")
+        try:
+            runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+            if runtime.state != "stopped":
+                workspace.stop_runtime(str(binding["workspace_surface_id"]))
+                runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+            if runtime.state != "stopped":
+                raise NeedsAttentionError("remediation-failure retirement runtime stop is ambiguous")
+            if binding["workspace_view_id"]:
+                workspace.close_tab(binding["workspace_view_id"])
+            linked = [issue]
+            if issue["escalated_from_issue_id"] is not None:
+                linked.append(_issue_row(store, str(issue["escalated_from_issue_id"]), project_id))
+            with store.transaction():
+                now = utc_now()
+                result = {"workstreamId": workstream_id, "remediationIssueId": remediation_issue_id, "failureReason": failure_reason, "branchRetained": row["branch_name"], "checkoutRetained": row["worktree_path"]}
+                store.conn.execute("UPDATE runtime_bindings SET observed_state='stopped',updated_at=? WHERE workstream_id=?", (now, workstream_id))
+                store.conn.execute("UPDATE workstreams SET desired_state='retired',retired_at=?,updated_at=? WHERE workstream_id=?", (now, now, workstream_id))
+                store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(result), now, operation_id))
+                append_event_in_transaction(store.conn, kind="workstream.retired", project_id=project_id, workstream_id=workstream_id, operation_id=operation_id, payload=result)
+                for linked_issue in linked:
+                    changed = _append_issue_update(store, issue=linked_issue, actor_kind="secretary", actor_id=actor_workstream_id, update_kind="remediation_failed", payload={"workstreamId": workstream_id, "failureReason": failure_reason}, idempotency_key=f"{idempotency_key}:{linked_issue['issue_id']}")
+                    store.conn.execute("UPDATE issues SET state='acknowledged',updated_at=? WHERE issue_id=?", (now, linked_issue["issue_id"]))
+                    if changed:
+                        append_event_in_transaction(store.conn, kind="issue.remediation_failed", project_id=project_id, workstream_id=actor_workstream_id, payload={"issueId": linked_issue["issue_id"], "workstreamId": workstream_id})
+            return _workstream(store, workstream_id)
+        except NeedsAttentionError:
+            raise
+        except Exception as error:
+            with store.transaction():
+                store.conn.execute("UPDATE operations SET state='needs_attention',error_code='retire_failed',error_message=?,updated_at=? WHERE operation_id=?", (str(error)[:512], utc_now(), operation_id))
+                store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason=?,updated_at=? WHERE workstream_id=?", (str(error)[:512], utc_now(), workstream_id))
+            raise NeedsAttentionError("remediation-failure retirement requires attention") from error
     if row["desired_state"] not in {"completed", "retired"}:
         raise ConflictError("workstream must be completed before retirement")
     if row["provisioning_state"] != "bound":
