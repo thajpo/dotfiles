@@ -15,6 +15,7 @@ from pathlib import Path
 import shutil
 import socket
 import stat
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -499,6 +500,25 @@ def _wait_for_broker(wait_seconds: float) -> None:
         time.sleep(min(0.1, remaining))
 
 
+def _semantic_state_health(state_root: Path) -> None:
+    database = state_root / "control.db"
+    connection = sqlite3.connect(str(database))
+    connection.row_factory = sqlite3.Row
+    try:
+        nonterminal = connection.execute("SELECT kind,state,COUNT(*) AS count FROM operations WHERE state IN ('planned','applying') GROUP BY kind,state").fetchall()
+        attention = connection.execute("SELECT COUNT(*) FROM workstreams WHERE desired_state='active' AND provisioning_state='needs_attention'").fetchone()[0]
+        lifecycle_attention = connection.execute("SELECT COUNT(*) FROM projects WHERE active=1 AND lifecycle_attention_reason IS NOT NULL").fetchone()[0]
+        reserved = connection.execute("SELECT COUNT(*) FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE w.desired_state='active' AND (r.refresh_pending=1 OR r.launch_generation_sha256 IS NOT NULL OR r.observed_state='starting')").fetchone()[0]
+    finally:
+        connection.close()
+    if nonterminal or attention or lifecycle_attention or reserved:
+        raise RuntimeError(
+            "semantic health failed: "
+            f"nonterminal={[(row['kind'], row['state'], row['count']) for row in nonterminal]} "
+            f"needs_attention={attention} lifecycle_attention={lifecycle_attention} reservations_or_starting={reserved}"
+        )
+
+
 def _post_switch(current: Path, wait_seconds: float) -> dict:
     environment = dict(os.environ)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -507,14 +527,37 @@ def _post_switch(current: Path, wait_seconds: float) -> dict:
     doctor = subprocess.run([str(current / "bin" / "pisec"), "doctor", "--json"], env=environment, text=True, capture_output=True)
     if doctor.returncode:
         raise RuntimeError(f"doctor failed: {doctor.stdout[-512:]}{doctor.stderr[-512:]}")
+    try:
+        doctor_value = json.loads(doctor.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("doctor returned invalid JSON") from error
+    if doctor_value.get("ok") is not True:
+        raise RuntimeError("doctor reported failed checks")
     refresh = subprocess.run([str(current / "bin" / "pisec"), "project", "refresh", "--all", "--wait-seconds", str(wait_seconds), "--json"], env=environment, text=True, capture_output=True)
     refresh_value = json.loads(refresh.stdout) if refresh.stdout.strip() else {"ok": False}
-    if refresh.returncode or refresh_value.get("failed"):
+    if refresh.returncode or refresh_value.get("ok") is not True or refresh_value.get("failed") or refresh_value.get("pending"):
         raise RuntimeError(f"runtime refresh failed: {refresh.stdout[-512:]}{refresh.stderr[-512:]}")
     reconcile = subprocess.run([str(current / "bin" / "pisec"), "reconcile", "--json"], env=environment, text=True, capture_output=True)
     if reconcile.returncode:
         raise RuntimeError(f"reconcile failed: {reconcile.stdout[-512:]}{reconcile.stderr[-512:]}")
-    return {"doctor": "ok", "refresh": refresh_value, "reconcile": "ok"}
+    try:
+        reconcile_value = json.loads(reconcile.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("reconcile returned invalid JSON") from error
+    if reconcile_value.get("reconciled") is not True or reconcile_value.get("errors"):
+        raise RuntimeError(f"reconcile reported failed state: {reconcile.stdout[-512:]}")
+    doctor_after = subprocess.run([str(current / "bin" / "pisec"), "doctor", "--json"], env=environment, text=True, capture_output=True)
+    if doctor_after.returncode:
+        raise RuntimeError(f"post-reconcile doctor failed: {doctor_after.stdout[-512:]}{doctor_after.stderr[-512:]}")
+    try:
+        doctor_after_value = json.loads(doctor_after.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("post-reconcile doctor returned invalid JSON") from error
+    if doctor_after_value.get("ok") is not True:
+        raise RuntimeError("post-reconcile doctor reported failed checks")
+    semantic_state_root = Path(os.environ.get("PISEC_STATE_ROOT", Path.home() / ".local" / "state" / "pisec")).expanduser()
+    _semantic_state_health(semantic_state_root)
+    return {"doctor": "ok", "refresh": refresh_value, "reconcile": "ok", "doctorAfter": "ok", "semanticState": "ok"}
 
 
 def _switch_current(install_root: Path, deployment: Path) -> None:

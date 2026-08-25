@@ -639,51 +639,78 @@ class BrokerDispatcher:
                 or row["refresh_operation_id"] is not None
                 or row["refresh_started_at"] is not None
                 or row["launch_generation_sha256"] is not None
-                or row["observed_state"] != "idle"
-                or row["runtime_instance_id"] is None
-                or row["report_seq"] is None
-                or int(row["report_seq"]) < 1
-                or row["session_start_event_sequence"] is None
-                or row["session_start_report_seq"] != row["report_seq"]
-                or row["desired_generation_sha256"] is None
-                or row["applied_generation_sha256"] != row["desired_generation_sha256"]
             ):
                 continue
             try:
                 request = json.loads(str(row["request_json"]))
             except (TypeError, ValueError):
                 continue
-            if not isinstance(request, dict) or request.get("desiredGenerationSha256") != row["desired_generation_sha256"]:
+            if not isinstance(request, dict) or not isinstance(request.get("desiredGenerationSha256"), str):
                 continue
+            requested_generation = request["desiredGenerationSha256"]
+            current_generation = row["desired_generation_sha256"]
+            safe_current = bool(
+                row["observed_state"] == "idle"
+                and row["runtime_instance_id"] is not None
+                and row["report_seq"] is not None
+                and int(row["report_seq"]) >= 1
+                and row["session_start_event_sequence"] is not None
+                and row["session_start_report_seq"] == row["report_seq"]
+                and current_generation is not None
+                and row["applied_generation_sha256"] == current_generation
+            )
+            if safe_current:
+                event = store.conn.execute(
+                    "SELECT kind,payload_json FROM events WHERE sequence=? AND workstream_id=?",
+                    (row["session_start_event_sequence"], row["workstream_id"]),
+                ).fetchone()
+                try:
+                    payload = json.loads(str(event["payload_json"])) if event is not None else None
+                except (TypeError, ValueError):
+                    payload = None
+                safe_current = bool(
+                    event is not None
+                    and event["kind"] == "runtime.session_started"
+                    and payload == {
+                        "generationSha256": str(current_generation),
+                        "reportSeq": int(row["report_seq"]),
+                        "runtimeInstanceId": str(row["runtime_instance_id"]),
+                    }
+                )
             try:
-                if self.workspace.observe_runtime(str(row["workspace_surface_id"]), str(row["policy_path"])).state != "live":
-                    continue
+                safe_current = safe_current and self.workspace.observe_runtime(str(row["workspace_surface_id"]), str(row["policy_path"])).state == "live"
             except BaseException:
-                continue
+                safe_current = False
             now = utc_now()
             result = {
                 "workstreamId": str(row["workstream_id"]),
-                "generationSha256": str(row["desired_generation_sha256"]),
-                "runtimeInstanceId": str(row["runtime_instance_id"]),
-                "reportSeq": int(row["report_seq"]),
+                "requestedGenerationSha256": requested_generation,
+                "currentGenerationSha256": current_generation,
                 "recovered": True,
             }
+            if safe_current and requested_generation == current_generation:
+                state, step, error_code, error_message, event_kind = "succeeded", "verified", None, None, "runtime.refresh_completed"
+                result.update({"generationSha256": str(current_generation), "runtimeInstanceId": str(row["runtime_instance_id"]), "reportSeq": int(row["report_seq"])})
+            elif safe_current:
+                state, step, error_code, error_message, event_kind = "failed", "superseded", "superseded_by_newer_refresh", "refresh was superseded by a later authenticated generation", "runtime.refresh_superseded"
+            else:
+                state, step, error_code, error_message, event_kind = "needs_attention", "attention", "refresh_recovery_required", "refresh operation lost a safe authenticated completion state", "runtime.refresh_recovery_required"
             with store.transaction():
                 cursor = store.conn.execute(
-                    "UPDATE operations SET state='succeeded',step='verified',result_json=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=? AND state='applying'",
-                    (canonical_json(result), now, row["operation_id"]),
+                    "UPDATE operations SET state=?,step=?,result_json=?,error_code=?,error_message=?,updated_at=? WHERE operation_id=? AND state='applying'",
+                    (state, step, canonical_json(result), error_code, error_message, now, row["operation_id"]),
                 )
                 if cursor.rowcount != 1:
                     continue
                 append_event_in_transaction(
                     store.conn,
-                    kind="runtime.refresh_completed",
+                    kind=event_kind,
                     project_id=str(row["project_id"]),
                     workstream_id=str(row["workstream_id"]),
                     operation_id=str(row["operation_id"]),
                     payload=result,
                 )
-            recovered.append({"operationId": str(row["operation_id"]), "state": "succeeded", "recovered": True})
+            recovered.append({"operationId": str(row["operation_id"]), "state": state, "recovered": True})
         return recovered
 
     def _reconcile_locked(self, store: PiStore, payload: Mapping[str, Any]) -> dict[str, Any]:

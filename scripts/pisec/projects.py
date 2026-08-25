@@ -81,7 +81,7 @@ def resolve_project(store: Any, selector: str) -> dict[str, Any]:
 
 def _bound_runtime_is_usable(store: Any, workstream_id: str, workspace: Any) -> bool:
     row = store.conn.execute(
-        "SELECT w.desired_state,w.provisioning_state,r.refresh_pending,r.launch_generation_sha256,r.applied_generation_sha256,r.desired_generation_sha256,r.observed_state,r.workspace_surface_id,r.policy_path "
+        "SELECT w.desired_state,w.provisioning_state,w.worktree_path,r.refresh_pending,r.launch_generation_sha256,r.applied_generation_sha256,r.desired_generation_sha256,r.observed_state,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,r.agent_name,r.policy_path,r.runtime_instance_id,r.report_seq,r.session_start_event_sequence,r.session_start_report_seq "
         "FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=?",
         (workstream_id,),
     ).fetchone()
@@ -91,9 +91,29 @@ def _bound_runtime_is_usable(store: Any, workstream_id: str, workspace: Any) -> 
         return False
     if row["applied_generation_sha256"] is None or row["applied_generation_sha256"] != row["desired_generation_sha256"]:
         return False
+    if (
+        row["runtime_instance_id"] is None
+        or row["report_seq"] is None
+        or int(row["report_seq"]) < 1
+        or row["session_start_event_sequence"] is None
+        or row["session_start_report_seq"] != row["report_seq"]
+    ):
+        return False
     if workspace is None:
         return False
     try:
+        observed = workspace.observe_surface(
+            workspace_id=str(row["workspace_id"]),
+            view_id=str(row["workspace_view_id"]),
+            surface_id=str(row["workspace_surface_id"]),
+            cwd=str(row["worktree_path"]),
+        )
+        if observed is None or observed.agent is None:
+            return False
+        if observed.agent.surface_id != str(row["workspace_surface_id"]) or observed.agent.name != str(row["agent_name"]):
+            return False
+        if not observed.agent.identity_usable or not workspace.prompt_eligible(observed.agent):
+            return False
         return workspace.observe_runtime(str(row["workspace_surface_id"]), str(row["policy_path"])).state == "live"
     except Exception:
         return False
@@ -108,6 +128,7 @@ def change_project_mode(store: Any, selector: str, coordination_mode: str, *, wo
     current = str(project.get("coordination_mode") or "project")
     if current == coordination_mode:
         return project
+    assert_project_writable(store, str(project["project_id"]))
     secretary_id = project.get("secretary_workstream_id")
     if not isinstance(secretary_id, str) or not _bound_runtime_is_usable(store, secretary_id, workspace):
         raise NeedsAttentionError("project mode changes require a usable bound Secretary")
@@ -127,10 +148,12 @@ def change_project_mode(store: Any, selector: str, coordination_mode: str, *, wo
         if open_escalation is not None:
             raise ConflictError("leaving fleet mode requires all Secretary escalation issues to be closed")
     with store.transaction():
-        store.conn.execute("UPDATE projects SET coordination_mode=?,updated_at=? WHERE project_id=? AND active=1 AND coordination_mode=?", (coordination_mode, utc_now(), project["project_id"], current))
-    if first_mate_id is not None:
-        from .attention import backfill_attention
-        backfill_attention(store, recipient_workstream_id=first_mate_id, limit=128)
+        cursor = store.conn.execute("UPDATE projects SET coordination_mode=?,updated_at=? WHERE project_id=? AND active=1 AND lifecycle_attention_reason IS NULL AND coordination_mode=?", (coordination_mode, utc_now(), project["project_id"], current))
+        if cursor.rowcount != 1:
+            raise ConflictError("project mode changed before the guarded update")
+        if first_mate_id is not None:
+            from .attention import backfill_attention
+            backfill_attention(store, recipient_workstream_id=first_mate_id, limit=128)
     return get_project(store, project["project_id"])
 
 

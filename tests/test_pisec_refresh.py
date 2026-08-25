@@ -4,6 +4,7 @@ import unittest
 
 from scripts.pisec.adapters import AdapterRegistry
 from scripts.pisec.broker import BrokerDispatcher
+from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.operations import create_operation
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.refresh import _binding_scope
@@ -195,12 +196,46 @@ class RuntimeRefreshTests(unittest.TestCase):
                 state="applying",
                 step="reserved",
             )
+            event = append_event_in_transaction(
+                store.conn,
+                kind="runtime.session_started",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                payload={
+                    "runtimeInstanceId": "recovered-refresh-runtime",
+                    "generationSha256": binding["desired_generation_sha256"],
+                    "reportSeq": 1,
+                },
+            )
             store.conn.execute(
-                "UPDATE runtime_bindings SET refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,launch_generation_sha256=NULL,applied_generation_sha256=desired_generation_sha256,runtime_instance_id='recovered-refresh-runtime',report_seq=1,session_start_event_sequence=1,session_start_report_seq=1,session_started_at='2026-08-25T00:00:00Z',observed_state='idle' WHERE workstream_id=?",
-                (self.workstream_id,),
+                "UPDATE runtime_bindings SET refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,launch_generation_sha256=NULL,applied_generation_sha256=desired_generation_sha256,runtime_instance_id='recovered-refresh-runtime',report_seq=1,session_start_event_sequence=?,session_start_report_seq=1,session_started_at='2026-08-25T00:00:00Z',observed_state='idle' WHERE workstream_id=?",
+                (event["sequence"], self.workstream_id),
             )
         result = self.dispatcher.startup_reconcile()
         self.assertIn({"operationId": operation.operation_id, "state": "succeeded", "recovered": True}, result["resumed"])
+
+    def test_reconcile_terminalizes_superseded_refresh_operation(self):
+        with PiStore(self.root / "state") as store:
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                idempotency_key="refresh-reconcile-superseded",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": "a" * 64},
+                state="applying",
+                step="reserved",
+            )
+            store.conn.execute(
+                "UPDATE runtime_bindings SET refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,launch_generation_sha256=NULL,applied_generation_sha256=desired_generation_sha256,observed_state='idle' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+        result = self.dispatcher.startup_reconcile()
+        self.assertIn({"operationId": operation.operation_id, "state": "failed", "recovered": True}, result["resumed"])
+        with PiStore(self.root / "state") as store:
+            row = store.conn.execute("SELECT state,error_code FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()
+            self.assertEqual(tuple(row), ("failed", "superseded_by_newer_refresh"))
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from contextlib import nullcontext
 from collections.abc import Mapping
 from typing import Any
 
@@ -280,7 +281,8 @@ def backfill_attention(store: Any, *, recipient_workstream_id: str | None = None
         add_rows(store.conn.execute("SELECT integration_id AS source_id,project_id FROM integration_jobs WHERE workstream_id=? AND state='awaiting_worker'", (workstream_id,)), "integration")
 
     inserted = 0
-    with store.transaction():
+    transaction = store.transaction() if not store.conn.in_transaction else nullcontext(store.conn)
+    with transaction:
         for source_kind, source_id, project_id in sources:
             if inserted >= limit:
                 break

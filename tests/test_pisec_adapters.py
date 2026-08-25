@@ -195,6 +195,8 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         with self.assertRaises(NeedsAttentionError):
             self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "coordinationMode": "fleet"})
         self.dispatcher.dispatch("admin", "first_mate.ensure", {"project": project["project_id"]})
+        for name, agent in list(self.workspace.agents.items()):
+            self.workspace.agents[name] = type(agent)(agent.name, agent.surface_id, agent.identity_usable, "idle")
         changed = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "coordinationMode": "fleet"})
         self.assertEqual(changed["coordination_mode"], "fleet")
         restored = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "coordinationMode": "project"})
