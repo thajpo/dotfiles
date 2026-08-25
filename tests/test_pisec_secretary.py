@@ -130,10 +130,14 @@ class SecretaryTests(unittest.TestCase):
                 workspace.agents.clear()
                 store.conn.execute("UPDATE projects SET active=0,lifecycle_attention_reason='project open requires repair' WHERE project_id=?", (project["project_id"],))
                 store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='workspace runtime is missing' WHERE workstream_id=?", (workstream_id,))
+                store.conn.execute("UPDATE operations SET state='applying',step='map_committed' WHERE workstream_id=?", (workstream_id,))
+                store.conn.execute("UPDATE runtime_bindings SET desired_generation_sha256=? WHERE workstream_id=?", ("0" * 64, workstream_id))
                 retried = ensure_secretary(store, project["project_id"], harness, workspace)
                 self.assertEqual(retried["project"]["active"], 1)
                 self.assertEqual(retried["workstream"]["provisioning_state"], "bound")
                 self.assertIsNone(retried["workstream"]["attention_reason"])
+                self.assertEqual(harness.launch_replacements, [False, True])
+                self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='secretary.binding.repaired'").fetchone()[0], 1)
 
     def test_ensure_refuses_scope_identity_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:

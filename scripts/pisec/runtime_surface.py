@@ -64,10 +64,12 @@ def materialize_current_surface(
     store: Any,
     harness: HarnessAdapter,
     scope: Mapping[str, Any],
+    *,
+    surface: RuntimeSurfaceArtifacts | None = None,
 ) -> tuple[Any, RuntimeSurfaceArtifacts, dict[str, Any]]:
     """Stage and activate using one captured surface; callers never reacquire it."""
     materialized_scope = fleet_scope_paths(store, scope)
-    surface = capture_runtime_surface(harness)
+    surface = capture_runtime_surface(harness) if surface is None else verify_surface(surface)
     staging = materialized_scope.get("stagingRoot")
     if not isinstance(staging, str) or not staging:
         staging = tempfile.mkdtemp(prefix="pisec-profile-stage-")

@@ -12,7 +12,7 @@ from .fence import resolve_data_dirs
 from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
 from .projects import resolve_project
 from .project_workspaces import ensure_project_workspace
-from .runtime_surface import materialize_current_surface
+from .runtime_surface import capture_runtime_surface, materialize_current_surface
 from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent
 from .workstreams import APPLY_LOCK, _wait_for_agent
 
@@ -286,6 +286,71 @@ def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdap
     else:
         _wait_for_agent(store, workspace, workstream_id=scope["workstreamId"], path=project["repository_path"], agent_name=scope["agentName"], workspace_id=binding["workspace_id"], view_id=binding["workspace_view_id"], surface_id=binding["workspace_surface_id"])
 
+
+def _repair_launch_binding(
+    store: Any,
+    workspace: WorkspaceAdapter,
+    harness: HarnessAdapter,
+    project: Mapping[str, Any],
+    scope: Mapping[str, Any],
+    binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Refresh a stopped retry binding after a deployed launcher change."""
+    surface = capture_runtime_surface(harness)
+    current_scope = {
+        **scope,
+        "runtimeSurfaceSha256": surface.content_sha256,
+        "runtimeSurfaceRoot": surface.root_path,
+        "runtimeSurfaceId": "surface_" + surface.content_sha256[:32],
+    }
+    desired = harness.desired_generation(current_scope, surface)
+    if binding.get("desired_generation_sha256") == desired:
+        return dict(binding)
+    runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+    if runtime.state == "unknown":
+        raise NeedsAttentionError("secretary runtime identity is ambiguous before binding repair")
+    if runtime.state == "live":
+        raise NeedsAttentionError("secretary binding repair requires a stopped runtime")
+    artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
+    harness.commit_launch_binding(
+        materialized_scope,
+        artifacts,
+        workspace_session_name=str(binding["workspace_session_name"]),
+        workspace_id=str(binding["workspace_id"]),
+        workspace_view_id=str(binding["workspace_view_id"]),
+        workspace_surface_id=str(binding["workspace_surface_id"]),
+        replace=True,
+    )
+    now = utc_now()
+    with store.transaction():
+        store.conn.execute(
+            "UPDATE runtime_bindings SET harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_generation_sha256=?,launch_generation_sha256=?,runtime_instance_id=NULL,report_seq=0,observed_state='starting',last_observed_at=NULL,updated_at=? WHERE workstream_id=?",
+            (
+                artifacts.harness_home,
+                artifact_document(harness.manifest, artifacts),
+                artifacts.launch_secret_path,
+                artifacts.policy_path,
+                artifacts.policy_sha256,
+                artifacts.runtime_token_sha256,
+                artifacts.generation_sha256,
+                artifacts.generation_sha256,
+                now,
+                binding["workstream_id"],
+            ),
+        )
+        append_event_in_transaction(
+            store.conn,
+            kind="secretary.binding.repaired",
+            project_id=project["project_id"],
+            workstream_id=scope["workstreamId"],
+            operation_id=scope["operationId"],
+            payload={"reason": "retry after deployed runtime binding change"},
+        )
+    repaired = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (binding["workstream_id"],)).fetchone()
+    if repaired is None:
+        raise NeedsAttentionError("secretary runtime binding disappeared during repair")
+    return dict(repaired)
+
 def _recover_prompt(workspace: WorkspaceAdapter, project: Mapping[str, Any], scope: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
     try:
         workspace.prompt_agent_nowait(binding["workspace_surface_id"], scope["brief"])
@@ -366,6 +431,9 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
             if existing["provisioning_state"] == "needs_attention":
                 store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, existing["workstream_id"]))
         operation = _operation(store, existing["workstream_id"])
+        binding = _binding(store, existing["workstream_id"])
+        if binding is not None and _rank(operation["step"]) >= _rank("map_committed"):
+            binding = _repair_launch_binding(store, workspace, harness, project, scope, binding)
     elif operation["state"] == "needs_attention" or existing["provisioning_state"] == "needs_attention":
         raise NeedsAttentionError("secretary ensure requires attention")
     if operation["state"] == "failed":

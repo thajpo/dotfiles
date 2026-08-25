@@ -42,6 +42,7 @@ class FixtureHarness:
         self.calls: list[tuple[str, Any]] = []
         self.profiles: list[str] = []
         self.launched: list[str] = []
+        self.launch_replacements: list[bool] = []
         self.cleaned: list[str] = []
 
     def validate_execution_profile(self, profile: str, role: str) -> None:
@@ -156,10 +157,11 @@ class FixtureHarness:
         if root.exists():
             shutil.rmtree(root)
 
-    def commit_launch_binding(self, scope: Mapping[str, Any], artifacts: HarnessArtifacts, **_: Any) -> Path:
+    def commit_launch_binding(self, scope: Mapping[str, Any], artifacts: HarnessArtifacts, **kwargs: Any) -> Path:
         workstream_id = str(scope["workstreamId"])
         self.calls.append(("launch", workstream_id))
         self.launched.append(workstream_id)
+        self.launch_replacements.append(bool(kwargs.get("replace", False)))
         path = Path(artifacts.harness_home) / "binding.json"
         path.write_text(workstream_id + "\n")
         os.chmod(path, 0o600)
