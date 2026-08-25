@@ -474,6 +474,29 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
                     payload={"previousDesiredState": "retired", "reopenedAt": now},
                 )
             existing = dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone())
+    if existing is not None and not _project_active(project):
+        operation = _operation(store, existing["workstream_id"])
+        binding = _binding(store, existing["workstream_id"])
+        if operation is not None and binding is None and operation["state"] in {"applying", "failed", "needs_attention"} and operation["step"] != "planned":
+            now = utc_now()
+            scope = _scope(project, existing, operation["operation_id"], external_domains)
+            with store.transaction():
+                store.conn.execute(
+                    "UPDATE workstreams SET provisioning_state='creating',attention_reason=NULL,updated_at=? WHERE workstream_id=?",
+                    (now, existing["workstream_id"]),
+                )
+                store.conn.execute(
+                    "UPDATE operations SET state='applying',step='planned',result_json=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?",
+                    (canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), now, operation["operation_id"]),
+                )
+                append_event_in_transaction(
+                    store.conn,
+                    kind="secretary.ensure.rewound",
+                    project_id=project["project_id"],
+                    workstream_id=existing["workstream_id"],
+                    operation_id=operation["operation_id"],
+                    payload={"reason": "inactive project had no durable runtime binding", "rewoundFrom": operation["step"]},
+                )
     if existing is None:
         workstream_id = new_id("ws")
         operation_id = new_id("op")
