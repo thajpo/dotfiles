@@ -337,7 +337,19 @@ exit 0
         self._write_command("bwrap", "echo 'bubblewrap 0.1'\n")
         self._write_command("socat", "echo 'socat 1.0'\n")
         self._write_command("loginctl", "exit 0\n")
-        self._write_command("systemctl", "exit 0\n")
+        self._write_command("systemctl", r'''
+state_file="${FAKE_SYSTEMD_STATE:?}"
+if [[ "${1:-}" == "--user" && "${2:-}" == "is-active" ]]; then
+  [[ -f "$state_file" && "$(<"$state_file")" == "active" ]]
+  exit $?
+fi
+if [[ "${1:-}" == "--user" && ( "${2:-}" == "enable" || "${2:-}" == "start" ) ]]; then
+  printf 'active\n' >"$state_file"
+elif [[ "${1:-}" == "--user" && ( "${2:-}" == "disable" || "${2:-}" == "stop" ) ]]; then
+  printf 'inactive\n' >"$state_file"
+fi
+exit 0
+''')
 
     def env(self):
         environment = os.environ.copy()
@@ -360,6 +372,7 @@ exit 0
                 "REAL_OMP_PATH": str(self.fake_bin / "omp-fixture"),
                 "FENCE_REAL_PATH": str(self.fake_bin / "fence-fixture"),
                 "FAKE_TREEHOUSE_ARCHIVE": str(self.treehouse_archive),
+                "FAKE_SYSTEMD_STATE": str(self.root / "fake-systemd-state"),
                 "TREEHOUSE_CHECKSUM_LOG": str(self.root / "treehouse-checksum.log"),
                 "HERDR_PLUGIN_LOG": str(self.root / "herdr-plugin.log"),
             }
