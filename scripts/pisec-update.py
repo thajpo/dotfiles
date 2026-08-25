@@ -560,6 +560,18 @@ def _post_switch(current: Path, wait_seconds: float) -> dict:
     return {"doctor": "ok", "refresh": refresh_value, "reconcile": "ok", "doctorAfter": "ok", "semanticState": "ok"}
 
 
+def _post_switch_for_state(current: Path, wait_seconds: float, state_root: Path) -> dict:
+    previous = os.environ.get("PISEC_STATE_ROOT")
+    os.environ["PISEC_STATE_ROOT"] = str(state_root)
+    try:
+        return _post_switch(current, wait_seconds)
+    finally:
+        if previous is None:
+            os.environ.pop("PISEC_STATE_ROOT", None)
+        else:
+            os.environ["PISEC_STATE_ROOT"] = previous
+
+
 def _switch_current(install_root: Path, deployment: Path) -> None:
     temporary = install_root / f".current-{uuid.uuid4().hex}"
     temporary.symlink_to(deployment.name)
@@ -686,7 +698,7 @@ def update(repo: Path, ref: str, wait_seconds: float, state_root: Path, install_
             status.update(currentStep="health")
             _json_write(status_path, status)
             try:
-                health = _post_switch(current, wait_seconds)
+                health = _post_switch_for_state(current, wait_seconds, state_root)
             except Exception as error:
                 return _failure(EXIT_FAILED, status_path, status, error, switched=True, current=candidate_identity, candidate=candidate_identity, stable=stable, marker=marker)
             status["refresh"] = health
@@ -914,7 +926,7 @@ def archive_reset_state(repo: Path, ref: str, wait_seconds: float, state_root: P
             status = _status(state="running", step="health", current=identity, candidate=identity, stable=stable, marker=None)
             _json_write(status_path, status)
             try:
-                health = _post_switch(_current_target(install_root), wait_seconds)
+                health = _post_switch_for_state(_current_target(install_root), wait_seconds, state_root)
             except Exception as error:
                 if archive is not None:
                     error = RuntimeError(f"{error}; archive={archive}; partial_state={state_root}")
@@ -970,7 +982,7 @@ def recover_previous(state_root: Path, install_root: Path, wait_seconds: float) 
             status = _status(state="running", step="health", current=selected_identity, candidate=selected_identity, stable=stable, marker=marker)
             _json_write(status_path, status)
             try:
-                health = _post_switch(selected, wait_seconds)
+                health = _post_switch_for_state(selected, wait_seconds, state_root)
             except Exception as error:
                 return _failure(EXIT_FAILED, status_path, status, error, switched=True, current=selected_identity, candidate=selected_identity, stable=stable, marker=marker)
             status = _status(state="applied", step="complete", current=selected_identity, candidate=None, stable=stable, marker=marker, refresh=health)
