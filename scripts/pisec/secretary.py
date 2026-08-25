@@ -348,14 +348,23 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
             _recover_start(store, workspace, harness, project, scope, binding)
         except Exception as error:
             raise NeedsAttentionError("secretary runtime identity is missing or mismatched") from error
-        if recoverable_missing:
+        if recoverable_missing or not project.get("active"):
             with store.transaction():
-                store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (utc_now(), existing["workstream_id"]))
+                now = utc_now()
+                store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, existing["workstream_id"]))
+                store.conn.execute("UPDATE projects SET active=1,lifecycle_attention_reason=NULL,deactivated_at=NULL,secretary_workstream_id=?,updated_at=? WHERE project_id=?", (existing["workstream_id"], now, project["project_id"]))
         workspace.focus_pane(binding["workspace_surface_id"])
         return {"project": resolve_project(store, project["project_id"]), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "binding": _binding(store, existing["workstream_id"]), "reused": True}
-    if operation["state"] == "needs_attention" and not project.get("active"):
+    if not project.get("active") and (
+        operation["state"] in {"needs_attention", "failed"}
+        or existing["provisioning_state"] == "needs_attention"
+    ):
+        now = utc_now()
         with store.transaction():
-            store.conn.execute("UPDATE operations SET state='applying',error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?", (utc_now(), operation["operation_id"]))
+            if operation["state"] in {"needs_attention", "failed"}:
+                store.conn.execute("UPDATE operations SET state='applying',error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?", (now, operation["operation_id"]))
+            if existing["provisioning_state"] == "needs_attention":
+                store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, existing["workstream_id"]))
         operation = _operation(store, existing["workstream_id"])
     elif operation["state"] == "needs_attention" or existing["provisioning_state"] == "needs_attention":
         raise NeedsAttentionError("secretary ensure requires attention")

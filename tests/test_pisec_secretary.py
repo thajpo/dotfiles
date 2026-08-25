@@ -116,6 +116,25 @@ class SecretaryTests(unittest.TestCase):
                     self.assertEqual(repaired["workstreamId"], workstream_id)
                     self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='secretary.scope.repaired'").fetchone()[0], 1)
 
+    def test_inactive_attention_retries_through_normal_open_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                first = ensure_secretary(store, project["project_id"], harness, workspace)
+                workstream_id = first["workstream"]["workstream_id"]
+                workspace.agents.clear()
+                store.conn.execute("UPDATE projects SET active=0,lifecycle_attention_reason='project open requires repair' WHERE project_id=?", (project["project_id"],))
+                store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='workspace runtime is missing' WHERE workstream_id=?", (workstream_id,))
+                retried = ensure_secretary(store, project["project_id"], harness, workspace)
+                self.assertEqual(retried["project"]["active"], 1)
+                self.assertEqual(retried["workstream"]["provisioning_state"], "bound")
+                self.assertIsNone(retried["workstream"]["attention_reason"])
+
     def test_ensure_refuses_scope_identity_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
