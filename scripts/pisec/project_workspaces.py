@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .adapters import WorkspaceAdapter, WorkspaceObservation
-from .models import ConflictError, NeedsAttentionError, utc_now
+from .models import ConflictError, NeedsAttentionError, PisecError, utc_now
 
 
 def _validate_observation(observed: WorkspaceObservation, workspace_id: str | None = None) -> WorkspaceObservation:
@@ -84,7 +84,21 @@ def ensure_project_workspace(
     if observed is None and create_tab:
         observed = workspace.observe_tab(workspace_id=workspace_id, cwd=repository)
         if observed is None:
-            observed = _validate_observation(workspace.create_tab(workspace_id=workspace_id, cwd=repository, label=label, focus=False), workspace_id)
+            try:
+                observed = _validate_observation(workspace.create_tab(workspace_id=workspace_id, cwd=repository, label=label, focus=False), workspace_id)
+            except PisecError as error:
+                if str(error) != f"workspace {workspace_id} not found":
+                    raise
+                observed = _validate_observation(workspace.create_workspace(repository, label, focus=False))
+                now = utc_now()
+                with store.transaction():
+                    store.conn.execute(
+                        "UPDATE project_workspaces SET workspace_id=?,updated_at=? WHERE project_id=? AND workspace_id=?",
+                        (observed.workspace_id, now, project["project_id"], workspace_id),
+                    )
+                record = _record(store, project, workspace)
+                if record is None or record["workspace_id"] != observed.workspace_id:
+                    raise NeedsAttentionError("project workspace identity was not repaired")
         else:
             observed = _validate_observation(observed, workspace_id)
     return {**record, "observation": observed}

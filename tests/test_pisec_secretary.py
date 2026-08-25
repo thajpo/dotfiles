@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.models import NeedsAttentionError, canonical_json
+from scripts.pisec.models import NeedsAttentionError, PisecError, canonical_json
 from scripts.pisec.first_mate import ensure_first_mate
 from scripts.pisec.projects import deactivate_project, register_project
 from scripts.pisec.secretary import ensure_secretary
@@ -246,7 +246,17 @@ class SecretaryTests(unittest.TestCase):
             with PiStore(root / "state") as store:
                 project = register_project(store, repo)
                 harness = FixtureHarness(root)
-                workspace = FixtureWorkspace(root, store)
+
+                class MissingWorkspaceFixture(FixtureWorkspace):
+                    fail_next_tab = True
+
+                    def create_tab(self, *, workspace_id, cwd, label, focus=False):
+                        if self.fail_next_tab:
+                            self.fail_next_tab = False
+                            raise PisecError(f"workspace {workspace_id} not found")
+                        return super().create_tab(workspace_id=workspace_id, cwd=cwd, label=label, focus=focus)
+
+                workspace = MissingWorkspaceFixture(root, store)
                 first = ensure_secretary(store, project["project_id"], harness, workspace)
                 workstream_id = first["workstream"]["workstream_id"]
                 old_surface_id = first["binding"]["workspace_surface_id"]
