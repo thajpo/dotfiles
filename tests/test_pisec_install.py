@@ -493,6 +493,7 @@ exit 0
         broker_unit = (self.home / ".config" / "systemd" / "user" / "pisec-broker.service").read_text()
         self.assertIn("Requires=herdr.service pisec-auth-gateway.service", broker_unit)
         self.assertIn("PartOf=herdr.service", broker_unit)
+        self.assertIn("Environment=PYTHONDONTWRITEBYTECODE=1", broker_unit)
         for retired in ("herdr-pisec.service", "herdr-pi-personal.service"):
             self.assertFalse((self.home / ".config" / "systemd" / "user" / retired).exists())
         self.assertFalse((self.home / ".local" / "lib" / "pisec" / "personal-bin").exists())
