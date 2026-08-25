@@ -68,6 +68,7 @@ def parser() -> argparse.ArgumentParser:
     _add_json_argument(update)
     update.add_argument("--commit", default=None, metavar="REF")
     update.add_argument("--wait-seconds", type=float, default=300.0, metavar="SECONDS")
+    update.add_argument("--recover-previous", action="store_true", help="switch to the verified previous deployment without automatic fallback")
     project = commands.add_parser(
         "project",
         **_parser_kwargs(
@@ -523,7 +524,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         deployment_failed = False
         if args.command == "update":
             updater = runpy.run_path(str(Path(__file__).parents[1] / "pisec-update.py"))
-            updater_args = (["--commit", args.commit] if args.commit is not None else []) + ["--wait-seconds", str(args.wait_seconds)] + (["--json"] if args.json_output else [])
+            updater_args = (["--commit", args.commit] if args.commit is not None else []) + (["--recover-previous"] if args.recover_previous else []) + ["--wait-seconds", str(args.wait_seconds)] + (["--json"] if args.json_output else [])
             return int(updater["main"](updater_args))
         if args.command == "project" and args.project_command == "register":
             payload = {"path": str(Path(args.path).expanduser())}
