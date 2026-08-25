@@ -1009,6 +1009,11 @@ class OmpHarnessAdapter:
             raise NeedsAttentionError("OMP cleanup path is unsafe")
         if stat.S_ISDIR(info.st_mode):
             readonly = "binding-surfaces" in path.parts
+            if readonly:
+                # Older sealed surfaces could retain owner-writable directory
+                # modes below the sealed root.  Normalize only this owned,
+                # symlink-free tree before applying the readonly safety check.
+                _normalize_owner_tree(path, readonly=True)
             _safe_owned_tree(path, readonly=readonly)
             if readonly:
                 _normalize_owner_tree(path, readonly=False)

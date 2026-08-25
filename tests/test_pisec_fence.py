@@ -84,6 +84,24 @@ class RuntimeMaterializationTests(unittest.TestCase):
 
             self.assertFalse(policy.exists())
 
+    def test_cleanup_normalizes_legacy_writable_sealed_surface_before_remove(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            workstream = "ws_" + "0" * 32
+            surface = state / "binding-surfaces" / "omp" / workstream
+            fence = surface / "fence"
+            fence.mkdir(parents=True)
+            (fence / "template").write_text("template\n")
+            os.chmod(surface, 0o500)
+            os.chmod(fence, 0o700)
+            os.chmod(fence / "template", 0o400)
+            adapter = OmpHarnessAdapter(state_root=state, config=make_config(root))
+
+            adapter._remove_state_path(str(surface))
+
+            self.assertFalse(surface.exists())
+
     def test_surface_isolated_from_later_user_surface_edits(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
