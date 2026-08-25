@@ -9,6 +9,7 @@ from unittest.mock import patch
 from scripts.pisec.adapters import AdapterRegistry, AgentObservation
 from scripts.pisec.attention import ATTENTION_WAKE_PROMPT, backfill_attention
 from scripts.pisec.broker import BrokerDispatcher
+from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.models import AuthorizationError, IdempotencyConflictError, InvalidRequestError, NotFoundError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
@@ -208,8 +209,15 @@ class ResearchTests(unittest.TestCase):
         with self.assertRaises(InvalidRequestError):
             dispatcher.dispatch("secretary", "attention.list", {**secretary_auth, "limit": 33})
         binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (secretary_id,)).fetchone()
-        event_sequence = store.conn.execute("SELECT COALESCE(MAX(sequence),0) FROM events").fetchone()[0]
-        store.conn.execute("UPDATE runtime_bindings SET observed_state='idle',refresh_pending=0,launch_generation_sha256=NULL,applied_generation_sha256=desired_generation_sha256,runtime_instance_id='watcher-runtime',report_seq=1,session_start_event_sequence=?,session_start_report_seq=1,session_started_at='2026-08-25T00:00:00Z' WHERE workstream_id=?", (event_sequence, secretary_id))
+        watcher_generation = str(binding["desired_generation_sha256"])
+        session_event = append_event_in_transaction(
+            store.conn,
+            kind="runtime.session_started",
+            project_id=project_a["project_id"],
+            workstream_id=secretary_id,
+            payload={"generationSha256": watcher_generation, "reportSeq": 1, "runtimeInstanceId": "watcher-runtime"},
+        )
+        store.conn.execute("UPDATE runtime_bindings SET observed_state='idle',refresh_pending=0,launch_generation_sha256=NULL,applied_generation_sha256=desired_generation_sha256,runtime_instance_id='watcher-runtime',report_seq=1,session_start_event_sequence=?,session_start_report_seq=1,session_started_at='2026-08-25T00:00:00Z' WHERE workstream_id=?", (session_event["sequence"], secretary_id))
         agent_name = str(binding["agent_name"])
         workspace.agents[agent_name] = AgentObservation(agent_name, str(binding["workspace_surface_id"]), True, "idle")
         workspace.runtime_states[str(binding["workspace_surface_id"])] = "live"
