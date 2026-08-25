@@ -111,7 +111,15 @@ def verify_runtime_binding(store: Any, payload: Mapping[str, Any], *, worker_onl
         "SELECT r.*,w.project_id,w.kind,w.execution_profile,w.desired_state,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?",
         (workstream_id,),
     ).fetchone()
-    if row is None or row["desired_state"] == "retired" or row["provisioning_state"] not in {"bound", "creating"}:
+    session_start_pending = (
+        allow_session_start
+        and row is not None
+        and row["provisioning_state"] == "needs_attention"
+        and row["launch_generation_sha256"] is not None
+    )
+    if row is None or row["desired_state"] == "retired" or (
+        row["provisioning_state"] not in {"bound", "creating"} and not session_start_pending
+    ):
         raise AuthorizationError("runtime binding is inactive")
     if worker_only and (row["kind"] != "worker" or row["execution_profile"] in {"first-mate", "secretary-project"}):
         raise AuthorizationError("runtime operation requires a worker binding")

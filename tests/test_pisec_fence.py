@@ -872,6 +872,23 @@ class RuntimeReportTests(unittest.TestCase):
         with self.assertRaises(ConflictError):
             report_runtime(self.store, self.payload(seq=2, event="lifecycle", state="idle", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
 
+    def test_session_start_can_complete_a_reserved_needs_attention_launch(self):
+        self.store.conn.execute(
+            "UPDATE workstreams SET provisioning_state='needs_attention' WHERE workstream_id=?",
+            (self.workstream_id,),
+        )
+        self.store.conn.execute(
+            "UPDATE runtime_bindings SET launch_generation_sha256=desired_generation_sha256 WHERE workstream_id=?",
+            (self.workstream_id,),
+        )
+        self.assertIsNotNone(self.store.conn.execute("SELECT launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()[0])
+        result = report_runtime(self.store, self.payload(), self.harness, self.workspace)
+        self.assertEqual(result["workstreamId"], self.workstream_id)
+
+        self.store.conn.execute("UPDATE runtime_bindings SET launch_generation_sha256=NULL WHERE workstream_id=?", (self.workstream_id,))
+        with self.assertRaises(AuthorizationError):
+            report_runtime(self.store, self.payload(runtimeInstanceId="instance-2"), self.harness, self.workspace)
+
     def test_done_is_not_an_authenticated_pisec_runtime_state(self):
         report_runtime(self.store, self.payload(), self.harness, self.workspace)
         with self.assertRaises(InvalidRequestError):
