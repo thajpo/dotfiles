@@ -56,17 +56,8 @@ def capture_runtime_surface(harness: HarnessAdapter) -> RuntimeSurfaceArtifacts:
 
 
 def fleet_scope_paths(store: Any, scope: Mapping[str, Any]) -> dict[str, Any]:
-    result = dict(scope)
-    if scope.get("executionProfile") != "first-mate":
-        return result
-    from .projects import fleet_project_ids
-
-    worktrees_root = Path(str(scope["fleetWorktreesDir"]))
-    git_objects_root = Path(str(scope["fleetGitObjectsDir"]))
-    project_ids = fleet_project_ids(store)
-    result["fleetProjectWorktrees"] = [str((worktrees_root / project_id).absolute()) for project_id in project_ids]
-    result["fleetProjectGitObjects"] = [str((git_objects_root / project_id).absolute()) for project_id in project_ids]
-    return result
+    del store
+    return dict(scope)
 
 
 def materialize_current_surface(

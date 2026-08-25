@@ -10,7 +10,7 @@ from typing import Any, Mapping
 
 from .adapters import HarnessAdapter, WorkspaceAdapter
 from .events import append_event_in_transaction
-from .git_objects import validate_worker_resume_git
+from .worker_repo import validate_worker_resume_git
 from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, bounded_text, validate_id, validate_sha256
 from .models import utc_now
 

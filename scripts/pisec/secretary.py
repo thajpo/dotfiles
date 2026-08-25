@@ -45,8 +45,6 @@ _SCOPE_IDENTITY_FIELDS = frozenset(
         "branchName",
         "worktreePath",
         "agentName",
-        "privateGitObjectDir",
-        "gitCommonObjectDir",
     }
 )
 
@@ -159,10 +157,6 @@ def _scope(project: Mapping[str, Any], workstream: Mapping[str, Any], operation_
         "baseCommitOid": workstream["base_commit_oid"],
         "branchName": workstream["branch_name"],
         "worktreePath": workstream["worktree_path"],
-        "privateGitObjectDir": None,
-        "gitCommonObjectDir": str((Path(project["git_common_dir"]) / "objects").absolute()),
-        "projectWorktreesDir": str((Path.home() / ".local" / "share" / "pisec" / "worktrees" / project["project_id"]).absolute()),
-        "projectGitObjectsDir": str((Path.home() / ".local" / "state" / "pisec" / "git-objects" / project["project_id"]).absolute()),
         "agentName": f"pisec-{workstream['workstream_id'][-12:]}",
         "externalDomains": list(external_domains),
         "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),

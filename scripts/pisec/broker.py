@@ -186,7 +186,6 @@ class BrokerDispatcher:
         registry: AdapterRegistry,
         harness: HarnessAdapter,
         workspace: WorkspaceAdapter,
-        git_objects: Any,
         config: Mapping[str, Any] | None = None,
         prepare_surfaces: bool = True,
     ):
@@ -194,7 +193,6 @@ class BrokerDispatcher:
         self.registry = registry
         self.harness = harness
         self.workspace = workspace
-        self.git_objects = git_objects
         self.config = dict(config or {})
         self._reconcile_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
         self._wake_queue: queue.Queue[str] = queue.Queue(maxsize=256)
@@ -708,7 +706,7 @@ class BrokerDispatcher:
                     scope = json.loads(operation["result_json"])
                     if not isinstance(scope, dict):
                         raise InvalidRequestError("durable workstream scope is invalid")
-                    applied = authorize_apply_workstream(store, scope=scope, harness=self._harness_for_scope(scope), workspace=self.workspace, git_objects=self.git_objects)
+                    applied = authorize_apply_workstream(store, scope=scope, harness=self._harness_for_scope(scope), workspace=self.workspace)
                     result["resumed"].append({"operationId": applied["operation"]["operation_id"], "state": applied["operation"]["state"]})
                 elif operation["kind"] == "secretary.ensure":
                     from .secretary import ensure_secretary
@@ -1026,7 +1024,7 @@ class BrokerDispatcher:
             return {"operation": _public_operation(prepared["operation"]), "workstream": _public_workstream(prepared["workstream"]), "approvalScope": prepared["approvalScope"]}
         if operation == "workstream.authorize_apply":
             _exact(payload, {"approvalScope"})
-            applied = authorize_apply_workstream(store, scope=payload["approvalScope"], harness=self._harness_for_scope(payload["approvalScope"]), workspace=self.workspace, git_objects=self.git_objects)
+            applied = authorize_apply_workstream(store, scope=payload["approvalScope"], harness=self._harness_for_scope(payload["approvalScope"]), workspace=self.workspace)
             return {"operation": _public_operation(applied["operation"]), "workstream": _public_workstream(applied["workstream"])}
         if operation == "workstream.send":
             _exact(payload, {"workstreamId", "text"})
@@ -1176,7 +1174,7 @@ class BrokerDispatcher:
             scope = payload["approvalScope"]
             if not isinstance(scope, Mapping) or scope.get("projectId") != project_id:
                 raise InvalidRequestError("fleet approval scope project does not match projectId")
-            applied = authorize_apply_workstream(store, scope=scope, harness=self._harness_for_scope(scope), workspace=self.workspace, git_objects=self.git_objects, actor="first_mate")
+            applied = authorize_apply_workstream(store, scope=scope, harness=self._harness_for_scope(scope), workspace=self.workspace, actor="first_mate")
             return {"operation": _public_operation(applied["operation"]), "workstream": _public_workstream(applied["workstream"])}
         if operation == "fleet.workstream.accept.prepare":
             _exact(payload, {"projectId", "workstreamId"})

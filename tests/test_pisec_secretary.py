@@ -85,15 +85,13 @@ class SecretaryTests(unittest.TestCase):
                 workstream_id = first["workstream"]["workstream_id"]
                 row = store.conn.execute("SELECT result_json FROM operations WHERE kind='secretary.ensure' AND workstream_id=?", (workstream_id,)).fetchone()
                 legacy = json.loads(row["result_json"])
-                legacy.pop("projectWorktreesDir")
-                legacy.pop("projectGitObjectsDir")
+                legacy.pop("targetRef")
                 store.conn.execute("UPDATE operations SET result_json=? WHERE kind='secretary.ensure' AND workstream_id=?", (json.dumps(legacy), workstream_id))
                 second = ensure_secretary(store, project["project_id"], harness, workspace)
                 self.assertTrue(second["reused"])
                 self.assertEqual(second["workstream"]["provisioning_state"], "bound")
                 repaired = json.loads(store.conn.execute("SELECT result_json FROM operations WHERE workstream_id=?", (workstream_id,)).fetchone()[0])
-                self.assertIn("projectWorktreesDir", repaired)
-                self.assertIn("projectGitObjectsDir", repaired)
+                self.assertIn("targetRef", repaired)
                 self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='secretary.scope.repaired'").fetchone()[0], 1)
 
     def test_ensure_repairs_missing_or_malformed_scope_before_restart(self):

@@ -6,7 +6,7 @@ from scripts.pisec.adapters import AdapterRegistry
 from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.refresh import _binding_scope
-from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
+from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
 class RuntimeRefreshTests(unittest.TestCase):
@@ -25,7 +25,6 @@ class RuntimeRefreshTests(unittest.TestCase):
             registry=registry,
             harness=self.harness,
             workspace=self.workspace,
-            git_objects=FixtureGitObjects(),
         )
         project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "defaultRef": "main"})
         self.project_id = project["project_id"]

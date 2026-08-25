@@ -1,7 +1,5 @@
 from pathlib import Path
-import os
 import sqlite3
-import subprocess
 import tempfile
 import unittest
 
@@ -12,13 +10,12 @@ from scripts.pisec.projects import _git, register_project
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workflow import checkpoint
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
-from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
+from scripts.pisec.git_runner import run_git
+from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
-def git_with_objects(path: Path, private: Path, common: Path, *args: str) -> str:
-    environment = os.environ.copy()
-    environment.update({"GIT_OBJECT_DIRECTORY": str(private), "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(common)})
-    return subprocess.run(["git", "-C", str(path), *args], check=True, text=True, capture_output=True, env=environment).stdout.strip()
+def git_worker(path: Path, *args: str) -> str:
+    return run_git(path, args, role="worker").stdout.strip()
 
 
 class IntegrationTests(unittest.TestCase):
@@ -45,24 +42,16 @@ class IntegrationTests(unittest.TestCase):
             harness=harness,
             workspace=workspace,
             work_root=root / "worktrees",
-            object_root=root / "objects",
         )
         scope = prepared["approvalScope"]
         full_scope = dict(__import__("json").loads(store.conn.execute("SELECT result_json FROM operations WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()[0]))
-        authorize_apply_workstream(store, scope=full_scope, harness=harness, workspace=workspace, git_objects=FixtureGitObjects())
+        authorize_apply_workstream(store, scope=full_scope, harness=harness, workspace=workspace)
         workstream = dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (scope["workstreamId"],)).fetchone())
         worktree = Path(workstream["worktree_path"])
-        private_objects = Path(full_scope["privateGitObjectDir"])
-        common_objects = Path(project["git_common_dir"]) / "objects"
-        _git(worktree, "config", "user.name", "Pisec Worker")
-        _git(worktree, "config", "user.email", "worker@example.invalid")
-        for path in (private_objects, private_objects / "info", private_objects / "pack"):
-            path.chmod(0o700)
-        (private_objects / "info" / "alternates").chmod(0o600)
         (worktree / "feature.txt").write_text("implemented\n")
-        git_with_objects(worktree, private_objects, common_objects, "add", "feature.txt")
-        git_with_objects(worktree, private_objects, common_objects, "commit", "-qm", "implement feature")
-        source = git_with_objects(worktree, private_objects, common_objects, "rev-parse", "HEAD").lower()
+        git_worker(worktree, "add", "feature.txt")
+        git_worker(worktree, "commit", "-qm", "implement feature")
+        source = git_worker(worktree, "rev-parse", "HEAD").lower()
         binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
         task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
         checkpoint(
@@ -85,7 +74,7 @@ class IntegrationTests(unittest.TestCase):
                 "residualRisk": "none",
             },
         )
-        return store, project, harness, workspace, workstream, scope, repo, worktree, private_objects, source
+        return store, project, harness, workspace, workstream, scope, repo, worktree, None, source
 
     def test_acceptance_is_the_only_user_gate_and_secretary_closes_out(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,7 +134,6 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(tuple(job), ("integrated", "rebase-then-ff", source, 2))
             self.assertEqual(_git(repo, "rev-parse", "HEAD"), source)
             self.assertFalse(worktree.exists())
-            self.assertTrue(private_objects.exists())
             self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='project.git_integrated'").fetchone()[0], 1)
             with self.assertRaises(sqlite3.IntegrityError):
                 store.conn.execute("UPDATE integration_reports SET residual_risk=? WHERE integration_id=?", ("changed", accepted["integration"]["integration_id"]))
@@ -183,9 +171,11 @@ class IntegrationTests(unittest.TestCase):
             (repo / "target.txt").write_text("advanced\n")
             _git(repo, "add", "target.txt")
             _git(repo, "commit", "-qm", "advance target")
-            common_objects = Path(project["git_common_dir"]) / "objects"
-            git_with_objects(worktree, private_objects, common_objects, "rebase", "main")
-            rebased_source = git_with_objects(worktree, private_objects, common_objects, "rev-parse", "HEAD").lower()
+            drift = reconcile_integrations(store, workspace, harness)
+            self.assertEqual(drift["processed"][0]["state"], "awaiting_worker")
+            target_ref = f"refs/pisec/target/{accepted['integration']['integration_id']}"
+            git_worker(worktree, "rebase", target_ref)
+            rebased_source = git_worker(worktree, "rev-parse", "HEAD").lower()
             binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
             task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
             checkpoint(

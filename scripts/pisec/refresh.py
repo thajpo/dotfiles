@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .adapters import HarnessAdapter, WorkspaceAdapter, RuntimeSurfaceArtifacts, artifact_document
-from .git_objects import validate_worker_resume_git
+from .worker_repo import validate_worker_resume_git
 from .models import ConflictError, NeedsAttentionError, NotFoundError, PisecError, canonical_json, json_digest, new_id, utc_now, validate_sha256
 from .runtime import start_bound_agent
 from .runtime_surface import capture_runtime_surface, verify_surface

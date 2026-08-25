@@ -14,7 +14,6 @@ from typing import Any, Callable, Mapping, Protocol
 from .adapters import HarnessAdapter, WorkspaceAdapter, WorkspaceObservation, artifact_document
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
-from .git_objects import GitObjectManager
 from .models import AuthorizationError, ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id
 from .policies import enforce_worker_creation_policy
 from .projects import _git, assert_project_writable, get_project
@@ -22,12 +21,13 @@ from .project_workspaces import ensure_project_workspace
 from .research import issue_task_packet_in_transaction, validate_task_packet
 from .runtime_surface import materialize_current_surface
 from .runtime import start_bound_agent
+from .worker_repo import create_worker_repository, project_git_lock, project_target_state, validate_worker_repository
 APPLY_LOCK = threading.RLock()
 CHECKPOINTS = (
     "authorized",
-    "worktree_observed_or_created",
+    "worker_repo_created",
+    "worker_repo_verified",
     "workspace_tab_observed_or_created",
-    "git_objects_materialized",
     "profile_materialized",
     "agent_started",
     "brief_delivered",
@@ -37,13 +37,12 @@ CHECKPOINTS = (
 _FULL_SCOPE_FIELDS = frozenset({
     "operationId", "workstreamId", "projectId", "title", "purpose", "brief",
     "harnessId", "workspaceAdapterId", "executionProfile", "workMode", "learningOverlay", "learningSeam", "decisionIds",
-    "targetRef", "baseCommitOid", "branchName",
-    "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "agentName",
-    "projectWorktreesDir", "projectGitObjectsDir",
+    "targetRef", "targetBranchRef", "baseCommitOid", "branchName",
+    "worktreePath", "agentName",
     "dataDirs", "pythonEnv", "implementationModel", "harnessModel", "reasoningEffort", "effects", "nonEffects", "taskPacket",
 })
-_PUBLIC_SCOPE_FIELDS = _FULL_SCOPE_FIELDS - {"privateGitObjectDir", "gitCommonObjectDir"}
-_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "projectWorktreesDir", "projectGitObjectsDir", "learningSeam", "decisionIds", "implementationModel", "harnessModel", "reasoningEffort"})
+_PUBLIC_SCOPE_FIELDS = _FULL_SCOPE_FIELDS
+_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "learningSeam", "decisionIds", "implementationModel", "harnessModel", "reasoningEffort"})
 _SCOPE_REQUIRED = _FULL_SCOPE_FIELDS - _OPTIONAL_SCOPE_FIELDS
 
 
@@ -121,7 +120,6 @@ def prepare_workstream(
     harness_model: str | None = None,
     reasoning_effort: str | None = None,
     work_root: Path | None = None,
-    object_root: Path | None = None,
     failpoint: Failpoint | None = None,
 ) -> dict[str, Any]:
     assert_project_writable(store, project_id)
@@ -152,6 +150,8 @@ def prepare_workstream(
     selected_ref = bounded_text(target_ref or project["default_ref"], name="target_ref", limit=512)
     if selected_ref.startswith("-") or any(ord(char) < 0x20 for char in selected_ref):
         raise InvalidRequestError("target_ref contains unsafe characters")
+    target_branch, target_branch_ref, base_oid = project_target_state(Path(project["repository_path"]), selected_ref)
+    selected_ref = target_branch_ref
     if work_mode not in {"FAST", "RIP", "BUILD", "MAJOR"} or learning_overlay not in {"OFF", "LIGHT", "DEEP"}:
         raise InvalidRequestError("work mode or learning overlay is invalid")
     if learning_overlay == "DEEP" and learning_seam is None:
@@ -195,17 +195,12 @@ def prepare_workstream(
             raise ScopeMismatchError("stored workstream proposal is invalid")
         return {"operation": dict(existing), "workstream": _workstream(store, scope["workstreamId"]), "approvalScope": _public_scope(scope)}
 
-    base_oid = _git(Path(project["repository_path"]), "rev-parse", "--verify", "--end-of-options", f"{selected_ref}^{{commit}}")
-    from .models import validate_git_oid
-    validate_git_oid(base_oid, "target base commit")
     operation_id = new_id("op")
     workstream_id = new_id("ws")
     branch = f"pisec/{workstream_id}/work"
     home = Path.home()
-    worktrees_root = work_root or home / ".local" / "share" / "pisec" / "worktrees"
-    objects_root = object_root or home / ".local" / "state" / "pisec" / "git-objects"
+    worktrees_root = work_root or Path(store.state_root) / "workers"
     checkout = worktrees_root / project_id / workstream_id
-    object_dir = objects_root / project_id / workstream_id / "objects"
     agent_name = f"pisec-{workstream_id[-12:]}"
     scope = {
         "operationId": operation_id,
@@ -222,17 +217,14 @@ def prepare_workstream(
         "learningSeam": learning_seam,
         "decisionIds": list(decision_ids),
         "targetRef": selected_ref,
+        "targetBranchRef": target_branch_ref,
         "baseCommitOid": base_oid,
         "branchName": branch,
         "worktreePath": str(checkout.absolute()),
-        "privateGitObjectDir": str(object_dir.absolute()),
-        "gitCommonObjectDir": str((Path(project["git_common_dir"]) / "objects").absolute()),
-        "projectWorktreesDir": str((worktrees_root / project_id).absolute()),
-        "projectGitObjectsDir": str((objects_root / project_id).absolute()),
         "agentName": agent_name,
         "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),
         "pythonEnv": normalized_python_env,
-        "effects": ["create branch and execution workspace", "register private Git object store", "start fenced harness agent", "deliver full brief"],
+        "effects": ["create independent worker repository and execution workspace", "start fenced harness agent", "deliver full brief"],
         "nonEffects": ["no push", "no merge", "no cleanup", "no branch deletion"],
         "taskPacket": normalized_task_packet,
     }
@@ -326,39 +318,25 @@ def _wait_for_agent(
 
 def _prompt_agent(workspace: WorkspaceAdapter, target: str, text: str) -> Mapping[str, Any]:
     return workspace.prompt_agent_nowait(target, text)
-def _git_worktree_identity(project_root: Path, worktree_path: str, branch_name: str) -> bool:
-    output = _git(project_root, "worktree", "list", "--porcelain")
-    target = str(Path(worktree_path).resolve(strict=False))
-    for block in output.split("\n\n"):
-        values = {}
-        for line in block.splitlines():
-            key, _, value = line.partition(" ")
-            if key:
-                values[key] = value
-        if str(Path(values.get("worktree", "")).resolve(strict=False)) == target and values.get("branch", "").removeprefix("refs/heads/") == branch_name:
-            return True
-    return False
-
-
-def _ensure_git_worktree(project: Mapping[str, Any], scope: Mapping[str, Any]) -> None:
+def _ensure_worker_repository(store: Any, project: Mapping[str, Any], scope: Mapping[str, Any]) -> None:
     project_root = Path(str(project["repository_path"]))
-    worktree_path = Path(str(scope["worktreePath"]))
-    if worktree_path.exists():
-        if not worktree_path.is_dir() or worktree_path.is_symlink():
-            raise NeedsAttentionError("approved worktree path is unsafe")
-        if not _git_worktree_identity(project_root, str(worktree_path), str(scope["branchName"])):
-            raise NeedsAttentionError("existing path is not the approved Git worktree")
-        # Git creates the checkout using the host umask; normalize the managed
-        # root before the launch preflight evaluates its ownership boundary.
-        if worktree_path.stat().st_uid != os.geteuid():
-            raise NeedsAttentionError("approved worktree is not owner-controlled")
-        os.chmod(worktree_path, 0o700)
-        return
-    worktree_path.parent.mkdir(parents=True, exist_ok=True)
-    _git(project_root, "worktree", "add", "-q", "-b", str(scope["branchName"]), str(worktree_path), str(scope["baseCommitOid"]))
-    if not _git_worktree_identity(project_root, str(worktree_path), str(scope["branchName"])):
-        raise NeedsAttentionError("created Git worktree is not the approved worktree")
-    os.chmod(worktree_path, 0o700)
+    target_branch = str(scope["targetBranchRef"]).removeprefix("refs/heads/")
+    with project_git_lock(store.state_root, str(scope["projectId"])):
+        create_worker_repository(
+            primary=project_root,
+            worker=Path(str(scope["worktreePath"])),
+            project_id=str(scope["projectId"]),
+            workstream_id=str(scope["workstreamId"]),
+            target_branch_ref=str(scope["targetBranchRef"]),
+            base_oid=str(scope["baseCommitOid"]),
+            target_branch=target_branch,
+        )
+        validate_worker_repository(
+            Path(str(scope["worktreePath"])),
+            branch_name=str(scope["branchName"]),
+            base_oid=str(scope["baseCommitOid"]),
+            target_branch=target_branch,
+        )
 
 
 def _authorize_apply_workstream(
@@ -367,7 +345,6 @@ def _authorize_apply_workstream(
     scope: Mapping[str, Any],
     harness: HarnessAdapter,
     workspace: WorkspaceAdapter,
-    git_objects: GitObjectManager,
     failpoint: Failpoint | None = None,
     actor: str = "secretary",
 ) -> dict[str, Any]:
@@ -454,15 +431,30 @@ def _authorize_apply_workstream(
         return observed
 
     observation = observe_worker()
-    if _rank(operation["step"]) < _rank("worktree_observed_or_created"):
+    if _rank(operation["step"]) < _rank("worker_repo_created"):
         try:
-            _ensure_git_worktree(project, scope)
+            _ensure_worker_repository(store, project, scope)
         except Exception as error:
-            _mark_attention(store, operation_id, workstream_id, f"Git worktree could not be prepared: {error}")
-            raise NeedsAttentionError("Git worktree could not be prepared") from error
+            _mark_attention(store, operation_id, workstream_id, f"worker repository could not be prepared: {error}")
+            raise NeedsAttentionError("worker repository could not be prepared") from error
         with store.transaction():
-            _checkpoint(store, operation_id, "worktree_observed_or_created")
-        _hit(failpoint, "after_workspace_creation", scope)
+            _checkpoint(store, operation_id, "worker_repo_created")
+        _hit(failpoint, "after_worker_repo_creation", scope)
+        operation = _operation(store, operation_id)
+    if _rank(operation["step"]) < _rank("worker_repo_verified"):
+        try:
+            validate_worker_repository(
+                Path(str(scope["worktreePath"])),
+                branch_name=str(scope["branchName"]),
+                base_oid=str(scope["baseCommitOid"]),
+                target_branch=str(scope["targetBranchRef"]).removeprefix("refs/heads/"),
+            )
+        except Exception as error:
+            _mark_attention(store, operation_id, workstream_id, f"worker repository verification failed: {error}")
+            raise NeedsAttentionError("worker repository verification failed") from error
+        with store.transaction():
+            _checkpoint(store, operation_id, "worker_repo_verified")
+        _hit(failpoint, "after_worker_repo_verification", scope)
         operation = _operation(store, operation_id)
     if _rank(operation["step"]) < _rank("workspace_tab_observed_or_created"):
         if observation is None:
@@ -512,13 +504,6 @@ def _authorize_apply_workstream(
         _mark_attention(store, operation_id, workstream_id, "worker tab observation is incomplete")
         raise NeedsAttentionError("worker tab observation is incomplete")
 
-    if _rank(operation["step"]) < _rank("git_objects_materialized"):
-        git_objects.materialize(scope)
-        with store.transaction():
-            _checkpoint(store, operation_id, "git_objects_materialized")
-        _hit(failpoint, "after_binding_persistence", scope)
-        operation = _operation(store, operation_id)
-
     if _rank(operation["step"]) < _rank("profile_materialized"):
         artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)
         artifact_json = artifact_document(harness.manifest, artifacts)
@@ -526,7 +511,7 @@ def _authorize_apply_workstream(
         with store.transaction():
             store.conn.execute(
                 "INSERT OR REPLACE INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,private_git_object_dir,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (workstream_id, workspace.manifest.adapter_id, workspace.manifest.session_name, observation.workspace_id, observation.view_id, observation.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_json, None, None, artifacts.launch_secret_path, scope["privateGitObjectDir"], artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
+                (workstream_id, workspace.manifest.adapter_id, workspace.manifest.session_name, observation.workspace_id, observation.view_id, observation.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_json, None, None, artifacts.launch_secret_path, None, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
             )
         harness.commit_launch_binding(
             materialized_scope,
@@ -624,14 +609,13 @@ def authorize_apply_workstream(
     scope: Mapping[str, Any],
     harness: HarnessAdapter,
     workspace: WorkspaceAdapter,
-    git_objects: GitObjectManager,
     failpoint: Failpoint | None = None,
     actor: str = "secretary",
 ) -> dict[str, Any]:
     assert_project_writable(store, str(scope["projectId"]))
     with APPLY_LOCK:
         try:
-            return _authorize_apply_workstream(store, scope=scope, harness=harness, workspace=workspace, git_objects=git_objects, failpoint=failpoint, actor=actor)
+            return _authorize_apply_workstream(store, scope=scope, harness=harness, workspace=workspace, failpoint=failpoint, actor=actor)
         except NeedsAttentionError as error:
             operation_id = scope.get("operationId") if isinstance(scope, Mapping) else None
             if isinstance(operation_id, str):

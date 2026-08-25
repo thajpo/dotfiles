@@ -15,26 +15,18 @@ from scripts.pisec.workflow import checkpoint
 from scripts.pisec.integration import apply_workstream_acceptance, prepare_workstream_acceptance
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, complete_workstream, prepare_workstream
-from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace
+from tests.pisec_fixture import FixtureHarness, FixtureWorkspace
 
 
 def git(path: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(path), *args], check=True, text=True, capture_output=True).stdout.strip()
 
 
-def git_with_objects(path: Path, private: Path, common: Path, *args: str) -> str:
-    environment = os.environ.copy()
-    environment.update({
-        "GIT_OBJECT_DIRECTORY": str(private),
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(common),
-    })
-    return subprocess.run(
-        ["git", "-C", str(path), *args],
-        check=True,
-        text=True,
-        capture_output=True,
-        env=environment,
-    ).stdout.strip()
+from scripts.pisec.git_runner import run_git
+
+
+def git_worker(path: Path, *args: str) -> str:
+    return run_git(path, args, role="worker").stdout.strip()
 
 
 def make_repo(path: Path) -> None:
@@ -73,7 +65,6 @@ class SecretaryGitTests(unittest.TestCase):
             harness=harness,
             workspace=workspace,
             work_root=root / "worktrees",
-            object_root=root / "objects",
         )
         scope = json.loads(store.conn.execute("SELECT result_json FROM operations WHERE workstream_id=?", (proposal["workstream"]["workstream_id"],)).fetchone()[0])
         authorize_apply_workstream(
@@ -81,21 +72,13 @@ class SecretaryGitTests(unittest.TestCase):
             scope=scope,
             harness=harness,
             workspace=workspace,
-            git_objects=FixtureGitObjects(),
         )
         workstream = store.conn.execute("SELECT worktree_path FROM workstreams WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
         worktree = Path(workstream["worktree_path"])
-        git(worktree, "config", "user.name", "Pisec Worker")
-        git(worktree, "config", "user.email", "worker@example.invalid")
-        common_objects = Path(project["git_common_dir"]) / "objects"
-        private_objects = Path(scope["privateGitObjectDir"])
-        for path in (private_objects, private_objects / "info", private_objects / "pack"):
-            path.chmod(0o700)
-        (private_objects / "info" / "alternates").chmod(0o600)
         (worktree / "feature.txt").write_text("implemented\n")
-        git_with_objects(worktree, private_objects, common_objects, "add", "feature.txt")
-        git_with_objects(worktree, private_objects, common_objects, "commit", "-qm", "implement feature")
-        source_commit = git_with_objects(worktree, private_objects, common_objects, "rev-parse", "HEAD").lower()
+        git_worker(worktree, "add", "feature.txt")
+        git_worker(worktree, "commit", "-qm", "implement feature")
+        source_commit = git_worker(worktree, "rev-parse", "HEAD").lower()
         binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
         task_packet = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
         checkpoint(
@@ -123,7 +106,7 @@ class SecretaryGitTests(unittest.TestCase):
             acceptance = prepare_workstream_acceptance(store, project["project_id"], scope["workstreamId"])
             apply_workstream_acceptance(store, project["project_id"], acceptance["approvalScope"])
             complete_workstream(store, project["project_id"], scope["workstreamId"], completion["packet_sha256"], workspace)
-        return store, project, scope, repo, worktree, private_objects
+        return store, project, scope, repo, worktree, None
 
     def test_inspection_and_exact_fast_forward_merge(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -156,7 +139,6 @@ class SecretaryGitTests(unittest.TestCase):
             replay = apply_workstream_merge(store, project["project_id"], approval_scope)
             self.assertTrue(replay["reused"])
             self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='project.git_merged'").fetchone()[0], 1)
-            private_objects.rename(private_objects.with_name("objects-disabled"))
             self.assertEqual(git(repo, "status", "--short"), "")
             self.assertEqual(git(repo, "show", "-s", "--format=%H", "HEAD"), approval_scope["sourceCommitOid"])
 

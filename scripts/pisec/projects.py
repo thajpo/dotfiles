@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Mapping
 from pathlib import Path
-import shutil
-import subprocess
 from typing import Any
 
 from .events import append_event_in_transaction
@@ -15,6 +12,7 @@ from .fence import resolve_data_dirs
 from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, bounded_text, canonical_json, new_id, utc_now, validate_git_oid, validate_id, validate_remote_url
 from .policies import normalize_merge_policy, normalize_worker_policy
 from .research import research_counts
+from .git_runner import git_text
 
 COORDINATION_MODES = frozenset({"fleet", "project", "direct"})
 WORKER_CREATION_POLICIES = frozenset({"review", "bounded_auto"})
@@ -23,16 +21,10 @@ FLEET_COORDINATION_MODE = "fleet"
 
 
 def _git(path: Path, *args: str) -> str:
-    executable = shutil.which("git", path=os.defpath)
-    if executable is None:
-        raise InvalidRequestError("git is unavailable")
-    environment = {"HOME": "/nonexistent", "PATH": os.defpath, "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
-    result = subprocess.run([executable, "-C", str(path), *args], env=environment, text=True, capture_output=True, timeout=10, check=False)
-    if result.returncode != 0:
-        raise InvalidRequestError("Git repository observation failed", detail={"command": args[0], "stderr": result.stderr.strip()[:512]})
-    if len(result.stdout.encode("utf-8")) > 64 * 1024:
-        raise InvalidRequestError("Git repository observation was too large")
-    return result.stdout.strip()
+    try:
+        return git_text(path, *args, timeout=10, max_bytes=64 * 1024)
+    except InvalidRequestError:
+        raise
 
 
 def _origin_url(path: Path) -> str | None:

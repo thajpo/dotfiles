@@ -12,7 +12,8 @@ from .events import append_event_in_transaction
 from .models import ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id, validate_sha256
 from .policies import enforce_merge_policy
 from .projects import get_project
-from .secretary_git import _oid, _primary_state, _private_objects, _promote_worker_objects, _repository, _run_git
+from .secretary_git import _oid, _primary_state, _repository, _run_git
+from .worker_repo import project_git_lock, validate_worker_repository
 from .workstreams import complete_workstream, inspect_workstream, retire_workstream
 
 
@@ -79,7 +80,7 @@ def _task_packet(store: Any, workstream_id: str, packet: Mapping[str, Any]) -> s
     return str(task["packet_sha256"])
 
 
-def _changed_paths(repository: Path, base_oid: str, source_oid: str, private_objects: Path) -> list[str]:
+def _changed_paths(repository: Path, base_oid: str, source_oid: str) -> list[str]:
     _code, names = _run_git(
         repository,
         "diff",
@@ -90,7 +91,6 @@ def _changed_paths(repository: Path, base_oid: str, source_oid: str, private_obj
         base_oid,
         source_oid,
         max_bytes=128 * 1024,
-        alternate_objects=(private_objects,),
     )
     paths = [item for item in names.split("\x00") if item]
     if any(not isinstance(path, str) or not path or len(path) > 4096 or any(ord(char) < 0x20 for char in path) for path in paths):
@@ -98,7 +98,7 @@ def _changed_paths(repository: Path, base_oid: str, source_oid: str, private_obj
     return sorted(set(paths))
 
 
-def _patch_digest(repository: Path, base_oid: str, source_oid: str, private_objects: Path) -> str:
+def _patch_digest(repository: Path, base_oid: str, source_oid: str) -> str:
     _code, patch = _run_git(
         repository,
         "diff",
@@ -108,7 +108,6 @@ def _patch_digest(repository: Path, base_oid: str, source_oid: str, private_obje
         base_oid,
         source_oid,
         max_bytes=16 * 1024 * 1024,
-        alternate_objects=(private_objects,),
     )
     return hashlib.sha256(patch.encode("utf-8")).hexdigest()
 
@@ -126,9 +125,16 @@ def _candidate(
     packet = _packet(store, workstream_id, packet_sha256)
     packet_value = packet["packet"]
     task_sha256 = _task_packet(store, workstream_id, packet_value)
-    repository = _repository(project)
-    private_objects = _private_objects(store, workstream)
-    source_oid = _oid(repository, f"refs/heads/{workstream['branch_name']}", alternate_objects=(private_objects,))
+    repository = Path(str(workstream["worktree_path"])).absolute()
+    integration_row = store.conn.execute(
+        "SELECT integration_id,state FROM integration_jobs WHERE workstream_id=? ORDER BY created_at DESC LIMIT 1",
+        (workstream_id,),
+    ).fetchone()
+    private_ref = None
+    if integration_row is not None and integration_row["state"] in {"awaiting_worker", "queued", "refreshing", "verifying", "applying"}:
+        private_ref = f"refs/pisec/target/{integration_row['integration_id']}"
+    primary = _repository(project)
+    source_oid = _oid(repository, f"refs/heads/{workstream['branch_name']}")
     if source_oid != str(packet["source_commit_oid"]).lower():
         raise ConflictError("completion packet source commit is stale")
     target_project, _repository_path, target_branch, target_oid, porcelain = _primary_state(store, project_id)
@@ -136,28 +142,44 @@ def _candidate(
         raise ConflictError("registered project identity changed")
     if porcelain:
         raise ConflictError("registered project checkout is dirty")
-    _code, symbolic_target = _run_git(repository, "rev-parse", "--symbolic-full-name", "--verify", "--end-of-options", str(workstream["target_ref"]))
+    _code, symbolic_target = _run_git(primary, "rev-parse", "--symbolic-full-name", "--verify", "--end-of-options", str(workstream["target_ref"]))
     if symbolic_target.strip() != f"refs/heads/{target_branch}":
         raise ConflictError("registered checkout is not on the workstream target branch")
+    history_base_oid = None
+    if private_ref is not None:
+        private_code, _ = _run_git(repository, "show-ref", "--verify", "--quiet", private_ref, accepted=frozenset({0, 1}))
+        if private_code == 0 and _oid(repository, private_ref) == target_oid:
+            history_base_oid = target_oid
+    validate_worker_repository(
+        repository,
+        branch_name=str(workstream["branch_name"]),
+        base_oid=str(workstream["base_commit_oid"]),
+        target_branch=str(workstream["target_ref"]).removeprefix("refs/heads/"),
+        allowed_private_ref=private_ref,
+        history_base_oid=history_base_oid,
+        review_base_oid=history_base_oid,
+    )
     if not isinstance(packet_value.get("acceptance"), list) or not isinstance(packet_value.get("verification"), list):
         raise NeedsAttentionError("completion packet acceptance or verification is invalid")
     if expected_acceptance is not None and packet_value.get("acceptance") != expected_acceptance:
         raise ScopeMismatchError("replacement completion packet changed the accepted criteria")
-    changed_paths = _changed_paths(repository, str(workstream["base_commit_oid"]), source_oid, private_objects)
-    patch_sha256 = _patch_digest(repository, str(workstream["base_commit_oid"]), source_oid, private_objects)
+    changed_paths = _changed_paths(repository, str(workstream["base_commit_oid"]), source_oid)
+    patch_sha256 = _patch_digest(repository, str(workstream["base_commit_oid"]), source_oid)
     scope_changed_paths = changed_paths
     if expected_paths is not None:
+        target_revision = target_oid
+        if history_base_oid is not None:
+            target_revision = private_ref
         ancestor_code, _output = _run_git(
             repository,
             "merge-base",
             "--is-ancestor",
-            target_oid,
+            target_revision,
             source_oid,
-            accepted=frozenset({0, 1}),
-            alternate_objects=(private_objects,),
+            accepted=frozenset({0, 1, 128}),
         )
         if ancestor_code == 0:
-            scope_changed_paths = _changed_paths(repository, target_oid, source_oid, private_objects)
+            scope_changed_paths = _changed_paths(repository, target_revision, source_oid)
     if expected_paths is not None and not set(scope_changed_paths).issubset(expected_paths):
         raise ScopeMismatchError("replacement completion packet changed paths outside the accepted scope")
     policy = enforce_merge_policy(project, target_branch=target_branch, completion_packet=packet_value)
@@ -165,7 +187,6 @@ def _candidate(
         "project": project,
         "workstream": workstream,
         "repository": repository,
-        "privateObjects": private_objects,
         "packet": packet,
         "packetValue": packet_value,
         "sourceOid": source_oid,
@@ -235,7 +256,8 @@ def _validate_scope(scope_value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def prepare_workstream_acceptance(store: Any, project_id: str, workstream_id: str) -> dict[str, Any]:
-    candidate = _candidate(store, project_id, workstream_id)
+    with project_git_lock(store.state_root, project_id):
+        candidate = _candidate(store, project_id, workstream_id)
     existing = store.conn.execute("SELECT completion_packet_sha256 FROM workstream_acceptances WHERE workstream_id=?", (workstream_id,)).fetchone()
     if existing is not None and existing["completion_packet_sha256"] != candidate["packet"]["packet_sha256"]:
         raise ConflictError("workstream already has an acceptance; use its existing integration")
@@ -277,14 +299,15 @@ def apply_workstream_acceptance(store: Any, project_id: str, scope_value: Mappin
     existing = store.conn.execute("SELECT completion_packet_sha256 FROM workstream_acceptances WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
     if existing is not None and existing["completion_packet_sha256"] != scope["completionPacketSha256"]:
         raise ConflictError("workstream already has an acceptance; use its existing integration")
-    candidate = _candidate(
-        store,
-        project_id,
-        scope["workstreamId"],
-        packet_sha256=scope["completionPacketSha256"],
-        expected_paths=scope["changedPaths"],
-        expected_acceptance=scope["acceptance"],
-    )
+    with project_git_lock(store.state_root, project_id):
+        candidate = _candidate(
+            store,
+            project_id,
+            scope["workstreamId"],
+            packet_sha256=scope["completionPacketSha256"],
+            expected_paths=scope["changedPaths"],
+            expected_acceptance=scope["acceptance"],
+        )
     expected = _approval_scope(candidate)
     if canonical_json(expected) != canonical_json(scope):
         raise ScopeMismatchError("acceptance scope no longer matches the candidate")
@@ -385,7 +408,7 @@ def _prompt_worker(store: Any, workspace: Any | None, workstream_id: str, messag
 
 def _latest_replacement(store: Any, candidate: Mapping[str, Any], accepted_paths: list[str], accepted_criteria: Any) -> dict[str, Any] | None:
     workstream_id = str(candidate["workstream"]["workstream_id"])
-    source_oid = _oid(candidate["repository"], f"refs/heads/{candidate['workstream']['branch_name']}", alternate_objects=(candidate["privateObjects"],))
+    source_oid = _oid(candidate["repository"], f"refs/heads/{candidate['workstream']['branch_name']}")
     rows = store.conn.execute(
         "SELECT packet_sha256 FROM completion_packets WHERE workstream_id=? AND task_packet_sha256=? ORDER BY submitted_at DESC,completion_packet_id DESC",
         (workstream_id, candidate["taskSha256"]),
@@ -519,40 +542,59 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
             _set_job(store, integration_id, state="queued", candidate_packet=candidate["packet"]["packet_sha256"], candidate_source=candidate["sourceOid"], next_action="candidate refreshed after worker verification")
             job = {**dict(job), "state": "queued", "candidate_completion_packet_sha256": candidate["packet"]["packet_sha256"], "candidate_source_oid": candidate["sourceOid"]}
         _set_job(store, integration_id, state="refreshing", next_action="inspect target and candidate")
-        _project, repository, target_branch, target_oid, porcelain = _primary_state(store, str(job["project_id"]))
-        if target_branch != job["target_branch"]:
-            raise NeedsAttentionError("registered checkout is not on the accepted target branch")
-        if porcelain:
-            _set_job(store, integration_id, state="needs_attention", error="registered project checkout is dirty", next_action="clean the target checkout before the secretary retries")
-            return {"integrationId": integration_id, "state": "needs_attention"}
-        candidate_source = str(candidate["sourceOid"])
-        ancestor_code, _output = _run_git(repository, "merge-base", "--is-ancestor", target_oid, candidate_source, accepted=frozenset({0, 1}), alternate_objects=(candidate["privateObjects"],))
-        if ancestor_code != 0:
-            _set_job(store, integration_id, state="awaiting_worker", error="target advanced beyond the accepted candidate", next_action="rebase onto the current target, resolve conflicts within the accepted paths, rerun verification, and submit a new ready_review checkpoint")
-            if job["state"] != "awaiting_worker":
-                _prompt_worker(store, workspace, str(job["workstream_id"]), f"Pisec integration {integration_id} needs bounded reconciliation. The target branch {target_branch} advanced. Rebase this workstream onto the current target, resolve conflicts only within the accepted paths, rerun the completion verification, and submit a new ready_review checkpoint. Do not change the task scope.")
-            return {"integrationId": integration_id, "state": "awaiting_worker"}
-        target_paths = _changed_paths(repository, target_oid, candidate_source, candidate["privateObjects"])
-        if not set(target_paths).issubset(accepted_paths):
-            _set_job(store, integration_id, state="needs_attention", error="integrated candidate changed paths outside the accepted scope", next_action="inspect the candidate and request a new bounded task")
-            return {"integrationId": integration_id, "state": "needs_attention"}
-        _set_job(store, integration_id, state="verifying", target_oid=target_oid, next_action="record the accepted verification")
-        verification = {
-            "completionPacketSha256": candidate["packet"]["packet_sha256"],
-            "checks": candidate["packetValue"]["verification"],
-            "targetCommitOid": target_oid,
-            "candidateSourceCommitOid": candidate_source,
-            "targetChangedPaths": target_paths,
-        }
-        _set_job(store, integration_id, state="applying", next_action="fast-forward target")
-        current_head = _oid(repository, "HEAD")
-        if current_head != candidate_source:
-            _promote_worker_objects(candidate["project"], repository, str(job["workstream_id"]), candidate["privateObjects"], target_oid, candidate_source)
-            _run_git(repository, "merge", "--ff-only", "--no-edit", "--end-of-options", f"refs/heads/{candidate['workstream']['branch_name']}", alternate_objects=(candidate["privateObjects"],))
-        merged_oid = _oid(repository, "HEAD")
-        if merged_oid != candidate_source:
-            raise NeedsAttentionError("target branch did not reach the candidate source commit")
-        _report_and_receipt(store, job, candidate, previous_target_oid=target_oid, final_source_oid=merged_oid, changed_paths=target_paths, verification=verification)
+        with project_git_lock(store.state_root, str(job["project_id"])):
+            _project, repository, target_branch, target_oid, porcelain = _primary_state(store, str(job["project_id"]))
+            if target_branch != job["target_branch"]:
+                raise NeedsAttentionError("registered checkout is not on the accepted target branch")
+            if porcelain:
+                _set_job(store, integration_id, state="needs_attention", error="registered project checkout is dirty", next_action="clean the target checkout before the secretary retries")
+                return {"integrationId": integration_id, "state": "needs_attention"}
+            candidate_source = str(candidate["sourceOid"])
+            worker_repository = candidate["repository"]
+            target_ref = f"refs/pisec/target/{integration_id}"
+            worker_branch_ref = f"refs/heads/{candidate['workstream']['branch_name']}"
+            worker_before = _oid(worker_repository, worker_branch_ref)
+            _run_git(worker_repository, "fetch", "--no-tags", "--no-write-fetch-head", "--", str(repository), f"refs/heads/{target_branch}:{target_ref}")
+            if _oid(worker_repository, worker_branch_ref) != worker_before:
+                raise NeedsAttentionError("worker branch moved during target import")
+            if _oid(worker_repository, target_ref) != target_oid:
+                raise NeedsAttentionError("target import did not reach the recorded target commit")
+            _run_git(worker_repository, "update-ref", f"refs/remotes/origin/{target_branch}", target_oid)
+            _run_git(worker_repository, "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{target_branch}")
+            _run_git(repository, "fetch", "--no-tags", "--no-write-fetch-head", "--", str(worker_repository), f"+refs/heads/{candidate['workstream']['branch_name']}:refs/pisec/candidates/{integration_id}")
+            candidate_ref = f"refs/pisec/candidates/{integration_id}"
+            if _oid(repository, candidate_ref) != candidate_source:
+                raise NeedsAttentionError("candidate import did not reach the recorded candidate commit")
+            ancestor_code, _output = _run_git(repository, "merge-base", "--is-ancestor", target_oid, candidate_ref, accepted=frozenset({0, 1}))
+            if ancestor_code != 0:
+                _set_job(store, integration_id, state="awaiting_worker", target_oid=target_oid, error="target advanced beyond the accepted candidate", next_action="rebase onto the current target, resolve conflicts within the accepted paths, rerun verification, and submit a new ready_review checkpoint")
+                if job["state"] != "awaiting_worker":
+                    _prompt_worker(store, workspace, str(job["workstream_id"]), f"Pisec integration {integration_id} needs bounded reconciliation. The target branch {target_branch} advanced. Rebase this workstream onto the current target, resolve conflicts only within the accepted paths, rerun the completion verification, and submit a new ready_review checkpoint. Do not change the task scope.")
+                return {"integrationId": integration_id, "state": "awaiting_worker"}
+            target_paths = _changed_paths(repository, target_oid, candidate_ref)
+            target_patch_sha256 = _patch_digest(repository, target_oid, candidate_ref)
+            if not set(target_paths).issubset(accepted_paths):
+                _set_job(store, integration_id, state="needs_attention", error="integrated candidate changed paths outside the accepted scope", next_action="inspect the candidate and request a new bounded task")
+                return {"integrationId": integration_id, "state": "needs_attention"}
+            _set_job(store, integration_id, state="verifying", target_oid=target_oid, next_action="record the accepted verification")
+            verification = {
+                "completionPacketSha256": candidate["packet"]["packet_sha256"],
+                "checks": candidate["packetValue"]["verification"],
+                "targetCommitOid": target_oid,
+                "candidateSourceCommitOid": candidate_source,
+                "targetChangedPaths": target_paths,
+                "targetPatchSha256": target_patch_sha256,
+            }
+            _set_job(store, integration_id, state="applying", next_action="fast-forward target")
+            current_head = _oid(repository, "HEAD")
+            if current_head != candidate_source:
+                _run_git(repository, "merge", "--ff-only", "--no-edit", "--end-of-options", candidate_ref)
+            merged_oid = _oid(repository, "HEAD")
+            if merged_oid != candidate_source:
+                raise NeedsAttentionError("target branch did not reach the candidate source commit")
+            _report_and_receipt(store, job, candidate, previous_target_oid=target_oid, final_source_oid=merged_oid, changed_paths=target_paths, verification=verification)
+            _run_git(repository, "update-ref", "-d", candidate_ref)
+            _run_git(worker_repository, "update-ref", "-d", target_ref)
         _set_job(store, integration_id, state="integrated", target_oid=merged_oid, integration_source=merged_oid, next_action="complete, retire, and clean up the worker")
         refreshed_job = dict(store.conn.execute("SELECT * FROM integration_jobs WHERE integration_id=?", (integration_id,)).fetchone())
         return {"integrationId": integration_id, "state": "integrated", "closeout": _closeout(store, refreshed_job, workspace, harness)}

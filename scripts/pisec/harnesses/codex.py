@@ -244,7 +244,7 @@ class CodexHarnessAdapter:
         values = {
             "adapter": self.manifest.adapter_id,
             "adapterVersion": self.manifest.version_label,
-            "scope": {key: scope.get(key) for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "externalDomains", "implementationModel", "harnessModel", "reasoningEffort", "pythonEnv")},
+            "scope": {key: scope.get(key) for key in ("executionProfile", "worktreePath", "externalDomains", "implementationModel", "harnessModel", "reasoningEffort", "pythonEnv")},
             "runtimeSurfaceSha256": scope.get("runtimeSurfaceSha256"),
         }
         return hashlib.sha256(canonical_json(values).encode()).hexdigest()
@@ -498,8 +498,6 @@ class CodexHarnessAdapter:
             "generationSha256": artifacts.generation_sha256,
             "runtimeSocketPath": str((runtime_root() / "runtime" / "control.sock").absolute()),
             "launchSecretPath": str(Path(artifacts.launch_secret_path).absolute()),
-            "privateGitObjectDir": str(Path(scope["privateGitObjectDir"]).absolute()),
-            "gitCommonObjectDir": str(Path(scope["gitCommonObjectDir"]).absolute()),
         }
         descriptor["identitySha256"] = hashlib.sha256(canonical_json(descriptor).encode()).hexdigest()
         launcher_dir = self._launcher_dir(workstream_id)

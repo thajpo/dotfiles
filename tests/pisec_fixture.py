@@ -289,7 +289,6 @@ class FixtureWorkspace:
         agent = next((item for item in self.agents.values() if item.surface_id == observed.surface_id), None)
         return WorkspaceObservation(observed.workspace_id, observed.view_id, observed.surface_id, observed.worktree_path, observed.branch_name, agent)
 
-
     def observe_workstream(self, *, path: str, agent_name: str) -> WorkspaceObservation | None:
         observed = self.worktrees.get(path)
         if observed is None:
@@ -434,22 +433,3 @@ class DelayedFixtureWorkspace(FixtureWorkspace):
         self.observations += 1
         agent = AgentObservation(observed.agent.name, observed.agent.surface_id, self.observations >= 2, observed.agent.state)
         return WorkspaceObservation(observed.workspace_id, observed.view_id, observed.surface_id, observed.worktree_path, observed.branch_name, agent)
-
-
-class FixtureGitObjects:
-    def __init__(self):
-        self.calls: list[str] = []
-
-    def materialize(self, scope: Mapping[str, Any]) -> Path:
-        path = Path(str(scope["privateGitObjectDir"]))
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        (path / "info").mkdir(mode=0o700, exist_ok=True)
-        (path / "pack").mkdir(mode=0o700, exist_ok=True)
-        common = Path(str(scope["gitCommonObjectDir"]))
-        (path / "info" / "alternates").write_text(str(common.resolve(strict=False)) + "\n")
-        self.calls.append(str(path))
-        return path
-
-    def promote(self, scope: Mapping[str, Any], source_oid: str) -> Mapping[str, Any]:
-        self.calls.append(f"promote:{source_oid}")
-        return {"sourceOid": source_oid, "promoted": True}

@@ -100,14 +100,10 @@ def _scope(project: Mapping[str, Any], workstream: Mapping[str, Any], operation_
         "baseCommitOid": workstream["base_commit_oid"],
         "branchName": workstream["branch_name"],
         "worktreePath": workstream["worktree_path"],
-        "privateGitObjectDir": None,
-        "gitCommonObjectDir": None,
-        "fleetWorktreesDir": str((Path.home() / ".local" / "share" / "pisec" / "worktrees").absolute()),
-        "fleetGitObjectsDir": str((Path.home() / ".local" / "state" / "pisec" / "git-objects").absolute()),
         "agentName": f"pisec-{workstream['workstream_id'][-12:]}",
         "externalDomains": ["*"],
         "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),
-        "effects": ["create execution workspace", "start fenced global coordinator", "read Pisec-managed project worktrees and Git objects", "send brokered messages to registered project secretaries"],
+        "effects": ["create execution workspace", "start fenced global coordinator", "read brokered project worker state and diffs", "send brokered messages to registered project secretaries"],
         "nonEffects": ["no host-secret access", "no project checkout or worker-worktree writes", "no raw push or publish", "no project registration or runtime administration", "no worker creation or workstream acceptance without exact user approval"],
     }
 
@@ -200,7 +196,7 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         operation_id = new_id("op")
         now = utc_now()
         base_oid = observe_project(project["repository_path"], project["default_ref"])["default_oid"]
-        scratch = Path.home() / ".local" / "share" / "pisec" / "first-mate" / workstream_id
+        scratch = Path(store.state_root) / "first-mate" / workstream_id
         branch = f"first-mate/{workstream_id}"
         with store.transaction():
             store.conn.execute(

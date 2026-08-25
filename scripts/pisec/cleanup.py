@@ -11,8 +11,9 @@ from typing import Any, Mapping
 from .adapters import HarnessAdapter, WorkspaceAdapter
 from .events import append_event_in_transaction
 from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
-from .projects import _git, get_project, resolve_project
+from .projects import get_project, resolve_project
 from .workstreams import inspect_workstream
+from .worker_repo import validate_worker_repository
 
 
 def _safe_owned_tree(path: Path) -> None:
@@ -104,7 +105,7 @@ def cleanup_workstream(store: Any, payload: Mapping[str, Any], workspace: Worksp
                 (operation_id, project["project_id"], workstream_id, idempotency_key, canonical_json(request), request_sha, now, now),
             )
 
-    worktree = Path(row["worktree_path"])
+    worktree = Path(row["worktree_path"]).absolute()
     try:
         if worktree.is_symlink():
             raise NeedsAttentionError("managed worktree is a symlink")
@@ -114,20 +115,23 @@ def cleanup_workstream(store: Any, payload: Mapping[str, Any], workspace: Worksp
             raise NeedsAttentionError("managed worktree basename does not match workstream")
         if binding is not None and binding["workspace_view_id"]:
             workspace.close_tab(binding["workspace_view_id"])
-        branch_before = _git(Path(project["repository_path"]), "for-each-ref", "--format=%(refname:short)", f"refs/heads/{row['branch_name']}")
-        if branch_before.strip() != row["branch_name"]:
-            raise NeedsAttentionError("retired workstream branch is missing before cleanup")
+        receipt = store.conn.execute("SELECT * FROM merge_receipts WHERE workstream_id=? ORDER BY created_at DESC LIMIT 1", (workstream_id,)).fetchone()
+        if receipt is None:
+            raise ConflictError("unintegrated worker repository must be retained")
         if worktree.exists():
-            status = _git(worktree, "status", "--porcelain", "--untracked-files=all")
-            if status and not bool(payload.get("forceDirty", False)):
-                raise ConflictError("managed worktree is dirty; clean it before cleanup or pass --force-dirty")
-            listed = _git(Path(project["repository_path"]), "worktree", "list", "--porcelain")
-            if str(worktree) not in listed:
-                raise NeedsAttentionError("approved worktree is not present in Git worktree inventory")
-            _git(Path(project["repository_path"]), "worktree", "remove", "--force", str(worktree))
-        branch_after = _git(Path(project["repository_path"]), "for-each-ref", "--format=%(refname:short)", f"refs/heads/{row['branch_name']}")
-        if branch_after.strip() != row["branch_name"]:
-            raise NeedsAttentionError("cleanup unexpectedly removed the retained branch")
+            final_oid = validate_worker_repository(
+                worktree,
+                branch_name=str(row["branch_name"]),
+                base_oid=str(row["base_commit_oid"]),
+                target_branch=str(row["target_ref"]).removeprefix("refs/heads/"),
+                history_base_oid=str(receipt["previous_target_oid"]),
+                review_base_oid=str(receipt["previous_target_oid"]),
+            )
+            if final_oid != str(receipt["source_commit_oid"]):
+                raise ConflictError("worker repository does not match the final integration receipt")
+            if payload.get("forceDirty", False):
+                raise ConflictError("force-dirty cleanup is not permitted for an independent worker repository")
+            _safe_owned_tree(worktree)
         retained_root: Path | None = None
         if binding is not None:
             retained_root = _validate_retained_session_root(binding, harness)
@@ -148,6 +152,8 @@ def cleanup_workstream(store: Any, payload: Mapping[str, Any], workspace: Worksp
                     store.conn.execute("UPDATE operations SET step='retention_recorded',updated_at=? WHERE operation_id=?", (utc_now(), operation_id))
         if binding is not None:
             harness.cleanup_binding(binding)
+        if worktree.exists():
+            shutil.rmtree(worktree)
         now = utc_now()
         with store.transaction():
             store.conn.execute("DELETE FROM runtime_bindings WHERE workstream_id=?", (workstream_id,))

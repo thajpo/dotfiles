@@ -12,7 +12,7 @@
   },
   "filesystem": {
     "defaultDenyRead": true,
-    "allowRead": ["${ASSIGNED_ROOT}", "${AGENT_DIR}", "${HARNESS_EXECUTABLE}", "${HARNESS_EXTENSION}", "${HARNESS_NATIVES}", "${DATA_DIRS}", "${FLEET_WORKTREES}", "${FLEET_GIT_OBJECTS}"],
+    "allowRead": ["${ASSIGNED_ROOT}", "${AGENT_DIR}", "${HARNESS_EXECUTABLE}", "${HARNESS_EXTENSION}", "${HARNESS_NATIVES}", "${DATA_DIRS}"],
     "allowWrite": ["${ASSIGNED_ROOT}", "${AGENT_DIR}", "${AGENT_DIR}/run", "${HARNESS_RUN}", "/tmp", "${RUNTIME_SOCKET_DIR}", "${FLEET_SOCKET_DIR}"],
     "denyRead": ["${HOME}/.ssh", "${HOME}/.aws", "${HOME}/.gnupg", "${HOME}/.kube", "${HOME}/.docker", "${HOME}/.omp/agent", "${HOME}/.omp/plugins", "${WORKSPACE_CONFIG}"],
     "denyWrite": ["${HOME}/.ssh", "${HOME}/.aws", "${HOME}/.gnupg", "${HOME}/.kube", "${HOME}/.docker", "${HOME}/.omp/agent", "${HOME}/.omp/plugins", "${WORKSPACE_CONFIG}"]

@@ -71,24 +71,6 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _linked_git_dir(worktree: Path, common_git: Path) -> Path:
-    marker = worktree / ".git"
-    try:
-        value = marker.read_text()
-    except OSError as error:
-        raise NeedsAttentionError("linked worktree Git marker is unavailable") from error
-    if len(value) > 8192 or not value.startswith("gitdir: "):
-        raise NeedsAttentionError("linked worktree Git marker is invalid")
-    linked = Path(value[8:].strip())
-    if not linked.is_absolute():
-        linked = marker.parent / linked
-    linked = linked.resolve(strict=True)
-    worktree_metadata = (common_git / "worktrees").resolve(strict=True)
-    if not linked.is_relative_to(worktree_metadata):
-        raise NeedsAttentionError("linked worktree Git directory escapes the common repository")
-    return linked
-
-
 def resolve_data_dirs(data_dirs: Any, repository: Path, *, data_root: Path | None = None) -> list[str]:
     """Resolve and validate a project's approved read-only data directories.
 
@@ -247,20 +229,12 @@ def render_policy(
                     result.append(path)
             return result
 
-        replacements["${FLEET_WORKTREES}"] = _resolve_scope_dirs(scope.get("fleetProjectWorktrees"), "fleet project worktree dirs")
-        replacements["${FLEET_GIT_OBJECTS}"] = _resolve_scope_dirs(scope.get("fleetProjectGitObjects"), "fleet project Git object dirs")
         replacements["${FLEET_SOCKET_DIR}"] = str((runtime_base / "fleet").absolute())
     else:
         worktree = Path(scope["worktreePath"]).resolve(strict=True)
-        common_objects = Path(scope["gitCommonObjectDir"]).resolve(strict=True)
-        common_git = common_objects.parent
-        private_objects = Path(scope["privateGitObjectDir"]).resolve(strict=True)
-        linked_git = _linked_git_dir(worktree, common_git)
         expected_branch = f"pisec/{workstream_id}/work"
         if scope.get("branchName") != expected_branch:
             raise NeedsAttentionError("workstream branch is outside its approved namespace")
-        ref_namespace = common_git / "refs" / "heads" / "pisec" / workstream_id
-        log_namespace = common_git / "logs" / "refs" / "heads" / "pisec" / workstream_id
         domains = scope.get("externalDomains")
         if not isinstance(domains, list) or any(not isinstance(domain, str) for domain in domains):
             raise InvalidRequestError("approved external domains are invalid")
@@ -272,12 +246,13 @@ def render_policy(
             raise InvalidRequestError("approved external domains omit the web search capability")
         replacements.update({
             "${WORKTREE}": str(worktree),
-            "${GIT_WORKTREE_DIR}": str(linked_git),
-            "${COMMON_OBJECTS}": str(common_objects),
-            "${PRIVATE_OBJECTS}": str(private_objects),
-            "${REF_NAMESPACE}": str(ref_namespace),
-            "${LOG_NAMESPACE}": str(log_namespace),
             "${EXTERNAL_DOMAINS}": domains,
+            "${PRIMARY_REPOSITORY}": [str(Path(scope["primaryRepositoryPath"]).resolve(strict=False))] if scope.get("primaryRepositoryPath") else [],
+            "${WORKER_SIBLINGS}": [
+                str(child.resolve(strict=False))
+                for child in worktree.parent.iterdir()
+                if child.resolve(strict=False) != worktree
+            ],
         })
         if profile == "worker-default" and baseline_domains and domains != sorted(set(baseline_domains)):
             raise InvalidRequestError("default worker has unapproved additional external domains")
@@ -304,22 +279,6 @@ def render_policy(
         rendered_env = resolve_python_env_paths(python_env)
     replacements["${PYTHON_ENV}"] = rendered_env
 
-    def _resolve_project_store(key: str, label: str) -> list[str]:
-        raw = scope.get(key)
-        if raw is None:
-            return []
-        if not isinstance(raw, str) or not raw or len(raw) > 4096 or "\x00" in raw:
-            raise InvalidRequestError(f"approved {label} is invalid")
-        path = Path(raw)
-        if not path.is_absolute():
-            raise InvalidRequestError(f"approved {label} must be absolute")
-        resolved = path.resolve(strict=False)
-        if resolved != path:
-            raise NeedsAttentionError(f"approved {label} is a symlink or resolves elsewhere")
-        return [str(resolved)]
-
-    replacements["${PROJECT_WORKTREES}"] = _resolve_project_store("projectWorktreesDir", "project worktrees dir")
-    replacements["${PROJECT_GIT_OBJECTS}"] = _resolve_project_store("projectGitObjectsDir", "project git objects dir")
     policy = _substitute(template, replacements)
     if is_macos():
         policy.pop("devices", None)

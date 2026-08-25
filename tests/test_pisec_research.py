@@ -13,7 +13,7 @@ from scripts.pisec.projects import register_project, update_project_policy
 from scripts.pisec.research import inspect_research, list_research_requests, list_unacknowledged_research, research_counts, validate_research_request
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
-from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
+from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
 def task_packet() -> dict[str, object]:
@@ -61,8 +61,8 @@ class ResearchTests(unittest.TestCase):
         ensure_secretary(store, project_b["project_id"], harness, workspace)
         worker_results = []
         for project, key in ((project_a, "worker-a"), (project_b, "worker-b")):
-            prepared = prepare_workstream(store, project_id=project["project_id"], title="Worker", purpose="Research", brief="Bounded fixture", task_packet=task_packet(), idempotency_key=key, harness=harness, workspace=workspace, work_root=root / "worktrees", object_root=root / "objects")
-            worker_results.append(authorize_apply_workstream(store, scope=prepared["approvalScope"], harness=harness, workspace=workspace, git_objects=FixtureGitObjects()))
+            prepared = prepare_workstream(store, project_id=project["project_id"], title="Worker", purpose="Research", brief="Bounded fixture", task_packet=task_packet(), idempotency_key=key, harness=harness, workspace=workspace, work_root=root / "worktrees")
+            worker_results.append(authorize_apply_workstream(store, scope=prepared["approvalScope"], harness=harness, workspace=workspace))
         secretary_binding = dict(secretary["binding"])
         workers = [dict(result["workstream"]) for result in worker_results]
         return temp, root, store, harness, workspace, dict(project_a), dict(project_b), secretary_binding, workers[0], workers[1]
@@ -78,7 +78,7 @@ class ResearchTests(unittest.TestCase):
         registry = AdapterRegistry()
         registry.register_harness(harness)
         registry.register_workspace(workspace)
-        return BrokerDispatcher(lambda: PiStore(root / "state"), registry=registry, harness=harness, workspace=workspace, git_objects=FixtureGitObjects())
+        return BrokerDispatcher(lambda: PiStore(root / "state"), registry=registry, harness=harness, workspace=workspace)
 
     def test_task_get_exposes_approved_python_env(self):
         temp, root, store, harness, workspace, project_a, project_b, secretary_binding, worker_a, worker_b = self.fixture()
@@ -86,8 +86,8 @@ class ResearchTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         env_dir = root / "venv"
         env_dir.mkdir()
-        prepared = prepare_workstream(store, project_id=project_a["project_id"], title="Worker", purpose="Research", brief="Bounded fixture", task_packet=task_packet(), idempotency_key="worker-env", harness=harness, workspace=workspace, work_root=root / "worktrees", object_root=root / "objects", python_env=str(env_dir))
-        worker = dict(authorize_apply_workstream(store, scope=prepared["approvalScope"], harness=harness, workspace=workspace, git_objects=FixtureGitObjects())["workstream"])
+        prepared = prepare_workstream(store, project_id=project_a["project_id"], title="Worker", purpose="Research", brief="Bounded fixture", task_packet=task_packet(), idempotency_key="worker-env", harness=harness, workspace=workspace, work_root=root / "worktrees", python_env=str(env_dir))
+        worker = dict(authorize_apply_workstream(store, scope=prepared["approvalScope"], harness=harness, workspace=workspace)["workstream"])
         dispatcher = self.dispatcher(root, harness, workspace)
         packet = dispatcher.dispatch("runtime", "task.get", self.runtime_auth(store, worker))
         self.assertEqual(packet["pythonEnv"], str(env_dir.resolve()))

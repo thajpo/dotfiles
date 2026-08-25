@@ -539,7 +539,7 @@ class OmpHarnessAdapter:
         self._surface_root(scope)
         scope_dict = {
             key: scope.get(key)
-            for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "fleetWorktreesDir", "fleetGitObjectsDir", "externalDomains", "implementationModel", "harnessModel", "reasoningEffort")
+            for key in ("executionProfile", "worktreePath", "externalDomains", "implementationModel", "harnessModel", "reasoningEffort")
         }
         if scope.get("dataDirs"):
             scope_dict["dataDirs"] = scope["dataDirs"]
@@ -833,8 +833,6 @@ class OmpHarnessAdapter:
             "secretarySocketPath": str(runtime_root_path / "secretary" / "control.sock") if role == "secretary" else None,
             "fleetSocketPath": str(runtime_root_path / "fleet" / "control.sock") if role == "first_mate" else None,
             "launchSecretPath": str(Path(artifacts.launch_secret_path).absolute()),
-            "privateGitObjectDir": None if scope.get("privateGitObjectDir") is None else str(Path(scope["privateGitObjectDir"]).absolute()),
-            "gitCommonObjectDir": None if scope.get("gitCommonObjectDir") is None else str(Path(scope["gitCommonObjectDir"]).absolute()),
         }
         descriptor["identitySha256"] = hashlib.sha256(
             canonical_json(descriptor, max_bytes=64 * 1024, max_text=8 * 1024).encode("utf-8")

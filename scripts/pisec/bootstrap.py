@@ -9,7 +9,6 @@ from typing import Callable
 from .adapters import AdapterRegistry, validate_configured_routes
 from .broker import BrokerDispatcher
 from .config import PisecConfig
-from .git_objects import GitObjectManager
 from .harnesses.codex import CodexHarnessAdapter
 from .harnesses.omp import OmpHarnessAdapter
 from .pi_store import PiStore
@@ -39,7 +38,6 @@ def build_adapters(
         registry=registry,
         harness=selected_harness,
         workspace=selected_workspace,
-        git_objects=GitObjectManager(state_root=state_root),
         config=config,
         prepare_surfaces=prepare_surfaces,
     )

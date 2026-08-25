@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 from scripts.pisec.adapters import RuntimeSurfaceArtifacts, artifact_document
 from scripts.pisec.fence import render_policy
-from scripts.pisec.git_objects import GitObjectManager
 from scripts.pisec.models import AuthorizationError, ConflictError, NeedsAttentionError, new_id
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
@@ -20,7 +19,7 @@ from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
 from scripts.pisec.harnesses.omp import OmpHarnessAdapter, _copy_user_surface
 WEB_SEARCH_DOMAINS = ("html.duckduckgo.com",)
-from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
+from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
 def make_config(root: Path) -> dict:
@@ -175,68 +174,6 @@ class RuntimeMaterializationTests(unittest.TestCase):
             self.assertEqual(overlay["tools"]["approvalMode"], "yolo")
             self.assertEqual(overlay["providers"]["webSearchOrder"], ["duckduckgo"])
 
-    def test_private_object_store_keeps_one_way_alternate_and_removes_legacy_pisec_entries(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            state = root / "state"
-            common = root / "repo.git" / "objects"
-            (common / "info").mkdir(parents=True)
-            os.chmod(common, 0o755)
-            os.chmod(common / "info", 0o755)
-            project_id = new_id("prj")
-            workstream_id = new_id("ws")
-            private = state / "git-objects" / project_id / workstream_id / "objects"
-            legacy_sibling = state / "git-objects" / project_id / new_id("ws") / "objects"
-            external = root / "external-objects"
-            external.mkdir()
-            (common / "info" / "alternates").write_text(f"{external}\n{private}\n{legacy_sibling}\n")
-            os.chmod(common / "info" / "alternates", 0o600)
-            scope = {"projectId": project_id, "workstreamId": workstream_id, "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common)}
-            manager = GitObjectManager(state_root=state)
-            first = manager.materialize(scope)
-            second = manager.materialize(scope)
-            self.assertEqual(first, second)
-            self.assertEqual(first["object_dir"], str(private))
-            self.assertEqual((private / "info" / "alternates").read_text(), str(common.resolve()) + "\n")
-            self.assertEqual((common / "info" / "alternates").read_text().splitlines(), [str(external)])
-
-    def test_common_object_directory_group_write_is_tightened_not_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            state = root / "state"
-            common = root / "repo.git" / "objects"
-            (common / "info").mkdir(parents=True)
-            os.chmod(common, 0o775)
-            os.chmod(common / "info", 0o775)
-            project_id = new_id("prj")
-            workstream_id = new_id("ws")
-            private = state / "git-objects" / project_id / workstream_id / "objects"
-            scope = {"projectId": project_id, "workstreamId": workstream_id, "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common)}
-            manager = GitObjectManager(state_root=state)
-            first = manager.materialize(scope)
-            self.assertEqual(first["object_dir"], str(private))
-            self.assertFalse((common / "info" / "alternates").exists())
-            self.assertEqual(os.stat(common).st_mode & 0o022, 0)
-            self.assertEqual(os.stat(common / "info").st_mode & 0o022, 0)
-            self.assertEqual((private / "info" / "alternates").read_text().strip(), str(common.resolve()))
-
-    def test_common_object_directory_symlink_is_still_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            state = root / "state"
-            real = root / "real-objects"
-            real.mkdir()
-            common = root / "repo.git" / "objects"
-            common.parent.mkdir()
-            common.symlink_to(real, target_is_directory=True)
-            project_id = new_id("prj")
-            workstream_id = new_id("ws")
-            private = state / "git-objects" / project_id / workstream_id / "objects"
-            scope = {"projectId": project_id, "workstreamId": workstream_id, "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common)}
-            manager = GitObjectManager(state_root=state)
-            with self.assertRaises(NeedsAttentionError):
-                manager.materialize(scope)
-
     def test_private_binding_descriptor_is_atomic_and_contains_no_runtime_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -293,7 +230,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
         common = (repo / common_value).resolve() if not Path(common_value).is_absolute() else Path(common_value).resolve()
         return repo, worktree, common, workstream_id, branch
 
-    def test_rendered_first_mate_policy_exposes_only_fleet_project_roots(self):
+    def test_rendered_first_mate_policy_does_not_expose_fleet_repositories(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             assigned = root / "assigned"
@@ -313,10 +250,8 @@ class FencePolicyAndShimTests(unittest.TestCase):
             policy_path, digest = render(scope, root, agent, make_config(root))
             policy = json.loads(policy_path.read_text())
             allow_read = policy["filesystem"]["allowRead"]
-            self.assertIn(str(fleet_worktree), allow_read)
-            self.assertIn(str(fleet_objects), allow_read)
-            self.assertNotIn(str(fleet_worktree.parent), allow_read)
-            self.assertNotIn(str(fleet_objects.parent), allow_read)
+            self.assertNotIn(str(fleet_worktree), allow_read)
+            self.assertNotIn(str(fleet_objects), allow_read)
             self.assertEqual(hashlib.sha256(policy_path.read_bytes()).hexdigest(), digest)
 
     def test_rendered_worker_policy_validates_with_fence(self):
@@ -464,33 +399,6 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertNotIn(str(interpreter.resolve()), policy["filesystem"]["allowWrite"])
             self.assertEqual(hashlib.sha256(policy_path.read_bytes()).hexdigest(), digest)
 
-    def test_rendered_secretary_policy_exposes_project_worktrees_and_git_objects_read_only(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            agent = root / "state" / "omp" / new_id("ws")
-            agent.mkdir(parents=True)
-            assigned = root / "assigned"
-            assigned.mkdir()
-            worktrees = root / "worktrees" / "prj_0123456789abcdef0123456789abcdef"
-            git_objects = root / "state" / "git-objects" / "prj_0123456789abcdef0123456789abcdef"
-            worktrees.mkdir(parents=True)
-            git_objects.mkdir(parents=True)
-            scope = {
-                "projectId": "prj_0123456789abcdef0123456789abcdef",
-                "workstreamId": new_id("ws"),
-                "executionProfile": "secretary-project",
-                "worktreePath": str(assigned),
-                "projectWorktreesDir": str(worktrees),
-                "projectGitObjectsDir": str(git_objects),
-            }
-            policy_path, digest = render(scope, root, agent, make_config(root))
-            policy = json.loads(policy_path.read_text())
-            self.assertIn(str(worktrees.resolve()), policy["filesystem"]["allowRead"])
-            self.assertIn(str(git_objects.resolve()), policy["filesystem"]["allowRead"])
-            self.assertNotIn(str(worktrees.resolve()), policy["filesystem"]["allowWrite"])
-            self.assertNotIn(str(git_objects.resolve()), policy["filesystem"]["allowWrite"])
-            self.assertEqual(hashlib.sha256(policy_path.read_bytes()).hexdigest(), digest)
-
     def test_rendered_secretary_policy_omits_project_stores_when_unset(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -504,17 +412,6 @@ class FencePolicyAndShimTests(unittest.TestCase):
             for entry in policy["filesystem"]["allowRead"]:
                 self.assertNotIn("worktrees", entry)
                 self.assertNotIn("git-objects", entry)
-
-    def test_rendered_secretary_policy_rejects_relative_project_store_dir(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            agent = root / "state" / "omp" / new_id("ws")
-            agent.mkdir(parents=True)
-            assigned = root / "assigned"
-            assigned.mkdir()
-            scope = {"projectId": new_id("prj"), "workstreamId": new_id("ws"), "executionProfile": "secretary-project", "worktreePath": str(assigned), "projectWorktreesDir": "worktrees/prj_x"}
-            with self.assertRaises(Exception):
-                render(scope, root, agent, make_config(root))
 
     def test_rendered_worker_policy_omits_project_stores(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -774,8 +671,6 @@ class FencePolicyAndShimTests(unittest.TestCase):
             "runtimeSocketPath": str(root / "runtime.sock"),
             "secretarySocketPath": str(root / "secretary.sock") if role == "secretary" else None,
             "fleetSocketPath": None,
-            "privateGitObjectDir": None if private is None else str(private),
-            "gitCommonObjectDir": None if common is None else str(common),
         }
         descriptor["identitySha256"] = hashlib.sha256(json.dumps({key: value for key, value in descriptor.items()}, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         descriptor_dir = launch_dir / workstream_id
@@ -792,7 +687,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
         os.chmod(launch_dir, 0o700)
         return nested, descriptor, launcher
 
-    def test_private_binding_selects_descriptor_and_sanitizes_environment(self):
+    def test_binding_selects_descriptor_and_sanitizes_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             nested, entry, launcher = self.make_shim_binding(root, role="secretary", selected=True)
@@ -804,7 +699,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertIn("--approval-mode=yolo", captured["argv"])
             self.assertIn(entry["extensionPath"], captured["argv"])
             self.assertIn(entry["overlayPath"], captured["argv"])
-            self.assertIn(str(Path(entry["harnessHome"]) / "user-config.yml"), captured["argv"])
+            self.assertNotIn(str(Path(entry["harnessHome"]) / "user-config.yml"), captured["argv"])
             self.assertEqual(captured["env"]["PISEC_SESSION_START_SOURCE"], "resume")
             self.assertEqual(captured["argv"][0:3], ["--settings", entry["policyPath"], "--"])
             self.assertEqual(captured["argv"][3], str(root / "real-omp"))
@@ -820,7 +715,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertNotEqual(unsupported_args.returncode, 0)
             self.assertIn("does not match the selected durable session", unsupported_args.stderr)
 
-    def test_private_binding_rejects_database_surface_drift(self):
+    def test_binding_rejects_database_surface_drift(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             nested, entry, launcher = self.make_shim_binding(root, role="secretary")
@@ -834,7 +729,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("durable binding identity", result.stderr)
 
-    def test_private_binding_allows_selected_applied_generation_while_desired_is_newer(self):
+    def test_binding_allows_selected_applied_generation_while_desired_is_newer(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             nested, entry, launcher = self.make_shim_binding(root, role="secretary")
@@ -852,7 +747,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             captured = json.loads(result.stdout)
             self.assertEqual(captured["env"]["PISEC_RUNTIME_GENERATION"], "a" * 64)
 
-    def test_private_binding_falls_back_to_applied_generation_after_session_start(self):
+    def test_binding_falls_back_to_applied_generation_after_session_start(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             nested, entry, launcher = self.make_shim_binding(root, role="secretary")
@@ -870,7 +765,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             captured = json.loads(result.stdout)
             self.assertEqual(captured["env"]["PISEC_RUNTIME_GENERATION"], "a" * 64)
 
-    def test_private_binding_recovers_from_needs_attention_error_state(self):
+    def test_binding_recovers_from_needs_attention_error_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             nested, entry, launcher = self.make_shim_binding(root, role="secretary", selected=True)
@@ -895,7 +790,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertNotEqual(busy.returncode, 0)
             self.assertIn("durable binding identity", busy.stderr)
 
-    def test_worker_binding_sets_private_git_capabilities(self):
+    def test_worker_binding_sets_sanitized_git_capabilities(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             private = root / "state" / "objects"
@@ -907,10 +802,10 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             captured = json.loads(result.stdout)
             self.assertIn("--approval-mode=yolo", captured["argv"])
-            self.assertEqual(captured["argv"][0:5], ["--settings", entry["policyPath"], "--expose-host-path", str(common), "--"])
-            self.assertEqual(captured["env"]["GIT_OBJECT_DIRECTORY"], str(private))
-            self.assertEqual(captured["env"]["GIT_ALTERNATE_OBJECT_DIRECTORIES"], str(common))
-            self.assertEqual(captured["env"]["GIT_CONFIG_COUNT"], "2")
+            self.assertEqual(captured["argv"][0:3], ["--settings", entry["policyPath"], "--"])
+            self.assertNotIn("GIT_OBJECT_DIRECTORY", captured["env"])
+            self.assertNotIn("GIT_ALTERNATE_OBJECT_DIRECTORIES", captured["env"])
+            self.assertEqual(captured["env"]["GIT_CONFIG_COUNT"], "6")
             self.assertNotIn("PISEC_SECRETARY_SOCKET", captured["env"])
 
 class RuntimeReportTests(unittest.TestCase):
@@ -925,8 +820,8 @@ class RuntimeReportTests(unittest.TestCase):
         self.workspace = FixtureWorkspace(self.root, self.store)
         ensure_secretary(self.store, project["project_id"], self.harness, self.workspace)
         packet = {"schemaVersion": 1, "outcome": "Runtime report behavior is verified.", "boundaries": ["Change runtime reporting only."], "acceptance": ["Runtime reports are monotonic."], "openQuestions": [], "evidence": ["Test output."]}
-        prepared = prepare_workstream(self.store, project_id=project["project_id"], title="Runtime", purpose="Verify runtime", brief="Verify runtime reports.", task_packet=packet, idempotency_key="runtime", harness=self.harness, workspace=self.workspace, work_root=self.root / "worktrees", object_root=self.root / "objects")
-        result = authorize_apply_workstream(self.store, scope=prepared["approvalScope"], harness=self.harness, workspace=self.workspace, git_objects=FixtureGitObjects())
+        prepared = prepare_workstream(self.store, project_id=project["project_id"], title="Runtime", purpose="Verify runtime", brief="Verify runtime reports.", task_packet=packet, idempotency_key="runtime", harness=self.harness, workspace=self.workspace, work_root=self.root / "worktrees")
+        result = authorize_apply_workstream(self.store, scope=prepared["approvalScope"], harness=self.harness, workspace=self.workspace)
         self.workstream_id = result["workstream"]["workstream_id"]
         binding = self.store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
         self.binding = dict(binding)

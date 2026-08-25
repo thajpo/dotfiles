@@ -4,11 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Mapping
 
 from .events import append_event_in_transaction
 from .models import ConflictError, IdempotencyConflictError, InvalidRequestError, NotFoundError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_git_oid, validate_id, validate_sha256
 from .projects import _git, assert_project_writable, get_project
+from .worker_repo import validate_worker_repository
 
 PHASES = frozenset({"investigating", "implementing", "verifying", "needs_input", "ready_review"})
 COORDINATION_KINDS = frozenset({"clarification", "blocker", "review_request"})
@@ -344,7 +346,24 @@ def _submit_completion_in_transaction(store: Any, *, workstream_id: str, runtime
         raise ConflictError("only worker workstreams may submit completion")
     if task is None or normalized["taskPacketSha256"] != task["packet_sha256"]:
         raise ConflictError("completion packet does not match the immutable task packet")
-    observed_source = _git(__import__("pathlib").Path(workstream["worktree_path"]), "rev-parse", "HEAD").lower()
+    integration = store.conn.execute(
+        "SELECT integration_id,state,target_oid FROM integration_jobs WHERE workstream_id=? ORDER BY created_at DESC LIMIT 1",
+        (workstream_id,),
+    ).fetchone()
+    private_ref = None
+    history_base_oid = None
+    if integration is not None and integration["state"] in {"awaiting_worker", "queued", "refreshing", "verifying", "applying"}:
+        private_ref = f"refs/pisec/target/{integration['integration_id']}"
+        history_base_oid = str(integration["target_oid"]) if integration["target_oid"] else None
+    observed_source = validate_worker_repository(
+        Path(str(workstream["worktree_path"])),
+        branch_name=str(workstream["branch_name"]),
+        base_oid=str(workstream["base_commit_oid"]),
+        target_branch=str(workstream["target_ref"]).removeprefix("refs/heads/"),
+        allowed_private_ref=private_ref,
+        history_base_oid=history_base_oid,
+        review_base_oid=history_base_oid,
+    )
     if normalized["sourceCommit"].lower() != observed_source:
         raise ConflictError("completion source commit is stale")
     packet_sha = hashlib.sha256(canonical_json(normalized).encode("utf-8")).hexdigest()

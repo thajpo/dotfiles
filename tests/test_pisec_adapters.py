@@ -10,7 +10,7 @@ from scripts.pisec.adapters import AdapterRegistry
 from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.models import AuthorizationError, ConflictError, NeedsAttentionError
 from scripts.pisec.pi_store import PiStore
-from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
+from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
 class FixtureAdapterBoundaryTests(unittest.TestCase):
@@ -21,7 +21,6 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         make_repo(self.repo)
         self.harness = FixtureHarness(self.root)
         self.workspace = FixtureWorkspace(self.root)
-        self.git_objects = FixtureGitObjects()
         self.registry = AdapterRegistry()
         self.registry.register_harness(self.harness)
         self.registry.register_workspace(self.workspace)
@@ -30,7 +29,6 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
             registry=self.registry,
             harness=self.harness,
             workspace=self.workspace,
-            git_objects=self.git_objects,
         )
 
     def tearDown(self) -> None:

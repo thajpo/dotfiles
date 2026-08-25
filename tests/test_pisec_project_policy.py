@@ -9,7 +9,7 @@ from scripts.pisec.project_workspaces import project_workspace
 from scripts.pisec.projects import fleet_activity, list_fleet_projects, register_project, require_fleet_project, update_project_policy
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
-from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
+from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
 PACKET = {
@@ -50,7 +50,6 @@ class ProjectPolicyTests(unittest.TestCase):
                     scope=prepared["approvalScope"],
                     harness=harness,
                     workspace=workspace,
-                    git_objects=FixtureGitObjects(),
                     actor="first_mate",
                 )
                 binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (applied["workstream"]["workstream_id"],)).fetchone()
@@ -162,7 +161,6 @@ class ProjectPolicyTests(unittest.TestCase):
                     scope=prepared["approvalScope"],
                     harness=harness,
                     workspace=workspace,
-                    git_objects=FixtureGitObjects(),
                     actor="first_mate",
                 )
                 with self.assertRaises(ConflictError):
@@ -225,7 +223,6 @@ class ProjectPolicyTests(unittest.TestCase):
                     scope=prepared["approvalScope"],
                     harness=harness,
                     workspace=workspace,
-                    git_objects=FixtureGitObjects(),
                     actor="first_mate",
                 )
                 workstream_id = applied["workstream"]["workstream_id"]

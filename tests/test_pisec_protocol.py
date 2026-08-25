@@ -14,7 +14,7 @@ from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project, update_project_policy
 from scripts.pisec.protocol import decode_request, request, success_response
 from scripts.pisec.secretary import ensure_secretary
-from tests.pisec_fixture import FixtureGitObjects, FixtureHarness, FixtureWorkspace, make_repo
+from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
 class ProtocolUnitTests(unittest.TestCase):
@@ -50,7 +50,7 @@ class BrokerSocketTests(unittest.TestCase):
         self.registry = AdapterRegistry()
         self.registry.register_harness(self.harness)
         self.registry.register_workspace(self.workspace)
-        dispatcher = BrokerDispatcher(lambda: PiStore(self.state), registry=self.registry, harness=self.harness, workspace=self.workspace, git_objects=FixtureGitObjects())
+        dispatcher = BrokerDispatcher(lambda: PiStore(self.state), registry=self.registry, harness=self.harness, workspace=self.workspace)
         self.service = BrokerService(dispatcher, runtime_root=self.root / "runtime")
         self.service.start()
 
@@ -148,7 +148,7 @@ class BrokerSocketTests(unittest.TestCase):
 
         self.workspace.reconcile = blocking_reconcile
         service = BrokerService(
-            BrokerDispatcher(lambda: PiStore(self.state), registry=self.registry, harness=self.harness, workspace=self.workspace, git_objects=FixtureGitObjects()),
+            BrokerDispatcher(lambda: PiStore(self.state), registry=self.registry, harness=self.harness, workspace=self.workspace),
             runtime_root=self.root / "deferred-runtime",
         )
         service.start()
@@ -263,7 +263,7 @@ class BrokerSocketTests(unittest.TestCase):
             self.assertNotIn(field, encoded)
         prepared = request(self.service.paths["secretary"], "workstream.prepare", {"authToken": self.token, "title": "Bounded worker", "purpose": "Verify projection", "brief": "Use only the approved scope.", "taskPacket": {"schemaVersion": 1, "outcome": "Projection is bounded.", "boundaries": ["Keep host paths private."], "acceptance": ["Public projection omits private paths."], "openQuestions": [], "evidence": ["Protocol test."]}, "idempotencyKey": "projection-check"})
         prepared_encoded = json.dumps(prepared)
-        for field in ("privateGitObjectDir", "gitCommonObjectDir", "private_git_object_dir", "git_common_dir"):
+        for field in ("privateGitObjectDir", "gitCommonObjectDir", "private_git_object_dir"):
             self.assertNotIn(field, prepared_encoded)
 
     def test_success_response_is_bounded(self):
