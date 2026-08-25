@@ -777,6 +777,12 @@ class OmpHarnessAdapter:
         if not isinstance(surface, RuntimeSurfaceArtifacts):
             raise InvalidRequestError("runtime surface snapshot is required")
         root = Path(staging_root).resolve()
+        if root.exists() or root.is_symlink():
+            info = root.lstat()
+            if root.is_symlink() or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                raise NeedsAttentionError("OMP staging root is unsafe")
+            _normalize_owner_tree(root)
+            shutil.rmtree(root)
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         candidate_root = root / "candidate-state"
         prior_secret = self.state_root / "secrets" / f"{validate_id(scope['workstreamId'], prefix='ws')}.token"
@@ -876,7 +882,11 @@ class OmpHarnessAdapter:
 
     def discard_staged_profile(self, staged: StagedHarnessArtifacts) -> None:
         root = Path(staged.staging_root)
-        if root.exists() and root.is_dir():
+        if root.exists() or root.is_symlink():
+            info = root.lstat()
+            if root.is_symlink() or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                raise NeedsAttentionError("OMP staging root is unsafe")
+            _normalize_owner_tree(root)
             shutil.rmtree(root)
 
     def _launcher_dir(self, workstream_id: str) -> Path:

@@ -68,6 +68,34 @@ def stage_and_activate(adapter: OmpHarnessAdapter, scope: dict):
 
 
 class RuntimeMaterializationTests(unittest.TestCase):
+    def test_stage_profile_retries_after_stale_sealed_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            (home / ".omp" / "agent").mkdir(parents=True)
+            adapter = OmpHarnessAdapter(state_root=root / "state", config=make_config(root))
+            worktree = root / "worktree"
+            worktree.mkdir()
+            scope = {
+                "projectId": new_id("prj"),
+                "workstreamId": new_id("ws"),
+                "executionProfile": "secretary-project",
+                "worktreePath": str(worktree),
+            }
+            with patch("scripts.pisec.harnesses.omp.Path.home", return_value=home):
+                surface = adapter.prepare_runtime_surface()
+                scope = with_surface(adapter, scope)
+                staging_root = adapter.state_root / "test-staging" / scope["workstreamId"]
+                first = adapter.stage_profile({**scope, "operationId": new_id("op")}, surface, staging_root)
+                stale_surface = staging_root / "candidate-state" / "binding-surfaces" / "omp" / scope["workstreamId"]
+                self.assertEqual(stale_surface.stat().st_mode & 0o777, 0o500)
+
+                retried = adapter.stage_profile({**scope, "operationId": new_id("op")}, surface, staging_root)
+
+            self.assertEqual(retried.workstream_id, scope["workstreamId"])
+            adapter.discard_staged_profile(first)
+            adapter.discard_staged_profile(retried)
+
     def test_cleanup_unseals_readonly_policy_parent_before_unlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
