@@ -36,7 +36,7 @@
   - Commit OID: `3125a65fc880ea5b37082a52aafd324cde302847`
   - Checks: clean owner-only checkout at `3125a65`: `python3 -m unittest discover -s tests -q` passed (207, 1 skipped); `bun test omp/extensions/pisec.test.ts` passed (7/7); `python3 -m compileall -q scripts tests` passed; `bash -n scripts/*.sh` passed; operation catalogue `--check` passed; `bun build omp/extensions/pisec.ts --target bun` passed; `git diff --check` passed; README command/required-truth and prohibited-claim audit passed; macOS stub exited 1 without home mutation; runtime `done` fail-first rejection passed; no live-state cutover performed.
   - Current blocker: none.
-- Phase 10 status: in progress; corrected Phase 8 bootstrap and Phase 9 final commits are now schema-compatible ancestors, and the corrected bootstrap boundary gate is green.
-  - Commit OID: none (source acceptance and live verification pending)
-  - Checks: corrected bootstrap `5121da6` clean owner-only gate passed; Python 207, 1 skipped; Bun 7/7; compileall, shell syntax, operation catalogue, Bun build, and diff checks passed; no live-state cutover performed.
-  - Current blocker: final source acceptance and reviewed live cutover approval remain pending.
+- Phase 10 status: source acceptance complete; corrected Phase 8 bootstrap and Phase 9 final commits are schema-compatible ancestors, the named scenario audit is green, and the live inventory is complete without mutation.
+  - Commit OID: none (live verification pending)
+  - Checks: bootstrap `5121da6` and final `3125a65` clean owner-only gates passed; both schema digests are `8f844d7e1835ec966041c79c70545a4f1def83cbf4f9dae19f94496388c633c5`; final Python 207, 1 skipped; Bun 7/7; compileall, shell syntax, operation catalogue, Bun build, diff, exact Collie patch, exact external-pin, Reviewr `0.32.1`, and verbose scenario audits passed; live inventory is owner-only and no live-state cutover occurred.
+  - Current blocker: explicit operator approval is required to archive/reset the active pre-v1 state; inventory shows nonterminal records and 24 busy/reserved runtime bindings.
