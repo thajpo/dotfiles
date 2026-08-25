@@ -286,6 +286,7 @@ class CodexHarnessAdapter:
         surface_root = self._surface_root(scope)
         executable_path, node_path = self._executables()
         home = state_root / "binding-state" / "codex" / workstream_id
+        tmp_dir = state_root / "tmp" / workstream_id
         surface_binding = state_root / "binding-surfaces" / "codex" / workstream_id
         prior_home = self.state_root / "binding-state" / "codex" / workstream_id
         if state_root != self.state_root and prior_home.exists():
@@ -297,8 +298,8 @@ class CodexHarnessAdapter:
         else:
             _secure_tree(state_root, home)
         _secure_tree(home, home / "sessions")
-        _secure_tree(home, home / "tmp")
         _secure_tree(home, home / "run")
+        _secure_tree(state_root, tmp_dir)
         _secure_tree(state_root, surface_binding)
         _copy_safe_entry(surface_root / "managed", surface_binding / "managed")
         codex_home = surface_binding / "home"
@@ -365,6 +366,7 @@ class CodexHarnessAdapter:
                 "HARNESS_EXTENSION": hook_path,
                 "HARNESS_NATIVES": codex_home,
                 "HARNESS_RUN": home / "run",
+                "TMP_ROOT": tmp_dir,
                 "WORKSPACE_CONFIG": codex_home,
             },
             baseline_domains=CODEX_BASELINE_DOMAINS,
@@ -393,6 +395,7 @@ class CodexHarnessAdapter:
                 "gatewayBaseUrl": self.harness_config["gateway"]["baseUrl"],
                 "runtimeSurfaceId": str(scope["runtimeSurfaceId"]),
                 "launcherTemplate": str((surface_root / "managed" / "codex").absolute()),
+                "tmpDir": str(tmp_dir),
             },
         )
 
@@ -451,6 +454,7 @@ class CodexHarnessAdapter:
             staged.candidate.adapter_data["hooksPath"],
             staged.candidate.adapter_data["mcpPath"],
             staged.candidate.adapter_data["hookPath"],
+            staged.candidate.adapter_data["tmpDir"],
         ]
         if not candidate_root.is_relative_to(staging_root) or any(not Path(value).resolve(strict=False).is_relative_to(staging_root) for value in candidate_paths):
             raise NeedsAttentionError("staged Codex profile escapes its operation root")
@@ -458,6 +462,7 @@ class CodexHarnessAdapter:
         for relative in (
             Path("binding-state") / "codex" / workstream_id,
             Path("binding-surfaces") / "codex" / workstream_id,
+            Path("tmp") / workstream_id,
             Path("secrets") / f"{workstream_id}.token",
         ):
             source = candidate_root / relative
@@ -529,6 +534,7 @@ class CodexHarnessAdapter:
             "workspaceViewId": workspace_view_id,
             "workspaceSurfaceId": workspace_surface_id,
             "harnessHome": str(Path(artifacts.harness_home).absolute()),
+            "tmpDir": str(Path(values["tmpDir"]).absolute()),
             "surfaceRoot": str(Path(values["surfaceRoot"]).absolute()),
             "codexHome": str(Path(values["codexHome"]).absolute()),
             "configPath": str(Path(values["configPath"]).absolute()),
@@ -592,7 +598,8 @@ class CodexHarnessAdapter:
         launcher_dir = self._launcher_dir(str(binding["workstream_id"]))
         if launcher_dir.exists():
             shutil.rmtree(launcher_dir)
-        for raw in (binding.get("launch_secret_path"), binding.get("policy_path")):
+        values = dict(values) if isinstance(values, Mapping) else {}
+        for raw in (binding.get("launch_secret_path"), binding.get("policy_path"), values.get("tmpDir")):
             if isinstance(raw, str):
                 path = Path(raw).absolute()
                 if path.is_relative_to(root) and path.exists():

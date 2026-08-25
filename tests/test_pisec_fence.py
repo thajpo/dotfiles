@@ -538,6 +538,13 @@ class FencePolicyAndShimTests(unittest.TestCase):
             curl_denied = subprocess.run(["fence", "--settings", str(policy_path), "--", "curl", "--version"], cwd=worktree, text=True, capture_output=True)
             self.assertNotEqual(curl_denied.returncode, 0)
 
+    def test_omp_binding_temp_root_keeps_fence_socket_paths_short(self):
+        workstream_id = "ws_" + "a" * 32
+        temp_root = Path.home() / ".local" / "state" / "pisec" / "tmp" / workstream_id
+        argv_exec_socket = temp_root / "fence-argv-exec-1234567890" / "control.sock"
+        self.assertLessEqual(len(str(argv_exec_socket)), 107)
+        self.assertFalse(str(temp_root).startswith("/tmp/"))
+
     def make_shim_binding(
         self,
         root: Path,
@@ -594,6 +601,9 @@ class FencePolicyAndShimTests(unittest.TestCase):
             os.chmod(path, 0o500 if path.is_dir() else 0o400)
         workstream_id = new_id("ws")
         project_id = new_id("prj")
+        temp_root = state / "tmp" / workstream_id
+        temp_root.mkdir(parents=True)
+        os.chmod(temp_root, 0o700)
         workspace_id, view_id, surface_id = "w1", "w1:t1", "w1:p1"
         if private is not None:
             private.mkdir(parents=True, exist_ok=True)
@@ -665,6 +675,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             "harnessExecutablePath": str(fake_omp),
             "fencePath": str(fake_fence),
             "harnessHome": str(state_binding),
+            "tmpDir": str(state / "tmp" / workstream_id),
             "surfaceRoot": str(agent),
             "agentRoot": str(agent),
             "overlayPath": str(overlay),

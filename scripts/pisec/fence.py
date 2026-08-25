@@ -179,6 +179,7 @@ def render_policy(
         "${HARNESS_EXTENSION}": str(Path(supplied.pop("HARNESS_EXTENSION", harness_home / "extension.ts")).absolute()),
         "${HARNESS_NATIVES}": str(Path(supplied.pop("HARNESS_NATIVES", harness_home / "natives")).absolute()),
         "${HARNESS_RUN}": str(Path(supplied.pop("HARNESS_RUN", harness_home / "run")).absolute()),
+        "${TMP_ROOT}": str(Path(supplied.pop("TMP_ROOT", state_root / "tmp")).absolute()),
         "${WORKSPACE_CONFIG}": str(Path(supplied.pop("WORKSPACE_CONFIG", harness_home / "workspace-config")).absolute()),
         "${GATEWAY_PORT}": [gateway_port],
         "${EXTERNAL_DOMAINS}": [],

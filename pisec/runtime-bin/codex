@@ -65,16 +65,13 @@ def main() -> None:
     home = Path(str(descriptor["harnessHome"]))
     surface = Path(str(descriptor["surfaceRoot"]))
     codex_home = Path(str(descriptor["codexHome"]))
+    tmp_dir = Path(str(descriptor["tmpDir"]))
     if not codex_home.is_relative_to(surface):
         fail("Codex home escapes its immutable surface")
     secure_directory(home)
+    secure_directory(tmp_dir)
     secure_readonly_tree(surface)
     secure_directory(codex_home)
-    tmp_dir = home / "tmp"
-    if tmp_dir.is_symlink() or (tmp_dir.exists() and not tmp_dir.is_dir()):
-        fail("binding temporary directory is unsafe")
-    tmp_dir.mkdir(mode=0o700, exist_ok=True)
-    secure_directory(tmp_dir)
     for key in ("configPath", "promptPath", "mcpPath", "hookPath", "hooksPath", "policyPath"):
         secure_file(Path(str(descriptor[key])), mode=None)
     secure_file(Path(str(descriptor["launchSecretPath"])))

@@ -671,6 +671,7 @@ class OmpHarnessAdapter:
         surface_root = self._surface_root(scope)
         generation_sha256 = self.desired_generation(scope)
         state_binding = state_root / "binding-state" / "omp" / workstream_id
+        tmp_dir = state_root / "tmp" / workstream_id
         surface_binding = state_root / "binding-surfaces" / "omp" / workstream_id
         prior_state_binding = self.state_root / "binding-state" / "omp" / workstream_id
         if state_root != self.state_root and prior_state_binding.exists():
@@ -687,6 +688,7 @@ class OmpHarnessAdapter:
         _secure_tree(state_binding, state_binding / "xdg" / "state")
         _secure_tree(state_binding, state_binding / "xdg" / "cache")
         _secure_tree(state_binding, state_binding / "xdg" / "config")
+        _secure_tree(state_root, tmp_dir)
         _secure_tree(state_root, surface_binding)
         surface_agent = surface_binding / "agent"
         _secure_tree(surface_binding, surface_agent)
@@ -739,6 +741,7 @@ class OmpHarnessAdapter:
                 "HARNESS_NATIVES": Path.home() / ".omp" / "natives",
                 "HARNESS_RUN": state_binding / "run",
                 "WORKSPACE_CONFIG": Path.home() / ".config" / "herdr",
+                "TMP_ROOT": tmp_dir,
             },
             baseline_domains=OMP_BASELINE_DOMAINS,
             template_root=surface_root / "managed" / "fence",
@@ -756,6 +759,7 @@ class OmpHarnessAdapter:
             "surfaceRoot": str(surface_binding.absolute()),
             "launcherTemplate": str((surface_root / "managed" / "omp").absolute()),
             "runtimeSurfaceId": str(scope["runtimeSurfaceId"]),
+            "tmpDir": str(tmp_dir),
         }
         _normalize_owner_tree(surface_binding, readonly=True)
         return HarnessArtifacts(
@@ -822,6 +826,7 @@ class OmpHarnessAdapter:
             staged.candidate.adapter_data["xdgStateHome"],
             staged.candidate.adapter_data["xdgCacheHome"],
             staged.candidate.adapter_data["xdgConfigHome"],
+            staged.candidate.adapter_data["tmpDir"],
         ]
         if not candidate_root.is_relative_to(staging_root) or any(not Path(value).resolve(strict=False).is_relative_to(staging_root) for value in candidate_paths):
             raise NeedsAttentionError("staged OMP profile escapes its operation root")
@@ -829,6 +834,7 @@ class OmpHarnessAdapter:
         for relative in (
             Path("binding-state") / "omp" / workstream_id,
             Path("binding-surfaces") / "omp" / workstream_id,
+            Path("tmp") / workstream_id,
             Path("secrets") / f"{workstream_id}.token",
         ):
             source = candidate_root / relative
@@ -927,6 +933,7 @@ class OmpHarnessAdapter:
             "workspaceViewId": workspace_view_id,
             "workspaceSurfaceId": workspace_surface_id,
             "harnessHome": str(Path(artifacts.harness_home).absolute()),
+            "tmpDir": str(Path(_artifact_value(artifacts, "tmpDir")).absolute()),
             "surfaceRoot": str(Path(_artifact_value(artifacts, "surfaceRoot")).absolute()),
             "agentRoot": str(Path(_artifact_value(artifacts, "agentRoot")).absolute()),
             "overlayPath": str(Path(_artifact_value(artifacts, "overlayPath")).absolute()),
@@ -1019,7 +1026,7 @@ class OmpHarnessAdapter:
         artifact_values = document.get("values") if isinstance(document, Mapping) else None
         if isinstance(artifact_values, Mapping):
             for key, value in artifact_values.items():
-                if key in {"surfaceRoot", "xdgStateHome", "xdgCacheHome", "xdgConfigHome"} and isinstance(value, str):
+                if key in {"surfaceRoot", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "tmpDir"} and isinstance(value, str):
                     values.append(value)
         for value in sorted(set(values), key=lambda item: (len(Path(item).parts), item), reverse=True):
             self._remove_state_path(value)
