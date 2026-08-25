@@ -6,12 +6,12 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from .adapters import HarnessAdapter, WorkspaceAdapter, WorkspaceObservation, artifact_document
+from .adapters import HarnessAdapter, RuntimeSurfaceArtifacts, WorkspaceAdapter, WorkspaceObservation, artifact_document
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
-from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
+from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now, validate_sha256
 from .projects import observe_project, resolve_project
-from .runtime_surface import materialize_current_surface
+from .runtime_surface import capture_runtime_surface, materialize_current_surface
 from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent
 from .workstreams import APPLY_LOCK, _wait_for_agent
 
@@ -30,6 +30,7 @@ FIRST_MATE_CHECKPOINTS = (
     "observed",
     "committed",
 )
+_SURFACE_SCOPE_FIELDS = frozenset({"runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest"})
 
 FIRST_MATE_RESPONSE_CONTRACT = (
     "Default user-facing replies must fit a short screen and be action-oriented. "
@@ -108,6 +109,45 @@ def _scope(project: Mapping[str, Any], workstream: Mapping[str, Any], operation_
     }
 
 
+def _surface_scope(scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts) -> dict[str, Any]:
+    return {
+        **scope,
+        "runtimeSurfaceSha256": surface.content_sha256,
+        "runtimeSurfaceRoot": surface.root_path,
+        "runtimeSurfaceId": "surface_" + surface.content_sha256[:32],
+        "runtimeSurfaceManifest": surface.manifest_json,
+    }
+
+
+def _surface_from_scope(scope: Mapping[str, Any]) -> RuntimeSurfaceArtifacts | None:
+    if not (_SURFACE_SCOPE_FIELDS & set(scope)):
+        return None
+    try:
+        surface = RuntimeSurfaceArtifacts(str(scope["runtimeSurfaceSha256"]), str(scope["runtimeSurfaceManifest"]), str(scope["runtimeSurfaceRoot"]))
+        if scope["runtimeSurfaceId"] != "surface_" + surface.content_sha256[:32]:
+            raise NeedsAttentionError("First Mate runtime surface identity is invalid")
+        return surface
+    except (KeyError, TypeError, ValueError) as error:
+        raise NeedsAttentionError("First Mate runtime surface snapshot is invalid") from error
+
+
+def _ensure_surface_snapshot(store: Any, operation_id: str, scope: Mapping[str, Any], harness: HarnessAdapter) -> tuple[dict[str, Any], RuntimeSurfaceArtifacts]:
+    surface = _surface_from_scope(scope)
+    if surface is None:
+        surface = capture_runtime_surface(harness)
+        scope = _surface_scope(scope, surface)
+        with store.transaction():
+            store.conn.execute("UPDATE operations SET result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(scope), utc_now(), operation_id))
+    return dict(scope), surface
+
+
+def _mark_attention(store: Any, operation_id: str, workstream_id: str, reason: str) -> None:
+    now = utc_now()
+    with store.transaction():
+        store.conn.execute("UPDATE operations SET state='needs_attention',error_code='effect_mismatch',error_message=?,updated_at=? WHERE operation_id=?", (reason[:512], now, operation_id))
+        store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason=?,updated_at=? WHERE workstream_id=?", (reason[:512], now, workstream_id))
+
+
 def _validate_workspace(observed: WorkspaceObservation, expected: Mapping[str, Any] | None = None) -> WorkspaceObservation:
     if not observed.workspace_id or not observed.view_id or not observed.surface_id:
         raise NeedsAttentionError("First Mate workspace observation is incomplete")
@@ -161,14 +201,23 @@ def _recover_workspace(workspace: WorkspaceAdapter, scope: Mapping[str, Any], ex
 
 
 def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdapter, scope: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
+    desired_generation = binding.get("desired_generation_sha256")
+    validate_sha256(desired_generation, "First Mate desired runtime generation")
+    if binding.get("launch_generation_sha256") not in {None, desired_generation}:
+        raise NeedsAttentionError("First Mate launch generation is stale")
+    if binding.get("applied_generation_sha256") not in {None, desired_generation} and binding.get("launch_generation_sha256") != desired_generation:
+        raise NeedsAttentionError("First Mate applied runtime generation is stale")
     observed = _observe_binding(workspace, scope, binding)
     agent = observed.agent if observed is not None else None
-    ready = agent is not None and agent.surface_id == binding["workspace_surface_id"] and agent.identity_usable is True
+    runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+    if runtime.state == "unknown":
+        raise NeedsAttentionError("First Mate runtime identity is ambiguous before start")
+    ready = runtime.state == "live" and agent is not None and agent.surface_id == binding["workspace_surface_id"] and agent.identity_usable is True
     if not ready:
         with store.transaction():
             now = utc_now()
-            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=IFNULL(applied_generation_sha256,launch_generation_sha256),observed_state='starting',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
-            store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
+            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=?,observed_state='starting',updated_at=? WHERE workstream_id=?", (desired_generation, now, scope["workstreamId"]))
+            store.conn.execute("UPDATE workstreams SET provisioning_state='bound',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
         start_error: Exception | None = None
         try:
             start_bound_agent(store, workspace, harness, binding, workstream_id=str(scope["workstreamId"]), project_id=str(scope["projectId"]), cwd=str(scope["worktreePath"]))
@@ -182,6 +231,57 @@ def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdap
             raise
     else:
         _wait_for_agent(store, workspace, workstream_id=str(scope["workstreamId"]), path=str(scope["worktreePath"]), agent_name=str(scope["agentName"]), workspace_id=str(binding["workspace_id"]), view_id=str(binding["workspace_view_id"]), surface_id=str(binding["workspace_surface_id"]))
+    with store.transaction():
+        store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (utc_now(), scope["workstreamId"]))
+
+
+def _repair_launch_binding(
+    store: Any,
+    workspace: WorkspaceAdapter,
+    harness: HarnessAdapter,
+    project: Mapping[str, Any],
+    scope: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    *,
+    surface: RuntimeSurfaceArtifacts,
+) -> dict[str, Any]:
+    current_scope = _surface_scope(scope, surface)
+    desired = harness.desired_generation(current_scope, surface)
+    if (
+        binding.get("desired_generation_sha256") == desired
+        and binding.get("applied_generation_sha256") == desired
+        and binding.get("launch_generation_sha256") is None
+        and not binding.get("refresh_pending")
+    ):
+        return dict(binding)
+    runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+    if runtime.state == "unknown":
+        raise NeedsAttentionError("First Mate runtime identity is ambiguous before binding repair")
+    if runtime.state == "live":
+        raise NeedsAttentionError("First Mate binding repair requires a stopped runtime")
+    artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, current_scope, surface=surface)
+    if artifacts.generation_sha256 != desired:
+        raise NeedsAttentionError("activated First Mate runtime generation does not match the captured surface")
+    harness.commit_launch_binding(
+        materialized_scope,
+        artifacts,
+        workspace_session_name=str(binding["workspace_session_name"]),
+        workspace_id=str(binding["workspace_id"]),
+        workspace_view_id=str(binding["workspace_view_id"]),
+        workspace_surface_id=str(binding["workspace_surface_id"]),
+        replace=True,
+    )
+    now = utc_now()
+    with store.transaction():
+        store.conn.execute(
+            "UPDATE runtime_bindings SET harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_generation_sha256=?,applied_generation_sha256=NULL,launch_generation_sha256=?,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,runtime_instance_id=NULL,report_seq=0,session_start_event_sequence=NULL,session_start_report_seq=NULL,session_started_at=NULL,observed_state='starting',last_observed_at=NULL,updated_at=? WHERE workstream_id=?",
+            (artifacts.harness_home, artifact_document(harness.manifest, artifacts), artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, desired, desired, now, binding["workstream_id"]),
+        )
+        append_event_in_transaction(store.conn, kind="first_mate.binding.repaired", project_id=project["project_id"], workstream_id=scope["workstreamId"], operation_id=scope["operationId"], payload={"reason": "reopen after deployed runtime binding change"})
+    repaired = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (binding["workstream_id"],)).fetchone()
+    if repaired is None:
+        raise NeedsAttentionError("First Mate runtime binding disappeared during repair")
+    return dict(repaired)
 
 
 def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAdapter, workspace: WorkspaceAdapter, failpoint: Any = None) -> dict[str, Any]:
@@ -220,7 +320,7 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
     except (TypeError, json.JSONDecodeError) as error:
         raise NeedsAttentionError("First Mate ensure scope is missing or invalid") from error
     fresh = _scope(project, existing, operation["operation_id"])
-    if not isinstance(scope, dict) or scope != fresh:
+    if not isinstance(scope, dict) or {key: value for key, value in scope.items() if key not in _SURFACE_SCOPE_FIELDS} != fresh:
         raise NeedsAttentionError("First Mate ensure scope is missing or invalid")
     recoverable_missing = (
         existing["provisioning_state"] == "needs_attention"
@@ -231,7 +331,21 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         binding = _binding(store, existing["workstream_id"])
         if binding is None:
             raise NeedsAttentionError("First Mate runtime binding is missing")
-        _recover_start(store, workspace, harness, scope, binding)
+        surface = capture_runtime_surface(harness)
+        current_scope = _surface_scope(scope, surface)
+        try:
+            desired = harness.desired_generation(current_scope, surface)
+            if not (
+                binding.get("desired_generation_sha256") == desired
+                and (binding.get("applied_generation_sha256") == desired or binding.get("launch_generation_sha256") == desired)
+                and binding.get("launch_generation_sha256") in {None, desired}
+                and not binding.get("refresh_pending")
+            ):
+                binding = _repair_launch_binding(store, workspace, harness, project, current_scope, binding, surface=surface)
+            _recover_start(store, workspace, harness, current_scope, binding)
+        except Exception as error:
+            _mark_attention(store, operation["operation_id"], existing["workstream_id"], str(error))
+            raise NeedsAttentionError("First Mate runtime identity is missing or mismatched") from error
         workspace.focus_pane(binding["workspace_surface_id"])
         return {"project": resolve_project(store, project["project_id"]), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "binding": binding, "reused": True}
     if operation["state"] == "needs_attention" or (existing["provisioning_state"] == "needs_attention" and not recoverable_missing):
@@ -254,14 +368,16 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
     artifacts = None
     materialized_scope = scope
     if _rank(operation["step"]) < _rank("profile_materialized"):
-        artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)
+        scope, surface = _ensure_surface_snapshot(store, operation["operation_id"], scope, harness)
+        artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
         with store.transaction():
-            store.conn.execute("UPDATE operations SET state='applying',step=?,updated_at=? WHERE operation_id=?", ("profile_materialized", utc_now(), operation["operation_id"]))
+            store.conn.execute("UPDATE operations SET state='applying',step=?,result_json=?,updated_at=? WHERE operation_id=?", ("profile_materialized", canonical_json(scope), utc_now(), operation["operation_id"]))
         _hit(failpoint, "after_first_mate_profile_materialization", scope)
         operation = _operation(store, existing["workstream_id"])
     binding = _binding(store, existing["workstream_id"])
     if artifacts is None and binding is None:
-        artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)
+        scope, surface = _ensure_surface_snapshot(store, operation["operation_id"], scope, harness)
+        artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
     if artifacts is not None and binding is None:
         now = utc_now()
         with store.transaction():
@@ -277,13 +393,18 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         raise NeedsAttentionError("First Mate runtime binding was not persisted")
     if _rank(operation["step"]) < _rank("map_committed"):
         if artifacts is None:
-            artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)
+            scope, surface = _ensure_surface_snapshot(store, operation["operation_id"], scope, harness)
+            artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
         harness.commit_launch_binding(materialized_scope, artifacts, workspace_session_name=workspace.manifest.session_name, workspace_id=observed.workspace_id, workspace_view_id=observed.view_id, workspace_surface_id=observed.surface_id)
         with store.transaction():
             store.conn.execute("UPDATE operations SET state='applying',step=?,updated_at=? WHERE operation_id=?", ("map_committed", utc_now(), operation["operation_id"]))
         _hit(failpoint, "after_first_mate_policy_map_materialization", scope)
         operation = _operation(store, existing["workstream_id"])
-    _recover_start(store, workspace, harness, scope, binding)
+    try:
+        _recover_start(store, workspace, harness, scope, binding)
+    except Exception as error:
+        _mark_attention(store, operation["operation_id"], existing["workstream_id"], str(error))
+        raise NeedsAttentionError("First Mate runtime identity is missing or mismatched") from error
     if _rank(operation["step"]) < _rank("agent_started"):
         with store.transaction():
             store.conn.execute("UPDATE operations SET state='applying',step=?,updated_at=? WHERE operation_id=?", ("agent_started", utc_now(), operation["operation_id"]))

@@ -92,6 +92,9 @@ class RuntimeSurfaceArtifacts:
         validate_sha256(self.content_sha256, "runtime surface digest")
         if not isinstance(self.root_path, str) or not self.root_path:
             raise InvalidRequestError("runtime surface root is invalid")
+        root = Path(self.root_path)
+        if not root.is_absolute() or root.is_symlink() or root.resolve(strict=False) != root:
+            raise InvalidRequestError("runtime surface root must be canonical and absolute")
         try:
             manifest_json = canonical_json(json.loads(self.manifest) if isinstance(self.manifest, str) else self.manifest, max_bytes=256 * 1024, max_text=64 * 1024)
             manifest = json.loads(manifest_json)
@@ -99,6 +102,15 @@ class RuntimeSurfaceArtifacts:
             raise InvalidRequestError("runtime surface manifest is invalid") from error
         if not isinstance(manifest, dict):
             raise InvalidRequestError("runtime surface manifest is invalid")
+        adapter_id = manifest.get("adapter")
+        interface_version = manifest.get("interfaceVersion")
+        version_label = manifest.get("adapterVersion")
+        if not isinstance(adapter_id, str) or ADAPTER_ID_RE.fullmatch(adapter_id) is None:
+            raise InvalidRequestError("runtime surface manifest adapter is invalid")
+        if isinstance(interface_version, bool) or interface_version != 1:
+            raise InvalidRequestError("runtime surface manifest interface version must be 1")
+        if not isinstance(version_label, str) or not version_label:
+            raise InvalidRequestError("runtime surface manifest adapter version is invalid")
         object.__setattr__(self, "manifest", manifest_json)
 
     def _manifest_mapping(self) -> Mapping[str, Any]:
@@ -110,16 +122,16 @@ class RuntimeSurfaceArtifacts:
     @property
     def adapter_id(self) -> str:
         manifest = self._manifest_mapping()
-        return str(manifest.get("adapter", manifest.get("adapterId", "")))
+        return str(manifest["adapter"])
 
     @property
     def interface_version(self) -> int:
-        return int(self._manifest_mapping().get("interfaceVersion", 1))
+        return int(self._manifest_mapping()["interfaceVersion"])
 
     @property
     def version_label(self) -> str:
         manifest = self._manifest_mapping()
-        return str(manifest.get("adapterVersion", manifest.get("versionLabel", "")))
+        return str(manifest["adapterVersion"])
 
     @property
     def manifest_json(self) -> str:

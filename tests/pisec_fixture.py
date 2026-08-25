@@ -44,6 +44,7 @@ class FixtureHarness:
         self.launched: list[str] = []
         self.launch_replacements: list[bool] = []
         self.cleaned: list[str] = []
+        self.surface_calls = 0
 
     def validate_execution_profile(self, profile: str, role: str) -> None:
         self.calls.append(("validate", (profile, role)))
@@ -58,10 +59,11 @@ class FixtureHarness:
         return tuple(sorted({"fixture.test", *additional_domains}))
 
     def current_runtime_surface(self) -> RuntimeSurfaceArtifacts:
+        self.surface_calls += 1
         root = self.root / "runtime-surface"
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         from scripts.pisec.runtime_surface import _tree_digest
-        return RuntimeSurfaceArtifacts(_tree_digest(root), {"adapter": self.manifest.adapter_id, "adapterVersion": self.manifest.version_label, "interfaceVersion": 1}, str(root))
+        return RuntimeSurfaceArtifacts(_tree_digest(root), {"adapter": self.manifest.adapter_id, "adapterVersion": self.manifest.version_label, "interfaceVersion": 1}, str(root.resolve()))
 
     def prepare_runtime_surface(self) -> RuntimeSurfaceArtifacts:
         return self.current_runtime_surface()

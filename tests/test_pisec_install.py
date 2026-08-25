@@ -673,7 +673,7 @@ exit 0
                 root = self.root / "runtime-surface"
                 root.mkdir(parents=True, exist_ok=True, mode=0o700)
                 from scripts.pisec.runtime_surface import _tree_digest
-                return RuntimeSurfaceArtifacts(_tree_digest(root), {"adapter": self.manifest.adapter_id, "adapterVersion": self.manifest.version_label, "interfaceVersion": 1}, str(root))
+                return RuntimeSurfaceArtifacts(_tree_digest(root), {"adapter": self.manifest.adapter_id, "adapterVersion": self.manifest.version_label, "interfaceVersion": 1}, str(root.resolve()))
 
             def __getattr__(self, name):
                 if name in {

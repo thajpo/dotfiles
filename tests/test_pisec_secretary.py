@@ -170,6 +170,43 @@ class SecretaryTests(unittest.TestCase):
                     expected_reason = "stopped runtime" if runtime_state == "live" else "ambiguous"
                     self.assertIn(expected_reason, workstream["attention_reason"])
 
+    def test_active_reopen_repairs_stale_generation_before_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                first = ensure_secretary(store, project["project_id"], harness, workspace)
+                workstream_id = first["workstream"]["workstream_id"]
+                workspace.runtime_states[first["binding"]["workspace_surface_id"]] = "stopped"
+                store.conn.execute("UPDATE runtime_bindings SET desired_generation_sha256=?,applied_generation_sha256=? WHERE workstream_id=?", ("0" * 64, "0" * 64, workstream_id))
+                reopened = ensure_secretary(store, project["project_id"], harness, workspace)
+                self.assertTrue(reopened["reused"])
+                self.assertEqual(harness.launch_replacements, [False, True])
+                binding = store.conn.execute("SELECT desired_generation_sha256,applied_generation_sha256,launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()
+                self.assertEqual(binding["desired_generation_sha256"], binding["applied_generation_sha256"])
+                self.assertIsNone(binding["launch_generation_sha256"])
+
+    def test_secretary_replay_reuses_persisted_surface_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                with self.assertRaises(RuntimeError):
+                    ensure_secretary(store, project["project_id"], harness, workspace, CrashOnce("after_secretary_profile_materialization"))
+                self.assertEqual(harness.surface_calls, 1)
+                (root / "runtime-surface" / "changed.txt").write_text("changed\n")
+                with self.assertRaises(NeedsAttentionError):
+                    ensure_secretary(store, project["project_id"], harness, workspace)
+                self.assertEqual(harness.surface_calls, 1)
+
     def test_recover_start_relaunches_stopped_runtime_with_stale_agent_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
