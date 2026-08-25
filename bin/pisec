@@ -18,6 +18,7 @@ if update_args[:1] == ["update"]:
 current = Path.home() / ".local" / "lib" / "pisec" / "current" / "bin" / "pisec"
 if current.is_file() and current.resolve() != Path(__file__).resolve():
     raise SystemExit(subprocess.run([str(current), *argv], check=False).returncode)
+sys.dont_write_bytecode = True
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
