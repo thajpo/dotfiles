@@ -7,7 +7,7 @@ from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.operations import create_operation
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.refresh import _binding_scope
+from scripts.pisec.refresh import _binding_scope, _mark_attention, _mark_pre_stop_attention
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
@@ -112,6 +112,30 @@ class RuntimeRefreshTests(unittest.TestCase):
             workstream = store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (self.workstream_id,)).fetchone()
             self.assertEqual(binding["applied_generation_sha256"], binding["desired_generation_sha256"])
             self.assertEqual(workstream["provisioning_state"], "bound")
+
+    def test_pre_stop_staging_failure_preserves_idle_binding_for_retry(self):
+        with PiStore(self.root / "state") as store:
+            binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                idempotency_key="pre-stop-staging-failure",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": binding["desired_generation_sha256"]},
+                state="applying",
+                step="reserved",
+            )
+            store.conn.execute(
+                "UPDATE runtime_bindings SET refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-25T00:00:00Z',launch_generation_sha256=?,observed_state='idle' WHERE workstream_id=?",
+                (operation.operation_id, binding["desired_generation_sha256"], self.workstream_id),
+            )
+
+            _mark_pre_stop_attention(store, self.workstream_id, operation.operation_id, "staging failed before stop")
+            _mark_attention(store, self.workstream_id, "staging failed before stop")
+
+            binding = store.conn.execute("SELECT observed_state FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            self.assertEqual(binding["observed_state"], "idle")
 
     def test_targeted_runtime_ensure_is_idempotent_and_starts_only_one_binding(self):
         with PiStore(self.root / "state") as store:

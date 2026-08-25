@@ -84,9 +84,20 @@ def _item(binding: Mapping[str, Any], generation: str | None = None, **extra: An
 def _mark_attention(store: Any, workstream_id: str, reason: str) -> None:
     now = utc_now()
     with store.transaction():
-        # refresh_pending is intentionally retained: a failed restart must remain
-        # visibly blocked until a later successful attestation.
-        store.conn.execute("UPDATE runtime_bindings SET observed_state='error',last_observed_at=?,updated_at=? WHERE workstream_id=?", (now, now, workstream_id))
+        operation = store.conn.execute(
+            "SELECT * FROM operations WHERE workstream_id=? AND kind='runtime.refresh' AND state IN ('planned','applying','needs_attention') ORDER BY created_at DESC,operation_id DESC LIMIT 1",
+            (workstream_id,),
+        ).fetchone()
+        # A staging failure occurs before the old runtime is stopped.  The
+        # pre-stop helper records that truthful idle state so a later retry can
+        # reserve and replace it; failures after that point remain visibly
+        # blocked until a new authenticated attestation.
+        if operation is not None and operation["step"] == "pre_stop_attention":
+            store.conn.execute("UPDATE runtime_bindings SET last_observed_at=?,updated_at=? WHERE workstream_id=?", (now, now, workstream_id))
+        else:
+            # refresh_pending is intentionally retained: a failed restart must remain
+            # visibly blocked until a later successful attestation.
+            store.conn.execute("UPDATE runtime_bindings SET observed_state='error',last_observed_at=?,updated_at=? WHERE workstream_id=?", (now, now, workstream_id))
         store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason=?,updated_at=? WHERE workstream_id=?", (reason[:512], now, workstream_id))
         operation = store.conn.execute(
             "SELECT * FROM operations WHERE workstream_id=? AND kind='runtime.refresh' AND state IN ('planned','applying') ORDER BY created_at DESC,operation_id DESC LIMIT 1",
