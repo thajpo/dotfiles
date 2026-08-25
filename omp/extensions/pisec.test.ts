@@ -96,6 +96,13 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
       externalDomains: [],
       effects: ["create"],
       nonEffects: ["push"],
+      dataDirs: ["/approved/data"],
+      pythonEnv: "/approved/python",
+      taskPacket: {
+        outcome: "Produce the verified change",
+        boundaries: ["/approved/src"],
+        acceptance: ["run the phase checks"],
+      },
     };
     const refused = await create.execute("id", { approval_scope: scope }, undefined, undefined, { hasUI: false });
     console.log(JSON.stringify({
@@ -157,24 +164,21 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
   assert.equal(approval.policy, "prompt");
   const approvalReason = stringValue(approval, "reason");
   for (const line of [
-    "operation id: op_" + "a".repeat(32),
-    "project id: prj_" + "b".repeat(32),
-    "workstream id: ws_" + "a".repeat(32),
-    "title: Title",
-    "purpose: Purpose",
-    "full brief: Full brief",
-    "harness adapter: omp",
-    "workspace adapter: herdr",
-    "execution profile: worker-default",
-    "target ref: main",
-    "base commit OID: " + "a".repeat(40),
-    "branch: pisec/ws_" + "a".repeat(32) + "/work",
-    "checkout path: /tmp/work",
-    "agent name: pisec-agent",
-    "exact external domains: (empty)",
-    "effects: create",
+    "intended outcome: Produce the verified change",
+    "allowed paths and changes: /approved/src",
     "non-effects: push",
+    "acceptance tests: run the phase checks",
+    "harness/model: omp / configured default",
+    "approved readable data: /approved/data, /approved/python",
+    "warning: approved readable data and Python paths are user data and are not proven secret-free",
   ]) assert.ok(approvalReason.includes(line), line);
+  for (const hidden of [
+    "op_" + "a".repeat(32),
+    "prj_" + "b".repeat(32),
+    "ws_" + "a".repeat(32),
+    "a".repeat(40),
+    "/tmp/work",
+  ]) assert.equal(approvalReason.includes(hidden), false, hidden);
   assert.equal(refused.isError, true);
   assert.match(refusalText, /interactive approval UI/);
   assert.ok(events.includes("session_shutdown"));

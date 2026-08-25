@@ -31,7 +31,7 @@ URL_MAX = 2048
 TASK_PACKET_KEYS = frozenset({"schemaVersion", "outcome", "boundaries", "acceptance", "openQuestions", "evidence"})
 EXECUTION_PACKET_KEYS = frozenset({
     "projectId", "workstreamId", "title", "purpose", "brief", "targetRef", "baseCommitOid",
-    "branchName", "executionProfile", "harnessId", "workspaceAdapterId", "implementationModel", "harnessModel", "reasoningEffort", "nonEffects", "approvalScopeSha256",
+    "branchName", "executionProfile", "workMode", "learningOverlay", "learningSeam", "harnessId", "workspaceAdapterId", "implementationModel", "harnessModel", "reasoningEffort", "nonEffects", "approvalScopeSha256",
 })
 RESEARCH_REQUEST_KEYS = frozenset({"kind", "summary", "question", "context", "attempted", "candidateSources", "blocking"})
 RESEARCH_RESULT_KEYS = frozenset({"schemaVersion", "findings", "sources", "uncertainties"})
@@ -103,6 +103,12 @@ def _execution_packet(value: Any) -> dict[str, Any]:
         validate_id(execution[key], prefix=prefix)
     for key, limit in (("title", 512), ("purpose", PACKET_TEXT_LIMIT), ("brief", PACKET_TEXT_LIMIT), ("targetRef", 512), ("branchName", 512), ("executionProfile", 128), ("harnessId", 64), ("workspaceAdapterId", 64)):
         bounded_text(execution[key], name=f"taskPacket.execution.{key}", limit=limit)
+    if execution["workMode"] not in {"FAST", "RIP", "BUILD", "MAJOR"}:
+        raise InvalidRequestError("taskPacket.execution.workMode is invalid")
+    if execution["learningOverlay"] not in {"OFF", "LIGHT", "DEEP"}:
+        raise InvalidRequestError("taskPacket.execution.learningOverlay is invalid")
+    if execution["learningSeam"] is not None:
+        bounded_text(execution["learningSeam"], name="taskPacket.execution.learningSeam", limit=1024)
     for key in ("implementationModel", "harnessModel"):
         if execution[key] is not None:
             bounded_text(execution[key], name=f"taskPacket.execution.{key}", limit=256)
@@ -293,6 +299,9 @@ def issue_task_packet_in_transaction(connection: Any, *, scope: Mapping[str, Any
         "baseCommitOid": scope["baseCommitOid"],
         "branchName": scope["branchName"],
         "executionProfile": scope["executionProfile"],
+        "workMode": scope["workMode"],
+        "learningOverlay": scope["learningOverlay"],
+        "learningSeam": scope.get("learningSeam"),
         "harnessId": scope["harnessId"],
         "workspaceAdapterId": scope["workspaceAdapterId"],
         "implementationModel": scope.get("implementationModel"),

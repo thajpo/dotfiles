@@ -365,6 +365,116 @@ def fleet_activity(store: Any, after: int = 0) -> dict[str, Any]:
 
 def project_status(store: Any, project_id: str) -> dict[str, Any]:
     project = get_project(store, project_id)
-    workstreams = [dict(row) for row in store.conn.execute("SELECT w.*,r.observed_state,r.last_observed_at,t.task_packet_id,t.packet_sha256 AS task_packet_sha256 FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) LEFT JOIN task_packets t USING(workstream_id) WHERE w.project_id=? ORDER BY w.created_at", (project_id,))]
+    workstreams = []
+    for row in store.conn.execute(
+        "SELECT w.*,r.observed_state,r.last_observed_at FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) WHERE w.project_id=? ORDER BY w.created_at",
+        (project_id,),
+    ):
+        workstreams.append(_semantic_workstream_status(store, dict(row)))
     decisions = [dict(row) for row in store.conn.execute("SELECT * FROM decisions WHERE project_id=? ORDER BY created_at", (project_id,))]
-    return {"project": project, "workstreams": workstreams, "decisions": decisions, "researchCounts": research_counts(store, project_id), "source": "pisec-sqlite"}
+    secretary = next((row for row in workstreams if row["kind"] == "secretary" and row["desired_state"] != "retired"), None)
+    project_view = dict(project)
+    if secretary is not None:
+        project_view["taskState"] = secretary["taskState"]
+        project_view["runtimeState"] = secretary["runtimeState"]
+        project_view["attentionCount"] = secretary["attentionCount"]
+        project_view["attentionPriority"] = secretary["attentionPriority"]
+        project_view["nextAction"] = secretary["nextAction"]
+    else:
+        project_view["taskState"] = "retired" if not project.get("active") else "setting_up"
+        project_view["runtimeState"] = "not_bound"
+        project_view["attentionCount"] = 0
+        project_view["attentionPriority"] = None
+        project_view["nextAction"] = "Open project coordinator" if project.get("active") else "Reopen project"
+    return {"project": project_view, "workstreams": workstreams, "decisions": decisions, "researchCounts": research_counts(store, project_id), "source": "pisec-sqlite"}
+
+
+def _semantic_workstream_status(store: Any, row: dict[str, Any]) -> dict[str, Any]:
+    workstream_id = str(row["workstream_id"])
+    binding = store.conn.execute(
+        "SELECT * FROM runtime_bindings WHERE workstream_id=?",
+        (workstream_id,),
+    ).fetchone()
+    runtime_state = "not_bound" if binding is None else str(binding["observed_state"] or "unknown")
+    integration_rows = list(store.conn.execute(
+        "SELECT * FROM integration_jobs WHERE workstream_id=? ORDER BY created_at DESC",
+        (workstream_id,),
+    ))
+    integration = integration_rows[0] if integration_rows else None
+    task_state_error = None
+    acceptance_count = int(store.conn.execute("SELECT COUNT(*) FROM workstream_acceptances WHERE workstream_id=?", (workstream_id,)).fetchone()[0])
+    if len(integration_rows) > 1:
+        task_state_error = "workstream has multiple integration jobs"
+    elif acceptance_count and len(integration_rows) != 1:
+        task_state_error = "accepted workstream must have exactly one integration job"
+    packet = store.conn.execute(
+        "SELECT * FROM completion_packets WHERE workstream_id=? ORDER BY sequence DESC LIMIT 1",
+        (workstream_id,),
+    ).fetchone()
+    checkpoint = store.conn.execute(
+        "SELECT * FROM workstream_checkpoints WHERE workstream_id=? ORDER BY sequence DESC LIMIT 1",
+        (workstream_id,),
+    ).fetchone()
+    if packet is not None and (checkpoint is None or checkpoint["phase"] != "ready_review" or checkpoint["idempotency_key"] != f"completion:{packet['packet_sha256']}"):
+        task_state_error = "completion packet lacks its matching ready_review checkpoint"
+    if task_state_error is not None:
+        task_state = "needs_attention"
+    elif row["desired_state"] == "retired":
+        task_state = "retired"
+    elif row["desired_state"] == "completed":
+        task_state = "completed"
+    elif row["provisioning_state"] == "needs_attention" or (integration is not None and integration["state"] == "needs_attention"):
+        task_state = "needs_attention"
+    elif row["provisioning_state"] in {"proposed", "creating"}:
+        task_state = "setting_up"
+    elif row["kind"] in {"secretary", "first_mate"} and row["provisioning_state"] == "bound":
+        task_state = "supervising"
+    elif integration is not None and integration["state"] == "awaiting_worker":
+        task_state = "reconciling"
+    elif integration is not None and integration["state"] == "queued":
+        task_state = "accepted"
+    elif integration is not None and integration["state"] in {"refreshing", "verifying", "applying", "integrated"}:
+        task_state = "integrating"
+    elif checkpoint is not None and checkpoint["phase"] == "ready_review" and packet is not None and acceptance_count == 0:
+        task_state = "ready_review"
+    else:
+        task_state = "active"
+    attention_count = 0
+    attention_priority = None
+    if binding is not None and row["desired_state"] == "active" and row["provisioning_state"] == "bound":
+        try:
+            from .attention import list_open_attention
+            attention = list_open_attention(store, recipient_workstream_id=workstream_id, limit=32)
+            attention_count = len(attention)
+            attention_priority = min((int(item["priority"]) for item in attention), default=None)
+        except Exception:
+            task_state_error = task_state_error or "attention projection is unavailable"
+            task_state = "needs_attention"
+    next_action = None
+    if integration is not None and integration["next_action"]:
+        next_action = integration["next_action"]
+    elif row.get("attention_reason"):
+        next_action = row["attention_reason"]
+    else:
+        next_action = {
+            "setting_up": "Complete runtime setup",
+            "supervising": "Review current attention",
+            "reconciling": "Review bounded target reconciliation",
+            "accepted": "Begin accepted integration",
+            "integrating": "Complete integration verification",
+            "ready_review": "Review completion candidate",
+            "needs_attention": "Inspect and repair the reported invariant",
+            "completed": "No action required",
+            "retired": "No action required",
+        }.get(task_state, "Continue task")
+    result = dict(row)
+    result.update({
+        "taskState": task_state,
+        "runtimeState": runtime_state,
+        "attentionCount": attention_count,
+        "attentionPriority": attention_priority,
+        "nextAction": next_action,
+    })
+    if task_state_error is not None:
+        result["taskStateError"] = task_state_error
+    return result

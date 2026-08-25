@@ -11,7 +11,7 @@ class RealHerdrLifecycleSmoke(unittest.TestCase):
     def test_real_protocol_projects_pisec_states_and_ignores_official_release(self):
         pane = os.environ["PISEC_REAL_HERDR_PANE"]
         adapter = HerdrWorkspaceAdapter()
-        harness = HarnessManifest("omp", "omp", "17.3.4-compatible")
+        harness = HarnessManifest("omp", "omp", "17.3.4")
         instance = f"real-herdr-smoke-{time.time_ns()}"
 
         def state() -> str:

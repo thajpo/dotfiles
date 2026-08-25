@@ -71,13 +71,14 @@ def _exact(payload: Mapping[str, Any], required: set[str], optional: set[str] = 
         raise InvalidRequestError("payload fields do not match the operation contract")
 
 
-_PUBLIC_PROJECT_FIELDS = ("project_id", "display_name", "default_ref", "data_dirs", "external_domains", "secretary_workstream_id", "coordination_mode", "active", "lifecycle_attention_reason", "created_at", "updated_at", "deactivated_at")
+_PUBLIC_PROJECT_FIELDS = ("project_id", "display_name", "default_ref", "data_dirs", "external_domains", "secretary_workstream_id", "coordination_mode", "active", "lifecycle_attention_reason", "created_at", "updated_at", "deactivated_at", "taskState", "runtimeState", "attentionCount", "attentionPriority", "nextAction")
 _PUBLIC_WORKSTREAM_FIELDS = (
     "workstream_id", "project_id", "kind", "title", "purpose", "brief", "harness_id", "workspace_adapter_id",
     "execution_profile", "target_ref", "base_commit_oid", "branch_name",
     "desired_state", "provisioning_state", "created_at", "updated_at", "completed_at", "retired_at",
     "observed_state", "last_observed_at", "agent_name", "task_packet_id", "task_packet_sha256",
     "desired_generation_sha256", "applied_generation_sha256", "runtime_stale",
+    "taskState", "runtimeState", "attentionCount", "attentionPriority", "nextAction", "taskStateError",
 )
 _PUBLIC_BINDING_FIELDS = ("workstream_id", "workspace_adapter_id", "workspace_session_name", "harness_id", "agent_name", "observed_state", "runtime_instance_id", "last_observed_at", "updated_at")
 _PUBLIC_OPERATION_FIELDS = ("operation_id", "kind", "project_id", "workstream_id", "idempotency_key", "request_sha256", "state", "step", "error_code", "created_at", "updated_at")
@@ -718,7 +719,7 @@ class BrokerDispatcher:
                 project = resolve_project(store, str(payload["project"]))
                 return _public_project_status(project_status(store, project["project_id"]))
             include_inactive = payload.get("includeInactive") is True
-            every_project = [_public_project(row) for row in list_projects(store, include_inactive=True)]
+            every_project = [_public_project(project_status(store, row["project_id"])["project"]) for row in list_projects(store, include_inactive=True)]
             active_projects = [row for row in every_project if row.get("active")]
             return {
                 "projects": every_project if include_inactive else active_projects,

@@ -116,7 +116,7 @@ Pisec is the durable, product-neutral workflow and security core. It owns
 projects, proposals, approvals, workstream intent, decisions, runtime
 bindings, research packets, and audit events. The selected `HarnessAdapter`
 and `WorkspaceAdapter` own product wire protocols and artifacts. The tested
-production adapters are OMP 17.3.4-compatible (`omp`) and Herdr 0.8.x
+production adapters are OMP 17.3.4 (`omp`) and Herdr 0.8.0
 protocol 19 (`herdr`); Collie remains deployment and presentation glue.
 
 The epoch-three configuration is explicit and adapter-neutral:
@@ -148,7 +148,7 @@ For an explicit archive-and-reset deployment:
 
 Review the printed epoch-two archive path after deployment. Pisec does not
 patch OMP, Herdr, or Fence source or binaries. The deployment applies one
-reviewed, fail-closed Collie 0.28.x source patch at the presentation boundary;
+reviewed, fail-closed Collie 0.28.0 source patch at the presentation boundary;
 it derives `done` from Collie's existing shared unread ledger without changing
 Herdr or Pisec lifecycle authority.
 
@@ -164,7 +164,7 @@ private Git object store, one isolated harness home, one rendered Fence
 policy, one immutable broker-owned task packet, and one adapter-owned
 workspace surface. Workers use the single `worker-default` profile. Project
 permissions are complete project-wide replacements: approved existing paths
-are read-only and approved domains are added to every compatible current or
+are read-only and approved domains are added to every exact pinned current or
 future worker in that project. Fence and the broker retain all role and
 write boundaries.
 
@@ -315,7 +315,7 @@ The live acceptance reset and adapter cutover were rerun on 2026-08-16. The
 installer archived the prior owner-only state and deployed schema epoch three.
 `pisec doctor --json` reported `schemaVersion=3`,
 `pisec-core-epoch-3`, selected harness `omp`, selected workspace `herdr`,
-OMP 17.3.4-compatible health, Herdr protocol 19, launch-map v2, and healthy
+OMP 17.3.4 health, Herdr protocol 19, launch-map v2, and healthy
 Fence/plugin/MCP/search checks. After worker cleanup, the same doctor command
 returned `ok: true`; cleaned retired bindings no longer require deleted
 harness artifacts.
@@ -367,7 +367,7 @@ state; the pinned downstream patch in `patches/collie-v0.28-unread-idle.patch`
 projects a resting agent as `done` only while Collie's persisted
 `lastActiveAt > lastSeenAt`, then returns it to `idle` after a Collie read.
 The installer applies the patch idempotently to the managed Collie checkout
-and fails closed if a future 0.28.x source no longer matches.
+and fails closed if a future 0.28.0 source no longer matches.
 
 The installer configures loopback binding, HTTPS Tailscale Serve,
 single-session discovery, the main-session transcript root,
@@ -404,7 +404,7 @@ as `needs_attention`, never guessed complete.
 
 The JSON doctor validates the active user service units, the broker and
 gateway health endpoints, Herdr protocol 19, the enabled local Pisec and
-Collie 0.28.x plugins, the loopback-only Collie listener, the single HTTPS
+Collie 0.28.0 plugins, the loopback-only Collie listener, the single HTTPS
 Tailscale Serve root route to Collie, and Funnel being disabled. A missing or
 malformed live probe is a failure rather than an informational warning.
 

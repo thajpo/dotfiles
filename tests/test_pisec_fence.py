@@ -51,7 +51,10 @@ def render(scope: dict, root: Path, agent: Path, config: dict, *, baseline=()):
 
 def with_surface(adapter: OmpHarnessAdapter, scope: dict) -> dict:
     target = adapter.state_root / "runtime-current" / adapter.manifest.adapter_id
-    surface = adapter.current_runtime_surface() if target.exists() else adapter.prepare_runtime_surface()
+    test_home = adapter.state_root / "test-home"
+    (test_home / ".omp" / "agent").mkdir(parents=True, exist_ok=True)
+    with patch("scripts.pisec.harnesses.omp.Path.home", return_value=test_home):
+        surface = adapter.current_runtime_surface() if target.exists() else adapter.prepare_runtime_surface()
     return {**scope, "runtimeSurfaceId": "surface_" + surface.content_sha256[:32], "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path}
 
 
@@ -81,7 +84,7 @@ class RuntimeMaterializationTests(unittest.TestCase):
                 source.write_text("second\n")
                 artifacts = stage_and_activate(adapter, first_scope)
                 second_surface = adapter.current_runtime_surface()
-            self.assertEqual((Path(artifacts.harness_home) / "rules" / "custom.md").read_text(), "first\n")
+            self.assertEqual((Path(artifacts.adapter_data["agentRoot"]) / "rules" / "custom.md").read_text(), "first\n")
             self.assertEqual(first_surface.content_sha256, second_surface.content_sha256)
 
     def test_config_validation_and_gateway_only_models(self):
@@ -93,19 +96,19 @@ class RuntimeMaterializationTests(unittest.TestCase):
             assigned.mkdir()
             scope = {"projectId": new_id("prj"), "workstreamId": new_id("ws"), "executionProfile": "secretary-project", "worktreePath": str(assigned)}
             artifacts = stage_and_activate(adapter, with_surface(adapter, scope))
-            models = json.loads((Path(artifacts.harness_home) / "models.yml").read_text())
+            models = json.loads((Path(artifacts.adapter_data["agentRoot"]) / "models.yml").read_text())
             self.assertEqual(set(models["providers"]), {"openai-codex", "deepseek"})
             for provider in models["providers"].values():
                 self.assertEqual(provider["baseUrl"], "http://127.0.0.1:4000")
                 self.assertEqual(provider["transport"], "pi-native")
                 self.assertEqual(provider["apiKey"], "g" * 48)
-            overlay = json.loads((Path(artifacts.harness_home) / "config.yml").read_text())
+            overlay = json.loads((Path(artifacts.adapter_data["agentRoot"]) / "config.yml").read_text())
             self.assertTrue(overlay["mcp"]["enableProjectConfig"])
             self.assertTrue(overlay["web_search"]["enabled"])
             self.assertEqual(overlay["tools"]["approvalMode"], "yolo")
             self.assertEqual(Path(artifacts.launch_secret_path).stat().st_mode & 0o777, 0o600)
-            self.assertFalse((Path(artifacts.harness_home) / "extensions" / "herdr-omp-agent-state.ts").exists())
-            self.assertFalse((Path(artifacts.harness_home) / "agent" / "extensions" / "herdr-omp-agent-state.ts").exists())
+            self.assertFalse((Path(artifacts.adapter_data["agentRoot"]) / "extensions" / "herdr-omp-agent-state.ts").exists())
+            self.assertFalse((Path(artifacts.adapter_data["agentRoot"]) / "agent" / "extensions" / "herdr-omp-agent-state.ts").exists())
             self.assertEqual(Path(artifacts.adapter_data["extensionPath"]).name, "pisec.ts")
             self.assertIn(artifacts.adapter_data["extensionPath"], json.dumps(json.loads(Path(artifacts.policy_path).read_text())))
 
@@ -122,7 +125,7 @@ class RuntimeMaterializationTests(unittest.TestCase):
             with patch("scripts.pisec.harnesses.omp.Path.home", return_value=home):
                 _copy_user_surface(destination)
             self.assertFalse((destination / "extensions" / "herdr-omp-agent-state.ts").exists())
-            self.assertEqual((destination / "extensions" / "custom.ts").read_text(), "custom extension\n")
+            self.assertFalse((destination / "extensions" / "custom.ts").exists())
 
     def test_desired_generation_reflects_python_env(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -167,9 +170,9 @@ class RuntimeMaterializationTests(unittest.TestCase):
             self.assertEqual(Path(first.launch_secret_path).read_text(), Path(second.launch_secret_path).read_text())
             self.assertEqual(first.runtime_token_sha256, second.runtime_token_sha256)
             self.assertEqual(custom.read_text(), "preserve\n")
-            overlay = json.loads((Path(first.harness_home) / "config.yml").read_text())
-            self.assertTrue((Path(first.harness_home) / "agents" / "pisec-web-research.md").is_file())
-            self.assertTrue((Path(first.harness_home) / "agent" / "agents" / "pisec-web-research.md").is_file())
+            overlay = json.loads((Path(first.adapter_data["agentRoot"]) / "config.yml").read_text())
+            self.assertTrue((Path(first.adapter_data["agentRoot"]) / "agents" / "pisec-web-research.md").is_file())
+            self.assertTrue((Path(first.adapter_data["agentRoot"]) / "agents" / "pisec-web-research.md").is_file())
             self.assertTrue(overlay["web_search"]["enabled"])
             self.assertEqual(overlay["tools"]["approvalMode"], "yolo")
             self.assertEqual(overlay["providers"]["webSearchOrder"], ["duckduckgo"])
@@ -551,14 +554,16 @@ class FencePolicyAndShimTests(unittest.TestCase):
         state = root / "state"
         launch_dir = state / "launchers"
         launch_dir.mkdir(parents=True)
-        agent = state / "agent"
-        (agent / "sessions").mkdir(parents=True)
-        os.chmod(agent / "sessions", 0o700)
-        os.chmod(agent, 0o700)
-        xdg = {name: agent / "xdg" / name for name in ("data", "state", "cache", "config")}
+        agent = state / "surface"
+        state_binding = state / "binding-state"
+        (state_binding / "sessions").mkdir(parents=True)
+        os.chmod(state_binding / "sessions", 0o700)
+        os.chmod(state_binding, 0o700)
+        xdg = {"data": agent / "xdg" / "data", "state": state_binding / "xdg" / "state", "cache": state_binding / "xdg" / "cache", "config": state_binding / "xdg" / "config"}
         for path in xdg.values():
             path.mkdir(parents=True, exist_ok=True)
             os.chmod(path, 0o700)
+        os.chmod(agent, 0o700)
         plugin_root = xdg["data"] / "omp" / "plugins"
         plugin_root.mkdir(parents=True)
         os.chmod(plugin_root, 0o700)
@@ -568,21 +573,25 @@ class FencePolicyAndShimTests(unittest.TestCase):
         os.chmod(user_config, 0o600)
         overlay = agent / "config.yml"
         overlay.write_text("{}\n")
-        policy = state / "policy.json"
+        policy = agent / "policy.json"
         policy.write_text("{}\n")
         secret = state / "secret"
         secret.write_text("r" * 48 + "\n")
-        session = agent / "sessions" / "one.jsonl"
+        session = state_binding / "sessions" / "one.jsonl"
         session.write_text("session\n")
         extension = Path(__file__).resolve().parents[1] / "omp" / "extensions" / "pisec.ts"
         fake_omp = root / "real-omp"
         fake_omp.write_text("#!/bin/sh\nexit 0\n")
         fake_fence = root / "fake-fence"
         fake_fence.write_text("#!/usr/bin/python3\nimport json, os, sys\nprint(json.dumps({'argv': sys.argv[1:], 'env': dict(os.environ)}))\n")
-        for path in (overlay, policy, secret, session):
+        for path in (overlay, policy):
+            os.chmod(path, 0o400)
+        for path in (secret, session):
             os.chmod(path, 0o600)
         for path in (fake_omp, fake_fence):
             os.chmod(path, 0o755)
+        for path in (agent, *sorted(agent.rglob("*"))):
+            os.chmod(path, 0o500 if path.is_dir() else 0o400)
         workstream_id = new_id("ws")
         project_id = new_id("prj")
         workspace_id, view_id, surface_id = "w1", "w1:t1", "w1:p1"
@@ -635,7 +644,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
         )
         connection.execute(
             "INSERT INTO runtime_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (workstream_id, "main", workspace_id, view_id, surface_id, "omp", str(agent), str(secret), str(policy), hashlib.sha256(policy.read_bytes()).hexdigest(), "a" * 64, "a" * 64, "a" * 64, None if private is None else str(private), session_kind, session_value, "starting"),
+            (workstream_id, "main", workspace_id, view_id, surface_id, "omp", str(state_binding), str(secret), str(policy), hashlib.sha256(policy.read_bytes()).hexdigest(), "a" * 64, "a" * 64, "a" * 64, None if private is None else str(private), session_kind, session_value, "starting"),
         )
         connection.commit()
         connection.close()
@@ -655,7 +664,9 @@ class FencePolicyAndShimTests(unittest.TestCase):
             "workspaceSurfaceId": surface_id,
             "harnessExecutablePath": str(fake_omp),
             "fencePath": str(fake_fence),
-            "harnessHome": str(agent),
+            "harnessHome": str(state_binding),
+            "surfaceRoot": str(agent),
+            "agentRoot": str(agent),
             "overlayPath": str(overlay),
             "extensionPath": str(extension),
             "policyPath": str(policy),
@@ -693,7 +704,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             nested, entry, launcher = self.make_shim_binding(root, role="secretary", selected=True)
             environment = os.environ.copy()
             environment.update({"HOME": str(root / "home"), "HERDR_SESSION": "main", "HERDR_PANE_ID": "w1:p1", "SSH_AUTH_SOCK": "/tmp/agent.sock", "OPENAI_API_KEY": "forbidden"})
-            result = subprocess.run([str(launcher), f"--resume={root / 'state' / 'agent' / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)
+            result = subprocess.run([str(launcher), f"--resume={Path(entry['harnessHome']) / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             captured = json.loads(result.stdout)
             self.assertIn("--approval-mode=yolo", captured["argv"])
@@ -707,7 +718,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertEqual(captured["env"]["PISEC_SECRETARY_SOCKET"], entry["secretarySocketPath"])
             self.assertNotIn("OPENAI_API_KEY", captured["env"])
             os.chmod(Path(entry["canonicalRoot"]), 0o775)
-            unsafe_root = subprocess.run([str(launcher), f"--resume={root / 'state' / 'agent' / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)
+            unsafe_root = subprocess.run([str(launcher), f"--resume={Path(entry['harnessHome']) / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)
             self.assertNotEqual(unsafe_root.returncode, 0)
             self.assertIn("binding root is unsafe", unsafe_root.stderr)
             os.chmod(Path(entry["canonicalRoot"]), 0o755)
@@ -776,7 +787,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             connection.close()
             environment = os.environ.copy()
             environment.update({"HOME": str(root / "home"), "HERDR_SESSION": "main", "HERDR_PANE_ID": "w1:p1"})
-            result = subprocess.run([str(launcher), f"--resume={root / 'state' / 'agent' / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)
+            result = subprocess.run([str(launcher), f"--resume={Path(entry['harnessHome']) / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             captured = json.loads(result.stdout)
             self.assertIn("--approval-mode=yolo", captured["argv"])
@@ -786,7 +797,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             connection.execute("UPDATE runtime_bindings SET observed_state='blocked'")
             connection.commit()
             connection.close()
-            busy = subprocess.run([str(launcher), f"--resume={root / 'state' / 'agent' / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)
+            busy = subprocess.run([str(launcher), f"--resume={Path(entry['harnessHome']) / 'sessions' / 'one.jsonl'}"], cwd=nested, env=environment, text=True, capture_output=True)
             self.assertNotEqual(busy.returncode, 0)
             self.assertIn("durable binding identity", busy.stderr)
 

@@ -138,35 +138,31 @@ def _display(value: object, width: int) -> str:
     return text[:width].ljust(width)
 
 
-def _research_summary(value: object) -> str:
-    if not isinstance(value, dict):
-        return "r:?"
-    fields = ("pending", "researching", "needs_context", "answered", "declined", "unacknowledged")
-    values = [f"{name[:3]}={value.get(name, 0)}" for name in fields if isinstance(value.get(name, 0), int) and not isinstance(value.get(name, 0), bool)]
-    return " ".join(values) if values else "r:?"
-
-
 def _line(item: dict[str, Any]) -> str:
     project = item["project"]
     workstream = item.get("workstream")
-    name = project.get("display_name", project.get("project_id", "?"))
-    research = _research_summary(item.get("research_counts"))
+    name = project.get("display_name", "?")
     if workstream is None:
-        values = (name, "-", "-", "-", "-", "-", "-", research, "-", "-")
+        values = (
+            name,
+            "-",
+            "-",
+            project.get("taskState", "-"),
+            project.get("runtimeState", "-"),
+            project.get("attentionCount", 0),
+            project.get("nextAction", "-"),
+        )
     else:
         values = (
             name,
             workstream.get("kind", "?"),
             workstream.get("title", "?"),
-            workstream.get("desired_state", "?"),
-            workstream.get("provisioning_state", "?"),
-            workstream.get("observed_state") or "?",
-            workstream.get("execution_profile", "?"),
-            research,
-            workstream.get("last_observed_at") or "-",
-            workstream.get("attention_reason") or "-",
+            workstream.get("taskState", "?"),
+            workstream.get("runtimeState", "?"),
+            workstream.get("attentionCount", 0),
+            workstream.get("nextAction", "-"),
         )
-    widths = (20, 10, 28, 16, 16, 16, 24, 38, 16, 96)
+    widths = (20, 12, 30, 18, 14, 10, 96)
     return " ".join(_display(value, width) for value, width in zip(values, widths)).rstrip()
 
 
@@ -184,7 +180,7 @@ def board() -> int:
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print("Pisec board")
         print("===========")
-        print("project              kind       title                        desired          provisioning     observed          profile                  research counts                         last observed    attention")
+        print("project              kind         title                          task               runtime        attention  next action")
         for item in items:
             print(_line(item))
         return 0
@@ -199,7 +195,7 @@ def board() -> int:
             screen.erase()
             height, width = screen.getmaxyx()
             screen.addnstr(0, 0, "Pisec board — arrows/j/k select, Enter/f focus, s secretary, r refresh, q quit", width - 1, curses.A_BOLD)
-            screen.addnstr(1, 0, "project              kind       title                        desired          provisioning     observed          profile                  research counts                         last observed    attention", width - 1)
+            screen.addnstr(1, 0, "project              kind         title                          task               runtime        attention  next action", width - 1)
             if items:
                 selected = max(0, min(selected, len(items) - 1))
             for index, item in enumerate(items[: max(0, height - 3)]):

@@ -149,9 +149,9 @@ const module = await import({json.dumps(EXTENSION.as_uri())} + '?secretary=' + D
 module.default(pi);
 const create = records.tools.find(value => value.name === 'pisec_create_workstream');
 const accept = records.tools.find(value => value.name === 'pisec_accept_workstream');
-const scope = {{operationId:'op_'+'a'.repeat(32), projectId:'prj_'+'b'.repeat(32), workstreamId:'ws_'+'a'.repeat(32), title:'Title', purpose:'Purpose', brief:'Full brief', harnessId:'omp', workspaceAdapterId:'herdr', executionProfile:'worker-default', targetRef:'refs/heads/main', targetBranchRef:'refs/heads/main', baseCommitOid:'a'.repeat(40), branchName:'pisec/ws_'+'a'.repeat(32)+'/work', worktreePath:'/tmp/work', agentName:'pisec-agent', externalDomains:['html.duckduckgo.com'], effects:['create'], nonEffects:['push']}};
+const scope = {{operationId:'op_'+'a'.repeat(32), projectId:'prj_'+'b'.repeat(32), workstreamId:'ws_'+'a'.repeat(32), title:'Title', purpose:'Full brief', brief:'Full brief', harnessId:'omp', workspaceAdapterId:'herdr', executionProfile:'worker-default', targetRef:'refs/heads/main', targetBranchRef:'refs/heads/main', baseCommitOid:'a'.repeat(40), branchName:'pisec/ws_'+'a'.repeat(32)+'/work', worktreePath:'/tmp/work', agentName:'pisec-agent', externalDomains:['html.duckduckgo.com'], effects:['create'], nonEffects:['push'], taskPacket:{{outcome:'Bounded outcome', boundaries:['src/main.ts'], acceptance:['bun test']}}}};
 const refused = await create.execute('id', {{approval_scope: scope}}, undefined, undefined, {{hasUI: false}});
-const acceptanceScope = {{kind:'workstream.accept', projectId:'prj_'+'b'.repeat(32), workstreamId:'ws_'+'a'.repeat(32), targetBranch:'main', completionPacketSha256:'c'.repeat(64), taskPacketSha256:'d'.repeat(64), candidatePatchSha256:'e'.repeat(64), changedPaths:['src/main.ts'], acceptance:[{{criterion:'passed'}}], verification:[{{command:'bun test', result:'passed'}}], conflictPolicy:'bounded-worker-reconciliation', mergePolicy:{{}}, effects:['advance main'], nonEffects:['no push']}};
+const acceptanceScope = {{kind:'workstream.accept', projectId:'prj_'+'b'.repeat(32), workstreamId:'ws_'+'a'.repeat(32), targetBranch:'main', completionPacketSha256:'c'.repeat(64), taskPacketSha256:'d'.repeat(64), candidatePatchSha256:'e'.repeat(64), achievedOutcome:'Verified bounded change', changedPaths:['src/main.ts'], acceptance:[{{criterion:'passed'}}], verification:[{{command:'bun test', result:'passed'}}], residualRisk:'none', conflictPolicy:'bounded-worker-reconciliation', mergePolicy:{{}}, effects:['advance main'], nonEffects:['no push']}};
 const acceptRefused = await accept.execute('id', {{approval_scope: acceptanceScope}}, undefined, undefined, {{hasUI: false}});
 console.log(JSON.stringify({{tools: records.tools.map(value => value.name), events: records.events, label: records.labels[0], approval: create.approval(scope), refused, acceptanceApproval: accept.approval(acceptanceScope), acceptRefused}}));
 """
@@ -160,16 +160,20 @@ console.log(JSON.stringify({{tools: records.tools.map(value => value.name), even
         output = json.loads(result.stdout)
         self.assertEqual(output["tools"], SECRETARY_TOOLS)
         self.assertEqual(output["label"], "Pisec Secretary")
-        self.assertIn("full brief: Full brief", output["approval"]["reason"])
-        self.assertIn("agent name: pisec-agent", output["approval"]["reason"])
-        self.assertIn("exact external domains: html.duckduckgo.com", output["approval"]["reason"])
-        self.assertIn("workspace adapter: herdr", output["approval"]["reason"])
+        self.assertIn("intended outcome: Bounded outcome", output["approval"]["reason"])
+        self.assertIn("allowed paths and changes: src/main.ts", output["approval"]["reason"])
+        self.assertIn("non-effects: push", output["approval"]["reason"])
+        self.assertIn("acceptance tests: bun test", output["approval"]["reason"])
+        self.assertIn("harness/model: omp / configured default", output["approval"]["reason"])
+        self.assertNotIn("op_" + "a" * 32, output["approval"]["reason"])
         self.assertEqual(output["approval"]["policy"], "prompt")
         self.assertEqual(output["approval"]["tier"], "exec")
         self.assertTrue(output["refused"]["isError"])
         self.assertIn("interactive approval UI", output["refused"]["content"][0]["text"])
-        self.assertIn("target branch: main", output["acceptanceApproval"]["reason"])
-        self.assertIn("candidate patch digest: " + "e" * 64, output["acceptanceApproval"]["reason"])
+        self.assertIn("achieved outcome: Verified bounded change", output["acceptanceApproval"]["reason"])
+        self.assertIn("changed paths: src/main.ts", output["acceptanceApproval"]["reason"])
+        self.assertIn('verification evidence: [{\"command\":\"bun test\",\"result\":\"passed\"}]', output["acceptanceApproval"]["reason"])
+        self.assertIn("residual risk: none", output["acceptanceApproval"]["reason"])
         self.assertEqual(output["acceptanceApproval"]["policy"], "prompt")
         self.assertTrue(output["acceptRefused"]["isError"])
         self.assertIn("interactive approval UI", output["acceptRefused"]["content"][0]["text"])

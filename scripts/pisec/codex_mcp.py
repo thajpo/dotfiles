@@ -35,6 +35,16 @@ TOOLS = {
     "pisec_verify_issue": ("issue.verify", {"type": "object"}),
 }
 
+TOOL_DESCRIPTIONS = {
+    "pisec_show_task_packet": "Use when you need the immutable assigned outcome and boundaries; reads the authoritative task packet.",
+    "pisec_checkpoint_workstream": "Use to record typed progress or the final ready_review evidence; creates the durable checkpoint transition.",
+    "pisec_request_help": "Use when blocked, clarifying, reviewing, or needing access; creates the single typed upward-help source.",
+    "pisec_list_attention": "Use at turn start and before ending a turn; lists current authorized attention references without acknowledging them.",
+    "pisec_inspect_attention": "Use after attention.list to identify the typed source and its existing inspector; read-only.",
+    "pisec_report_issue": "Use for access, tooling, lifecycle, or permission failures; records a canonical issue for the project Secretary.",
+    "pisec_verify_issue": "Use when the Secretary asks you to verify a remediation; closes the reporter revision or reopens supervisor attention.",
+}
+
 if any(operation not in SOCKET_OPERATIONS["runtime"] for operation, _schema in TOOLS.values()):
     raise RuntimeError("Codex Pisec MCP tools are absent from the generated operation catalogue")
 
@@ -89,7 +99,7 @@ def main() -> int:
             elif method == "notifications/initialized":
                 continue
             elif method == "tools/list":
-                result = {"tools": [{"name": name, "description": f"Authenticated Pisec worker operation: {operation}", "inputSchema": schema} for name, (operation, schema) in TOOLS.items()]}
+                result = {"tools": [{"name": name, "description": TOOL_DESCRIPTIONS.get(name, f"Use to perform the typed {operation} transition; inspect the result and follow its next action."), "inputSchema": schema} for name, (operation, schema) in TOOLS.items()]}
             elif method == "tools/call":
                 params = request.get("params", {})
                 name = params.get("name")

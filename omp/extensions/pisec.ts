@@ -192,33 +192,23 @@ function renderTaskPacket(value: unknown): string {
 function renderExactScope(value: unknown): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "Pisec refused: approval scope is not an object";
   const scope = value as JsonObject;
-  const externalDomains = Array.isArray(scope.externalDomains) ? scope.externalDomains.join(", ") || "(empty)" : "(invalid)";
-  const effects = Array.isArray(scope.effects) ? scope.effects.join("; ") : "(invalid)";
+  const packet = scope.taskPacket && typeof scope.taskPacket === "object" ? scope.taskPacket as JsonObject : {};
+  const allowed = Array.isArray(packet.boundaries) ? packet.boundaries.join("; ") || "(none)" : "(invalid)";
+  const acceptance = Array.isArray(packet.acceptance) ? packet.acceptance.join("; ") || "(none)" : "(invalid)";
   const nonEffects = Array.isArray(scope.nonEffects) ? scope.nonEffects.join("; ") : "(invalid)";
+  const readable = [
+    ...(Array.isArray(scope.dataDirs) ? scope.dataDirs.map(String) : []),
+    ...(typeof scope.pythonEnv === "string" ? [scope.pythonEnv] : []),
+  ];
   return [
-    "Pisec exact workstream creation approval",
-    `operation id: ${String(scope.operationId ?? "")}`,
-    `project id: ${String(scope.projectId ?? "")}`,
-    `workstream id: ${String(scope.workstreamId ?? "")}`,
-    `title: ${String(scope.title ?? "")}`,
-    `purpose: ${String(scope.purpose ?? "")}`,
-    `full brief: ${String(scope.brief ?? "")}`,
-    `harness adapter: ${String(scope.harnessId ?? "")}`,
-    `implementation model: ${String(scope.implementationModel ?? "(configured default)")}`,
-    `harness model: ${String(scope.harnessModel ?? "(adapter default)")}`,
-    `reasoning effort: ${String(scope.reasoningEffort ?? "(adapter default)")}`,
-    `workspace adapter: ${String(scope.workspaceAdapterId ?? "")}`,
-    `execution profile: ${String(scope.executionProfile ?? "")}`,
-    `target ref: ${String(scope.targetRef ?? "")}`,
-    `base commit OID: ${String(scope.baseCommitOid ?? "")}`,
-    `branch: ${String(scope.branchName ?? "")}`,
-    `checkout path: ${String(scope.worktreePath ?? "")}`,
-    `agent name: ${String(scope.agentName ?? "")}`,
-    `exact external domains: ${externalDomains}`,
-    `python env (read-only): ${scope.pythonEnv ? String(scope.pythonEnv) : "(none)"}`,
-    `effects: ${effects}`,
+    "Pisec worker delegation approval",
+    `intended outcome: ${String(packet.outcome ?? scope.purpose ?? scope.title ?? "")}`,
+    `allowed paths and changes: ${allowed}`,
     `non-effects: ${nonEffects}`,
-    `immutable task packet: ${renderTaskPacket(scope.taskPacket)}`,
+    `acceptance tests: ${acceptance}`,
+    `harness/model: ${String(scope.harnessId ?? "")} / ${String(scope.implementationModel ?? scope.harnessModel ?? "configured default")}`,
+    `approved readable data: ${readable.join(", ") || "(none)"}`,
+    "warning: approved readable data and Python paths are user data and are not proven secret-free",
   ].join("\n");
 }
 
@@ -226,23 +216,18 @@ function renderAcceptanceScope(value: unknown): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "Pisec refused: acceptance scope is not an object";
   const scope = value as JsonObject;
   const changedPaths = Array.isArray(scope.changedPaths) ? scope.changedPaths.join(", ") || "(none)" : "(invalid)";
+  const achieved = String(scope.achievedOutcome ?? scope.outcome ?? "(see completion evidence)");
   const acceptance = Array.isArray(scope.acceptance) ? JSON.stringify(scope.acceptance) : "(invalid)";
   const verification = Array.isArray(scope.verification) ? JSON.stringify(scope.verification) : "(invalid)";
   const effects = Array.isArray(scope.effects) ? scope.effects.join("; ") : "(invalid)";
   const nonEffects = Array.isArray(scope.nonEffects) ? scope.nonEffects.join("; ") : "(invalid)";
   return [
-    "Pisec bounded workstream acceptance",
-    `project id: ${String(scope.projectId ?? "")}`,
-    `workstream id: ${String(scope.workstreamId ?? "")}`,
-    `target branch: ${String(scope.targetBranch ?? "")}`,
-    `completion packet digest: ${String(scope.completionPacketSha256 ?? "")}`,
-    `task packet digest: ${String(scope.taskPacketSha256 ?? "")}`,
-    `candidate patch digest: ${String(scope.candidatePatchSha256 ?? "")}`,
+    "Pisec candidate acceptance",
+    `achieved outcome: ${achieved}`,
     `changed paths: ${changedPaths}`,
     `acceptance criteria: ${acceptance}`,
     `verification evidence: ${verification}`,
-    `conflict policy: ${String(scope.conflictPolicy ?? "")}`,
-    `merge policy: ${JSON.stringify(scope.mergePolicy ?? {})}`,
+    `residual risk: ${String(scope.residualRisk ?? "(none stated)")}`,
     `effects: ${effects}`,
     `non-effects: ${nonEffects}`,
   ].join("\n");
@@ -331,7 +316,7 @@ function registerRuntime(pi: ExtensionAPI): void {
       return {
         systemPrompt: [
           ...event.systemPrompt,
-           "Pisec secretary contract: you are trusted inside exactly one registered project Fence. You may use the full standard OMP tool surface, installed plugins, project MCP, copied user extensions/skills/rules/commands/themes/agents, normal local Git, project writes, and broad public web access. Plugins and MCP are trusted code inside this same Fence boundary, not extra sandboxes. Fence denies sibling projects, host secrets, metadata IP, and the real harness/workspace state. Raw git push remains denied; publish an existing non-default branch with pisec_push_branch, which performs only a pinned-origin fast-forward through the host broker without exposing credentials. Keep worker creation and bounded workstream acceptance behind exact interactive approval. After acceptance, own target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without requesting a second merge approval. For independent worker research requests, list pending packets and launch the exact @smol pisec-web-research agent in one task batch; return every answer through durable Pisec research tools. Do not claim product state from memory; inspect through Pisec adapters.",
+           "Pisec secretary contract: you are trusted inside exactly one registered project Fence. You may use the full standard OMP tool surface, installed plugins, project MCP, approved user-authored skills/rules/commands/themes/agents/instructions, normal local Git, project writes, and broad public web access. Plugins and MCP are trusted code inside this same Fence boundary, not extra sandboxes. Fence denies sibling projects, host secrets, metadata IP, and the real harness/workspace state. Raw git push remains denied; publish an existing non-default branch with pisec_push_branch, which performs only a pinned-origin fast-forward through the host broker without exposing credentials. Keep worker creation and bounded workstream acceptance behind exact interactive approval. After acceptance, own target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without requesting a second merge approval. For independent worker research requests, list pending packets and launch the exact @smol pisec-web-research agent in one task batch; return every answer through durable Pisec research tools. Do not claim product state from memory; inspect through Pisec adapters.",
         ],
       };
     }
@@ -410,7 +395,7 @@ function secretaryTools(pi: ExtensionAPI): void {
     pi.registerTool({
       name,
       label,
-      description: `Use the Pisec broker operation ${operation}.`,
+      description: `Use when the typed ${operation} transition is needed; inspect the result and follow its next action.`,
       approval,
       parameters,
       async execute(_id, params, signal) {
@@ -496,7 +481,7 @@ function fleetTools(pi: ExtensionAPI): void {
     pi.registerTool({
       name,
       label,
-      description: `Use the Pisec fleet broker operation ${operation}.`,
+      description: `Use when the typed ${operation} transition is needed; inspect the semantic result and follow its next action.`,
       approval,
       parameters,
       async execute(_id, params, signal) {

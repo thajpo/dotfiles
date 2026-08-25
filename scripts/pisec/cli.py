@@ -255,6 +255,11 @@ def _key_label(value: Any) -> str:
     return text.capitalize()
 
 
+def _ordinary_text(value: Any) -> str:
+    """Render human prose without exposing internal identity tokens."""
+    return re.sub(r"\b(?:prj|ws|op|tp|az)_[0-9a-f]{32,64}\b", "[internal item]", _scalar_text(value))
+
+
 def _render_value(value: Any, indent: int = 0) -> list[str]:
     prefix = " " * indent
     if _is_simple(value):
@@ -306,9 +311,7 @@ def _project_lines(project: Any, heading: str = "Project") -> list[str]:
     lines = [heading]
     fields = (
         ("Name", "display_name"),
-        ("ID", "project_id"),
         ("Default ref", "default_ref"),
-        ("Coordinator workstream", "secretary_workstream_id"),
     )
     for label, key in fields:
         if key in project:
@@ -323,15 +326,11 @@ def _project_table(projects: Any, *, show_state: bool = False) -> list[str]:
     for item in projects:
         if not isinstance(item, Mapping):
             continue
-        row = [
-            item.get("display_name", "-"),
-            item.get("project_id", "-"),
-            item.get("default_ref", "-"),
-        ]
+        row = [item.get("display_name", "-"), item.get("taskState", "-"), item.get("runtimeState", "-"), item.get("attentionCount", 0), item.get("nextAction", "-")]
         if show_state:
             row.append("inactive" if not item.get("active") else "active")
         rows.append(tuple(row))
-    headers = ("NAME", "ID", "DEFAULT REF") + (("STATE",) if show_state else ())
+    headers = ("NAME", "TASK", "RUNTIME", "ATTENTION", "NEXT ACTION") + (("STATE",) if show_state else ())
     return _table(headers, rows)
 
 
@@ -342,7 +341,6 @@ def _first_mate_lines(first_mate: Any) -> list[str]:
         return ["First Mate: not provisioned (`pisec` admin first_mate.ensure can create it)"]
     return [
         "First Mate: present",
-        f"  Workstream: {_scalar_text(first_mate.get('workstreamId'))}",
         f"  State: {_scalar_text(first_mate.get('provisioningState'))} / {_scalar_text(first_mate.get('observedState'))}",
     ]
 
@@ -354,16 +352,8 @@ def _workstream_table(workstreams: Any) -> list[str]:
     for item in workstreams:
         if not isinstance(item, Mapping):
             continue
-        rows.append(
-            (
-                item.get("desired_state", "-"),
-                item.get("observed_state", "-"),
-                item.get("kind", "-"),
-                item.get("title", "-"),
-                item.get("workstream_id", "-"),
-            )
-        )
-    return _table(("STATE", "RUNTIME", "KIND", "TITLE", "ID"), rows)
+        rows.append((item.get("kind", "-"), item.get("title", "-"), item.get("taskState", "-"), item.get("runtimeState", "-"), item.get("attentionCount", 0), item.get("nextAction", "-")))
+    return _table(("KIND", "TITLE", "TASK", "RUNTIME", "ATTENTION", "NEXT ACTION"), rows)
 
 
 def _decision_table(decisions: Any) -> list[str]:
@@ -373,8 +363,8 @@ def _decision_table(decisions: Any) -> list[str]:
     for item in decisions:
         if not isinstance(item, Mapping):
             continue
-        rows.append((item.get("state", "-"), item.get("summary", "-"), item.get("decision_id", "-")))
-    return _table(("STATE", "SUMMARY", "ID"), rows)
+        rows.append((item.get("state", "-"), item.get("summary", "-")))
+    return _table(("STATE", "SUMMARY"), rows)
 
 
 def _status_lines(result: Any, heading: str) -> list[str]:
@@ -397,8 +387,7 @@ def _status_lines(result: Any, heading: str) -> list[str]:
 
     project = result.get("project")
     project_name = project.get("display_name", "-") if isinstance(project, Mapping) else "-"
-    project_id = project.get("project_id", "-") if isinstance(project, Mapping) else "-"
-    lines = [f"{heading}: {project_name} ({project_id})"]
+    lines = [f"{heading}: {project_name}"]
     if isinstance(project, Mapping):
         lines.append(f"Default ref: {_scalar_text(project.get('default_ref'))}")
     if "source" in result:
@@ -434,9 +423,7 @@ def _human_result(command: tuple[str, ...], result: Any) -> str:
         heading = "Project already inactive" if result.get("reused") else "Project deactivated"
         lines = [heading]
         if isinstance(project, Mapping):
-            lines.append(f"Project: {_scalar_text(project.get('display_name'))} ({_scalar_text(project.get('project_id'))})")
-        if result.get("workstreamId"):
-            lines.append(f"Retired coordinator: {_scalar_text(result.get('workstreamId'))}")
+            lines.append(f"Project: {_scalar_text(project.get('display_name'))}")
         if result.get("retainedSessionRoot"):
             lines.append(f"Retained session root: {_scalar_text(result.get('retainedSessionRoot'))}")
         lines.append("Registration: retained; reopen through `pisec project open`")
@@ -450,23 +437,22 @@ def _human_result(command: tuple[str, ...], result: Any) -> str:
         lines = [heading]
         project = result.get("project")
         if isinstance(project, Mapping):
-            lines.append(f"Project: {_scalar_text(project.get('display_name'))} ({_scalar_text(project.get('project_id'))})")
+            lines.append(f"Project: {_scalar_text(project.get('display_name'))}")
         workstream = result.get("workstream")
         if isinstance(workstream, Mapping):
-            lines.append(f"Coordinator: {_scalar_text(workstream.get('workstream_id'))}")
             lines.append(f"State: {_scalar_text(workstream.get('desired_state'))} / {_scalar_text(workstream.get('provisioning_state'))}")
         binding = result.get("binding")
         if isinstance(binding, Mapping):
             lines.append(f"Runtime: {_scalar_text(binding.get('observed_state'))}")
         return "\n".join(lines)
     if command == ("project", "refresh") and isinstance(result, Mapping):
-        lines = ["Pisec runtime refresh", f"Generation: {_scalar_text(result.get('generation'))}"]
+        lines = ["Pisec runtime refresh"]
         for key in ("upgraded", "pending", "skipped", "failed"):
             values = result.get(key, [])
             lines.append(f"{_key_label(key)} ({len(values) if isinstance(values, list) else 0})")
             if isinstance(values, list):
-                rows = [(item.get("project", "-"), item.get("workstreamId", "-"), item.get("reason", item.get("state", item.get("generation", "-")))) for item in values if isinstance(item, Mapping)]
-                lines.extend(_table(("PROJECT", "WORKSTREAM", "RESULT"), rows))
+                rows = [(item.get("project", "-"), item.get("reason", item.get("state", "-"))) for item in values if isinstance(item, Mapping)]
+                lines.extend(_table(("PROJECT", "RESULT"), rows))
         return "\n".join(lines)
     if command == ("reconcile",) and isinstance(result, Mapping):
         lines = ["Reconcile complete" if result.get("reconciled") else "Reconcile incomplete"]
@@ -476,8 +462,8 @@ def _human_result(command: tuple[str, ...], result: Any) -> str:
             lines.extend(_render_value(workspace, 2))
         resumed = result.get("resumed", [])
         lines.append(f"Resumed operations ({len(resumed) if isinstance(resumed, list) else 0})")
-        rows = [(item.get("operationId", "-"), item.get("state", item.get("reused", "-"))) for item in resumed if isinstance(item, Mapping)]
-        lines.extend(_table(("OPERATION", "RESULT"), rows))
+        rows = [(item.get("state", item.get("reused", "-")),) for item in resumed if isinstance(item, Mapping)]
+        lines.extend(_table(("RESULT",), rows))
         errors = result.get("errors", [])
         if errors:
             lines.append(f"Errors ({len(errors)})")
@@ -487,7 +473,7 @@ def _human_result(command: tuple[str, ...], result: Any) -> str:
         lines = [f"Pisec doctor: {'OK' if result.get('ok') else 'FAILED'}"]
         checks = result.get("checks", [])
         rows = [
-            ("OK" if item.get("status") == "ok" else "ERROR", item.get("name", "-"), item.get("detail", "-"))
+            ("OK" if item.get("status") == "ok" else "ERROR", _ordinary_text(item.get("name", "-")), _ordinary_text(item.get("detail", "-")))
             for item in checks
             if isinstance(item, Mapping)
         ]
@@ -503,15 +489,16 @@ def _human_result(command: tuple[str, ...], result: Any) -> str:
         lines = ["Workstream cleanup replayed" if result.get("reused") else "Workstream cleanup complete"]
         workstream = result.get("workstream")
         if isinstance(workstream, Mapping):
-            lines.append(f"Workstream: {_scalar_text(workstream.get('title'))} ({_scalar_text(workstream.get('workstream_id'))})")
-            lines.append(f"State: {_scalar_text(workstream.get('desired_state'))} / {_scalar_text(workstream.get('provisioning_state'))}")
+            lines.append(f"Workstream: {_scalar_text(workstream.get('title'))}")
+            lines.append(f"Task: {_scalar_text(workstream.get('taskState', workstream.get('desired_state')))}")
+            lines.append(f"Runtime: {_scalar_text(workstream.get('runtimeState', workstream.get('observed_state')))}")
         operation = result.get("operation")
         if isinstance(operation, Mapping):
-            lines.append(f"Operation: {_scalar_text(operation.get('operation_id'))} ({_scalar_text(operation.get('state'))})")
+            lines.append(f"Operation: {_scalar_text(operation.get('state'))}")
         lines.append("Branch: retained")
         return "\n".join(lines)
     if isinstance(result, Mapping) and result.get("focused") and "workstreamId" in result:
-        return f"Focused workstream {_scalar_text(result.get('workstreamId'))}"
+        return "Workstream focused"
     return "\n".join(_render_value(result))
 
 

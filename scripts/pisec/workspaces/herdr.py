@@ -179,7 +179,7 @@ class HerdrWorkspaceAdapter:
             state = agent.get("agent_status", "unknown")
             if isinstance(name, str) and isinstance(surface_id, str):
                 state = state if state in {"unknown", "starting", "working", "blocked", "idle", "done", "stopped", "missing", "error"} else "unknown"
-                agent_observation = AgentObservation(name=name, surface_id=surface_id, identity_usable=state in {"working", "blocked", "idle"}, state=state)
+                agent_observation = AgentObservation(name=name, surface_id=surface_id, identity_usable=state in {"working", "blocked", "idle", "done"}, state=state)
         return WorkspaceObservation(
             workspace_id=str(identity["workspace_id"]),
             view_id=str(identity["view_id"]),

@@ -30,8 +30,33 @@ def _profile_role(profile: str) -> str:
     if profile == "first-mate":
         return "first_mate"
     return "worker"
-COPY_NAMES = ("extensions", "skills", "rules", "commands", "themes", "agents")
+COPY_NAMES = ("skills", "rules", "commands", "themes", "agents")
 COPY_FILES = ("AGENTS.md",)
+SURFACE_NAMES = ("extensions", *COPY_NAMES)
+USER_CONTEXT_MAX_FILE_BYTES = 256 * 1024
+USER_CONTEXT_MAX_TOTAL_BYTES = 8 * 1024 * 1024
+_CREDENTIAL_BASENAMES = frozenset({
+    ".aws",
+    ".gnupg",
+    ".ssh",
+    "credentials",
+    "credentials.json",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa",
+    "access_token",
+    "api_key",
+    "auth_token",
+    "key",
+    "keys",
+    "private_key",
+    "provider",
+    "secret",
+    "secrets",
+    "token",
+    "tokens",
+})
 PLUGIN_FILES = ("package.json", "bun.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "omp-plugins.lock.json")
 
 def _expand_path(value: Any, name: str) -> str:
@@ -111,7 +136,7 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _normalize_owner_tree(root: Path) -> None:
+def _normalize_owner_tree(root: Path, *, readonly: bool = False) -> None:
     for path in [root, *sorted(root.rglob("*"))]:
         if path.is_symlink():
             raise PisecError("isolated OMP surface contains a symlink")
@@ -119,9 +144,9 @@ def _normalize_owner_tree(root: Path) -> None:
         if info.st_uid != os.geteuid():
             raise PisecError("isolated OMP surface is not user-owned")
         if stat.S_ISDIR(info.st_mode):
-            os.chmod(path, 0o700)
+            os.chmod(path, 0o500 if readonly else 0o700)
         elif stat.S_ISREG(info.st_mode):
-            os.chmod(path, 0o600 | (0o100 if info.st_mode & stat.S_IXUSR else 0))
+            os.chmod(path, (0o400 if readonly else 0o600) | (0o100 if info.st_mode & stat.S_IXUSR else 0))
         else:
             raise PisecError("isolated OMP surface contains an unsupported file")
 
@@ -130,6 +155,10 @@ def _activate_directory(staged: Path, target: Path) -> None:
     backup = target.with_name(f".{target.name}.previous-{secrets.token_hex(8)}")
     replaced = False
     try:
+        # A staged immutable tree must be made writable at its own root while
+        # it is moved; the contents remain immutable after activation.
+        if staged.is_dir() and not staged.is_symlink():
+            os.chmod(staged, 0o700)
         if target.exists():
             os.replace(target, backup)
             replaced = True
@@ -145,8 +174,12 @@ def _activate_directory(staged: Path, target: Path) -> None:
         raise
     finally:
         if staged.exists():
+            if staged.is_dir() and not staged.is_symlink():
+                _normalize_owner_tree(staged, readonly=False)
             shutil.rmtree(staged)
         if backup.exists():
+            if backup.is_dir() and not backup.is_symlink():
+                _normalize_owner_tree(backup, readonly=False)
             shutil.rmtree(backup)
 
 
@@ -175,44 +208,78 @@ def _surface_source(origin: Path, kind: str) -> Path:
     return resolved
 
 
-def _copy_user_surface(destination: Path) -> None:
+def _user_context_name_allowed(name: str) -> bool:
+    lowered = name.casefold()
+    return lowered not in _CREDENTIAL_BASENAMES and not lowered.startswith(".env") and not any(
+        marker in lowered for marker in ("credential", "private-key", "private_key", "access-token", "api-key")
+    )
+
+
+def _copy_user_context_entry(source: Path, target: Path, source_root: Path, manifest: list[dict[str, str]], total: list[int], active: set[Path], forbidden_values: Sequence[bytes] = ()) -> None:
+    try:
+        info = source.lstat()
+    except OSError as error:
+        raise PisecError("approved OMP user context is unavailable") from error
+    if source.is_symlink():
+        raise PisecError("approved OMP user context contains a symlink")
+    if not _user_context_name_allowed(source.name):
+        raise PisecError(f"approved OMP user context contains a credential-like basename: {source.name}")
+    resolved = source.resolve(strict=False)
+    if resolved != source or not resolved.is_relative_to(source_root):
+        raise PisecError("approved OMP user context escapes its source root")
+    if stat.S_ISDIR(info.st_mode):
+        if resolved in active:
+            raise PisecError("approved OMP user context contains a cycle")
+        active.add(resolved)
+        if target.exists() and (target.is_symlink() or not target.is_dir()):
+            raise PisecError("approved OMP user context target is unsafe")
+        target.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for child in sorted(source.iterdir(), key=lambda item: item.name):
+            _copy_user_context_entry(child, target / child.name, source_root, manifest, total, active, forbidden_values)
+        active.remove(resolved)
+        return
+    if not stat.S_ISREG(info.st_mode):
+        raise PisecError("approved OMP user context contains a special file")
+    if info.st_size > USER_CONTEXT_MAX_FILE_BYTES or total[0] + info.st_size > USER_CONTEXT_MAX_TOTAL_BYTES:
+        raise PisecError("approved OMP user context is too large")
+    content = source.read_bytes()
+    if any(value and value in content for value in forbidden_values):
+        raise PisecError(f"approved OMP user context contains a configured credential: {source}")
+    if b"-----BEGIN " in content and b" PRIVATE KEY-----" in content:
+        raise PisecError("approved OMP user context contains a private-key header")
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        decoded = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise PisecError("approved OMP user context is not valid UTF-8") from error
+    _atomic_write(target, decoded, mode=0o600)
+    total[0] += len(content)
+    manifest.append({"path": str(source.relative_to(source_root)), "sha256": hashlib.sha256(content).hexdigest()})
+
+
+def _copy_user_surface(destination: Path, *, forbidden_values: Sequence[bytes] = ()) -> list[dict[str, str]]:
     source = Path.home() / ".omp" / "agent"
     if source.exists() or source.is_symlink():
         if source.is_symlink() or not source.is_dir():
             raise PisecError("user OMP agent surface is unsafe")
+    manifest: list[dict[str, str]] = []
+    total = [0]
     for name in COPY_NAMES:
         origin = source / name
         target = destination / name
-        if name == "skills":
-            if not origin.exists() and not origin.is_symlink():
-                if target.exists() and not target.is_symlink():
-                    shutil.rmtree(target)
-                continue
-            origin = _surface_source(origin, "directory")
-        else:
-            if not origin.exists() or origin.is_symlink() or not origin.is_dir():
-                if target.exists() and not target.is_symlink():
-                    shutil.rmtree(target)
-                continue
+        if not origin.exists() and not origin.is_symlink():
+            if target.exists() and not target.is_symlink():
+                shutil.rmtree(target)
+            continue
+        if not origin.is_dir():
+            raise PisecError(f"approved OMP user context directory is unsafe: {name}")
         if target.is_symlink():
             raise PisecError("isolated OMP surface contains an unsafe symlink")
         if target.exists() and not target.is_dir():
             raise PisecError("isolated OMP surface target is not a directory")
-        ignore_patterns = shutil.ignore_patterns("*.db", "*.sqlite", "*.token", ".env", ".env.*", "sessions")
-
-        def ignore_unsafe(directory: str, names: list[str]) -> list[str]:
-            ignored = set(ignore_patterns(directory, names))
-            if name == "skills":
-                ignored.add("treehouse-worktrees")
-            if name == "extensions":
-                ignored.add("herdr-omp-agent-state.ts")
-            ignored.update(item for item in names if (Path(directory) / item).is_symlink())
-            return sorted(ignored)
-
-        staged = target.with_name(f".{target.name}.staged-{secrets.token_hex(8)}")
-        shutil.copytree(origin, staged, symlinks=False, ignore=ignore_unsafe)
-        _normalize_owner_tree(staged)
-        _activate_directory(staged, target)
+        if target.exists():
+            shutil.rmtree(target)
+        _copy_user_context_entry(origin, target, source, manifest, total, set(), forbidden_values)
     for name in COPY_FILES:
         origin = source / name
         target = destination / name
@@ -220,24 +287,37 @@ def _copy_user_surface(destination: Path) -> None:
             if target.exists() and not target.is_symlink():
                 target.unlink()
             continue
-        origin = _surface_source(origin, "file")
+        if origin.is_symlink() or not origin.is_file():
+            raise PisecError("isolated OMP instruction target is unsafe")
         if target.is_symlink() or (target.exists() and not target.is_file()):
             raise PisecError("isolated OMP instruction target is unsafe")
-        _atomic_write(target, origin.read_text())
+        _copy_user_context_entry(origin, target, source, manifest, total, set(), forbidden_values)
+    return manifest
 
 
-def _copy_user_config(destination: Path) -> Path | None:
-    source = Path.home() / ".omp" / "agent" / "config.yml"
-    target = destination / "user-config.yml"
-    if not source.exists() and not source.is_symlink():
-        if target.exists() or target.is_symlink():
-            if target.is_symlink() or not target.is_file():
-                raise PisecError("isolated OMP user config target is unsafe")
-            target.unlink()
-        return None
-    resolved = _surface_source(source, "file")
-    _copy_safe_entry(resolved, target)
-    return target
+def _configured_secret_values(gateway_token_file: Path) -> tuple[bytes, ...]:
+    values: list[bytes] = []
+    for name in (
+        "OMP_AUTH_BROKER_TOKEN",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+    ):
+        value = os.environ.get(name)
+        if value:
+            values.append(value.encode("utf-8"))
+    for path in (Path.home() / ".omp" / "auth-broker.token", gateway_token_file):
+        try:
+            info = path.lstat()
+            if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o022:
+                value = path.read_bytes().strip()
+                if value:
+                    values.append(value)
+        except OSError:
+            continue
+    return tuple(dict.fromkeys(value for value in values if len(value) >= 8))
 
 
 def _copy_safe_entry(source: Path, target: Path, active_dirs: set[Path] | None = None) -> None:
@@ -329,7 +409,7 @@ def _copy_plugin_snapshot(destination: Path, source: Path | None = None) -> dict
 def _copy_surface(source: Path, destination: Path) -> None:
     if not source.is_dir() or source.is_symlink():
         raise PisecError("runtime surface agent is unavailable")
-    for name in COPY_NAMES:
+    for name in SURFACE_NAMES:
         origin = source / name
         target = destination / name
         if not origin.exists():
@@ -409,17 +489,18 @@ def _artifact_value(artifacts: HarnessArtifacts, key: str) -> str:
     return value
 
 
-def _safe_owned_tree(root: Path) -> None:
+def _safe_owned_tree(root: Path, *, readonly: bool = False) -> None:
     if not root.exists():
         return
     if root.is_symlink():
         raise NeedsAttentionError("OMP harness home is a symlink")
     info = root.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+    allowed_modes = {0o700, 0o500} if readonly else {0o700}
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) not in allowed_modes:
         raise NeedsAttentionError("OMP harness home is unsafe")
     for child in sorted(root.rglob("*")):
         child_info = child.lstat()
-        if child.is_symlink() or child_info.st_uid != os.geteuid() or child_info.st_mode & 0o022:
+        if child.is_symlink() or child_info.st_uid != os.geteuid() or child_info.st_mode & 0o022 or (readonly and child_info.st_mode & 0o200):
             raise NeedsAttentionError("OMP harness home contains an unsafe entry")
 
 
@@ -462,8 +543,7 @@ class OmpHarnessAdapter:
         try:
             surface = staged / "agent"
             surface.mkdir(mode=0o700)
-            _copy_user_surface(surface)
-            _copy_user_config(surface)
+            user_context = _copy_user_surface(surface, forbidden_values=_configured_secret_values(Path(self.harness_config["gateway"]["tokenFile"])))
             extensions = surface / "extensions"
             agents = surface / "agents"
             extensions.mkdir(mode=0o700, exist_ok=True)
@@ -484,17 +564,19 @@ class OmpHarnessAdapter:
                 "adapter": self.manifest.adapter_id,
                 "adapterVersion": self.manifest.version_label,
                 "config": self.config,
+                "userContext": user_context,
                 "harnessExecutableSha256": _file_digest(Path(self.harness_config["executablePath"])),
                 "fenceExecutableSha256": _file_digest(Path(str(self.config["fencePath"]))),
             }
             _atomic_write(staged / "surface.json", canonical_json(manifest, max_bytes=256 * 1024, max_text=64 * 1024) + "\n")
-            _normalize_owner_tree(staged)
+            _normalize_owner_tree(staged, readonly=True)
             digest = _tree_digest(staged)
             target = surfaces_root / self.manifest.adapter_id
             if target.exists():
                 if target.is_symlink() or not target.is_dir():
                     raise PisecError("existing runtime surface is unsafe or corrupt")
             _activate_directory(staged, target)
+            _normalize_owner_tree(target, readonly=True)
             return RuntimeSurfaceArtifacts(digest, manifest, str(target.absolute()))
         except Exception:
             if staged.exists():
@@ -504,7 +586,7 @@ class OmpHarnessAdapter:
     def current_runtime_surface(self) -> RuntimeSurfaceArtifacts:
         target = self.state_root / "runtime-current" / self.manifest.adapter_id
         try:
-            _safe_owned_tree(target)
+            _safe_owned_tree(target, readonly=True)
             manifest = json.loads((target / "surface.json").read_text(encoding="utf-8"))
             digest = _tree_digest(target)
         except (NeedsAttentionError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
@@ -588,23 +670,27 @@ class OmpHarnessAdapter:
         self.validate_execution_profile(profile, role)
         surface_root = self._surface_root(scope)
         generation_sha256 = self.desired_generation(scope)
-        agent_dir = state_root / "omp" / workstream_id
-        prior_agent_dir = self.state_root / "omp" / workstream_id
-        if state_root != self.state_root and prior_agent_dir.exists():
-            if prior_agent_dir.is_symlink() or any(path.is_symlink() for path in prior_agent_dir.rglob("*")):
-                raise PisecError("existing OMP profile contains a symlink")
-            _secure_tree(state_root, agent_dir.parent)
-            _copy_safe_entry(prior_agent_dir, agent_dir)
-            _normalize_owner_tree(agent_dir)
+        state_binding = state_root / "binding-state" / "omp" / workstream_id
+        surface_binding = state_root / "binding-surfaces" / "omp" / workstream_id
+        prior_state_binding = self.state_root / "binding-state" / "omp" / workstream_id
+        if state_root != self.state_root and prior_state_binding.exists():
+            if prior_state_binding.is_symlink() or any(path.is_symlink() for path in prior_state_binding.rglob("*")):
+                raise PisecError("existing OMP binding state contains a symlink")
+            _secure_tree(state_root, state_binding.parent)
+            _copy_safe_entry(prior_state_binding, state_binding)
+            _normalize_owner_tree(state_binding)
         else:
-            _secure_tree(state_root, agent_dir)
-        _secure_tree(agent_dir, agent_dir / "sessions")
-        _copy_surface(surface_root / "agent", agent_dir)
-        _normalize_owner_tree(agent_dir)
-        discovery_agent_dir = agent_dir / "agent"
-        _secure_tree(state_root, discovery_agent_dir)
-        _copy_surface(surface_root / "agent", discovery_agent_dir)
-        plugin_info = _copy_plugins(surface_root, agent_dir)
+            _secure_tree(state_root, state_binding)
+        _secure_tree(state_binding, state_binding / "sessions")
+        _secure_tree(state_binding, state_binding / "tmp")
+        _secure_tree(state_binding, state_binding / "run")
+        _secure_tree(state_binding, state_binding / "xdg" / "state")
+        _secure_tree(state_binding, state_binding / "xdg" / "cache")
+        _secure_tree(state_binding, state_binding / "xdg" / "config")
+        _secure_tree(state_root, surface_binding)
+        surface_agent = surface_binding / "agent"
+        _secure_tree(surface_binding, surface_agent)
+        _copy_surface(surface_root / "agent", surface_agent)
         secret_path = state_root / "secrets" / f"{workstream_id}.token"
         _secure_tree(state_root, secret_path.parent)
         if preserved_token is not None:
@@ -617,7 +703,7 @@ class OmpHarnessAdapter:
             _atomic_write(secret_path, token + "\n")
         roles = self.harness_config["modelRoles"]
         providers = self._model_providers(str(profile), scope.get("externalDomains") if isinstance(scope.get("externalDomains"), list) else [])
-        _atomic_write(agent_dir / "models.yml", json.dumps({"providers": providers}, indent=2, sort_keys=True) + "\n")
+        _atomic_write(surface_agent / "models.yml", json.dumps({"providers": providers}, indent=2, sort_keys=True) + "\n")
         overlay: dict[str, Any] = {
             "setupVersion": 2,
             "modelRoles": roles,
@@ -635,42 +721,45 @@ class OmpHarnessAdapter:
                 "pisec_answer_worker_research": "allow",
                 "pisec_decline_worker_research": "allow",
             }
-        overlay_path = agent_dir / "config.yml"
+        overlay_path = surface_agent / "config.yml"
         _atomic_write(overlay_path, json.dumps(overlay, indent=2, sort_keys=True) + "\n")
         renderer = self.policy_renderer
         if renderer is None:
             from ..fence import render_policy
             renderer = render_policy
         policy_path, policy_digest = renderer(
-            state_root,
+            surface_binding,
             scope,
-            agent_dir,
+            surface_agent,
             self.config,
-            harness_home=agent_dir,
+            harness_home=state_binding,
             adapter_replacements={
                 "HARNESS_EXECUTABLE": self.harness_config["executablePath"],
-                "HARNESS_EXTENSION": agent_dir / "extensions" / "pisec.ts",
+                "HARNESS_EXTENSION": surface_agent / "extensions" / "pisec.ts",
                 "HARNESS_NATIVES": Path.home() / ".omp" / "natives",
-                "HARNESS_RUN": Path.home() / ".omp" / "run",
+                "HARNESS_RUN": state_binding / "run",
                 "WORKSPACE_CONFIG": Path.home() / ".config" / "herdr",
             },
             baseline_domains=OMP_BASELINE_DOMAINS,
             template_root=surface_root / "managed" / "fence",
         )
-        extension_path = agent_dir / "extensions" / "pisec.ts"
+        extension_path = surface_agent / "extensions" / "pisec.ts"
         adapter_data = {
             "overlayPath": str(overlay_path),
-            "xdgDataHome": plugin_info["xdg_data_home"],
-            "xdgStateHome": plugin_info["xdg_state_home"],
-            "xdgCacheHome": plugin_info["xdg_cache_home"],
-            "xdgConfigHome": plugin_info["xdg_config_home"],
-            "pluginRoot": plugin_info["plugin_root"],
+            "xdgDataHome": str(surface_root / "xdg" / "data"),
+            "xdgStateHome": str(state_binding / "xdg" / "state"),
+            "xdgCacheHome": str(state_binding / "xdg" / "cache"),
+            "xdgConfigHome": str(state_binding / "xdg" / "config"),
+            "pluginRoot": str(surface_root / "xdg" / "data" / "omp" / "plugins"),
             "extensionPath": str(extension_path.absolute()),
+            "agentRoot": str(surface_agent.absolute()),
+            "surfaceRoot": str(surface_binding.absolute()),
             "launcherTemplate": str((surface_root / "managed" / "omp").absolute()),
             "runtimeSurfaceId": str(scope["runtimeSurfaceId"]),
         }
+        _normalize_owner_tree(surface_binding, readonly=True)
         return HarnessArtifacts(
-            harness_home=str(agent_dir),
+            harness_home=str(state_binding),
             launch_secret_path=str(secret_path),
             policy_path=str(policy_path),
             policy_sha256=policy_digest,
@@ -687,8 +776,9 @@ class OmpHarnessAdapter:
         candidate_root = root / "candidate-state"
         prior_secret = self.state_root / "secrets" / f"{validate_id(scope['workstreamId'], prefix='ws')}.token"
         preserved_token = _read_runtime_secret(prior_secret) if prior_secret.exists() or prior_secret.is_symlink() else None
-        prior_home = self.state_root / "omp" / validate_id(scope["workstreamId"], prefix="ws")
-        prior_policy = self.state_root / "fence" / f"{validate_id(scope['workstreamId'], prefix='ws')}.json"
+        workstream_id = validate_id(scope["workstreamId"], prefix="ws")
+        prior_home = self.state_root / "binding-state" / "omp" / workstream_id
+        prior_policy = self.state_root / "binding-surfaces" / "omp" / workstream_id / "fence" / f"{workstream_id}.json"
         prior = None
         if prior_home.is_dir() and prior_secret.is_file() and prior_policy.is_file():
             prior = HarnessArtifacts(
@@ -714,22 +804,38 @@ class OmpHarnessAdapter:
             candidate_content_sha256=surface.content_sha256,
             candidate=candidate,
             prior=prior,
-            compensation_json=canonical_json({"paths": [candidate.harness_home, candidate.policy_path], "pointer": str(self.state_root / "omp" / str(scope["workstreamId"]))}),
+            compensation_json=canonical_json({"paths": [candidate.harness_home, candidate.adapter_data["surfaceRoot"], candidate.policy_path], "pointer": str(self.state_root / "binding-state" / "omp" / str(scope["workstreamId"]))}),
         )
 
     def activate_profile(self, scope: Mapping[str, Any], staged: StagedHarnessArtifacts) -> HarnessArtifacts:
         workstream_id = validate_id(scope["workstreamId"], prefix="ws")
         staging_root = Path(staged.staging_root).resolve(strict=False)
-        candidate_root = Path(staged.candidate.harness_home).parents[1].resolve(strict=False)
-        if not candidate_root.is_relative_to(staging_root) or any(not Path(value).resolve(strict=False).is_relative_to(staging_root) for value in (staged.candidate.harness_home, staged.candidate.launch_secret_path, staged.candidate.policy_path)):
+        candidate_root = staging_root / "candidate-state"
+        candidate_paths = [
+            staged.candidate.harness_home,
+            staged.candidate.launch_secret_path,
+            staged.candidate.policy_path,
+            staged.candidate.adapter_data["surfaceRoot"],
+            staged.candidate.adapter_data["agentRoot"],
+            staged.candidate.adapter_data["overlayPath"],
+            staged.candidate.adapter_data["extensionPath"],
+            staged.candidate.adapter_data["xdgStateHome"],
+            staged.candidate.adapter_data["xdgCacheHome"],
+            staged.candidate.adapter_data["xdgConfigHome"],
+        ]
+        if not candidate_root.is_relative_to(staging_root) or any(not Path(value).resolve(strict=False).is_relative_to(staging_root) for value in candidate_paths):
             raise NeedsAttentionError("staged OMP profile escapes its operation root")
         active_root = self.state_root
-        for relative in (Path("omp") / workstream_id, Path("secrets") / f"{workstream_id}.token", Path("fence") / f"{workstream_id}.json"):
+        for relative in (
+            Path("binding-state") / "omp" / workstream_id,
+            Path("binding-surfaces") / "omp" / workstream_id,
+            Path("secrets") / f"{workstream_id}.token",
+        ):
             source = candidate_root / relative
             target = active_root / relative
             if not source.exists():
                 continue
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _secure_tree(active_root, target.parent)
             if source.is_dir():
                 _activate_directory(source, target)
             else:
@@ -743,10 +849,13 @@ class OmpHarnessAdapter:
         def rebase(value: str) -> str:
             return value.replace(prefix, str(active_root), 1)
         candidate = staged.candidate
+        active_surface = Path(rebase(candidate.adapter_data["surfaceRoot"]))
+        _normalize_owner_tree(active_surface, readonly=False)
         active_policy = Path(rebase(candidate.policy_path))
         policy_text = active_policy.read_text(encoding="utf-8").replace(prefix, str(active_root))
         _atomic_write(active_policy, policy_text)
         policy_digest = hashlib.sha256(policy_text.encode("utf-8")).hexdigest()
+        _normalize_owner_tree(active_surface, readonly=True)
         return HarnessArtifacts(
             harness_home=rebase(candidate.harness_home), launch_secret_path=rebase(candidate.launch_secret_path),
             policy_path=rebase(candidate.policy_path), policy_sha256=policy_digest,
@@ -818,6 +927,8 @@ class OmpHarnessAdapter:
             "workspaceViewId": workspace_view_id,
             "workspaceSurfaceId": workspace_surface_id,
             "harnessHome": str(Path(artifacts.harness_home).absolute()),
+            "surfaceRoot": str(Path(_artifact_value(artifacts, "surfaceRoot")).absolute()),
+            "agentRoot": str(Path(_artifact_value(artifacts, "agentRoot")).absolute()),
             "overlayPath": str(Path(_artifact_value(artifacts, "overlayPath")).absolute()),
             "extensionPath": str(Path(_artifact_value(artifacts, "extensionPath")).absolute()),
             "policyPath": str(Path(artifacts.policy_path).absolute()),
@@ -889,7 +1000,10 @@ class OmpHarnessAdapter:
         if info.st_uid != os.geteuid() or stat.S_ISLNK(info.st_mode):
             raise NeedsAttentionError("OMP cleanup path is unsafe")
         if stat.S_ISDIR(info.st_mode):
-            _safe_owned_tree(path)
+            readonly = "binding-surfaces" in path.parts
+            _safe_owned_tree(path, readonly=readonly)
+            if readonly:
+                _normalize_owner_tree(path, readonly=False)
             shutil.rmtree(path)
         elif stat.S_ISREG(info.st_mode) and not info.st_mode & 0o022:
             path.unlink()
@@ -905,7 +1019,7 @@ class OmpHarnessAdapter:
         artifact_values = document.get("values") if isinstance(document, Mapping) else None
         if isinstance(artifact_values, Mapping):
             for key, value in artifact_values.items():
-                if key in {"overlayPath", "xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot"} and isinstance(value, str):
+                if key in {"surfaceRoot", "xdgStateHome", "xdgCacheHome", "xdgConfigHome"} and isinstance(value, str):
                     values.append(value)
         for value in sorted(set(values), key=lambda item: (len(Path(item).parts), item), reverse=True):
             self._remove_state_path(value)
@@ -975,14 +1089,15 @@ class OmpHarnessAdapter:
         def check(name: str, ok: bool, detail: str) -> None:
             checks.append(AdapterHealth(name, ok, detail[:256]))
 
-        def owner_directory(path: Path, *, required: bool = True) -> bool:
+        def owner_directory(path: Path, *, required: bool = True, readonly: bool = False) -> bool:
             try:
                 info = path.lstat()
             except FileNotFoundError:
                 return not required
             except OSError:
                 return False
-            return stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700
+            modes = {0o700, 0o500} if readonly else {0o700}
+            return stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) in modes
 
         def owner_file(path: Path, *, executable: bool = False, mode: int | None = None) -> bool:
             try:
@@ -1006,12 +1121,12 @@ class OmpHarnessAdapter:
             try:
                 result = subprocess.run([str(executable), "--version"], text=True, capture_output=True, timeout=5, check=False)
                 version = (result.stdout or result.stderr).strip()
-                version_ok = result.returncode == 0 and "17.3" in version
+                version_ok = result.returncode == 0 and re.search(r"(?<![0-9.])17\.3\.4(?![0-9.])", version) is not None
                 version_detail = version or f"exit={result.returncode}"
             except (OSError, subprocess.SubprocessError) as error:
                 version_detail = str(error)
         check("harness executable", executable_ok, str(executable))
-        check("harness API range", version_ok, version_detail)
+        check("harness version", version_ok, version_detail)
 
         roles = self.harness_config.get("modelRoles")
         roles_ok = isinstance(roles, Mapping) and isinstance(roles.get("smol"), str) and "/" in roles["smol"]
@@ -1073,25 +1188,27 @@ class OmpHarnessAdapter:
                 and artifact_document_value.get("schemaVersion") == 2
                 and artifact_document_value.get("adapterId") == self.manifest.adapter_id
                 and artifact_document_value.get("generationSha256") == binding.get("desired_generation_sha256")
-                and isinstance(values, Mapping)
-                and set(values) == {"overlayPath", "xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot", "extensionPath", "launcherTemplate", "runtimeSurfaceId"}
+            and isinstance(values, Mapping)
+            and set(values) == {"overlayPath", "xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot", "extensionPath", "agentRoot", "surfaceRoot", "launcherTemplate", "runtimeSurfaceId"}
                 and all(isinstance(value, str) and value for value in values.values())
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             values = {}
             artifacts_ok = False
         harness_home = Path(str(binding.get("harness_home", "")))
-        copied_ok = artifacts_ok and owner_directory(harness_home)
+        surface_root = Path(str(values.get("surfaceRoot", ""))) if artifacts_ok else Path("/")
+        copied_ok = artifacts_ok and owner_directory(harness_home) and owner_directory(surface_root, readonly=True)
         plugin_ok = copied_ok
         overlay_ok = copied_ok
         if artifacts_ok:
             for name in ("xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot"):
                 path = Path(str(values[name]))
-                copied_ok = copied_ok and path.is_relative_to(harness_home) and owner_directory(path)
-            plugin_ok = copied_ok and owner_directory(Path(str(values["pluginRoot"])))
+                expected_root = surface_root if name in {"xdgDataHome", "pluginRoot"} else harness_home
+                copied_ok = copied_ok and (path.is_relative_to(expected_root) or path == expected_root) and owner_directory(path, readonly=name in {"xdgDataHome", "pluginRoot"})
+            plugin_ok = copied_ok and owner_directory(Path(str(values["pluginRoot"])), readonly=True)
             overlay_path = Path(str(values["overlayPath"]))
             extension_path = Path(str(values["extensionPath"]))
-            overlay_ok = copied_ok and owner_file(overlay_path, mode=0o600) and owner_file(extension_path)
+            overlay_ok = copied_ok and owner_file(overlay_path, mode=None) and not overlay_path.stat().st_mode & 0o200 and owner_file(extension_path) and not extension_path.stat().st_mode & 0o200
             if overlay_ok:
                 try:
                     overlay = json.loads(overlay_path.read_text())
@@ -1108,8 +1225,8 @@ class OmpHarnessAdapter:
                         overlay_ok = overlay_ok and isinstance(mcp_config, Mapping) and mcp_config.get("enableProjectConfig") is True
                 except (OSError, TypeError, ValueError, json.JSONDecodeError):
                     overlay_ok = False
-        check("copied surface", copied_ok, str(harness_home))
-        competing = [harness_home / "extensions" / "herdr-omp-agent-state.ts", harness_home / "agent" / "extensions" / "herdr-omp-agent-state.ts"]
+        check("copied surface", copied_ok, str(surface_root))
+        competing = [surface_root / "agent" / "extensions" / "herdr-omp-agent-state.ts", harness_home / "extensions" / "herdr-omp-agent-state.ts"]
         check("single lifecycle reporter", copied_ok and not any(path.exists() or path.is_symlink() for path in competing), str(harness_home))
         check("plugin snapshot", plugin_ok, str(values.get("pluginRoot", "")))
         check("overlay and MCP/search", overlay_ok, str(values.get("overlayPath", "")))

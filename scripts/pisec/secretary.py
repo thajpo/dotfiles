@@ -32,6 +32,15 @@ SECRETARY_CHECKPOINTS = (
     "committed",
 )
 
+SECRETARY_RESPONSE_CONTRACT = (
+    "Default user-facing replies must fit a short screen and be action-oriented. "
+    "Use only the headings Status, Needs attention, and Next action when applicable. "
+    "Report material exceptions, active work, blockers, decisions needed, and next actions; "
+    "suppress healthy or idle listings, raw metadata, timestamps, event history, and implementation narration. "
+    "Include a projectId or workstreamId only when the user must approve, inspect, or act on that item. "
+    "If nothing needs action, say so in one sentence. Provide detailed evidence only when the user explicitly asks for a drill-down."
+)
+
 _SCOPE_IDENTITY_FIELDS = frozenset(
     {
         "projectId",
@@ -306,7 +315,7 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         with store.transaction():
             store.conn.execute(
                 "INSERT INTO workstreams(workstream_id,project_id,kind,title,purpose,brief,harness_id,workspace_adapter_id,execution_profile,target_ref,base_commit_oid,branch_name,worktree_path,desired_state,provisioning_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (workstream_id, project["project_id"], "secretary", f"Project coordinator: {project['display_name']}", "Coordinate the registered project with durable Pisec workflows.", "You are the project coordinator. You have project-scoped write access, normal local Git, broad public web access, the full configured harness/plugin/MCP surface, and Pisec coordination tools inside Fence. Publish existing non-default branches only through pisec_push_branch; raw git push remains denied. Delegate bounded implementation to approved worker workstreams; use exact approval for worker creation and workstream acceptance. After acceptance, own target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without requesting a second merge approval. Answer worker research only through durable Pisec packets.", harness.manifest.adapter_id, workspace.manifest.adapter_id, "secretary-project", project["default_ref"], "0" * 40, branch, project["repository_path"], "active", "creating", now, now),
+                (workstream_id, project["project_id"], "secretary", f"Project coordinator: {project['display_name']}", "Coordinate the registered project with durable Pisec workflows.", f"You are the project coordinator. You have project-scoped write access, normal local Git, broad public web access, the full configured harness/plugin/MCP surface, and Pisec coordination tools inside Fence. Publish existing non-default branches only through pisec_push_branch; raw git push remains denied. Delegate bounded implementation to approved worker workstreams; use exact approval for worker creation and workstream acceptance. After acceptance, own target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without requesting a second merge approval. Answer worker research only through durable Pisec packets. {SECRETARY_RESPONSE_CONTRACT}", harness.manifest.adapter_id, workspace.manifest.adapter_id, "secretary-project", project["default_ref"], "0" * 40, branch, project["repository_path"], "active", "creating", now, now),
             )
             created = dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone())
             scope = _scope(project, created, operation_id, external_domains)

@@ -10,6 +10,7 @@ import subprocess
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 from .adapters import AdapterRegistry, validate_configured_routes
 from .models import NeedsAttentionError, canonical_json
@@ -156,6 +157,17 @@ def run_doctor(
                 gateway = nested.get("gateway")
                 if isinstance(gateway, Mapping):
                     _path(checks, "Harness gateway token", gateway.get("tokenFile", ""), 0o600)
+                    base_url = gateway.get("baseUrl")
+                    try:
+                        parsed = urlsplit(base_url) if isinstance(base_url, str) else None
+                        port = parsed.port if parsed is not None else None
+                        loopback = parsed is not None and parsed.scheme == "http" and parsed.hostname == "127.0.0.1" and not parsed.username and not parsed.password and parsed.path in {"", "/"} and not parsed.query and not parsed.fragment and port is not None and 1 <= port <= 65535
+                    except ValueError:
+                        loopback = False
+                    _check(checks, "Inference gateway loopback boundary", loopback, "loopback inference endpoint" if loopback else "gateway must be loopback HTTP")
+                    gateway_path = Path(str(gateway.get("tokenFile", ""))).expanduser()
+                    broker_path = Path.home() / ".omp" / "auth-broker.token"
+                    _check(checks, "Inference gateway token separation", gateway_path.absolute() != broker_path.absolute(), "separate gateway and auth-broker token files" if gateway_path.absolute() != broker_path.absolute() else "gateway token path equals auth-broker token path")
         else:
             _check(checks, "Configured harness", False, "invalid")
         if isinstance(workspace_config, Mapping):

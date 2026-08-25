@@ -13,7 +13,8 @@
   "filesystem": {
     "defaultDenyRead": true,
     "allowRead": ["${WORKTREE}", "${AGENT_DIR}", "${HARNESS_EXECUTABLE}", "${HARNESS_SCRIPT}", "${HARNESS_EXTENSION}", "${HARNESS_NATIVES}", "${DATA_DIRS}", "${PYTHON_ENV}"],
-    "allowWrite": ["${WORKTREE}", "${AGENT_DIR}", "${HARNESS_RUN}", "${RUNTIME_SOCKET_DIR}"],
+    "allowWrite": ["${WORKTREE}", "${STATE_ROOT}", "${HARNESS_RUN}", "${RUNTIME_SOCKET_DIR}"],
+    "denyWrite": ["${SURFACE_ROOT}"],
     "denyRead": ["${PRIMARY_REPOSITORY}", "${WORKER_SIBLINGS}", "${HOME}/.ssh", "${HOME}/.aws", "${HOME}/.gnupg", "${HOME}/.kube", "${HOME}/.docker", "${HOME}/.omp/agent", "${WORKSPACE_CONFIG}"]
   },
   "devices": {"mode": "minimal"},

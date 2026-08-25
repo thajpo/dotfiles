@@ -15,6 +15,7 @@ import shutil
 import stat
 import subprocess
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from ..adapters import AdapterHealth, HarnessArtifacts, HarnessManifest, RuntimeSurfaceArtifacts, StagedHarnessArtifacts, artifact_document
 from ..fsutil import _atomic_write, _read_runtime_secret, _secure_secret, _secure_tree
@@ -63,15 +64,16 @@ def _codex_file_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _safe_owned_tree(root: Path) -> None:
+def _safe_owned_tree(root: Path, *, readonly: bool = False) -> None:
     if not root.exists() or root.is_symlink():
         raise NeedsAttentionError("current Codex runtime surface is missing or unsafe")
     info = root.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+    modes = {0o700, 0o500} if readonly else {0o700}
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) not in modes:
         raise NeedsAttentionError("current Codex runtime surface is unsafe")
     for child in sorted(root.rglob("*")):
         child_info = child.lstat()
-        if child.is_symlink() or child_info.st_uid != os.geteuid() or child_info.st_mode & 0o022:
+        if child.is_symlink() or child_info.st_uid != os.geteuid() or child_info.st_mode & 0o022 or (readonly and child_info.st_mode & 0o200):
             raise NeedsAttentionError("current Codex runtime surface contains an unsafe entry")
 
 
@@ -79,6 +81,8 @@ def _activate_directory(staged: Path, target: Path) -> None:
     backup = target.with_name(f".{target.name}.previous-{secrets.token_hex(8)}")
     replaced = False
     try:
+        if staged.is_dir() and not staged.is_symlink():
+            os.chmod(staged, 0o700)
         if target.exists():
             os.replace(target, backup)
             replaced = True
@@ -94,8 +98,12 @@ def _activate_directory(staged: Path, target: Path) -> None:
         raise
     finally:
         if staged.exists():
+            if staged.is_dir() and not staged.is_symlink():
+                _normalize_owner_tree(staged, readonly=False)
             shutil.rmtree(staged)
         if backup.exists():
+            if backup.is_dir() and not backup.is_symlink():
+                _normalize_owner_tree(backup, readonly=False)
             shutil.rmtree(backup)
 
 
@@ -108,11 +116,18 @@ def _validate_config(config: Mapping[str, Any], root_config: Mapping[str, Any]) 
     if set(value) != {"executablePath", "versionPrefix"}:
         raise InvalidRequestError("Codex worker harness configuration fields are invalid")
     version_prefix = value["versionPrefix"]
-    if not isinstance(version_prefix, str) or not version_prefix or any(ord(char) < 0x20 for char in version_prefix):
-        raise InvalidRequestError("Codex versionPrefix is invalid")
+    if version_prefix != "0.147.0":
+        raise InvalidRequestError("Codex version pin must be exactly 0.147.0")
     gateway = config.get("harness", {}).get("config", {}).get("gateway") if isinstance(config.get("harness"), Mapping) else None
     if not isinstance(gateway, Mapping) or set(gateway) != {"baseUrl", "tokenFile"}:
         raise InvalidRequestError("Codex requires the configured loopback gateway")
+    try:
+        parsed = urlsplit(gateway["baseUrl"]) if isinstance(gateway.get("baseUrl"), str) else None
+        port = parsed.port if parsed is not None else None
+    except ValueError as error:
+        raise InvalidRequestError("Codex gateway URL has an invalid port") from error
+    if parsed is None or parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.username or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or port is None or not 1 <= port <= 65535:
+        raise InvalidRequestError("Codex gateway must use loopback HTTP")
     return {
         "executablePath": _expand_executable(value["executablePath"], "Codex executablePath"),
         "nodePath": _expand_executable(shutil.which("node"), "Node executable"),
@@ -208,13 +223,14 @@ class CodexHarnessAdapter:
                 "fenceExecutableSha256": _file_digest(Path(str(self.root_config["fencePath"]))),
             }
             _atomic_write(staged / "surface.json", canonical_json(manifest) + "\n")
-            _normalize_owner_tree(staged)
+            _normalize_owner_tree(staged, readonly=True)
             digest = _tree_digest(staged)
             target = surfaces_root / self.manifest.adapter_id
             if target.exists():
                 if target.is_symlink() or not target.is_dir():
                     raise PisecError("existing Codex runtime surface is unsafe or corrupt")
             _activate_directory(staged, target)
+            _normalize_owner_tree(target, readonly=True)
             return RuntimeSurfaceArtifacts(digest, manifest, str(target.absolute()))
         except Exception:
             if staged.exists():
@@ -224,7 +240,7 @@ class CodexHarnessAdapter:
     def current_runtime_surface(self) -> RuntimeSurfaceArtifacts:
         target = self.state_root / "runtime-current" / self.manifest.adapter_id
         try:
-            _safe_owned_tree(target)
+            _safe_owned_tree(target, readonly=True)
             manifest = json.loads((target / "surface.json").read_text(encoding="utf-8"))
             digest = _tree_digest(target)
         except (NeedsAttentionError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
@@ -269,20 +285,25 @@ class CodexHarnessAdapter:
         self.validate_execution_profile(profile, "worker")
         surface_root = self._surface_root(scope)
         executable_path, node_path = self._executables()
-        home = state_root / "codex" / workstream_id
-        prior_home = self.state_root / "codex" / workstream_id
+        home = state_root / "binding-state" / "codex" / workstream_id
+        surface_binding = state_root / "binding-surfaces" / "codex" / workstream_id
+        prior_home = self.state_root / "binding-state" / "codex" / workstream_id
         if state_root != self.state_root and prior_home.exists():
             if prior_home.is_symlink() or any(path.is_symlink() for path in prior_home.rglob("*")):
-                raise PisecError("existing Codex profile contains a symlink")
+                raise PisecError("existing Codex binding state contains a symlink")
             _secure_tree(state_root, home.parent)
             _copy_safe_entry(prior_home, home)
             _normalize_owner_tree(home)
         else:
             _secure_tree(state_root, home)
-        _secure_tree(state_root, home / "sessions")
-        codex_home = home / "home"
-        _secure_tree(state_root, codex_home)
-        prompt_path = home / "worker-prompt.md"
+        _secure_tree(home, home / "sessions")
+        _secure_tree(home, home / "tmp")
+        _secure_tree(home, home / "run")
+        _secure_tree(state_root, surface_binding)
+        _copy_safe_entry(surface_root / "managed", surface_binding / "managed")
+        codex_home = surface_binding / "home"
+        _secure_tree(surface_binding, codex_home)
+        prompt_path = surface_binding / "worker-prompt.md"
         _atomic_write(prompt_path, _prompt(scope), mode=0o600)
         runtime_secret = state_root / "secrets" / f"{workstream_id}.token"
         _secure_tree(state_root, runtime_secret.parent)
@@ -296,8 +317,8 @@ class CodexHarnessAdapter:
             _atomic_write(runtime_secret, token + "\n", mode=0o600)
         model = str(scope.get("harnessModel") or scope.get("implementationModel") or "gpt-5.6-luna")
         effort = str(scope.get("reasoningEffort") or "high")
-        runtime_root = home / "runtime"
-        _secure_tree(state_root, runtime_root)
+        runtime_root = surface_binding / "runtime"
+        _secure_tree(surface_binding, runtime_root)
         mcp_path = runtime_root / "codex_mcp.py"
         hook_path = runtime_root / "codex_hook.py"
         _copy_safe_entry(surface_root / "managed" / "codex_mcp.py", mcp_path)
@@ -333,9 +354,9 @@ class CodexHarnessAdapter:
             from ..fence import render_policy
             policy_renderer = render_policy
         policy_path, policy_digest = policy_renderer(
-            state_root,
+            surface_binding,
             scope,
-            home,
+            surface_binding,
             self.root_config,
             harness_home=home,
             adapter_replacements={
@@ -349,6 +370,7 @@ class CodexHarnessAdapter:
             baseline_domains=CODEX_BASELINE_DOMAINS,
             template_root=surface_root / "managed" / "fence",
         )
+        _normalize_owner_tree(surface_binding, readonly=True)
         return HarnessArtifacts(
             harness_home=str(home),
             launch_secret_path=str(runtime_secret),
@@ -358,6 +380,8 @@ class CodexHarnessAdapter:
             generation_sha256=self.desired_generation(scope),
             adapter_data={
                 "codexHome": str(codex_home),
+                "agentRoot": str(surface_binding),
+                "surfaceRoot": str(surface_binding),
                 "configPath": str(codex_home / "config.toml"),
                 "promptPath": str(prompt_path),
                 "hooksPath": str(codex_home / "hooks.json"),
@@ -380,8 +404,9 @@ class CodexHarnessAdapter:
         candidate_root = root / "candidate-state"
         prior_secret = self.state_root / "secrets" / f"{validate_id(scope['workstreamId'], prefix='ws')}.token"
         preserved_token = _read_runtime_secret(prior_secret) if prior_secret.exists() or prior_secret.is_symlink() else None
-        prior_home = self.state_root / "codex" / validate_id(scope["workstreamId"], prefix="ws")
-        prior_policy = self.state_root / "fence" / f"{validate_id(scope['workstreamId'], prefix='ws')}.json"
+        workstream_id = validate_id(scope["workstreamId"], prefix="ws")
+        prior_home = self.state_root / "binding-state" / "codex" / workstream_id
+        prior_policy = self.state_root / "binding-surfaces" / "codex" / workstream_id / "fence" / f"{workstream_id}.json"
         prior = None
         if prior_home.is_dir() and prior_secret.is_file() and prior_policy.is_file():
             prior = HarnessArtifacts(
@@ -407,22 +432,39 @@ class CodexHarnessAdapter:
             candidate_content_sha256=surface.content_sha256,
             candidate=candidate,
             prior=prior,
-            compensation_json=canonical_json({"paths": [candidate.harness_home, candidate.policy_path], "pointer": str(self.state_root / "codex" / str(scope["workstreamId"]))}),
+            compensation_json=canonical_json({"paths": [candidate.harness_home, candidate.adapter_data["surfaceRoot"], candidate.policy_path], "pointer": str(self.state_root / "binding-state" / "codex" / str(scope["workstreamId"]))}),
         )
 
     def activate_profile(self, scope: Mapping[str, Any], staged: StagedHarnessArtifacts) -> HarnessArtifacts:
         workstream_id = validate_id(scope["workstreamId"], prefix="ws")
         staging_root = Path(staged.staging_root).resolve(strict=False)
-        candidate_root = Path(staged.candidate.harness_home).parents[1].resolve(strict=False)
-        if not candidate_root.is_relative_to(staging_root) or any(not Path(value).resolve(strict=False).is_relative_to(staging_root) for value in (staged.candidate.harness_home, staged.candidate.launch_secret_path, staged.candidate.policy_path)):
+        candidate_root = staging_root / "candidate-state"
+        candidate_paths = [
+            staged.candidate.harness_home,
+            staged.candidate.launch_secret_path,
+            staged.candidate.policy_path,
+            staged.candidate.adapter_data["surfaceRoot"],
+            staged.candidate.adapter_data["agentRoot"],
+            staged.candidate.adapter_data["codexHome"],
+            staged.candidate.adapter_data["configPath"],
+            staged.candidate.adapter_data["promptPath"],
+            staged.candidate.adapter_data["hooksPath"],
+            staged.candidate.adapter_data["mcpPath"],
+            staged.candidate.adapter_data["hookPath"],
+        ]
+        if not candidate_root.is_relative_to(staging_root) or any(not Path(value).resolve(strict=False).is_relative_to(staging_root) for value in candidate_paths):
             raise NeedsAttentionError("staged Codex profile escapes its operation root")
         active_root = self.state_root
-        for relative in (Path("codex") / workstream_id, Path("secrets") / f"{workstream_id}.token", Path("fence") / f"{workstream_id}.json"):
+        for relative in (
+            Path("binding-state") / "codex" / workstream_id,
+            Path("binding-surfaces") / "codex" / workstream_id,
+            Path("secrets") / f"{workstream_id}.token",
+        ):
             source = candidate_root / relative
             target = active_root / relative
             if not source.exists():
                 continue
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _secure_tree(active_root, target.parent)
             if source.is_dir():
                 _activate_directory(source, target)
             else:
@@ -436,10 +478,13 @@ class CodexHarnessAdapter:
         def rebase(value: str) -> str:
             return value.replace(prefix, str(active_root), 1)
         candidate = staged.candidate
+        active_surface = Path(rebase(candidate.adapter_data["surfaceRoot"]))
+        _normalize_owner_tree(active_surface, readonly=False)
         active_policy = Path(rebase(candidate.policy_path))
         policy_text = active_policy.read_text(encoding="utf-8").replace(prefix, str(active_root))
         _atomic_write(active_policy, policy_text)
         policy_digest = hashlib.sha256(policy_text.encode("utf-8")).hexdigest()
+        _normalize_owner_tree(active_surface, readonly=True)
         return HarnessArtifacts(
             harness_home=rebase(candidate.harness_home), launch_secret_path=rebase(candidate.launch_secret_path),
             policy_path=rebase(candidate.policy_path), policy_sha256=policy_digest,
@@ -484,6 +529,7 @@ class CodexHarnessAdapter:
             "workspaceViewId": workspace_view_id,
             "workspaceSurfaceId": workspace_surface_id,
             "harnessHome": str(Path(artifacts.harness_home).absolute()),
+            "surfaceRoot": str(Path(values["surfaceRoot"]).absolute()),
             "codexHome": str(Path(values["codexHome"]).absolute()),
             "configPath": str(Path(values["configPath"]).absolute()),
             "promptPath": str(Path(values["promptPath"]).absolute()),
@@ -533,6 +579,16 @@ class CodexHarnessAdapter:
             raise NeedsAttentionError("Codex cleanup path escapes the state root")
         if home.exists():
             shutil.rmtree(home)
+        surface_value = binding.get("adapter_artifacts_json")
+        if isinstance(surface_value, str):
+            try:
+                values = json.loads(surface_value).get("values", {})
+            except (TypeError, ValueError, json.JSONDecodeError):
+                values = {}
+            surface = Path(str(values.get("surfaceRoot", ""))).absolute() if isinstance(values, Mapping) and values.get("surfaceRoot") else None
+            if surface is not None and surface.is_relative_to(root) and surface.exists():
+                _normalize_owner_tree(surface, readonly=False)
+                shutil.rmtree(surface)
         launcher_dir = self._launcher_dir(str(binding["workstream_id"]))
         if launcher_dir.exists():
             shutil.rmtree(launcher_dir)
@@ -568,11 +624,11 @@ class CodexHarnessAdapter:
             try:
                 result = subprocess.run([str(node), str(executable), "--version"], capture_output=True, text=True, timeout=5, check=False)
                 detail = (result.stdout or result.stderr).strip()
-                version_ok = result.returncode == 0 and self.harness_config["versionPrefix"] in detail
+                version_ok = result.returncode == 0 and detail.strip() in {"0.147.0", "codex 0.147.0"}
             except (OSError, subprocess.SubprocessError) as error:
                 detail = str(error)
         elif "error_detail" in locals():
             detail = error_detail
-        checks.append(AdapterHealth("Codex API range", version_ok, detail[:256]))
+        checks.append(AdapterHealth("Codex version", version_ok, detail[:256]))
         checks.append(AdapterHealth("Codex gateway", True, self.harness_config["gateway"]["baseUrl"]))
         return checks

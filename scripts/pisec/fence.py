@@ -169,11 +169,13 @@ def render_policy(
     replacements: dict[str, Any] = {
         "${HOME}": str(Path.home()),
         "${AGENT_DIR}": str(agent_dir.absolute()),
+        "${SURFACE_ROOT}": str(agent_dir.absolute()),
         "${RUNTIME_SOCKET_DIR}": str((runtime_base / "runtime").absolute()),
         "${SECRETARY_SOCKET_DIR}": str((runtime_base / "secretary").absolute()),
         "${HARNESS_EXECUTABLE}": str(Path(supplied.pop("HARNESS_EXECUTABLE", config["harness"]["config"]["executablePath"])).absolute()),
         "${HARNESS_SCRIPT}": str(Path(supplied.pop("HARNESS_SCRIPT", supplied.get("HARNESS_EXECUTABLE", config["harness"]["config"]["executablePath"]))).absolute()),
         "${HARNESS_HOME}": str(harness_home.absolute()),
+        "${STATE_ROOT}": str(harness_home.absolute()),
         "${HARNESS_EXTENSION}": str(Path(supplied.pop("HARNESS_EXTENSION", harness_home / "extension.ts")).absolute()),
         "${HARNESS_NATIVES}": str(Path(supplied.pop("HARNESS_NATIVES", harness_home / "natives")).absolute()),
         "${HARNESS_RUN}": str(Path(supplied.pop("HARNESS_RUN", harness_home / "run")).absolute()),

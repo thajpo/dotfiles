@@ -228,6 +228,20 @@ class HerdrTests(unittest.TestCase):
             self.adapter.report_state("w1:p1", "done", None, 11, "instance-1", self.harness)
         self.assertEqual(len([params for method, params in self.state.requests if method == "pane.release_agent"]), 1)
 
+    def test_raw_herdr_done_is_prompt_eligible_presentation_only(self):
+        self.adapter.snapshot = lambda: {
+            "version": "0.8.0",
+            "protocol": 19,
+            "workspaces": [{"workspace_id": "w1"}],
+            "tabs": [{"tab_id": "t1", "workspace_id": "w1"}],
+            "panes": [{"pane_id": "w1:p1", "tab_id": "t1", "workspace_id": "w1", "cwd": "/tmp/repo"}],
+            "layouts": [],
+            "agents": [{"agent": "omp", "agent_status": "done", "workspace_id": "w1", "tab_id": "t1", "pane_id": "w1:p1"}],
+        }
+        observed = self.adapter.observe_workstream(path="/tmp/repo", agent_name="pisec-secretary")
+        self.assertTrue(observed.agent.identity_usable)
+        self.assertTrue(self.adapter.prompt_eligible(observed.agent))
+
     def test_official_release_returns_ok_without_mutating_real_protocol_semantics(self):
         self.state.created = True
         self.state.agent_status = "working"

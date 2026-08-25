@@ -117,8 +117,8 @@ if [[ "$SKILLS_ONLY" -eq 0 && "$HOST_OS:$HOST_ARCH" != "Linux:x86_64" ]]; then
   die "full Pisec installation currently requires Linux x86_64 for pinned Treehouse $TREEHOUSE_VERSION"
 fi
 
-if [[ "$SKILLS_ONLY" -eq 0 && ! "$COLLIE_REF" =~ ^v?0\.28\.[0-9]+$ ]]; then
-  die "Collie 0.28.x is required; found $COLLIE_REF"
+if [[ "$SKILLS_ONLY" -eq 0 && "$COLLIE_REF" != "v0.28.0" ]]; then
+  die "Collie 0.28.0 is required; found $COLLIE_REF"
 fi
 validate_port_setting() {
   local name="$1"
@@ -465,7 +465,7 @@ for plugin in plugins:
     match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", version)
     if match is None:
         print("wrong:" + (version or "missing"))
-    elif (int(match.group(1)), int(match.group(2))) == (0, 28):
+    elif (int(match.group(1)), int(match.group(2)), int(match.group(3))) == (0, 28, 0):
         print("valid")
     else:
         print("wrong:" + version)
@@ -738,16 +738,16 @@ if [[ "$SKILLS_ONLY" -eq 0 ]]; then
   [[ "$(python3 -c 'import sys; print(1 if sys.version_info >= (3, 12) else 0)')" == 1 ]] || die "Python 3.12 or newer is required"
 
   herdr_version="$("$HERDR_PATH" --version 2>&1)"
-  if ! python3 -c 'import re,sys; m=re.search(r"(\d+)\.(\d+)\.(\d+)",sys.stdin.read()); raise SystemExit(0 if m and tuple(map(int,m.groups())) >= (0,8,0) and tuple(map(int,m.groups())) < (0,9,0) else 1)' <<<"$herdr_version"; then
-    die "Herdr 0.8.x is required; found $herdr_version"
+  if ! python3 -c 'import re,sys; m=re.search(r"(?<![0-9.])(\d+)\.(\d+)\.(\d+)(?![0-9.])",sys.stdin.read()); raise SystemExit(0 if m and tuple(map(int,m.groups())) == (0,8,0) else 1)' <<<"$herdr_version"; then
+    die "Herdr 0.8.0 is required; found $herdr_version"
   fi
   omp_version="$("$REAL_OMP_PATH" --version 2>&1)"
-  if ! python3 -c 'import re,sys; m=re.search(r"(?:omp/|v)(\d+)\.(\d+)\.(\d+)",sys.stdin.read()); raise SystemExit(0 if m and tuple(map(int,m.groups())) >= (17,3,4) and tuple(map(int,m.groups())) < (18,0,0) else 1)' <<<"$omp_version"; then
-    die "OMP 17.3.4-compatible API is required; found $omp_version"
+  if ! python3 -c 'import re,sys; m=re.search(r"(?<![0-9.])17\.3\.4(?![0-9.])",sys.stdin.read()); raise SystemExit(0 if m else 1)' <<<"$omp_version"; then
+    die "OMP 17.3.4 is required; found $omp_version"
   fi
   fence_version="$("$FENCE_REAL_PATH" --version 2>&1)"
-  if ! python3 -c 'import re,sys; m=re.search(r"Version:\s*(\d+)\.(\d+)\.(\d+)",sys.stdin.read()); raise SystemExit(0 if m and tuple(map(int,m.groups())) >= (0,1,66) else 1)' <<<"$fence_version"; then
-    die "Fence >=0.1.66 is required; found $fence_version"
+  if ! python3 -c 'import re,sys; m=re.search(r"Version:\s*(\d+)\.(\d+)\.(\d+)",sys.stdin.read()); raise SystemExit(0 if m and tuple(map(int,m.groups())) == (0,1,66) else 1)' <<<"$fence_version"; then
+    die "Fence 0.1.66 is required; found $fence_version"
   fi
   features="$(PATH="$PISEC_BWRAP_DIR:$PATH" "$FENCE_REAL_PATH" --linux-features 2>&1)"
   feature_row_ok "Bubblewrap" && bubblewrap_ok=1 || bubblewrap_ok=0
@@ -798,7 +798,7 @@ PY
   collie_listing="$("$HERDR_PATH" plugin list --json 2>&1)" || die "unable to inspect installed Collie plugin"
   collie_state="$(collie_plugin_state "$collie_listing")" || die "Herdr returned invalid plugin metadata"
   case "$collie_state" in
-    wrong:*) die "Collie 0.28.x is required; found ${collie_state#wrong:}" ;;
+    wrong:*) die "Collie 0.28.0 is required; found ${collie_state#wrong:}" ;;
     valid|absent) ;;
     *) die "Herdr returned invalid Collie plugin metadata" ;;
   esac
@@ -965,6 +965,9 @@ PY
 )"
 ensure_omp_token "$HOME/.omp/auth-broker.token" auth-broker token "auth broker bearer token"
 ensure_omp_token "$gateway_token_file" auth-gateway token "auth gateway bearer token"
+if [[ "$(cat "$HOME/.omp/auth-broker.token")" == "$(cat "$gateway_token_file")" ]]; then
+  die "auth gateway token must remain distinct from the auth broker token"
+fi
 link_file "$DOTFILES_DIR/bin/pisec" "$HOME/.local/bin/pisec"
 transaction_capture_path "$HOME/.config/herdr/config.toml"
 python3 "$DOTFILES_DIR/scripts/pisec/host_config.py" patch-herdr "$HOME/.config/herdr/config.toml"
@@ -1036,7 +1039,7 @@ if [[ "$collie_state" == "absent" ]]; then
   "$HERDR_PATH" plugin install AltanS/collie --ref "$COLLIE_REF" --yes
   collie_listing="$("$HERDR_PATH" plugin list --json 2>&1)" || die "unable to verify installed Collie plugin"
   collie_state="$(collie_plugin_state "$collie_listing")" || die "Herdr returned invalid plugin metadata after Collie installation"
-  [[ "$collie_state" == "valid" ]] || die "Collie installation did not provide a 0.28.x plugin"
+  [[ "$collie_state" == "valid" ]] || die "Collie installation did not provide a 0.28.0 plugin"
 fi
 collie_source_dir="$(collie_plugin_root "$collie_listing")" || die "Herdr did not report the Collie managed checkout"
 apply_collie_patch "$collie_source_dir"
