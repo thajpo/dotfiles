@@ -348,7 +348,14 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
             raise NeedsAttentionError("First Mate runtime identity is missing or mismatched") from error
         workspace.focus_pane(binding["workspace_surface_id"])
         return {"project": resolve_project(store, project["project_id"]), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "binding": binding, "reused": True}
-    if operation["state"] == "needs_attention" or (existing["provisioning_state"] == "needs_attention" and not recoverable_missing):
+    if operation["state"] == "needs_attention":
+        with store.transaction():
+            store.conn.execute(
+                "UPDATE operations SET state='applying',step='map_committed',error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=? AND state='needs_attention'",
+                (utc_now(), operation["operation_id"]),
+            )
+        operation = _operation(store, existing["workstream_id"])
+    elif existing["provisioning_state"] == "needs_attention" and not recoverable_missing:
         raise NeedsAttentionError("First Mate ensure requires attention")
     if operation["state"] == "failed":
         with store.transaction():

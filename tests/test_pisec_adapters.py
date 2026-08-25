@@ -200,6 +200,24 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         restored = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "coordinationMode": "project"})
         self.assertEqual(restored["coordination_mode"], "project")
 
+    def test_first_mate_retries_a_recoverable_needs_attention_saga(self):
+        project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo)})
+        self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
+        with PiStore(self.root / "state") as store:
+            first = self.dispatcher.dispatch("admin", "first_mate.ensure", {"project": project["project_id"]})
+            workstream_id = first["workstream"]["workstream_id"]
+            store.conn.execute(
+                "UPDATE operations SET state='needs_attention',step='committed',error_code='effect_mismatch',error_message='transient identity mismatch' WHERE workstream_id=? AND kind='first_mate.ensure'",
+                (workstream_id,),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='transient identity mismatch' WHERE workstream_id=?",
+                (workstream_id,),
+            )
+        retried = self.dispatcher.dispatch("admin", "first_mate.ensure", {"project": project["project_id"]})
+        self.assertFalse(retried["reused"])
+        self.assertEqual(retried["workstream"]["provisioning_state"], "bound")
+
 
 if __name__ == "__main__":
     unittest.main()
