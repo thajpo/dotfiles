@@ -427,6 +427,45 @@ def _repair_launch_binding(
         raise NeedsAttentionError("secretary runtime binding disappeared during repair")
     return dict(repaired)
 
+
+def _recreate_missing_inactive_binding(
+    store: Any,
+    workspace: WorkspaceAdapter,
+    harness: HarnessAdapter,
+    project: Mapping[str, Any],
+    scope: Mapping[str, Any],
+    binding: Mapping[str, Any],
+) -> bool:
+    """Reset an unobservable stopped binding before retrying an inactive open."""
+    try:
+        observed = _observe_binding(workspace, project, binding)
+    except Exception as error:
+        raise NeedsAttentionError("secretary binding repair requires an unambiguous stopped runtime") from error
+    if observed is not None:
+        return False
+
+    harness.cleanup_binding(binding)
+    now = utc_now()
+    with store.transaction():
+        store.conn.execute("DELETE FROM runtime_bindings WHERE workstream_id=?", (binding["workstream_id"],))
+        store.conn.execute(
+            "UPDATE workstreams SET provisioning_state='creating',attention_reason=NULL,updated_at=? WHERE workstream_id=?",
+            (now, binding["workstream_id"]),
+        )
+        store.conn.execute(
+            "UPDATE operations SET state='applying',step='planned',result_json=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?",
+            (canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), now, scope["operationId"]),
+        )
+        append_event_in_transaction(
+            store.conn,
+            kind="secretary.binding.recreated",
+            project_id=project["project_id"],
+            workstream_id=binding["workstream_id"],
+            operation_id=scope["operationId"],
+            payload={"reason": "inactive project open found no durable workspace surface"},
+        )
+    return True
+
 def _recover_prompt(workspace: WorkspaceAdapter, project: Mapping[str, Any], scope: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
     try:
         workspace.prompt_agent_nowait(binding["workspace_surface_id"], scope["brief"])
@@ -533,6 +572,15 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         workspace,
         external_domains,
     )
+    if not _project_active(project) and (
+        operation["state"] in {"needs_attention", "failed"}
+        or existing["provisioning_state"] == "needs_attention"
+    ):
+        binding = _binding(store, existing["workstream_id"])
+        if binding is not None and _rank(operation["step"]) >= _rank("map_committed"):
+            if _recreate_missing_inactive_binding(store, workspace, harness, project, scope, binding):
+                operation = _operation(store, existing["workstream_id"])
+                existing = dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone())
     recoverable_missing = existing["provisioning_state"] == "needs_attention" and existing["attention_reason"] == WORKSPACE_RUNTIME_MISSING
     if operation["state"] == "succeeded" and (existing["provisioning_state"] == "bound" or recoverable_missing):
         binding = _binding(store, existing["workstream_id"])

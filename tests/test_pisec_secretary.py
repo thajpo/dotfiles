@@ -238,6 +238,47 @@ class SecretaryTests(unittest.TestCase):
                 self.assertEqual(reopened["workstream"]["provisioning_state"], "bound")
                 self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='secretary.ensure.rewound'").fetchone()[0], 1)
 
+    def test_inactive_open_recreates_missing_stale_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                first = ensure_secretary(store, project["project_id"], harness, workspace)
+                workstream_id = first["workstream"]["workstream_id"]
+                old_surface_id = first["binding"]["workspace_surface_id"]
+                workspace.worktrees.pop(str(repo.resolve()), None)
+                workspace.agents.clear()
+                workspace.runtime_states.pop(old_surface_id, None)
+                with store.transaction():
+                    store.conn.execute(
+                        "UPDATE projects SET active=0,lifecycle_attention_reason='project open requires repair' WHERE project_id=?",
+                        (project["project_id"],),
+                    )
+                    store.conn.execute(
+                        "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='stale binding' WHERE workstream_id=?",
+                        (workstream_id,),
+                    )
+                    store.conn.execute(
+                        "UPDATE operations SET state='needs_attention',step='map_committed' WHERE workstream_id=?",
+                        (workstream_id,),
+                    )
+
+                reopened = ensure_secretary(store, project["project_id"], harness, workspace)
+
+                self.assertEqual(reopened["project"]["active"], 1)
+                self.assertEqual(reopened["workstream"]["provisioning_state"], "bound")
+                self.assertNotEqual(reopened["binding"]["workspace_surface_id"], old_surface_id)
+                self.assertIn(workstream_id, harness.cleaned)
+                self.assertEqual(
+                    store.conn.execute("SELECT COUNT(*) FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()[0],
+                    1,
+                )
+                self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='secretary.binding.recreated'").fetchone()[0], 1)
+
     def test_secretary_replay_reuses_persisted_surface_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
