@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -40,6 +41,20 @@ class UpdaterContractTests(unittest.TestCase):
                 sorted(path.relative_to(bundle).as_posix() for path in (bundle / "patches").glob("*") if path.is_file()),
                 ["patches/collie-v0.28-unread-idle.patch"],
             )
+
+    def test_archive_manifest_preserves_opaque_unix_socket_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "state.archive-opaque"
+            install = root / "install"
+            archive.mkdir(mode=0o700)
+            socket_path = archive / "runtime" / "broker.sock"
+            socket_path.parent.mkdir(mode=0o700)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(socket_path))
+                manifest = self.updater["_write_archive_manifest"](install, root / "state", archive)
+            self.assertEqual(manifest["filesystemSha256"], self.updater["_opaque_archive_digest"](archive))
+            self.assertTrue((install / "archive-manifests" / f"{archive.name}.json").is_file())
 
     def test_unsupported_state_writes_status_outside_state_root(self):
         with tempfile.TemporaryDirectory() as tmp:

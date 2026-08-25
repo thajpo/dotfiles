@@ -157,6 +157,28 @@ def _tree_digest(root: Path, *, exclude: frozenset[str] = frozenset()) -> str:
     return digest.hexdigest()
 
 
+def _opaque_archive_digest(root: Path) -> str:
+    """Digest an archived pre-v1 tree without interpreting its contents."""
+    digest = hashlib.sha256()
+    for path in [root, *sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())]:
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        info = path.lstat()
+        mode = stat.S_IMODE(info.st_mode) & 0o700
+        if stat.S_ISLNK(info.st_mode):
+            digest.update(f"l\0{relative}\0{mode:o}\0".encode())
+            digest.update(os.readlink(path).encode())
+            digest.update(b"\0")
+        elif stat.S_ISDIR(info.st_mode):
+            digest.update(f"d\0{relative}\0{mode:o}\0".encode())
+        elif stat.S_ISREG(info.st_mode):
+            digest.update(f"f\0{relative}\0{mode:o}\0".encode())
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        else:
+            digest.update(f"x\0{relative}\0{stat.S_IFMT(info.st_mode):o}\0{mode:o}\0{info.st_size}\0".encode())
+    return digest.hexdigest()
+
+
 def _allowed(name: str) -> bool:
     return any(
         name == prefix.rstrip("/")
@@ -741,7 +763,7 @@ def _quarantine_pre_v1_metadata(install_root: Path, archive_name: str) -> Path:
 
 
 def _write_archive_manifest(install_root: Path, state_root: Path, archive: Path) -> dict:
-    filesystem_sha = _tree_digest(archive)
+    filesystem_sha = _opaque_archive_digest(archive)
     manifest = {
         "schemaVersion": SCHEMA_VERSION,
         "archive": archive.name,
