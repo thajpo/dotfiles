@@ -16,3 +16,7 @@
   - Commit OID: `bbc5d16`
   - Checks: `python3 -m compileall -q scripts tests` passed; full Python suite passed (186, 1 skipped, Linux-capable run); `bun test omp/extensions/pisec.test.ts` passed (7/7, Linux-capable run); operation catalogue `--check` passed; `git diff --check` passed; production removed-reference/predecessor/migration audit passed; no live-state cutover performed.
   - Current blocker: none.
+- Phase 5 status: complete; durable typed attention projections, atomic source/event/index transitions, deterministic watcher delivery, turn presentation, exact help and supervisor issue workflows, remediation lifecycle, integration attention, bounded backfill, and removed direct-send/worker-creation mutation surfaces implemented.
+  - Commit OID: `0f46d8c`
+  - Checks: `python3 -m unittest discover -s tests` passed (189, 1 skipped, Linux-capable run); `bun test omp/extensions/pisec.test.ts` passed (7/7); Phase 5 protocol/attention/integration suite passed (25); `python3 -m compileall -q scripts tests` passed; operation catalogue `--check` passed; `git diff --check` passed; stale compatibility/direct-send operation audit passed; no live-state cutover performed.
+  - Current blocker: none.
