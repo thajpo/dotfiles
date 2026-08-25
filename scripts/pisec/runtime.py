@@ -10,10 +10,11 @@ from typing import Any, Mapping
 
 from .adapters import HarnessAdapter, WorkspaceAdapter
 from .events import append_event_in_transaction
-from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, bounded_text, validate_id
+from .git_objects import validate_worker_resume_git
+from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, bounded_text, validate_id, validate_sha256
 from .models import utc_now
 
-RUNTIME_FIELDS = frozenset({"workstreamId", "runtimeInstanceId", "seq", "event", "reason", "state", "nativeSessionKind", "nativeSessionValue", "startSource", "surfaceId", "token"})
+RUNTIME_FIELDS = frozenset({"workstreamId", "runtimeInstanceId", "seq", "event", "reason", "state", "nativeSessionKind", "nativeSessionValue", "startSource", "surfaceId", "token", "generation"})
 RUNTIME_AUTH_FIELDS = frozenset({"workstreamId", "runtimeInstanceId", "surfaceId", "token"})
 SESSION_SWITCH_REASONS = frozenset({"new", "resume", "fork", "handoff"})
 OBSERVED_STATES = frozenset({"unknown", "starting", "working", "blocked", "idle", "done", "stopped", "missing", "error"})
@@ -40,6 +41,7 @@ def start_bound_agent(
     ).fetchone()
     if row is None:
         raise ConflictError("runtime binding is missing")
+    validate_worker_resume_git(store, dict(row))
     expected_role = "secretary" if row["kind"] == "secretary" else "first_mate" if row["kind"] == "first_mate" else "worker"
     harness.validate_execution_profile(row["execution_profile"], expected_role)
     expected = {
@@ -97,6 +99,7 @@ def verify_runtime_binding(store: Any, payload: Mapping[str, Any], *, worker_onl
     instance = payload["runtimeInstanceId"]
     surface_id = payload["surfaceId"]
     token = payload["token"]
+    generation = validate_sha256(payload.get("generation"), "runtime generation")
     if not isinstance(instance, str) or not instance or len(instance) > 128 or "\x00" in instance:
         raise InvalidRequestError("runtime instance id is invalid")
     if not isinstance(surface_id, str) or not surface_id or len(surface_id) > 256 or "\x00" in surface_id:
@@ -117,6 +120,9 @@ def verify_runtime_binding(store: Any, payload: Mapping[str, Any], *, worker_onl
         raise AuthorizationError("runtime surface does not match its binding")
     if not allow_session_start and row["runtime_instance_id"] != instance:
         raise ConflictError("runtime instance is stale")
+    expected_generation = row["launch_generation_sha256"] if allow_session_start and row["launch_generation_sha256"] else row["applied_generation_sha256"]
+    if expected_generation != generation:
+        raise ConflictError("runtime generation is stale or does not match the reserved launch")
     return dict(row)
 
 
@@ -161,6 +167,7 @@ def report_runtime(store: Any, payload_value: Mapping[str, Any], harness: Harnes
     if not isinstance(payload_value, Mapping) or set(payload_value) != RUNTIME_FIELDS:
         raise InvalidRequestError("runtime report fields do not match protocol version 1")
     payload = dict(payload_value)
+    generation = validate_sha256(payload["generation"], "runtime generation")
     event = payload["event"]
     reason = payload["reason"]
     state = payload["state"]
@@ -215,8 +222,17 @@ def report_runtime(store: Any, payload_value: Mapping[str, Any], harness: Harnes
             workspace_seq += 1
             workspace.report_state(surface_id, "unknown", None, workspace_seq, instance, harness.manifest)
         now = utc_now()
+        session_event = None
+        if event == "session_start":
+            session_event = append_event_in_transaction(
+                store.conn,
+                kind="runtime.session_started",
+                project_id=str(binding["project_id"]),
+                workstream_id=workstream_id,
+                payload={"runtimeInstanceId": instance, "generationSha256": generation, "reportSeq": seq},
+            )
         store.conn.execute(
-            "UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=?,workspace_report_seq=?,native_session_kind=COALESCE(?,native_session_kind),native_session_value=COALESCE(?,native_session_value),observed_state=?,applied_generation_sha256=CASE WHEN ?='session_start' THEN COALESCE(launch_generation_sha256,applied_generation_sha256) ELSE applied_generation_sha256 END,launch_generation_sha256=CASE WHEN ?='session_start' THEN NULL ELSE launch_generation_sha256 END,last_observed_at=?,updated_at=? WHERE workstream_id=?",
-            (instance, seq, workspace_seq, kind, value, state, event, event, now, now, workstream_id),
+            "UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=?,workspace_report_seq=?,native_session_kind=COALESCE(?,native_session_kind),native_session_value=COALESCE(?,native_session_value),observed_state=?,applied_generation_sha256=CASE WHEN ?='session_start' THEN ? ELSE applied_generation_sha256 END,launch_generation_sha256=CASE WHEN ?='session_start' THEN NULL ELSE launch_generation_sha256 END,refresh_pending=CASE WHEN ?='session_start' THEN 0 ELSE refresh_pending END,refresh_operation_id=CASE WHEN ?='session_start' THEN NULL ELSE refresh_operation_id END,refresh_started_at=CASE WHEN ?='session_start' THEN NULL ELSE refresh_started_at END,session_start_event_sequence=CASE WHEN ?='session_start' THEN ? ELSE session_start_event_sequence END,session_start_report_seq=CASE WHEN ?='session_start' THEN ? ELSE session_start_report_seq END,session_started_at=CASE WHEN ?='session_start' THEN ? ELSE session_started_at END,last_observed_at=?,updated_at=? WHERE workstream_id=?",
+            (instance, seq, workspace_seq, kind, value, state, event, generation, event, event, event, event, event, session_event["sequence"] if session_event else None, event, seq, event, now, now, now, workstream_id),
         )
     return {"accepted": True, "workstreamId": workstream_id, "seq": seq, "reason": reason, "workspaceReportSeq": workspace_seq}

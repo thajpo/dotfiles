@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from .cleanup import cleanup_workstream
 from .events import append_event_in_transaction
-from .models import ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id
+from .models import ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id, validate_sha256
 from .policies import enforce_merge_policy
 from .projects import get_project
 from .secretary_git import _oid, _primary_state, _private_objects, _promote_worker_objects, _repository, _run_git
@@ -218,9 +218,7 @@ def _validate_scope(scope_value: Mapping[str, Any]) -> dict[str, Any]:
     validate_id(scope.get("workstreamId"), prefix="ws")
     bounded_text(scope.get("targetBranch"), name="targetBranch", limit=512)
     for field in _HASH_FIELDS - {"scopeSha256"}:
-        value = scope.get(field)
-        if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
-            raise InvalidRequestError(f"acceptance scope field {field} is invalid")
+        validate_sha256(scope.get(field), f"acceptance scope field {field}")
     paths = scope.get("changedPaths")
     if not isinstance(paths, list) or len(paths) > 4096 or any(not isinstance(path, str) or not path or len(path) > 4096 or any(ord(char) < 0x20 for char in path) for path in paths):
         raise InvalidRequestError("acceptance changed paths are invalid")

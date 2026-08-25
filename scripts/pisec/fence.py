@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -99,7 +100,7 @@ def resolve_data_dirs(data_dirs: Any, repository: Path, *, data_root: Path | Non
         data_dirs = []
     if not isinstance(data_dirs, list):
         raise InvalidRequestError("data dirs must be a list")
-    if len(data_dirs) != len(set(data_dirs)):
+    if len(data_dirs) > 64 or len(data_dirs) != len(set(data_dirs)):
         raise InvalidRequestError("data dirs contain duplicates")
     allowed_roots = [Path(repository).resolve(strict=False)]
     if data_root is not None:
@@ -111,9 +112,13 @@ def resolve_data_dirs(data_dirs: Any, repository: Path, *, data_root: Path | Non
         path = Path(entry)
         if not path.is_absolute():
             raise InvalidRequestError("data dir must be absolute")
-        resolved = path.resolve(strict=False)
-        if not any(resolved == root or resolved.is_relative_to(root) for root in allowed_roots):
-            raise InvalidRequestError("data dir is outside the approved project data root")
+        try:
+            resolved = path.resolve(strict=True)
+            info = resolved.lstat()
+        except OSError as error:
+            raise InvalidRequestError("data dir must exist") from error
+        if resolved != path or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+            raise InvalidRequestError("data dir must be a canonical regular file or directory")
         resolved_list.append(str(resolved))
     return resolved_list
 

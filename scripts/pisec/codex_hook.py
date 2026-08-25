@@ -52,6 +52,7 @@ def main() -> int:
         "startSource": os.environ.get("PISEC_SESSION_START_SOURCE", "startup"),
         "surfaceId": surface,
         "token": token,
+        "generation": os.environ.get("PISEC_RUNTIME_GENERATION"),
     }
     request = {"protocolVersion": 1, "requestId": "codex-hook", "operation": "runtime.report", "payload": payload}
     try:

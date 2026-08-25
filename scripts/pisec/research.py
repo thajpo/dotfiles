@@ -19,7 +19,9 @@ from .models import (
     json_digest,
     new_id,
     utc_now,
+    validate_git_oid,
     validate_id,
+    validate_sha256,
 )
 
 PACKET_MAX_BYTES = 32 * 1024
@@ -29,7 +31,7 @@ URL_MAX = 2048
 TASK_PACKET_KEYS = frozenset({"schemaVersion", "outcome", "boundaries", "acceptance", "openQuestions", "evidence"})
 EXECUTION_PACKET_KEYS = frozenset({
     "projectId", "workstreamId", "title", "purpose", "brief", "targetRef", "baseCommitOid",
-    "branchName", "executionProfile", "externalDomains", "harnessId", "workspaceAdapterId", "implementationModel", "harnessModel", "reasoningEffort", "nonEffects", "approvalScopeSha256",
+    "branchName", "executionProfile", "harnessId", "workspaceAdapterId", "implementationModel", "harnessModel", "reasoningEffort", "nonEffects", "approvalScopeSha256",
 })
 RESEARCH_REQUEST_KEYS = frozenset({"kind", "summary", "question", "context", "attempted", "candidateSources", "blocking"})
 RESEARCH_RESULT_KEYS = frozenset({"schemaVersion", "findings", "sources", "uncertainties"})
@@ -106,17 +108,10 @@ def _execution_packet(value: Any) -> dict[str, Any]:
             bounded_text(execution[key], name=f"taskPacket.execution.{key}", limit=256)
     if execution["reasoningEffort"] is not None and execution["reasoningEffort"] not in {"low", "medium", "high", "xhigh"}:
         raise InvalidRequestError("taskPacket.execution.reasoningEffort is invalid")
-    bounded_text(execution["baseCommitOid"], name="taskPacket.execution.baseCommitOid", limit=128)
-    if not isinstance(execution["externalDomains"], list) or len(execution["externalDomains"]) > PACKET_MAX_ITEMS:
-        raise InvalidRequestError("taskPacket.execution.externalDomains is invalid")
-    for item in execution["externalDomains"]:
-        bounded_text(item, name="taskPacket.execution.externalDomains[]", limit=253)
+    validate_git_oid(execution["baseCommitOid"], "taskPacket.execution.baseCommitOid")
     normalized = dict(execution)
-    normalized["externalDomains"] = list(execution["externalDomains"])
     normalized["nonEffects"] = _bounded_list(execution["nonEffects"], name="taskPacket.execution.nonEffects")
-    bounded_text(execution["approvalScopeSha256"], name="taskPacket.execution.approvalScopeSha256", limit=64)
-    if len(execution["approvalScopeSha256"]) != 64:
-        raise InvalidRequestError("taskPacket.execution.approvalScopeSha256 is invalid")
+    validate_sha256(execution["approvalScopeSha256"], "taskPacket.execution.approvalScopeSha256")
     return normalized
 
 
@@ -309,7 +304,6 @@ def issue_task_packet_in_transaction(connection: Any, *, scope: Mapping[str, Any
         "baseCommitOid": scope["baseCommitOid"],
         "branchName": scope["branchName"],
         "executionProfile": scope["executionProfile"],
-        "externalDomains": scope["externalDomains"],
         "harnessId": scope["harnessId"],
         "workspaceAdapterId": scope["workspaceAdapterId"],
         "implementationModel": scope.get("implementationModel"),

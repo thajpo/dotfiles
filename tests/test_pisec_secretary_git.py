@@ -205,7 +205,8 @@ class SecretaryGitTests(unittest.TestCase):
         subprocess.run(["git", "init", "--bare", "-q", "--initial-branch=main", str(remote)], check=True)
         repo = root / "push-repo"
         make_repo(repo)
-        git(repo, "config", "--local", "remote.origin.url", str(remote))
+        remote_url = "ssh://git@localhost" + str(remote)
+        git(repo, "config", "--local", "remote.origin.url", remote_url)
         git(remote, "fetch", "-q", str(repo), "refs/heads/main:refs/heads/main")
         git(repo, "switch", "-q", "-c", "research/topic")
         (repo / "research.txt").write_text("published base\n")
@@ -221,6 +222,15 @@ class SecretaryGitTests(unittest.TestCase):
         store = PiStore(root / "push-state")
         self.addCleanup(store.close)
         project = register_project(store, repo, default_ref="main")
+        real_run_git = secretary_git_module._run_git
+
+        def local_transport(path, *args, **kwargs):
+            translated = tuple(str(remote) if value == remote_url else value for value in args)
+            return real_run_git(path, *translated, **kwargs)
+
+        transport_patch = patch.object(secretary_git_module, "_run_git", side_effect=local_transport)
+        transport_patch.start()
+        self.addCleanup(transport_patch.stop)
         return store, project, repo, remote, remote_oid, local_oid
 
     def test_existing_non_default_branch_pushes_fast_forward_and_replays(self):
@@ -236,7 +246,7 @@ class SecretaryGitTests(unittest.TestCase):
                 if args[0] != "push":
                     return real_run_git(path, *args, **kwargs)
                 pushed_commands.append(args)
-                remote_path = Path(args[-2])
+                remote_path = remote if args[-2] == "ssh://git@localhost" + str(remote) else Path(args[-2])
                 target_ref = args[-1].split(":", 1)[1]
                 real_run_git(
                     remote_path,

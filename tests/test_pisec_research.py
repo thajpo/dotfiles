@@ -71,7 +71,7 @@ class ResearchTests(unittest.TestCase):
     def runtime_auth(store: PiStore, workstream: dict[str, object]) -> dict[str, str]:
         binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone())
         token = Path(binding["launch_secret_path"]).read_text().strip()
-        return {"workstreamId": str(workstream["workstream_id"]), "runtimeInstanceId": str(binding["runtime_instance_id"]), "surfaceId": str(binding["workspace_surface_id"]), "token": token}
+        return {"workstreamId": str(workstream["workstream_id"]), "runtimeInstanceId": str(binding["runtime_instance_id"]), "surfaceId": str(binding["workspace_surface_id"]), "token": token, "generation": str(binding["launch_generation_sha256"] or binding["applied_generation_sha256"])}
 
     @staticmethod
     def dispatcher(root: Path, harness, workspace) -> BrokerDispatcher:

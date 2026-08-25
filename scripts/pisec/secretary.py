@@ -12,7 +12,7 @@ from .fence import resolve_data_dirs
 from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
 from .projects import resolve_project
 from .project_workspaces import ensure_project_workspace
-from .releases import materialize_current_surface
+from .runtime_surface import materialize_current_surface
 from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent
 from .workstreams import APPLY_LOCK, _wait_for_agent
 
@@ -255,7 +255,7 @@ def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdap
     if observed is not None:
         workspace.rename_tab(observed.view_id, f"Project: {project['display_name']}" if project.get("coordination_mode") == "fleet" else "Project chat")
     agent = observed.agent if observed is not None else None
-    ready = agent is not None and agent.surface_id == binding["workspace_surface_id"] and agent.interactive_ready is True
+    ready = agent is not None and agent.surface_id == binding["workspace_surface_id"] and agent.identity_usable is True
     if not ready:
         with store.transaction():
             now = utc_now()

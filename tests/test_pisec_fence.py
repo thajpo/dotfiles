@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.pisec.adapters import artifact_document
+from scripts.pisec.adapters import RuntimeSurfaceArtifacts, artifact_document
 from scripts.pisec.fence import render_policy
 from scripts.pisec.git_objects import GitObjectManager
 from scripts.pisec.models import AuthorizationError, ConflictError, NeedsAttentionError, new_id
@@ -27,13 +27,16 @@ def make_config(root: Path) -> dict:
     gateway = root / "gateway.token"
     gateway.write_text("g" * 48 + "\n")
     os.chmod(gateway, 0o600)
+    executable = root / "omp-fixture"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    os.chmod(executable, 0o700)
     return {
+        "fencePath": str(executable),
         "schemaVersion": 3,
-        "fencePath": "/usr/bin/false",
         "harness": {
             "id": "omp",
             "config": {
-                "executablePath": "/usr/bin/false",
+                "executablePath": str(executable),
                 "gateway": {"baseUrl": "http://127.0.0.1:4000", "tokenFile": str(gateway)},
                 "modelRoles": {"default": "openai-codex/model", "task": "deepseek/model", "smol": "deepseek/smol"},
                 "network": {"registryDomains": [], "developmentEndpoints": []},
@@ -47,13 +50,21 @@ def render(scope: dict, root: Path, agent: Path, config: dict, *, baseline=()):
     return render_policy(root / "state", scope, agent, config, harness_home=agent, adapter_replacements={"HARNESS_EXECUTABLE": "/usr/bin/false"}, baseline_domains=baseline)
 
 
-def with_release(adapter: OmpHarnessAdapter, scope: dict) -> dict:
-    release = adapter.build_runtime_release()
-    return {**scope, "runtimeReleaseId": "rel_" + release.content_sha256[:32], "runtimeReleaseSha256": release.content_sha256, "runtimeReleaseRoot": release.root_path}
+def with_surface(adapter: OmpHarnessAdapter, scope: dict) -> dict:
+    target = adapter.state_root / "runtime-current" / adapter.manifest.adapter_id
+    surface = adapter.current_runtime_surface() if target.exists() else adapter.prepare_runtime_surface()
+    return {**scope, "runtimeSurfaceId": "surface_" + surface.content_sha256[:32], "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path}
+
+
+def stage_and_activate(adapter: OmpHarnessAdapter, scope: dict):
+    surface = adapter.current_runtime_surface()
+    stage_root = adapter.state_root / "test-staging" / new_id("op")
+    staged = adapter.stage_profile({**scope, "operationId": new_id("op")}, surface, stage_root)
+    return adapter.activate_profile(scope, staged)
 
 
 class RuntimeMaterializationTests(unittest.TestCase):
-    def test_built_release_isolated_from_later_user_surface_edits(self):
+    def test_surface_isolated_from_later_user_surface_edits(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             home = root / "home"
@@ -66,13 +77,13 @@ class RuntimeMaterializationTests(unittest.TestCase):
             worktree.mkdir()
             scope = {"projectId": new_id("prj"), "workstreamId": new_id("ws"), "executionProfile": "secretary-project", "worktreePath": str(worktree)}
             with patch("scripts.pisec.harnesses.omp.Path.home", return_value=home):
-                first_release = adapter.build_runtime_release()
-                first_scope = {**scope, "runtimeReleaseId": "rel_" + first_release.content_sha256[:32], "runtimeReleaseSha256": first_release.content_sha256, "runtimeReleaseRoot": first_release.root_path}
+                first_surface = adapter.prepare_runtime_surface()
+                first_scope = {**scope, "runtimeSurfaceId": "surface_" + first_surface.content_sha256[:32], "runtimeSurfaceSha256": first_surface.content_sha256, "runtimeSurfaceRoot": first_surface.root_path}
                 source.write_text("second\n")
-                artifacts = adapter.materialize_profile(first_scope)
-                second_release = adapter.build_runtime_release()
+                artifacts = stage_and_activate(adapter, first_scope)
+                second_surface = adapter.current_runtime_surface()
             self.assertEqual((Path(artifacts.harness_home) / "rules" / "custom.md").read_text(), "first\n")
-            self.assertNotEqual(first_release.content_sha256, second_release.content_sha256)
+            self.assertEqual(first_surface.content_sha256, second_surface.content_sha256)
 
     def test_config_validation_and_gateway_only_models(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -82,7 +93,7 @@ class RuntimeMaterializationTests(unittest.TestCase):
             assigned = root / "assigned"
             assigned.mkdir()
             scope = {"projectId": new_id("prj"), "workstreamId": new_id("ws"), "executionProfile": "secretary-project", "worktreePath": str(assigned)}
-            artifacts = adapter.materialize_profile(with_release(adapter, scope))
+            artifacts = stage_and_activate(adapter, with_surface(adapter, scope))
             models = json.loads((Path(artifacts.harness_home) / "models.yml").read_text())
             self.assertEqual(set(models["providers"]), {"openai-codex", "deepseek"})
             for provider in models["providers"].values():
@@ -97,6 +108,7 @@ class RuntimeMaterializationTests(unittest.TestCase):
             self.assertFalse((Path(artifacts.harness_home) / "extensions" / "herdr-omp-agent-state.ts").exists())
             self.assertFalse((Path(artifacts.harness_home) / "agent" / "extensions" / "herdr-omp-agent-state.ts").exists())
             self.assertEqual(Path(artifacts.adapter_data["extensionPath"]).name, "pisec.ts")
+            self.assertIn(artifacts.adapter_data["extensionPath"], json.dumps(json.loads(Path(artifacts.policy_path).read_text())))
 
     def test_user_surface_omits_competing_herdr_omp_lifecycle_extension(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,8 +142,8 @@ class RuntimeMaterializationTests(unittest.TestCase):
             scope = {"projectId": new_id("prj"), "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS)}
             env_dir = root / "venv"
             env_dir.mkdir()
-            released_scope = with_release(adapter, scope)
-            self.assertNotEqual(adapter.desired_generation(released_scope), adapter.desired_generation({**released_scope, "pythonEnv": str(env_dir)}))
+            surface_scope = with_surface(adapter, scope)
+            self.assertNotEqual(adapter.desired_generation(surface_scope), adapter.desired_generation({**surface_scope, "pythonEnv": str(env_dir)}))
 
     def test_profile_replay_reuses_runtime_token_and_agent_surface(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,11 +160,11 @@ class RuntimeMaterializationTests(unittest.TestCase):
             (private / "pack").mkdir()
             adapter = OmpHarnessAdapter(state_root=root / "state", config=make_config(root))
             scope = {"projectId": new_id("prj"), "workstreamId": workstream_id, "executionProfile": "worker-default", "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch, "externalDomains": list(WEB_SEARCH_DOMAINS)}
-            released_scope = with_release(adapter, scope)
-            first = adapter.materialize_profile(released_scope)
+            surface_scope = with_surface(adapter, scope)
+            first = stage_and_activate(adapter, surface_scope)
             custom = Path(first.harness_home) / "custom.txt"
             custom.write_text("preserve\n")
-            second = adapter.materialize_profile(released_scope)
+            second = stage_and_activate(adapter, surface_scope)
             self.assertEqual(Path(first.launch_secret_path).read_text(), Path(second.launch_secret_path).read_text())
             self.assertEqual(first.runtime_token_sha256, second.runtime_token_sha256)
             self.assertEqual(custom.read_text(), "preserve\n")
@@ -236,16 +248,16 @@ class RuntimeMaterializationTests(unittest.TestCase):
             control_db.parent.mkdir(parents=True, exist_ok=True)
             control_db.touch()
             os.chmod(control_db, 0o600)
-            released_scope = with_release(adapter, scope)
-            artifacts = adapter.materialize_profile(released_scope)
-            launcher = adapter.commit_launch_binding(released_scope, artifacts, workspace_session_name="main", workspace_id="w1", workspace_view_id="w1:t1", workspace_surface_id="w1:p1")
+            surface_scope = with_surface(adapter, scope)
+            artifacts = stage_and_activate(adapter, surface_scope)
+            launcher = adapter.commit_launch_binding(surface_scope, artifacts, workspace_session_name="main", workspace_id="w1", workspace_view_id="w1:t1", workspace_surface_id="w1:p1")
             descriptor_path = launcher.parent / "binding.json"
             document = json.loads(descriptor_path.read_text())
             launcher_schema = runpy.run_path(str(launcher))["DESCRIPTOR_FIELDS"]
             self.assertEqual(set(document), launcher_schema)
             self.assertEqual(document["schemaVersion"], 3)
             self.assertEqual(document["harnessId"], "omp")
-            self.assertEqual(document["runtimeReleaseId"], released_scope["runtimeReleaseId"])
+            self.assertEqual(document["runtimeSurfaceId"], surface_scope["runtimeSurfaceId"])
             self.assertEqual(document["canonicalRoot"], str(managed.resolve()))
             self.assertEqual(document["workspaceSessionName"], "main")
             self.assertEqual(document["workspaceSurfaceId"], "w1:p1")
@@ -259,7 +271,6 @@ class RuntimeMaterializationTests(unittest.TestCase):
                 "workspace_view_id": "w1:t1",
                 "workspace_surface_id": "w1:p1",
                 "harness_home": artifacts.harness_home,
-                "desired_release_id": released_scope["runtimeReleaseId"],
                 "desired_generation_sha256": artifacts.generation_sha256,
                 "adapter_artifacts_json": artifact_document(adapter.manifest, artifacts),
                 "policy_path": artifacts.policy_path,
@@ -579,7 +590,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             (private / "info").mkdir(parents=True)
             (private / "pack").mkdir()
             base = {"projectId": project_id, "workstreamId": workstream_id, "worktreePath": str(worktree), "privateGitObjectDir": str(private), "gitCommonObjectDir": str(common / "objects"), "branchName": branch}
-            for profile, domains in (("worker-default", list(WEB_SEARCH_DOMAINS)), ("worker-networked", sorted([*WEB_SEARCH_DOMAINS, "*.example.com", "registry.example.com"]))):
+            for profile, domains in (("worker-default", list(WEB_SEARCH_DOMAINS)),):
                 scope = {**base, "executionProfile": profile, "externalDomains": domains}
                 policy_path, digest = render(scope, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
                 policy = json.loads(policy_path.read_text())
@@ -708,9 +719,6 @@ class FencePolicyAndShimTests(unittest.TestCase):
                 launch_secret_path TEXT,
                 policy_path TEXT,
                 policy_sha256 TEXT,
-                desired_release_id TEXT,
-                applied_release_id TEXT,
-                launch_release_id TEXT,
                 desired_generation_sha256 TEXT,
                 applied_generation_sha256 TEXT,
                 launch_generation_sha256 TEXT,
@@ -729,8 +737,8 @@ class FencePolicyAndShimTests(unittest.TestCase):
             (workstream_id, project_id, role, "secretary-project" if role == "secretary" else "worker-default", str(managed.resolve()), "active", "bound"),
         )
         connection.execute(
-            "INSERT INTO runtime_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (workstream_id, "main", workspace_id, view_id, surface_id, "omp", str(agent), str(secret), str(policy), hashlib.sha256(policy.read_bytes()).hexdigest(), "rel_fixture", "rel_fixture", "rel_fixture", "a" * 64, "a" * 64, "a" * 64, None if private is None else str(private), session_kind, session_value, "starting"),
+            "INSERT INTO runtime_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (workstream_id, "main", workspace_id, view_id, surface_id, "omp", str(agent), str(secret), str(policy), hashlib.sha256(policy.read_bytes()).hexdigest(), "a" * 64, "a" * 64, "a" * 64, None if private is None else str(private), session_kind, session_value, "starting"),
         )
         connection.commit()
         connection.close()
@@ -755,7 +763,7 @@ class FencePolicyAndShimTests(unittest.TestCase):
             "extensionPath": str(extension),
             "policyPath": str(policy),
             "policySha256": hashlib.sha256(policy.read_bytes()).hexdigest(),
-            "runtimeReleaseId": "rel_fixture",
+            "runtimeSurfaceId": "surface_fixture",
             "generationSha256": "a" * 64,
             "launchSecretPath": str(secret),
             "xdgDataHome": str(xdg["data"]),
@@ -932,7 +940,7 @@ class RuntimeReportTests(unittest.TestCase):
         self.temp.cleanup()
 
     def payload(self, **changes):
-        value = {"workstreamId": self.workstream_id, "runtimeInstanceId": "instance-1", "seq": 1, "event": "session_start", "reason": None, "state": "starting", "nativeSessionKind": "path", "nativeSessionValue": str(self.session), "startSource": "startup", "surfaceId": self.binding["workspace_surface_id"], "token": self.token}
+        value = {"workstreamId": self.workstream_id, "runtimeInstanceId": "instance-1", "seq": 1, "event": "session_start", "reason": None, "state": "starting", "nativeSessionKind": "path", "nativeSessionValue": str(self.session), "startSource": "startup", "surfaceId": self.binding["workspace_surface_id"], "token": self.token, "generation": self.binding["desired_generation_sha256"]}
         value.update(changes)
         return value
 

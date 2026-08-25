@@ -79,14 +79,14 @@ class BrokerSocketTests(unittest.TestCase):
             self.assertEqual([item["project"]["project_id"] for item in dispatcher._fleet(store, "fleet.status", "ws_00000000000000000000000000000000", {})["projects"]], [self.project_id])
     def test_secretary_issue_report_is_durable_and_idempotent(self):
         payload = {"authToken": self.token, "category": "permission", "severity": "blocking", "summary": "Worker cannot read approved source", "details": "The fenced worker received permission denied for the approved Herdr excerpt.", "requestedAction": "Review the minimum read-only source scope.", "evidence": ["PermissionError: denied"], "idempotencyKey": "source-read-1"}
-        first = request(self.service.paths["secretary"], "secretary.issue.report", payload)
-        replay = request(self.service.paths["secretary"], "secretary.issue.report", payload)
+        first = request(self.service.paths["secretary"], "issue.report", payload)
+        replay = request(self.service.paths["secretary"], "issue.report", payload)
         self.assertEqual(first["issue_id"], replay["issue_id"])
         with PiStore(self.state) as store:
             row = store.conn.execute("SELECT category,severity,state FROM secretary_issue_reports WHERE issue_id=?", (first["issue_id"],)).fetchone()
             self.assertEqual(tuple(row), ("permission", "blocking", "open"))
         with self.assertRaises(PisecError) as denied:
-            request(self.service.paths["admin"], "secretary.issue.report", {key: value for key, value in payload.items() if key != "authToken"})
+            request(self.service.paths["admin"], "issue.report", {key: value for key, value in payload.items() if key != "authToken"})
         self.assertEqual(denied.exception.code, "authorization_denied")
 
     def test_cross_socket_operations_and_bad_token_fail(self):
@@ -106,7 +106,7 @@ class BrokerSocketTests(unittest.TestCase):
     def test_runtime_handler_is_only_on_runtime_socket(self):
         session = Path(self.binding["harness_home"]) / "sessions" / "one.jsonl"
         session.write_text("session\n")
-        payload = {"workstreamId": self.binding["workstream_id"], "runtimeInstanceId": "protocol-runtime", "seq": 1, "event": "session_start", "reason": None, "state": "starting", "nativeSessionKind": "path", "nativeSessionValue": str(session), "startSource": "startup", "surfaceId": self.binding["workspace_surface_id"], "token": self.token}
+        payload = {"workstreamId": self.binding["workstream_id"], "runtimeInstanceId": "protocol-runtime", "seq": 1, "event": "session_start", "reason": None, "state": "starting", "nativeSessionKind": "path", "nativeSessionValue": str(session), "startSource": "startup", "surfaceId": self.binding["workspace_surface_id"], "token": self.token, "generation": self.binding["desired_generation_sha256"]}
         result = request(self.service.paths["runtime"], "runtime.report", payload)
         self.assertTrue(result["accepted"])
         with self.assertRaises(PisecError):

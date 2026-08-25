@@ -66,7 +66,7 @@ def parser() -> argparse.ArgumentParser:
 
     update = commands.add_parser("update", help="install a committed Pisec bundle and refresh workers")
     _add_json_argument(update)
-    update.add_argument("--commit", default="HEAD", metavar="REF")
+    update.add_argument("--commit", default=None, metavar="REF")
     update.add_argument("--wait-seconds", type=float, default=300.0, metavar="SECONDS")
     project = commands.add_parser(
         "project",
@@ -232,12 +232,16 @@ def parser() -> argparse.ArgumentParser:
     cleanup.add_argument("workstream", metavar="WORKSTREAM", help="retired worker workstream id")
     cleanup.add_argument("--confirm", required=True, metavar="WORKSTREAM", help="repeat the exact workstream id")
     cleanup.add_argument("--force-dirty", action="store_true", help="remove a dirty managed checkout")
+    ensure_runtime = workstream_commands.add_parser("ensure-runtime", help="ensure one active runtime is current and live")
+    _add_json_argument(ensure_runtime)
+    ensure_runtime.add_argument("workstream", metavar="WORKSTREAM")
+    ensure_runtime.add_argument("--wait-seconds", type=float, default=30.0, metavar="SECONDS")
     return root
 
 
 def _command_path(args: argparse.Namespace) -> tuple[str, ...]:
     path = [str(args.command)]
-    for name in ("project_command", "release_command", "workstream_command"):
+    for name in ("project_command", "workstream_command"):
         value = getattr(args, name, None)
         if value:
             path.append(str(value))
@@ -577,7 +581,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         deployment_failed = False
         if args.command == "update":
             updater = runpy.run_path(str(Path(__file__).parents[1] / "pisec-update.py"))
-            return int(updater["main"](["--commit", args.commit, "--wait-seconds", str(args.wait_seconds), *(["--json"] if args.json_output else [])]))
+            updater_args = (["--commit", args.commit] if args.commit is not None else []) + ["--wait-seconds", str(args.wait_seconds)] + (["--json"] if args.json_output else [])
+            return int(updater["main"](updater_args))
         if args.command == "project" and args.project_command == "register":
             payload = {"path": str(Path(args.path).expanduser())}
             if args.name is not None:
@@ -622,6 +627,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _call("system.doctor", {} if args.live_search_workstream is None else {"liveSearchWorkstream": args.live_search_workstream})
         elif args.command == "workstream" and args.workstream_command == "cleanup":
             result = _call("workstream.cleanup", {"workstreamId": args.workstream, "confirm": args.confirm, "forceDirty": bool(args.force_dirty)})
+        elif args.command == "workstream" and args.workstream_command == "ensure-runtime":
+            result = _call("runtime.ensure", {"workstreamId": args.workstream, "waitSeconds": args.wait_seconds}, timeout=max(30.0, args.wait_seconds + 30.0))
         else:
             raise AssertionError("unhandled command")
         print(format_result(_command_path(args), result, as_json=bool(args.json_output)))

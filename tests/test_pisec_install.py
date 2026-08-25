@@ -17,7 +17,7 @@ from unittest.mock import patch
 from scripts.pisec import doctor
 from scripts.pisec.host_config import patch_herdr_config, patch_pisec_config, write_collie_env
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.adapters import AdapterHealth, AdapterRegistry, HarnessManifest, WorkspaceManifest
+from scripts.pisec.adapters import AdapterHealth, AdapterRegistry, HarnessManifest, RuntimeSurfaceArtifacts, WorkspaceManifest
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "agent-workflow-install.sh"
 
@@ -45,12 +45,10 @@ class FakeAdminHandler(socketserver.StreamRequestHandler):
         request = json.loads(self.rfile.readline())
         if request["operation"] == "system.doctor":
             result = {"ok": True}
-        elif request["operation"] == "runtime.release.build":
-            result = {"release_id": "rel_" + "a" * 32, "content_sha256": "a" * 64, "reused": False}
-        elif request["operation"] == "runtime.release.activate":
-            result = {"release_id": request["payload"]["releaseId"], "content_sha256": "a" * 64, "activated": True}
         elif request["operation"] == "project.refresh":
             result = {"ok": True, "generation": None, "upgraded": [], "pending": [], "skipped": [], "failed": []}
+        elif request["operation"] == "system.reconcile":
+            result = {"ok": True}
         else:
             result = {}
         response = {
@@ -76,6 +74,10 @@ class FakeInstallTests(unittest.TestCase):
         self._write_collie_source()
         self._make_treehouse_archive()
         self._write_commands()
+        codex = self.home / ".nvm" / "versions" / "node" / "v22.19.0" / "bin" / "codex"
+        codex.parent.mkdir(parents=True, exist_ok=True)
+        codex.write_text("#!/usr/bin/env bash\nexit 0\n")
+        os.chmod(codex, 0o700)
         self.runtime_root = self.root / "runtime"
         self._sockets = []
         self._threads = []
@@ -651,11 +653,40 @@ exit 0
         class FakeHarness:
             manifest = HarnessManifest("fixture-harness", "fixture-agent", "fixture-1")
 
+            def __init__(self, root):
+                self.root = root
+
+            def current_runtime_surface(self):
+                root = self.root / "runtime-surface"
+                root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                from scripts.pisec.runtime_surface import _tree_digest
+                return RuntimeSurfaceArtifacts(_tree_digest(root), {"adapter": self.manifest.adapter_id, "adapterVersion": self.manifest.version_label, "interfaceVersion": 1}, str(root))
+
+            def __getattr__(self, name):
+                if name in {
+                    "prepare_runtime_surface", "current_runtime_surface", "desired_generation", "stage_profile",
+                    "activate_profile", "restore_profile", "discard_staged_profile", "validate_execution_profile",
+                    "profile_domains", "commit_launch_binding", "launch_binding_path", "cleanup_binding",
+                    "validate_native_session",
+                }:
+                    return lambda *args, **kwargs: None
+                raise AttributeError(name)
+
             def health_checks(self, _binding, _workstream):
                 return (AdapterHealth("fixture harness", True, "fixture"),)
 
         class FakeWorkspace:
             manifest = WorkspaceManifest("fixture-workspace", "fixture-session", "fixture-1", None)
+
+            def __getattr__(self, name):
+                if name in {
+                    "create_workspace", "create_tab", "rename_tab", "move_surface_to_tab", "observe_tab",
+                    "observe_workstream", "observe_surface", "observe_runtime", "run_command", "stop_runtime",
+                    "prompt_agent", "prompt_agent_nowait", "prompt_eligible", "focus_pane", "close_tab",
+                    "close_workspace", "report_session", "report_state", "release_agent", "reconcile",
+                }:
+                    return lambda *args, **kwargs: None
+                raise AttributeError(name)
 
             def health_checks(self):
                 return (AdapterHealth("fixture workspace", True, "fixture"),)
@@ -676,7 +707,7 @@ exit 0
             },
         }
         registry = AdapterRegistry()
-        registry.register_harness(FakeHarness())
+        registry.register_harness(FakeHarness(self.root / "fake-harness"))
         registry.register_workspace(FakeWorkspace())
         with patch.dict(os.environ, self.env(), clear=False), PiStore(state) as store:
             result = doctor.run_doctor(store=store, config=config, registry=registry)

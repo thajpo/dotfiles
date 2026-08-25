@@ -18,6 +18,7 @@ from pathlib import Path
 from .events import append_event_in_transaction
 from .fence import resolve_python_env_paths
 from .models import NeedsAttentionError, canonical_json, json_digest, utc_now, validate_id
+from .operations import authoritative_workstream_creation
 from .pi_store import PiStore
 
 
@@ -29,12 +30,7 @@ def attach_python_env(store: PiStore, workstream_id: str, python_env: str) -> di
     workstream_id = validate_id(workstream_id, prefix="ws")
     resolved_env = resolve_python_env_paths(python_env)
     normalized = resolved_env[0]
-    operation = store.conn.execute(
-        "SELECT * FROM operations WHERE workstream_id=? AND kind='workstream.create'",
-        (workstream_id,),
-    ).fetchone()
-    if operation is None:
-        raise ValueError(f"no workstream.create operation for {workstream_id}")
+    operation = authoritative_workstream_creation(store, workstream_id)
     scope = json.loads(operation["result_json"])
     if not isinstance(scope, dict) or scope.get("workstreamId") != workstream_id:
         raise ValueError(f"stored scope for {workstream_id} is invalid")

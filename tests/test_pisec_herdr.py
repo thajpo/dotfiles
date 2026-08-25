@@ -206,7 +206,7 @@ class HerdrTests(unittest.TestCase):
         observed = self.adapter.observe_workstream(path="/tmp/repo", agent_name="pisec-secretary")
         self.assertEqual(observed.agent.name, "omp")
         self.assertEqual(observed.agent.surface_id, "w2:p1")
-        self.assertTrue(observed.agent.interactive_ready)
+        self.assertTrue(observed.agent.identity_usable)
 
     def test_runtime_reports_use_only_the_pisec_source(self):
         self.adapter.report_state("w1:p1", "blocked", "approval", 7, "instance-1", self.harness)

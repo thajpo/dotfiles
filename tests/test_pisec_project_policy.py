@@ -74,7 +74,7 @@ class ProjectPolicyTests(unittest.TestCase):
                     project["project_id"],
                     coordination_mode="fleet",
                     worker_creation_policy="bounded_auto",
-                    worker_creation_policy_json={"workerLimit": 2, "approvedProfiles": ["worker-default"]},
+                    worker_creation_policy_json={"workerLimit": 2, "approvedWorkModes": ["BUILD"]},
                 )
                 self.assertFalse(updated["reused"])
                 self.assertEqual(updated["coordination_mode"], "fleet")
@@ -131,18 +131,18 @@ class ProjectPolicyTests(unittest.TestCase):
                     store,
                     project["project_id"],
                     worker_creation_policy="bounded_auto",
-                    worker_creation_policy_json={"workerLimit": 1, "approvedProfiles": ["worker-default"]},
+                    worker_creation_policy_json={"workerLimit": 1, "approvedWorkModes": ["BUILD"]},
                 )
-                with self.assertRaises(ConflictError):
+                with self.assertRaises((ConflictError, ValueError)):
                     prepare_workstream(
                         store,
                         project_id=project["project_id"],
-                        title="Networked worker",
+                        title="Unsupported worker profile",
                         purpose="Should be rejected",
-                        brief="The profile is outside policy.",
+                        brief="The profile is outside the worker contract.",
                         task_packet=PACKET,
                         idempotency_key="bounded-profile-rejected",
-                        execution_profile="worker-networked",
+                        execution_profile="secretary-project",
                         harness=harness,
                         workspace=workspace,
                     )
@@ -190,7 +190,7 @@ class ProjectPolicyTests(unittest.TestCase):
                         store,
                         project["project_id"],
                         worker_creation_policy="bounded_auto",
-                        worker_creation_policy_json={"approvedProfiles": ["worker-default"]},
+                        worker_creation_policy_json={"approvedWorkModes": ["BUILD"]},
                     )
                 with self.assertRaises(InvalidRequestError):
                     update_project_policy(

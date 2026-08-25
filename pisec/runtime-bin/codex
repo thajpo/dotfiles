@@ -80,6 +80,7 @@ def main() -> None:
         "PISEC_WORKSTREAM_ID": str(descriptor["workstreamId"]),
         "PISEC_PROJECT_ID": str(descriptor["projectId"]),
         "PISEC_RUNTIME_SOCKET": str(descriptor["runtimeSocketPath"]),
+        "PISEC_RUNTIME_GENERATION": str(descriptor["generationSha256"]),
         "PISEC_RUNTIME_TOKEN": token,
         "PISEC_RUNTIME_INSTANCE_ID": secrets.token_hex(16),
         "PISEC_SURFACE_ID": str(descriptor["workspaceSurfaceId"]),

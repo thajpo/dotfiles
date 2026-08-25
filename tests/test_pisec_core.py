@@ -75,116 +75,63 @@ class StoreTests(unittest.TestCase):
                 PiStore(root)
 
 
-    def test_epoch_fifteen_fresh_store_has_acceptance_and_integration_schema(self):
+    def test_epoch_sixteen_fresh_store_uses_current_surface_and_permission_schema(self):
         with tempfile.TemporaryDirectory() as tmp, PiStore(Path(tmp) / "state") as store:
-            metadata = store.conn.execute("SELECT schema_name,schema_version,migration_name FROM control_meta").fetchone()
-            self.assertEqual(tuple(metadata), ("pisec-core", 15, "pisec-core-epoch-15"))
-            columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(secretary_issue_reports)")}
-            self.assertIn("requested_action", columns)
-            self.assertIn("evidence_json", columns)
-            self.assertIn("state", columns)
-            columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(authorizations)")}
-            self.assertNotIn("state", columns)
-            self.assertNotIn("expires_at", columns)
-            project_columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(projects)")}
-            self.assertIn("remote_url", project_columns)
-            self.assertIn("data_dirs", project_columns)
-            self.assertIn("active", project_columns)
-            self.assertIn("deactivated_at", project_columns)
-            self.assertIn("coordination_mode", project_columns)
-            self.assertIn("worker_creation_policy", project_columns)
-            self.assertIn("merge_policy", project_columns)
+            metadata = store.conn.execute("SELECT schema_name,schema_version,schema_sha256 FROM control_meta").fetchone()
+            self.assertEqual(metadata["schema_name"], "pisec-core")
+            self.assertEqual(metadata["schema_version"], 16)
+            self.assertTrue(metadata["schema_sha256"].startswith("sha256:"))
             binding_columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(runtime_bindings)")}
             self.assertIn("desired_generation_sha256", binding_columns)
             self.assertIn("applied_generation_sha256", binding_columns)
-            self.assertIn("launch_generation_sha256", binding_columns)
-            self.assertIn("refresh_pending", binding_columns)
-            self.assertIn("desired_release_id", binding_columns)
-            self.assertIn("applied_release_id", binding_columns)
-            self.assertIn("launch_release_id", binding_columns)
-            self.assertIsNotNone(store.conn.execute("SELECT sql FROM sqlite_master WHERE name='runtime_releases'").fetchone())
-            completion_columns = {row["name"]: row for row in store.conn.execute("PRAGMA table_info(completion_packets)")}
-            self.assertEqual(completion_columns["accepted_at"]["notnull"], 0)
-            for table in ("workstream_acceptances", "integration_jobs", "integration_reports"):
-                self.assertIsNotNone(store.conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone())
-            receipt_columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(merge_receipts)")}
-            self.assertTrue({"acceptance_id", "integration_id", "accepted_source_commit_oid", "verification_json", "strategy"} <= receipt_columns)
+            self.assertNotIn("desired_release_id", binding_columns)
+            self.assertNotIn("applied_release_id", binding_columns)
+            for table in ("runtime_releases", "runtime_release_channels", "access_grants", "deployment_actions"):
+                self.assertIsNone(store.conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone())
+            remediation_columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(issue_remediations)")}
+            self.assertEqual(remediation_columns, {"remediation_id", "issue_id", "kind", "workstream_id", "created_at"})
             operation_sql = store.conn.execute("SELECT sql FROM sqlite_master WHERE name='operations'").fetchone()[0]
             self.assertNotIn("'authorized'", operation_sql)
 
-    def test_epoch_six_state_migrates_without_resetting_rows(self):
+    def test_epoch_fifteen_state_migration_requires_explicitly_safe_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            with PiStore(root) as store:
+                store.conn.execute("ALTER TABLE workstreams ADD COLUMN worker_creation_policy_json TEXT NOT NULL DEFAULT '{}'")
+                store.conn.execute("ALTER TABLE control_meta ADD COLUMN migration_name TEXT")
+                store.conn.execute(
+                    "UPDATE control_meta SET schema_version=15,schema_sha256=?,migration_name=?",
+                    (PREVIOUS_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME),
+                )
+            with PiStore(root) as migrated:
+                metadata = migrated.conn.execute("SELECT schema_version,schema_sha256 FROM control_meta").fetchone()
+                self.assertEqual(metadata["schema_version"], 16)
+                self.assertTrue(metadata["schema_sha256"].startswith("sha256:"))
+
+    def test_legacy_epoch_six_state_is_rejected_without_resetting_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "state"
             store = PiStore(root)
             project_id = "prj_" + "a" * 32
             store.conn.execute("INSERT INTO projects(project_id,display_name,repository_path,git_common_dir,default_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (project_id, "Project", "/repo", "/repo/.git", "main", "now", "now"))
-            store.conn.execute("ALTER TABLE projects DROP COLUMN data_dirs")
-            store.conn.execute("ALTER TABLE projects DROP COLUMN active")
-            store.conn.execute("ALTER TABLE projects DROP COLUMN deactivated_at")
+            store.conn.execute("ALTER TABLE control_meta ADD COLUMN migration_name TEXT")
             store.conn.execute("UPDATE control_meta SET schema_version=6,schema_sha256=?,migration_name='pisec-core-epoch-6'", ("sha256:c00cd142b2cd4dd775c3d7878820c4fd69f945e9e4254cfd18414bc82877ca59",))
             store.close()
-            with PiStore(root) as migrated:
-                project = migrated.conn.execute("SELECT display_name,remote_url,data_dirs,active FROM projects WHERE project_id=?", (project_id,)).fetchone()
-                self.assertEqual(tuple(project), ("Project", None, None, 1))
-                self.assertEqual(tuple(migrated.conn.execute("SELECT schema_version,migration_name FROM control_meta").fetchone()), (15, "pisec-core-epoch-15"))
-
-    def test_epoch_fourteen_completion_packets_return_to_unaccepted_state(self):
+            with self.assertRaises(SchemaError):
+                PiStore(root)
+            connection = sqlite3.connect(root / "control.db")
+            try:
+                self.assertIsNotNone(connection.execute("SELECT project_id FROM projects WHERE project_id=?", (project_id,)).fetchone())
+            finally:
+                connection.close()
+    def test_epoch_fourteen_state_is_rejected_without_implicit_downgrade(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "state"
-            store = PiStore(root)
-            project_id = "prj_" + "a" * 32
-            workstream_id = "ws_" + "b" * 32
-            packet_id = "cmp_" + "c" * 32
-            source_oid = "d" * 40
-            task_sha = "e" * 64
-            packet_sha = "f" * 64
-            now = "2026-01-01T00:00:00Z"
-            store.conn.execute(
-                "INSERT INTO projects(project_id,display_name,repository_path,git_common_dir,default_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                (project_id, "Project", "/repo", "/repo/.git", "main", now, now),
-            )
-            store.conn.execute(
-                "INSERT INTO workstreams(workstream_id,project_id,kind,title,purpose,brief,harness_id,workspace_adapter_id,execution_profile,target_ref,base_commit_oid,branch_name,worktree_path,desired_state,provisioning_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (workstream_id, project_id, "worker", "Worker", "Purpose", "Brief", "harness", "workspace", "default", "refs/heads/main", source_oid, "pisec/work", "/worktree", "active", "proposed", now, now),
-            )
-            for trigger in ("workstream_acceptances_no_update", "workstream_acceptances_no_delete", "integration_reports_no_update", "integration_reports_no_delete"):
-                store.conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-            for table in ("integration_reports", "integration_jobs", "workstream_acceptances"):
-                store.conn.execute(f"DROP TABLE {table}")
-            store.conn.execute("DROP TRIGGER completion_packets_no_update")
-            store.conn.execute("DROP TRIGGER completion_packets_no_delete")
-            store.conn.execute("ALTER TABLE completion_packets RENAME TO completion_packets_epoch14")
-            store.conn.execute(
-                """
-                CREATE TABLE completion_packets (
-                    completion_packet_id TEXT PRIMARY KEY,
-                    workstream_id TEXT NOT NULL REFERENCES workstreams(workstream_id),
-                    source_commit_oid TEXT NOT NULL CHECK(length(source_commit_oid) IN (40,64)),
-                    task_packet_sha256 TEXT NOT NULL CHECK(length(task_packet_sha256) = 64),
-                    packet_sha256 TEXT NOT NULL UNIQUE CHECK(length(packet_sha256) = 64),
-                    packet_json TEXT NOT NULL CHECK(length(CAST(packet_json AS BLOB)) <= 65536),
-                    submitted_at TEXT NOT NULL,
-                    accepted_at TEXT NOT NULL
-                )
-                """
-            )
-            store.conn.execute(
-                "INSERT INTO completion_packets VALUES(?,?,?,?,?,?,?,?)",
-                (packet_id, workstream_id, source_oid, task_sha, packet_sha, "{}", now, now),
-            )
-            store.conn.execute("DROP TABLE completion_packets_epoch14")
-            store.conn.execute(
-                "UPDATE control_meta SET schema_version=14,schema_sha256=?,migration_name=?",
-                (PREVIOUS_SCHEMA_DIGEST, PREVIOUS_MIGRATION_NAME),
-            )
-            store.close()
-
-            with PiStore(root) as migrated:
-                packet = migrated.conn.execute("SELECT accepted_at FROM completion_packets WHERE packet_sha256=?", (packet_sha,)).fetchone()
-                self.assertIsNone(packet["accepted_at"])
-                migrated.conn.execute("UPDATE completion_packets SET accepted_at=? WHERE packet_sha256=?", (now, packet_sha))
-                with self.assertRaises(sqlite3.IntegrityError):
-                    migrated.conn.execute("UPDATE completion_packets SET accepted_at=? WHERE packet_sha256=?", ("2026-01-02T00:00:00Z", packet_sha))
+            with PiStore(root) as store:
+                store.conn.execute("ALTER TABLE control_meta ADD COLUMN migration_name TEXT")
+                store.conn.execute("UPDATE control_meta SET schema_version=14,schema_sha256=?,migration_name='pisec-core-epoch-14'", (PREVIOUS_SCHEMA_DIGEST,))
+            with self.assertRaises(SchemaError):
+                PiStore(root)
 
 
 class OperationEventTests(unittest.TestCase):

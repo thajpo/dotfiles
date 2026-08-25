@@ -14,14 +14,14 @@ import stat
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
-from ..adapters import AdapterHealth, HarnessAdapter, HarnessArtifacts, HarnessManifest, RuntimeSurfaceArtifacts
+from ..adapters import AdapterHealth, HarnessAdapter, HarnessArtifacts, HarnessManifest, RuntimeSurfaceArtifacts, StagedHarnessArtifacts, artifact_document
 from ..fsutil import _atomic_write, _read_runtime_secret, _secure_secret, _secure_tree
-from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canonical_json, validate_id
+from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canonical_json, validate_id, validate_sha256
 
 DOMAIN_RE = re.compile(r"^(?:\*\.)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 OMP_BASELINE_DOMAINS = ("html.duckduckgo.com",)
 OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1"
-OMP_PROFILE_IDS = frozenset({"secretary-project", "first-mate", "worker-default", "worker-networked"})
+OMP_PROFILE_IDS = frozenset({"secretary-project", "first-mate", "worker-default"})
 
 
 def _profile_role(profile: str) -> str:
@@ -326,9 +326,9 @@ def _copy_plugin_snapshot(destination: Path, source: Path | None = None) -> dict
     }
 
 
-def _copy_release_surface(source: Path, destination: Path) -> None:
+def _copy_surface(source: Path, destination: Path) -> None:
     if not source.is_dir() or source.is_symlink():
-        raise PisecError("runtime release agent surface is unavailable")
+        raise PisecError("runtime surface agent is unavailable")
     for name in COPY_NAMES:
         origin = source / name
         target = destination / name
@@ -349,10 +349,10 @@ def _copy_release_surface(source: Path, destination: Path) -> None:
             target.unlink()
 
 
-def _copy_released_plugins(release_root: Path, destination: Path) -> dict[str, str]:
+def _copy_plugins(surface_root: Path, destination: Path) -> dict[str, str]:
     for name in ("data", "state", "cache", "config"):
         target = destination / "xdg" / name
-        source = release_root / "xdg" / name
+        source = surface_root / "xdg" / name
         if target.exists() and not target.is_symlink():
             shutil.rmtree(target)
         _copy_safe_entry(source, target)
@@ -424,7 +424,7 @@ def _safe_owned_tree(root: Path) -> None:
 
 
 class OmpHarnessAdapter:
-    manifest = HarnessManifest(adapter_id="omp", agent_kind="omp", version_label="17.3.4-compatible")
+    manifest = HarnessManifest(adapter_id="omp", agent_kind="omp", version_label="17.3.4", interface_version=1, supported_role_profiles=(("worker", "worker-default"), ("secretary", "secretary-project"), ("first_mate", "first-mate")))
 
     def __init__(self, *, state_root: Path | str, config: Mapping[str, Any], policy_renderer: Any = None):
         self.state_root = Path(state_root)
@@ -455,9 +455,9 @@ class OmpHarnessAdapter:
         return tuple(sorted(values))
 
     def prepare_runtime_surface(self) -> RuntimeSurfaceArtifacts:
-        releases_root = self.state_root / "runtime-surfaces"
-        _secure_tree(self.state_root, releases_root)
-        staged = releases_root / f".staged-{secrets.token_hex(8)}"
+        surfaces_root = self.state_root / "runtime-current"
+        _secure_tree(self.state_root, surfaces_root)
+        staged = surfaces_root / f".staged-{secrets.token_hex(8)}"
         staged.mkdir(mode=0o700)
         try:
             surface = staged / "agent"
@@ -470,6 +470,7 @@ class OmpHarnessAdapter:
             agents.mkdir(mode=0o700, exist_ok=True)
             repository = _repo_root()
             _copy_safe_entry(repository / "omp" / "extensions" / "pisec.ts", extensions / "pisec.ts")
+            _copy_safe_entry(repository / "omp" / "extensions" / "pisec-operation-catalogue.generated.ts", extensions / "pisec-operation-catalogue.generated.ts")
             managed_agent = repository / "omp" / "agents" / "pisec-web-research.md"
             if managed_agent.exists():
                 _copy_safe_entry(managed_agent, agents / managed_agent.name)
@@ -489,44 +490,53 @@ class OmpHarnessAdapter:
             _atomic_write(staged / "surface.json", canonical_json(manifest, max_bytes=256 * 1024, max_text=64 * 1024) + "\n")
             _normalize_owner_tree(staged)
             digest = _tree_digest(staged)
-            target = releases_root / digest
+            target = surfaces_root / self.manifest.adapter_id
             if target.exists():
-                if target.is_symlink() or not target.is_dir() or _tree_digest(target) != digest:
+                if target.is_symlink() or not target.is_dir():
                     raise PisecError("existing runtime surface is unsafe or corrupt")
-                shutil.rmtree(staged)
-            else:
-                os.replace(staged, target)
+            _activate_directory(staged, target)
             return RuntimeSurfaceArtifacts(digest, manifest, str(target.absolute()))
         except Exception:
             if staged.exists():
                 shutil.rmtree(staged)
             raise
 
-    def build_runtime_release(self) -> RuntimeSurfaceArtifacts:
-        return self.prepare_runtime_surface()
+    def current_runtime_surface(self) -> RuntimeSurfaceArtifacts:
+        target = self.state_root / "runtime-current" / self.manifest.adapter_id
+        try:
+            _safe_owned_tree(target)
+            manifest = json.loads((target / "surface.json").read_text(encoding="utf-8"))
+            digest = _tree_digest(target)
+        except (NeedsAttentionError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise NeedsAttentionError("current runtime surface is missing or corrupt; run pisec update") from error
+        if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 1 or manifest.get("adapter") != self.manifest.adapter_id or not target.is_dir():
+            raise NeedsAttentionError("current runtime surface is missing or corrupt; run pisec update")
+        return RuntimeSurfaceArtifacts(digest, manifest, str(target.absolute()))
+
 
     def _surface_root(self, scope: Mapping[str, Any]) -> Path:
-        root_value = scope.get("runtimeReleaseRoot")
-        digest = scope.get("runtimeReleaseSha256")
-        if not isinstance(root_value, str) or not isinstance(digest, str) or len(digest) != 64:
+        root_value = scope.get("runtimeSurfaceRoot")
+        digest = scope.get("runtimeSurfaceSha256")
+        if not isinstance(root_value, str):
             raise InvalidRequestError("runtime surface scope is incomplete")
+        validate_sha256(digest, "runtime surface digest")
         root = Path(root_value).absolute()
-        expected_parent = (self.state_root / "runtime-surfaces").absolute()
-        if root.parent != expected_parent or root.name != digest or root.is_symlink() or not root.is_dir():
+        expected_parent = (self.state_root / "runtime-current").absolute()
+        if root.parent != expected_parent or root.name != self.manifest.adapter_id or root.is_symlink() or not root.is_dir():
             raise NeedsAttentionError("runtime surface root is invalid")
         if _tree_digest(root) != digest:
             raise NeedsAttentionError("runtime surface contents do not match their digest")
         return root
 
     def desired_generation(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> str:
-        if surface is None and not isinstance(scope.get("runtimeReleaseRoot"), str):
+        if surface is None and not isinstance(scope.get("runtimeSurfaceRoot"), str):
             surface = self.current_runtime_surface()
         if surface is not None:
-            scope = {**scope, "runtimeReleaseSha256": surface.content_sha256, "runtimeReleaseRoot": surface.root_path, "runtimeReleaseId": "surface_" + surface.content_sha256[:32]}
+            scope = {**scope, "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path, "runtimeSurfaceId": "surface_" + surface.content_sha256[:32]}
         profile = scope.get("executionProfile")
         role = _profile_role(str(profile))
         self.validate_execution_profile(str(profile), role)
-        surface_root = self._surface_root(scope)
+        self._surface_root(scope)
         scope_dict = {
             key: scope.get(key)
             for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "fleetWorktreesDir", "fleetGitObjectsDir", "externalDomains", "implementationModel", "harnessModel", "reasoningEffort")
@@ -540,36 +550,67 @@ class OmpHarnessAdapter:
             "adapter": self.manifest.adapter_id,
             "adapterVersion": self.manifest.version_label,
             "scope": scope_dict,
-            "runtimeSurfaceSha256": scope.get("runtimeReleaseSha256"),
-            "runtimeSurfaceRoot": str(surface_root),
+            "runtimeSurfaceSha256": scope.get("runtimeSurfaceSha256"),
         }
         return hashlib.sha256(canonical_json(manifest, max_bytes=256 * 1024, max_text=256 * 1024).encode("utf-8")).hexdigest()
 
     def _model_providers(self, profile: str, external_domains: Sequence[str] | None = None) -> dict[str, dict[str, str]]:
         del profile, external_domains
-
-    def materialize_profile(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> HarnessArtifacts:
-        if surface is None and not isinstance(scope.get("runtimeReleaseRoot"), str):
+        gateway = self.harness_config["gateway"]
+        token = Path(str(gateway["tokenFile"])).read_text(encoding="utf-8").strip()
+        if not token:
+            raise InvalidRequestError("OMP gateway token is empty")
+        providers: dict[str, dict[str, str]] = {}
+        for model in self.harness_config["modelRoles"].values():
+            provider = str(model).split("/", 1)[0]
+            providers[provider] = {
+                "baseUrl": str(gateway["baseUrl"]),
+                "transport": "pi-native",
+                "apiKey": token,
+            }
+        return providers
+    def _build_profile(
+        self,
+        scope: Mapping[str, Any],
+        surface: RuntimeSurfaceArtifacts | None = None,
+        *,
+        state_root: Path | None = None,
+        preserved_token: str | None = None,
+    ) -> HarnessArtifacts:
+        if surface is None and not isinstance(scope.get("runtimeSurfaceRoot"), str):
             surface = self.current_runtime_surface()
         if surface is not None:
-            scope = {**scope, "runtimeReleaseSha256": surface.content_sha256, "runtimeReleaseRoot": surface.root_path, "runtimeReleaseId": "surface_" + surface.content_sha256[:32]}
+            scope = {**scope, "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path, "runtimeSurfaceId": "surface_" + surface.content_sha256[:32]}
         workstream_id = validate_id(scope["workstreamId"], prefix="ws")
+        state_root = Path(state_root or self.state_root)
         profile = scope.get("executionProfile")
         role = _profile_role(str(profile))
         self.validate_execution_profile(profile, role)
         surface_root = self._surface_root(scope)
         generation_sha256 = self.desired_generation(scope)
-        agent_dir = self.state_root / "omp" / workstream_id
-        _secure_tree(self.state_root, agent_dir)
+        agent_dir = state_root / "omp" / workstream_id
+        prior_agent_dir = self.state_root / "omp" / workstream_id
+        if state_root != self.state_root and prior_agent_dir.exists():
+            if prior_agent_dir.is_symlink() or any(path.is_symlink() for path in prior_agent_dir.rglob("*")):
+                raise PisecError("existing OMP profile contains a symlink")
+            _secure_tree(state_root, agent_dir.parent)
+            _copy_safe_entry(prior_agent_dir, agent_dir)
+            _normalize_owner_tree(agent_dir)
+        else:
+            _secure_tree(state_root, agent_dir)
         _secure_tree(agent_dir, agent_dir / "sessions")
-        _copy_release_surface(surface_root / "agent", agent_dir)
+        _copy_surface(surface_root / "agent", agent_dir)
+        _normalize_owner_tree(agent_dir)
         discovery_agent_dir = agent_dir / "agent"
-        _secure_tree(self.state_root, discovery_agent_dir)
-        _copy_release_surface(release_root / "agent", discovery_agent_dir)
-        plugin_info = _copy_released_plugins(release_root, agent_dir)
-        secret_path = self.state_root / "secrets" / f"{workstream_id}.token"
-        _secure_tree(self.state_root, secret_path.parent)
-        if secret_path.exists() or secret_path.is_symlink():
+        _secure_tree(state_root, discovery_agent_dir)
+        _copy_surface(surface_root / "agent", discovery_agent_dir)
+        plugin_info = _copy_plugins(surface_root, agent_dir)
+        secret_path = state_root / "secrets" / f"{workstream_id}.token"
+        _secure_tree(state_root, secret_path.parent)
+        if preserved_token is not None:
+            token = preserved_token
+            _atomic_write(secret_path, token + "\n")
+        elif secret_path.exists() or secret_path.is_symlink():
             token = _read_runtime_secret(secret_path)
         else:
             token = secrets.token_urlsafe(48)
@@ -601,14 +642,14 @@ class OmpHarnessAdapter:
             from ..fence import render_policy
             renderer = render_policy
         policy_path, policy_digest = renderer(
-            self.state_root,
+            state_root,
             scope,
             agent_dir,
             self.config,
             harness_home=agent_dir,
             adapter_replacements={
                 "HARNESS_EXECUTABLE": self.harness_config["executablePath"],
-                "HARNESS_EXTENSION": _repo_root() / "omp" / "extensions" / "pisec.ts",
+                "HARNESS_EXTENSION": agent_dir / "extensions" / "pisec.ts",
                 "HARNESS_NATIVES": Path.home() / ".omp" / "natives",
                 "HARNESS_RUN": Path.home() / ".omp" / "run",
                 "WORKSPACE_CONFIG": Path.home() / ".config" / "herdr",
@@ -626,7 +667,7 @@ class OmpHarnessAdapter:
             "pluginRoot": plugin_info["plugin_root"],
             "extensionPath": str(extension_path.absolute()),
             "launcherTemplate": str((surface_root / "managed" / "omp").absolute()),
-            "runtimeSurfaceId": str(scope["runtimeReleaseId"]),
+            "runtimeSurfaceId": str(scope["runtimeSurfaceId"]),
         }
         return HarnessArtifacts(
             harness_home=str(agent_dir),
@@ -637,6 +678,90 @@ class OmpHarnessAdapter:
             generation_sha256=generation_sha256,
             adapter_data=adapter_data,
         )
+
+    def stage_profile(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, staging_root: Path) -> StagedHarnessArtifacts:
+        if not isinstance(surface, RuntimeSurfaceArtifacts):
+            raise InvalidRequestError("runtime surface snapshot is required")
+        root = Path(staging_root).resolve()
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        candidate_root = root / "candidate-state"
+        prior_secret = self.state_root / "secrets" / f"{validate_id(scope['workstreamId'], prefix='ws')}.token"
+        preserved_token = _read_runtime_secret(prior_secret) if prior_secret.exists() or prior_secret.is_symlink() else None
+        prior_home = self.state_root / "omp" / validate_id(scope["workstreamId"], prefix="ws")
+        prior_policy = self.state_root / "fence" / f"{validate_id(scope['workstreamId'], prefix='ws')}.json"
+        prior = None
+        if prior_home.is_dir() and prior_secret.is_file() and prior_policy.is_file():
+            prior = HarnessArtifacts(
+                harness_home=str(prior_home),
+                launch_secret_path=str(prior_secret),
+                policy_path=str(prior_policy),
+                policy_sha256=_file_digest(prior_policy),
+                runtime_token_sha256=hashlib.sha256(preserved_token.encode("utf-8")).hexdigest() if preserved_token is not None else "0" * 64,
+                generation_sha256=self.desired_generation(scope, surface),
+                adapter_data={},
+            )
+        candidate = self._build_profile(
+            {**scope, "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path, "runtimeSurfaceId": "surface_" + surface.content_sha256[:32]},
+            surface,
+            state_root=candidate_root,
+            preserved_token=preserved_token,
+        )
+        return StagedHarnessArtifacts(
+            operation_id=str(scope.get("operationId", "op_stage")),
+            workstream_id=validate_id(scope["workstreamId"], prefix="ws"),
+            staging_root=str(root),
+            candidate_manifest_json=artifact_document(self.manifest, candidate),
+            candidate_content_sha256=surface.content_sha256,
+            candidate=candidate,
+            prior=prior,
+            compensation_json=canonical_json({"paths": [candidate.harness_home, candidate.policy_path], "pointer": str(self.state_root / "omp" / str(scope["workstreamId"]))}),
+        )
+
+    def activate_profile(self, scope: Mapping[str, Any], staged: StagedHarnessArtifacts) -> HarnessArtifacts:
+        workstream_id = validate_id(scope["workstreamId"], prefix="ws")
+        staging_root = Path(staged.staging_root).resolve(strict=False)
+        candidate_root = Path(staged.candidate.harness_home).parents[1].resolve(strict=False)
+        if not candidate_root.is_relative_to(staging_root) or any(not Path(value).resolve(strict=False).is_relative_to(staging_root) for value in (staged.candidate.harness_home, staged.candidate.launch_secret_path, staged.candidate.policy_path)):
+            raise NeedsAttentionError("staged OMP profile escapes its operation root")
+        active_root = self.state_root
+        for relative in (Path("omp") / workstream_id, Path("secrets") / f"{workstream_id}.token", Path("fence") / f"{workstream_id}.json"):
+            source = candidate_root / relative
+            target = active_root / relative
+            if not source.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if source.is_dir():
+                _activate_directory(source, target)
+            else:
+                backup = target.with_name(f".{target.name}.previous-{secrets.token_hex(8)}")
+                if target.exists():
+                    os.replace(target, backup)
+                os.replace(source, target)
+                if backup.exists():
+                    backup.unlink()
+        prefix = str(candidate_root)
+        def rebase(value: str) -> str:
+            return value.replace(prefix, str(active_root), 1)
+        candidate = staged.candidate
+        active_policy = Path(rebase(candidate.policy_path))
+        policy_text = active_policy.read_text(encoding="utf-8").replace(prefix, str(active_root))
+        _atomic_write(active_policy, policy_text)
+        policy_digest = hashlib.sha256(policy_text.encode("utf-8")).hexdigest()
+        return HarnessArtifacts(
+            harness_home=rebase(candidate.harness_home), launch_secret_path=rebase(candidate.launch_secret_path),
+            policy_path=rebase(candidate.policy_path), policy_sha256=policy_digest,
+            runtime_token_sha256=candidate.runtime_token_sha256, generation_sha256=candidate.generation_sha256,
+            adapter_data={key: rebase(value) for key, value in candidate.adapter_data.items()},
+        )
+
+    def restore_profile(self, scope: Mapping[str, Any], previous: HarnessArtifacts) -> HarnessArtifacts:
+        del scope
+        return previous
+
+    def discard_staged_profile(self, staged: StagedHarnessArtifacts) -> None:
+        root = Path(staged.staging_root)
+        if root.exists() and root.is_dir():
+            shutil.rmtree(root)
 
     def _launcher_dir(self, workstream_id: str) -> Path:
         workstream_id = validate_id(workstream_id, prefix="ws")

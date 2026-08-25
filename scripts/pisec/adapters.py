@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
+import json
 from pathlib import Path
 import re
 from typing import Any, Mapping, Protocol, Sequence
 
-from .models import InvalidRequestError, NeedsAttentionError, canonical_json
+from .models import InvalidRequestError, NeedsAttentionError, canonical_json, validate_sha256
 
 ADAPTER_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 def validate_adapter_id(value: Any) -> str:
@@ -21,11 +23,17 @@ class HarnessManifest:
     adapter_id: str
     agent_kind: str
     version_label: str
+    interface_version: int = 1
+    supported_role_profiles: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         validate_adapter_id(self.adapter_id)
         if not self.agent_kind or not self.version_label:
             raise ValueError("harness manifest fields must not be empty")
+        if self.interface_version != 1:
+            raise InvalidRequestError("Pisec harness interface version must be 1")
+        if any(not isinstance(role, str) or not isinstance(profile, str) or not role or not profile for role, profile in self.supported_role_profiles):
+            raise InvalidRequestError("harness role/profile metadata is invalid")
 
 
 @dataclass(frozen=True)
@@ -34,6 +42,7 @@ class WorkspaceManifest:
     session_name: str
     version_label: str
     protocol_version: int | None
+    interface_version: int = 1
 
     def __post_init__(self) -> None:
         validate_adapter_id(self.adapter_id)
@@ -41,6 +50,8 @@ class WorkspaceManifest:
             raise ValueError("workspace manifest fields must not be empty")
         if self.protocol_version is not None and self.protocol_version < 1:
             raise ValueError("workspace protocol version must be positive")
+        if self.interface_version != 1:
+            raise InvalidRequestError("Pisec workspace interface version must be 1")
 
 
 @dataclass(frozen=True)
@@ -52,6 +63,12 @@ class HarnessArtifacts:
     runtime_token_sha256: str
     generation_sha256: str
     adapter_data: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for value, name in ((self.policy_sha256, "policy digest"), (self.runtime_token_sha256, "runtime token digest"), (self.generation_sha256, "runtime generation")):
+            validate_sha256(value, name)
+        if any(not isinstance(value, str) or not value for value in (self.harness_home, self.launch_secret_path, self.policy_path)):
+            raise InvalidRequestError("harness artifact paths are invalid")
 
     def as_mapping(self) -> dict[str, Any]:
         return {
@@ -72,13 +89,55 @@ class RuntimeSurfaceArtifacts:
     root_path: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.content_sha256, str) or len(self.content_sha256) != 64:
-            raise InvalidRequestError("runtime surface digest is invalid")
+        validate_sha256(self.content_sha256, "runtime surface digest")
         if not isinstance(self.root_path, str) or not self.root_path:
             raise InvalidRequestError("runtime surface root is invalid")
+        if not isinstance(self.manifest, Mapping):
+            raise InvalidRequestError("runtime surface manifest is invalid")
+
+    @property
+    def adapter_id(self) -> str:
+        return str(self.manifest.get("adapter", self.manifest.get("adapterId", "")))
+
+    @property
+    def interface_version(self) -> int:
+        return int(self.manifest.get("interfaceVersion", 1))
+
+    @property
+    def version_label(self) -> str:
+        return str(self.manifest.get("adapterVersion", self.manifest.get("versionLabel", "")))
+
+    @property
+    def manifest_json(self) -> str:
+        return canonical_json(self.manifest, max_bytes=256 * 1024, max_text=64 * 1024)
 
 
-RuntimeReleaseArtifacts = RuntimeSurfaceArtifacts
+@dataclass(frozen=True)
+class StagedHarnessArtifacts:
+    operation_id: str
+    workstream_id: str
+    staging_root: str
+    candidate_manifest_json: str
+    candidate_content_sha256: str
+    candidate: HarnessArtifacts
+    prior: HarnessArtifacts | None
+    compensation_json: str
+
+    def __post_init__(self) -> None:
+        if not self.operation_id or not self.workstream_id:
+            raise InvalidRequestError("staged harness identity is invalid")
+        staging_root = Path(self.staging_root)
+        if not staging_root.is_absolute() or staging_root.resolve(strict=False) != staging_root:
+            raise InvalidRequestError("staged harness root must be canonical and absolute")
+        if not isinstance(self.candidate, HarnessArtifacts) or (self.prior is not None and not isinstance(self.prior, HarnessArtifacts)):
+            raise InvalidRequestError("staged harness artifacts are invalid")
+        validate_sha256(self.candidate_content_sha256, "staged harness content digest")
+        if canonical_json(__import__("json").loads(self.candidate_manifest_json), max_bytes=256 * 1024, max_text=64 * 1024) != self.candidate_manifest_json:
+            raise InvalidRequestError("staged candidate manifest is not canonical")
+        if canonical_json(__import__("json").loads(self.compensation_json), max_bytes=64 * 1024, max_text=64 * 1024) != self.compensation_json:
+            raise InvalidRequestError("staged compensation is not canonical")
+
+
 
 def artifact_document(manifest: HarnessManifest, artifacts: HarnessArtifacts) -> str:
     if not isinstance(artifacts, HarnessArtifacts):
@@ -97,7 +156,7 @@ def artifact_document(manifest: HarnessManifest, artifacts: HarnessArtifacts) ->
 class AgentObservation:
     name: str
     surface_id: str
-    interactive_ready: bool
+    identity_usable: bool
     state: str
 
 
@@ -138,12 +197,14 @@ class HarnessAdapter(Protocol):
 
     def desired_generation(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> str: ...
 
-    def materialize_profile(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> HarnessArtifacts: ...
+    def stage_profile(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, staging_root: Path) -> StagedHarnessArtifacts: ...
+    def activate_profile(self, scope: Mapping[str, Any], staged: StagedHarnessArtifacts) -> HarnessArtifacts: ...
+    def restore_profile(self, scope: Mapping[str, Any], previous: HarnessArtifacts) -> HarnessArtifacts: ...
+    def discard_staged_profile(self, staged: StagedHarnessArtifacts) -> None: ...
     def validate_execution_profile(self, profile: str, role: str) -> None: ...
 
     def profile_domains(self, profile: str, additional_domains: Sequence[str]) -> tuple[str, ...]: ...
 
-    def desired_generation(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> str: ...
 
     def commit_launch_binding(
         self,
@@ -192,6 +253,8 @@ class WorkspaceAdapter(Protocol):
 
     def prompt_agent_nowait(self, surface_id: str, text: str) -> Mapping[str, Any]: ...
 
+    def prompt_eligible(self, agent_observation: AgentObservation) -> bool: ...
+
     def focus_pane(self, surface_id: str) -> Mapping[str, Any]: ...
 
     def close_tab(self, view_id: str) -> Mapping[str, Any]: ...
@@ -219,12 +282,14 @@ class AdapterRegistry:
 
     def register_harness(self, adapter: HarnessAdapter) -> None:
         adapter_id = validate_adapter_id(adapter.manifest.adapter_id)
+        _validate_adapter_surface(adapter, HARNESS_METHODS, "harness")
         if adapter_id in self._harnesses:
             raise InvalidRequestError("harness adapter is registered more than once", detail={"adapterId": adapter_id})
         self._harnesses[adapter_id] = adapter
 
     def register_workspace(self, adapter: WorkspaceAdapter) -> None:
         adapter_id = validate_adapter_id(adapter.manifest.adapter_id)
+        _validate_adapter_surface(adapter, WORKSPACE_METHODS, "workspace")
         if adapter_id in self._workspaces:
             raise InvalidRequestError("workspace adapter is registered more than once", detail={"adapterId": adapter_id})
         self._workspaces[adapter_id] = adapter
@@ -248,3 +313,53 @@ class AdapterRegistry:
 
     def workspace_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._workspaces))
+
+
+def validate_configured_routes(config: Mapping[str, Any], registry: AdapterRegistry) -> None:
+    """Resolve every configured harness before any workstream is prepared."""
+    harness = config.get("harness")
+    workspace = config.get("workspace")
+    if not isinstance(harness, Mapping) or not isinstance(workspace, Mapping):
+        raise InvalidRequestError("Pisec primary adapter configuration is invalid")
+    primary = registry.resolve_harness(str(harness.get("id")))
+    registry.resolve_workspace(str(workspace.get("id")))
+    supported = set(primary.manifest.supported_role_profiles)
+    if supported and not {("secretary", "secretary-project"), ("first_mate", "first-mate")} <= supported:
+        raise InvalidRequestError("configured primary harness cannot run supervisor profiles")
+    routing = config.get("workerRouting", {})
+    if not isinstance(routing, Mapping):
+        raise InvalidRequestError("worker routing configuration is invalid")
+    target_ids = {str(routing.get("fallbackHarness"))} if routing.get("fallbackHarness") else set()
+    routes = routing.get("routes", {})
+    if isinstance(routes, Mapping):
+        for key, route in routes.items():
+            if not isinstance(route, Mapping) or not isinstance(route.get("harness"), str):
+                raise InvalidRequestError(f"worker route {key} is invalid")
+            target_ids.add(str(route["harness"]))
+    for adapter_id in sorted(target_ids):
+        adapter = registry.resolve_harness(adapter_id)
+        if adapter.manifest.supported_role_profiles and ("worker", "worker-default") not in set(adapter.manifest.supported_role_profiles):
+            raise InvalidRequestError(f"worker route harness {adapter_id} cannot run worker-default")
+
+
+HARNESS_METHODS = (
+    "prepare_runtime_surface", "current_runtime_surface", "desired_generation", "stage_profile",
+    "activate_profile", "restore_profile", "discard_staged_profile", "validate_execution_profile",
+    "profile_domains", "commit_launch_binding", "launch_binding_path", "cleanup_binding",
+    "validate_native_session", "health_checks",
+)
+WORKSPACE_METHODS = (
+    "create_workspace", "create_tab", "rename_tab", "move_surface_to_tab", "observe_tab",
+    "observe_workstream", "observe_surface", "observe_runtime", "run_command", "stop_runtime",
+    "prompt_agent", "prompt_agent_nowait", "prompt_eligible", "focus_pane", "close_tab", "close_workspace",
+    "report_session", "report_state", "release_agent", "reconcile", "health_checks",
+)
+
+
+def _validate_adapter_surface(adapter: Any, methods: Sequence[str], kind: str) -> None:
+    missing = [name for name in methods if not callable(getattr(adapter, name, None))]
+    if missing:
+        raise InvalidRequestError(f"{kind} adapter is missing required methods", detail={"missing": missing})
+    manifest = getattr(adapter, "manifest", None)
+    if kind == "harness" and (not isinstance(manifest, HarnessManifest) or manifest.interface_version != 1):
+        raise InvalidRequestError("harness adapter manifest is invalid")

@@ -56,7 +56,7 @@ test("Pisec extension is inert without a Pisec role", () => {
 test("secretary exposes the exact semantic surface and UI-bound approval", () => {
   const output = runProbe(`
     const records = { tools: [], events: [], labels: [] };
-    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain, regex: chain });
     const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
     Object.assign(process.env, {
       PISEC_ROLE: "secretary",
@@ -114,12 +114,17 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
   if (!Array.isArray(content) || content.length === 0) throw new TypeError("refusal content is missing");
   const refusalText = stringValue(asRecord(content[0]), "text");
   assert.deepEqual(tools, [
+    "pisec_list_attention",
+    "pisec_inspect_attention",
     "pisec_project_activity",
-    "pisec_report_secretary_issue",
     "pisec_list_issues",
     "pisec_inspect_issue",
     "pisec_add_issue_context",
     "pisec_verify_issue",
+    "pisec_acknowledge_issue",
+    "pisec_link_issue_remediation",
+    "pisec_request_issue_verification",
+    "pisec_resolve_issue",
     "pisec_project_status",
     "pisec_git_status",
     "pisec_push_branch",
@@ -132,7 +137,6 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
     "pisec_inspect_integration",
     "pisec_prepare_workstream",
     "pisec_create_workstream",
-    "pisec_send_workstream",
     "pisec_focus_workstream",
     "pisec_retire_workstream",
     "pisec_list_decisions",
@@ -179,7 +183,7 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
 test("first mate exposes the exact fleet surface", () => {
   const output = runProbe(`
     const records = { tools: [], events: [], labels: [] };
-    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain, regex: chain });
     const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
     Object.assign(process.env, {
       PISEC_ROLE: "first_mate",
@@ -202,12 +206,8 @@ test("first mate exposes the exact fleet surface", () => {
     console.log(JSON.stringify(records));
   `);
   assert.deepEqual(stringArray(output.tools), [
-    "pisec_fleet_list_access_grants",
-    "pisec_fleet_inspect_access_grant",
-    "pisec_fleet_prepare_access_grant",
-    "pisec_fleet_apply_access_grant",
-    "pisec_fleet_prepare_access_revoke",
-    "pisec_fleet_apply_access_revoke",
+    "pisec_fleet_list_attention",
+    "pisec_fleet_inspect_attention",
     "pisec_fleet_list_issues",
     "pisec_fleet_inspect_issue",
     "pisec_fleet_add_issue_context",
@@ -215,16 +215,13 @@ test("first mate exposes the exact fleet surface", () => {
     "pisec_fleet_resolve_issue",
     "pisec_fleet_status",
     "pisec_fleet_events",
-    "pisec_fleet_send_secretary",
     "pisec_fleet_list_workstreams",
     "pisec_fleet_inspect_workstream",
     "pisec_fleet_list_integrations",
     "pisec_fleet_inspect_integration",
      "pisec_fleet_git_changes",
-    "pisec_fleet_prepare_workstream",
-    "pisec_fleet_create_worker",
-    "pisec_fleet_prepare_acceptance",
-    "pisec_fleet_accept_workstream",
+    "pisec_fleet_request_issue_remediation",
+    "pisec_fleet_request_issue_verification",
   ]);
   assert.equal(stringArray(output.labels)[0], "Pisec First Mate");
   assert.ok(stringArray(output.events).includes("session_shutdown"));
@@ -233,7 +230,7 @@ test("first mate exposes the exact fleet surface", () => {
 test("worker registers runtime handling without secretary tools", () => {
   const output = runProbe(`
     const records = { tools: [], events: [], labels: [] };
-    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain, regex: chain });
     const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
     Object.assign(process.env, {
       PISEC_ROLE: "worker",
@@ -258,9 +255,11 @@ test("worker registers runtime handling without secretary tools", () => {
   const tools = stringArray(output.tools);
   const events = stringArray(output.events);
   assert.deepEqual(tools, [
+    "pisec_list_attention",
+    "pisec_inspect_attention",
     "pisec_checkpoint_workstream",
+    "pisec_submit_completion",
     "pisec_request_help",
-    "pisec_request_coordination",
     "pisec_list_coordination",
     "pisec_inspect_coordination",
     "pisec_report_issue",
@@ -302,7 +301,7 @@ test("only the root UI session reports idle-working-idle lifecycle", () => {
       },
     });
     const handlers = {};
-    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain, regex: chain });
     const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
     Object.assign(process.env, {
       PISEC_ROLE: "secretary",
@@ -356,7 +355,7 @@ test("failed tool telemetry is bounded and excludes tool output", () => {
       },
     });
     const handlers = {};
-    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain, regex: chain });
     const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
     Object.assign(process.env, {
       PISEC_ROLE: "worker",
@@ -399,7 +398,7 @@ test("worker rejects a session resume target outside its owned session root", ()
     const outside = root + "-outside.jsonl";
     await writeFile(outside, "outside\\n");
     const records = { events: [], handlers: {} };
-    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain });
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain, regex: chain });
     const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
     Object.assign(process.env, {
       PISEC_ROLE: "worker",

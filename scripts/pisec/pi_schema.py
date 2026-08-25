@@ -109,6 +109,11 @@ CREATE TABLE runtime_bindings (
     applied_generation_sha256 TEXT CHECK(applied_generation_sha256 IS NULL OR length(applied_generation_sha256) = 64),
     launch_generation_sha256 TEXT CHECK(launch_generation_sha256 IS NULL OR length(launch_generation_sha256) = 64),
     refresh_pending INTEGER NOT NULL DEFAULT 0 CHECK(refresh_pending IN (0,1)),
+    refresh_operation_id TEXT REFERENCES operations(operation_id),
+    refresh_started_at TEXT,
+    session_start_event_sequence INTEGER REFERENCES events(sequence),
+    session_start_report_seq INTEGER CHECK(session_start_report_seq IS NULL OR session_start_report_seq > 0),
+    session_started_at TEXT,
     runtime_instance_id TEXT,
     observed_state TEXT NOT NULL CHECK(observed_state IN ('unknown','starting','working','blocked','idle','done','stopped','missing','error')),
     report_seq INTEGER NOT NULL DEFAULT 0 CHECK(report_seq >= 0),
@@ -1154,7 +1159,12 @@ def _migrate_epoch_fifteen_to_sixteen(connection: sqlite3.Connection) -> None:
             connection.execute("ALTER TABLE projects ADD COLUMN external_domains TEXT")
         connection.execute("UPDATE projects SET data_dirs=COALESCE(data_dirs,'[]'), external_domains=COALESCE(external_domains,'[]')")
 
-        for row in connection.execute("SELECT workstream_id,execution_profile,worker_creation_policy_json FROM workstreams").fetchall():
+        workstream_columns = {row[1] for row in connection.execute("PRAGMA table_info(workstreams)")}
+        if "worker_creation_policy_json" in workstream_columns:
+            rows = connection.execute("SELECT workstream_id,execution_profile,worker_creation_policy_json FROM workstreams").fetchall()
+        else:
+            rows = connection.execute("SELECT workstream_id,execution_profile,NULL FROM workstreams").fetchall()
+        for row in rows:
             profile = "worker-default" if row[1] == "worker-networked" else row[1]
             try:
                 policy = json.loads(row[2] or "{}")
@@ -1163,10 +1173,13 @@ def _migrate_epoch_fifteen_to_sixteen(connection: sqlite3.Connection) -> None:
             if isinstance(policy, dict):
                 policy.pop("allowedExternalDomains", None)
                 policy.pop("approvedProfiles", None)
-            connection.execute(
-                "UPDATE workstreams SET execution_profile=?, worker_creation_policy_json=? WHERE workstream_id=?",
-                (profile, json.dumps(policy if isinstance(policy, dict) else {}, sort_keys=True, separators=(",", ":")), row[0]),
-            )
+            if "worker_creation_policy_json" in workstream_columns:
+                connection.execute(
+                    "UPDATE workstreams SET execution_profile=?, worker_creation_policy_json=? WHERE workstream_id=?",
+                    (profile, json.dumps(policy if isinstance(policy, dict) else {}, sort_keys=True, separators=(",", ":")), row[0]),
+                )
+            else:
+                connection.execute("UPDATE workstreams SET execution_profile=? WHERE workstream_id=?", (profile, row[0]))
 
         grant_table = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='access_grants'"
@@ -1307,6 +1320,9 @@ def _migrate_epoch_fifteen_to_sixteen(connection: sqlite3.Connection) -> None:
             (SCHEMA_NAME, SCHEMA_VERSION, schema_digest(), created_at),
         )
         connection.execute("DROP TABLE control_meta_epoch15")
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.DatabaseError("epoch-15 to epoch-16 migration left foreign-key violations")
         connection.commit()
     except Exception:
         connection.rollback()

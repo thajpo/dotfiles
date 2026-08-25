@@ -10,6 +10,7 @@ import math
 import re
 import secrets
 from typing import Any, Mapping
+from urllib.parse import urlsplit, urlunsplit
 
 MAX_JSON_BYTES = 64 * 1024
 MAX_JSON_DEPTH = 32
@@ -17,7 +18,9 @@ MAX_JSON_ITEMS = 4096
 MAX_TEXT = 4096
 ID_PREFIXES = frozenset({"prj", "ws", "op", "az", "dec", "evt", "req", "tp", "wrq", "rpk", "cp", "cmp", "cr", "cop", "sir", "iss", "iup", "rem", "agr", "dep", "mrg", "acc", "int", "rel"})
 ID_RE = re.compile(r"^(?P<prefix>[a-z][a-z0-9]{0,15})_(?P<random>[0-9a-f]{32})$")
-OID_RE = re.compile(r"^[0-9a-f]{40,64}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+GIT_OID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+SCP_REMOTE_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s:]+$")
 
 
 class PisecError(Exception):
@@ -98,9 +101,54 @@ def bounded_text(value: Any, *, name: str = "value", limit: int = MAX_TEXT, allo
     return value
 
 
-def validate_oid(value: Any, *, name: str = "commit") -> str:
-    if not isinstance(value, str) or OID_RE.fullmatch(value) is None:
+def validate_sha256(value: Any, name: str = "digest") -> str:
+    if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+        raise InvalidRequestError(f"{name} is not a lowercase hexadecimal SHA-256 digest")
+    return value
+
+
+def validate_git_oid(value: Any, name: str = "commit") -> str:
+    if not isinstance(value, str) or GIT_OID_RE.fullmatch(value) is None:
         raise InvalidRequestError(f"{name} is not a full hexadecimal object id")
+    return value
+
+
+def validate_remote_url(value: Any) -> str:
+    """Validate a canonical credential-free HTTPS or SSH Git remote."""
+    if not isinstance(value, str) or not value or value.startswith("-") or any(ord(char) < 0x21 or ord(char) == 0x7f for char in value):
+        raise InvalidRequestError("remote URL is invalid")
+    if SCP_REMOTE_RE.fullmatch(value):
+        user, host = value.split("@", 1)
+        if user != "git":
+            raise InvalidRequestError("remote URL must use the git SSH user")
+        host = host.split(":", 1)[0]
+        if host.startswith(".") or host.endswith(".") or ".." in host:
+            raise InvalidRequestError("remote URL is invalid")
+        return value
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as error:
+        raise InvalidRequestError("remote URL is invalid") from error
+    if parsed.scheme not in {"https", "ssh"} or not hostname or parsed.username is None and parsed.password is not None:
+        raise InvalidRequestError("remote URL must be credential-free HTTPS or SSH")
+    if parsed.password is not None or parsed.query or parsed.fragment or not parsed.path or "\\" in parsed.path:
+        raise InvalidRequestError("remote URL is invalid")
+    if parsed.scheme == "https" and parsed.username is not None:
+        raise InvalidRequestError("remote URL must not contain HTTPS userinfo")
+    if parsed.scheme == "ssh" and parsed.username != "git":
+        raise InvalidRequestError("remote URL must use the git SSH user")
+    if parsed.scheme == "ssh" and any(char in (parsed.username or "") for char in "\\/:@"):
+        raise InvalidRequestError("remote URL is invalid")
+    if port is not None and not 1 <= port <= 65535:
+        raise InvalidRequestError("remote URL port is invalid")
+    if hostname.lower() != hostname or parsed.scheme != value.split(":", 1)[0]:
+        raise InvalidRequestError("remote URL is not canonical")
+    canonical_netloc = parsed.netloc
+    canonical = urlunsplit((parsed.scheme, canonical_netloc, parsed.path, "", ""))
+    if canonical != value:
+        raise InvalidRequestError("remote URL is not canonical")
     return value
 
 

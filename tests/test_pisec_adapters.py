@@ -45,6 +45,7 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
             "runtimeInstanceId": instance or str(binding["runtime_instance_id"]),
             "surfaceId": str(binding["workspace_surface_id"]),
             "token": Path(str(binding["launch_secret_path"])).read_text().strip(),
+            "generation": str(binding["launch_generation_sha256"] or binding["applied_generation_sha256"]),
         }
 
     def test_registry_and_broker_keep_product_adapters_at_boundary(self):
@@ -104,6 +105,7 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         worker_auth = self._binding_auth(worker_id, instance="fixture-runtime-next")
         report_base = {
             **worker_auth,
+            "generation": worker_auth["generation"],
             "seq": 1,
             "event": "session_start",
             "state": "working",

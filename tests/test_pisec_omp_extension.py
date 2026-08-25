@@ -9,14 +9,17 @@ from scripts.pisec.operation_contracts import SOCKET_OPERATIONS
 ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = ROOT / "omp" / "extensions" / "pisec.ts"
 SECRETARY_TOOL_OPERATIONS = [
+    ("pisec_list_attention", "attention.list"),
+    ("pisec_inspect_attention", "attention.inspect"),
     ("pisec_project_activity", "project.activity"),
-    ("pisec_refresh_project", "project.refresh"),
-    ("pisec_install_release", "runtime.release.install"),
-    ("pisec_report_secretary_issue", "issue.report"),
     ("pisec_list_issues", "issue.list"),
     ("pisec_inspect_issue", "issue.inspect"),
     ("pisec_add_issue_context", "issue.add_context"),
     ("pisec_verify_issue", "issue.verify"),
+    ("pisec_acknowledge_issue", "issue.acknowledge"),
+    ("pisec_link_issue_remediation", "issue.link_remediation"),
+    ("pisec_request_issue_verification", "issue.request_verification"),
+    ("pisec_resolve_issue", "issue.resolve"),
     ("pisec_project_status", "project.status"),
     ("pisec_git_status", "git.status"),
     ("pisec_push_branch", "git.push"),
@@ -29,7 +32,6 @@ SECRETARY_TOOL_OPERATIONS = [
     ("pisec_inspect_integration", "integration.inspect"),
     ("pisec_prepare_workstream", "workstream.prepare"),
     ("pisec_create_workstream", "workstream.authorize_apply"),
-    ("pisec_send_workstream", "workstream.send"),
     ("pisec_focus_workstream", "workstream.focus"),
     ("pisec_retire_workstream", "workstream.retire"),
     ("pisec_list_decisions", "decision.list"),
@@ -46,12 +48,8 @@ SECRETARY_TOOL_OPERATIONS = [
     ("pisec_decline_worker_research", "research.decline"),
 ]
 FLEET_TOOL_OPERATIONS = [
-    ("pisec_fleet_list_access_grants", "fleet.access.list"),
-    ("pisec_fleet_inspect_access_grant", "fleet.access.inspect"),
-    ("pisec_fleet_prepare_access_grant", "fleet.access.grant.prepare"),
-    ("pisec_fleet_apply_access_grant", "fleet.access.grant.apply"),
-    ("pisec_fleet_prepare_access_revoke", "fleet.access.revoke.prepare"),
-    ("pisec_fleet_apply_access_revoke", "fleet.access.revoke.apply"),
+    ("pisec_fleet_list_attention", "attention.list"),
+    ("pisec_fleet_inspect_attention", "attention.inspect"),
     ("pisec_fleet_list_issues", "fleet.issue.list"),
     ("pisec_fleet_inspect_issue", "fleet.issue.inspect"),
     ("pisec_fleet_add_issue_context", "fleet.issue.add_context"),
@@ -59,22 +57,20 @@ FLEET_TOOL_OPERATIONS = [
     ("pisec_fleet_resolve_issue", "fleet.issue.resolve"),
     ("pisec_fleet_status", "fleet.status"),
     ("pisec_fleet_events", "fleet.events"),
-    ("pisec_fleet_send_secretary", "fleet.secretary.send"),
     ("pisec_fleet_list_workstreams", "fleet.workstream.list"),
     ("pisec_fleet_inspect_workstream", "fleet.workstream.inspect"),
     ("pisec_fleet_list_integrations", "fleet.integration.list"),
     ("pisec_fleet_inspect_integration", "fleet.integration.inspect"),
     ("pisec_fleet_git_changes", "fleet.git.workstream_changes"),
-    ("pisec_fleet_prepare_workstream", "fleet.workstream.prepare"),
-    ("pisec_fleet_create_worker", "fleet.workstream.authorize_apply"),
-    ("pisec_fleet_prepare_acceptance", "fleet.workstream.accept.prepare"),
-    ("pisec_fleet_accept_workstream", "fleet.workstream.accept.apply"),
+    ("pisec_fleet_request_issue_remediation", "fleet.issue.request_remediation"),
+    ("pisec_fleet_request_issue_verification", "fleet.issue.request_verification"),
 ]
 WORKER_TOOL_OPERATIONS = [
+    ("pisec_list_attention", "attention.list"),
+    ("pisec_inspect_attention", "attention.inspect"),
     ("pisec_checkpoint_workstream", "workstream.checkpoint"),
     ("pisec_submit_completion", "workstream.completion.submit"),
     ("pisec_request_help", "help.request"),
-    ("pisec_request_coordination", "coordination.request"),
     ("pisec_list_coordination", "coordination.list"),
     ("pisec_inspect_coordination", "coordination.inspect"),
     ("pisec_report_issue", "issue.report"),
@@ -133,7 +129,7 @@ console.log(JSON.stringify(records));
     def test_bun_load_registers_exact_secretary_surface_and_dynamic_scope(self):
         script = f"""
 const records = {{tools: [], events: [], labels: []}};
-const chain = () => ({{min: chain, max: chain, optional: chain, int: chain, url: chain}});
+const chain = () => ({{min: chain, max: chain, optional: chain, int: chain, url: chain, regex: chain}});
 const zod = {{string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain}};
 const pi = {{
   zod,
@@ -182,7 +178,7 @@ console.log(JSON.stringify({{tools: records.tools.map(value => value.name), even
     def test_bun_worker_registers_runtime_only_without_secretary_tools(self):
         script = f"""
 const records = {{tools: [], events: [], labels: []}};
-const chain = () => ({{min: chain, max: chain, optional: chain, int: chain, url: chain}});
+const chain = () => ({{min: chain, max: chain, optional: chain, int: chain, url: chain, regex: chain}});
 const zod = {{string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain}};
 const pi = {{
   zod,

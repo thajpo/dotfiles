@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-from .adapters import AdapterRegistry
+from .adapters import AdapterRegistry, validate_configured_routes
 from .broker import BrokerDispatcher
 from .config import PisecConfig
 from .git_objects import GitObjectManager
@@ -21,6 +21,7 @@ def build_adapters(
     state_root: Path | str,
     *,
     store_factory: Callable[[], PiStore] | None = None,
+    prepare_surfaces: bool = True,
 ) -> BrokerDispatcher:
     registry = AdapterRegistry()
     harness = OmpHarnessAdapter(state_root=state_root, config=config)
@@ -29,6 +30,7 @@ def build_adapters(
     if "codex" in config.worker_harnesses:
         registry.register_harness(CodexHarnessAdapter(state_root=state_root, config=config))
     registry.register_workspace(workspace)
+    validate_configured_routes(config, registry)
     selected_harness = registry.resolve_harness(config["harness"]["id"])
     selected_workspace = registry.resolve_workspace(config["workspace"]["id"])
     factory = store_factory or (lambda: PiStore(state_root))
@@ -39,6 +41,7 @@ def build_adapters(
         workspace=selected_workspace,
         git_objects=GitObjectManager(state_root=state_root),
         config=config,
+        prepare_surfaces=prepare_surfaces,
     )
 
 def run_broker() -> None:

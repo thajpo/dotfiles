@@ -10,7 +10,7 @@ from typing import Any, Mapping
 from .adapters import HarnessAdapter, WorkspaceAdapter, WorkspaceObservation, artifact_document
 from .models import NeedsAttentionError, canonical_json, utc_now
 from .runtime import start_bound_agent
-from .releases import materialize_active_release
+from .runtime_surface import materialize_current_surface
 
 
 def _scope(operation: Mapping[str, Any]) -> dict[str, Any]:
@@ -59,11 +59,11 @@ def _wait_for_exit(workspace: WorkspaceAdapter, binding: Mapping[str, Any], time
         time.sleep(0.05)
 
 
-def _wait_for_start(store: Any, workspace: WorkspaceAdapter, workstream_id: str, release_id: str, generation: str, timeout: float = 30.0) -> dict[str, Any]:
+def _wait_for_start(store: Any, workspace: WorkspaceAdapter, workstream_id: str, generation: str, timeout: float = 30.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while True:
         row = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()
-        if row is not None and row["runtime_instance_id"] and int(row["report_seq"]) >= 1 and row["applied_release_id"] == release_id and row["applied_generation_sha256"] == generation:
+        if row is not None and row["runtime_instance_id"] and int(row["report_seq"]) >= 1 and row["applied_generation_sha256"] == generation:
             if workspace.observe_runtime(str(row["workspace_surface_id"]), str(row["policy_path"])).state == "live":
                 return dict(row)
         if time.monotonic() >= deadline:
@@ -151,7 +151,7 @@ def _migrate_one(
             raise NeedsAttentionError("First Mate workspace surface is missing")
     else:
         observed = _worker_surface(store, workspace, project, workstream)
-    artifacts, release, materialized_scope = materialize_active_release(store, harness, scope)
+    artifacts, surface, materialized_scope = materialize_current_surface(store, harness, scope)
     harness.commit_launch_binding(
         materialized_scope,
         artifacts,
@@ -164,8 +164,8 @@ def _migrate_one(
     now = utc_now()
     with store.transaction():
         store.conn.execute(
-            "UPDATE runtime_bindings SET workspace_session_name=?,workspace_id=?,workspace_view_id=?,workspace_surface_id=?,harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_release_id=?,applied_release_id=NULL,launch_release_id=?,desired_generation_sha256=?,applied_generation_sha256=NULL,launch_generation_sha256=?,runtime_instance_id=NULL,observed_state='starting',report_seq=0,workspace_report_seq=0,last_observed_at=NULL,updated_at=? WHERE workstream_id=?",
-            (workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, release["release_id"], release["release_id"], artifacts.generation_sha256, artifacts.generation_sha256, now, expected_workstream_id),
+            "UPDATE runtime_bindings SET workspace_session_name=?,workspace_id=?,workspace_view_id=?,workspace_surface_id=?,harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_generation_sha256=?,applied_generation_sha256=NULL,launch_generation_sha256=?,runtime_instance_id=NULL,observed_state='starting',report_seq=0,workspace_report_seq=0,last_observed_at=NULL,updated_at=? WHERE workstream_id=?",
+            (workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, artifacts.generation_sha256, now, expected_workstream_id),
         )
         store.conn.execute(
             "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?",
@@ -265,7 +265,6 @@ def _rehome_fleet_binding(
             identity_matches
             and binding["runtime_instance_id"]
             and int(binding["report_seq"]) >= 1
-            and binding["applied_release_id"] == binding["desired_release_id"]
             and binding["applied_generation_sha256"] == binding["desired_generation_sha256"]
         )
         if runtime.state == "live" and attested:
@@ -285,7 +284,7 @@ def _rehome_fleet_binding(
             raise NeedsAttentionError("reserved fleet topology pane identity is ambiguous")
         if runtime.state == "live" and identity_matches:
             try:
-                resumed = _wait_for_start(store, workspace, workstream_id, str(binding["desired_release_id"]), str(binding["desired_generation_sha256"]))
+                resumed = _wait_for_start(store, workspace, workstream_id, str(binding["desired_generation_sha256"]))
             except NeedsAttentionError:
                 pass
             else:
@@ -334,7 +333,7 @@ def _rehome_fleet_binding(
     if observed.worktree_path is not None and str(Path(observed.worktree_path).resolve(strict=False)) != str(Path(str(workstream["worktree_path"])).resolve(strict=False)):
         raise NeedsAttentionError("fleet topology moved pane has the wrong cwd")
     workspace.rename_tab(observed.view_id, label)
-    artifacts, release, materialized_scope = materialize_active_release(store, harness, scope)
+    artifacts, surface, materialized_scope = materialize_current_surface(store, harness, scope)
     harness.commit_launch_binding(
         materialized_scope,
         artifacts,
@@ -347,8 +346,8 @@ def _rehome_fleet_binding(
     now = utc_now()
     with store.transaction():
         store.conn.execute(
-            "UPDATE runtime_bindings SET workspace_session_name=?,workspace_id=?,workspace_view_id=?,workspace_surface_id=?,harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_release_id=?,launch_release_id=?,desired_generation_sha256=?,launch_generation_sha256=?,runtime_instance_id=NULL,observed_state='starting',report_seq=0,refresh_pending=1,last_observed_at=?,updated_at=? WHERE workstream_id=?",
-            (workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, release["release_id"], release["release_id"], artifacts.generation_sha256, artifacts.generation_sha256, now, now, workstream_id),
+            "UPDATE runtime_bindings SET workspace_session_name=?,workspace_id=?,workspace_view_id=?,workspace_surface_id=?,harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_generation_sha256=?,launch_generation_sha256=?,runtime_instance_id=NULL,observed_state='starting',report_seq=0,refresh_pending=1,last_observed_at=?,updated_at=? WHERE workstream_id=?",
+            (workspace.manifest.session_name, observed.workspace_id, observed.view_id, observed.surface_id, artifacts.harness_home, artifact_document(harness.manifest, artifacts), artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, artifacts.generation_sha256, now, now, workstream_id),
         )
         store.conn.execute(
             "INSERT INTO project_workspaces(project_id,workspace_adapter_id,workspace_session_name,workspace_id,repository_path,created_at,updated_at) VALUES(?,?,?,?,?,?,?) "
@@ -358,7 +357,7 @@ def _rehome_fleet_binding(
         store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, workstream_id))
     refreshed = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone())
     start_bound_agent(store, workspace, harness, refreshed, workstream_id=workstream_id, project_id=str(project["project_id"]), cwd=str(workstream["worktree_path"]))
-    attested = _wait_for_start(store, workspace, workstream_id, str(release["release_id"]), artifacts.generation_sha256)
+    attested = _wait_for_start(store, workspace, workstream_id, artifacts.generation_sha256)
     with store.transaction():
         store.conn.execute("UPDATE runtime_bindings SET refresh_pending=0,updated_at=? WHERE workstream_id=?", (utc_now(), workstream_id))
     return {

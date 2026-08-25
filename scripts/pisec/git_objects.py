@@ -9,7 +9,7 @@ import subprocess
 from typing import Any, Mapping
 
 from .fsutil import _atomic_write, _secure_tree
-from .models import NeedsAttentionError, validate_id
+from .models import InvalidRequestError, NeedsAttentionError, validate_git_oid, validate_id
 
 
 class GitObjectManager:
@@ -112,3 +112,70 @@ class GitObjectManager:
         )
         if index.returncode != 0:
             raise NeedsAttentionError("approved Git object promotion index failed", detail={"stderr": index.stderr.decode("utf-8", "replace")[:256]})
+
+
+def validate_worker_resume_git(store: Any, binding: Mapping[str, Any]) -> str | None:
+    """Prove that a worker's approved branch commit is readable before launch."""
+    workstream_id = str(binding.get("workstream_id") or "")
+    row = store.conn.execute(
+        "SELECT w.kind,w.branch_name,w.worktree_path,p.repository_path,p.git_common_dir "
+        "FROM workstreams w JOIN projects p USING(project_id) WHERE w.workstream_id=?",
+        (workstream_id,),
+    ).fetchone()
+    if row is None:
+        raise NeedsAttentionError("worker Git binding is missing")
+    if row["kind"] != "worker":
+        return None
+
+    worktree = Path(str(row["worktree_path"])).absolute()
+    private_objects = Path(str(binding.get("private_git_object_dir") or "")).absolute()
+    common_objects = (Path(str(row["git_common_dir"])) / "objects").absolute()
+    for label, path in (("worker worktree", worktree), ("private Git object store", private_objects), ("project Git object store", common_objects)):
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise NeedsAttentionError(f"{label} is unavailable") from error
+        if path.is_symlink() or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise NeedsAttentionError(f"{label} is unsafe")
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GIT_OBJECT_DIRECTORY": str(private_objects),
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(common_objects),
+        }
+    )
+    branch = subprocess.run(
+        ["git", "-C", str(worktree), "symbolic-ref", "--quiet", "--short", "HEAD"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        env=environment,
+    )
+    branch_name = branch.stdout.decode("utf-8", "replace").strip()
+    if branch.returncode != 0 or branch_name != str(row["branch_name"]):
+        raise NeedsAttentionError("worker worktree branch does not match its approved branch")
+    oid_result = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        env=environment,
+    )
+    oid = oid_result.stdout.decode("ascii", "replace").strip()
+    try:
+        validate_git_oid(oid, "worker branch commit")
+    except InvalidRequestError as error:
+        raise NeedsAttentionError("worker branch commit could not be read") from error
+    if oid_result.returncode != 0:
+        raise NeedsAttentionError("worker branch commit could not be read")
+    readable = subprocess.run(
+        ["git", "-C", str(worktree), "cat-file", "-e", f"{oid}^{{commit}}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        env=environment,
+    )
+    if readable.returncode != 0:
+        raise NeedsAttentionError(f"worker branch commit object {oid} is unavailable")
+    return oid

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
 import fcntl
 import hashlib
@@ -62,7 +63,7 @@ def _git(repo: Path, *args: str) -> str:
 def _safe_tree(root: Path) -> None:
     for path in [root, *sorted(root.rglob("*"))]:
         info = path.lstat()
-        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        if info.st_uid != os.geteuid():
             raise RuntimeError(f"unsafe bundle ownership or mode: {path}")
         if stat.S_ISLNK(info.st_mode) or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
             raise RuntimeError(f"unsupported bundle entry: {path}")
@@ -74,18 +75,29 @@ def _safe_tree(root: Path) -> None:
 
 def _tree_digest(root: Path) -> str:
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*")):
-        relative = path.relative_to(root).as_posix()
+    for path in [root, *sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())]:
+        relative = "." if path == root else path.relative_to(root).as_posix()
         info = path.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        if stat.S_ISLNK(info.st_mode):
             raise RuntimeError(f"bundle contains an unsupported entry: {relative}")
-        digest.update(relative.encode() + b"\0")
-        digest.update(path.read_bytes())
+        if stat.S_ISDIR(info.st_mode):
+            digest.update(f"d\0{relative}\0".encode())
+        elif stat.S_ISREG(info.st_mode):
+            digest.update(f"f\0{relative}\0{stat.S_IMODE(info.st_mode) & 0o700:o}\0".encode())
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        else:
+            raise RuntimeError(f"bundle contains an unsupported entry: {relative}")
     return digest.hexdigest()
 
 
 def _allowed(name: str) -> bool:
-    return any(name == prefix.rstrip("/") or name.startswith(prefix) for prefix in ALLOWLIST)
+    return any(
+        name == prefix.rstrip("/")
+        or name.startswith(prefix)
+        or prefix.startswith(name.rstrip("/") + "/")
+        for prefix in ALLOWLIST
+    )
 
 
 def _archive(repo: Path, ref: str, destination: Path) -> tuple[str, str, str]:
@@ -114,6 +126,7 @@ def _archive(repo: Path, ref: str, destination: Path) -> tuple[str, str, str]:
                 raise RuntimeError(f"bundle member is unreadable: {name}")
             with target.open("wb") as output:
                 shutil.copyfileobj(source, output)
+            os.chmod(target, member.mode & 0o777)
     error = process.wait()
     if error:
         raise RuntimeError(f"git archive failed with status {error}")
@@ -124,7 +137,16 @@ def _archive(repo: Path, ref: str, destination: Path) -> tuple[str, str, str]:
     return commit, tree, _tree_digest(destination)
 
 
-def _preflight_state(state_root: Path) -> None:
+def _schema_digest(repo: Path, commit: str) -> str:
+    source = _run(["git", "-C", str(repo), "show", f"{commit}:scripts/pisec/pi_schema.py"])
+    tree = ast.parse(source)
+    value = next((node.value for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "SCHEMA_SQL" for target in node.targets)), None)
+    if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+        raise RuntimeError("staged schema SQL is unavailable")
+    return "sha256:" + hashlib.sha256(value.value.encode("utf-8")).hexdigest()
+
+
+def _preflight_state(state_root: Path, expected_digest: str) -> None:
     db_path = state_root / "control.db"
     if not db_path.exists():
         return
@@ -134,7 +156,7 @@ def _preflight_state(state_root: Path) -> None:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(control_meta)")}
         if columns == {"singleton", "schema_name", "schema_version", "schema_sha256", "created_at"}:
             row = connection.execute("SELECT schema_name,schema_version,schema_sha256 FROM control_meta WHERE singleton=1").fetchone()
-            if row is None or row[0] != "pisec-core" or row[1] != 16:
+            if row is None or row != ("pisec-core", 16, expected_digest):
                 raise ValueError("unsupported Pisec state schema")
             return
         if columns != {"singleton", "schema_name", "schema_version", "schema_sha256", "migration_name", "created_at"}:
@@ -174,7 +196,19 @@ def _post_switch(current: Path, wait_seconds: float) -> dict:
     return {"doctor": "ok", "refresh": refresh_value, "reconcile": "ok"}
 
 
-def update(repo: Path, ref: str, wait_seconds: float, state_root: Path, install_root: Path) -> tuple[int, dict]:
+def _validate_bundle(bundle: Path) -> None:
+    for path in bundle.rglob("*.py"):
+        compile(path.read_text(encoding="utf-8"), str(path), "exec", dont_inherit=True)
+    bun = shutil.which("bun")
+    extension = bundle / "omp" / "extensions" / "pisec.ts"
+    if bun and extension.is_file():
+        with tempfile.TemporaryDirectory(prefix="pisec-bun-") as output:
+            result = subprocess.run([bun, "build", str(extension), "--target", "bun", "--outdir", output], text=True, capture_output=True)
+            if result.returncode:
+                raise RuntimeError(f"OMP extension build failed: {result.stdout[-256:]}{result.stderr[-256:]}")
+
+
+def update(repo: Path, ref: str, wait_seconds: float, state_root: Path, install_root: Path, *, reject_dirty: bool = False) -> tuple[int, dict]:
     status_path = state_root / "update-status.json"
     base = {"schemaVersion": 1, "state": "running", "sourceCommit": None, "sourceTree": None, "bundleSha256": None, "currentStep": "lock", "refresh": None, "error": None, "startedAt": now(), "finishedAt": None}
     _json_write(status_path, base)
@@ -195,17 +229,18 @@ def update(repo: Path, ref: str, wait_seconds: float, state_root: Path, install_
         try:
             base["currentStep"] = "resolve"
             _json_write(status_path, base)
-            if ref == "HEAD" and _git(repo, "status", "--porcelain"):
+            if reject_dirty and _git(repo, "status", "--porcelain"):
                 raise RuntimeError("source checkout is dirty; commit changes before updating Pisec")
-            _preflight_state(state_root)
             staging.mkdir(mode=0o700)
             base["currentStep"] = "archive"
             commit, tree, digest = _archive(repo, ref, staging)
+            _preflight_state(state_root, _schema_digest(repo, commit))
             base.update(sourceCommit=commit, sourceTree=tree, bundleSha256=digest, currentStep="verify")
             manifest = {"schemaVersion": 1, "sourceCommit": commit, "sourceTree": tree, "treeSha256": digest, "createdAt": now()}
             (staging / "bundle.json").write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
             os.chmod(staging / "bundle.json", 0o600)
             _safe_tree(staging)
+            _validate_bundle(staging)
             base["currentStep"] = "switch"
             _json_write(status_path, base)
             os.replace(staging, deployment)
@@ -220,6 +255,12 @@ def update(repo: Path, ref: str, wait_seconds: float, state_root: Path, install_
             base["currentStep"] = "health"
             _json_write(status_path, base)
             base["refresh"] = _post_switch(current, wait_seconds)
+            stable_updater = install_root / "bin" / "pisec-update"
+            stable_updater.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            temporary_updater = stable_updater.with_name(f".pisec-update.{uuid.uuid4().hex}.tmp")
+            shutil.copy2(deployment / "scripts" / "pisec-update.py", temporary_updater)
+            os.chmod(temporary_updater, 0o700)
+            os.replace(temporary_updater, stable_updater)
             base.update(state="applied", currentStep="complete", finishedAt=now())
             _json_write(status_path, base)
             return 0, base
@@ -238,7 +279,7 @@ def update(repo: Path, ref: str, wait_seconds: float, state_root: Path, install_
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pisec update")
-    parser.add_argument("--commit", default="HEAD")
+    parser.add_argument("--commit", default=None)
     parser.add_argument("--repo", type=Path, default=None)
     parser.add_argument("--wait-seconds", type=float, default=300.0)
     parser.add_argument("--json", action="store_true")
@@ -246,10 +287,13 @@ def main(argv: list[str] | None = None) -> int:
     if os.name != "posix" or sys.platform != "linux":
         print("Pisec updater supports Linux only", file=sys.stderr)
         return EXIT_FAILED
-    repo = (args.repo or Path(os.environ.get("PISEC_SOURCE_ROOT", Path.cwd()))).expanduser().resolve()
+    configured_source = Path.home() / ".config" / "pisec" / "source-root"
+    configured = configured_source.read_text(encoding="utf-8").strip() if configured_source.is_file() else ""
+    repo = (args.repo or Path(os.environ.get("PISEC_SOURCE_ROOT", configured or Path.cwd()))).expanduser().resolve()
     state_root = Path(os.environ.get("PISEC_STATE_ROOT", Path.home() / ".local" / "state" / "pisec")).expanduser()
     install_root = Path(os.environ.get("PISEC_INSTALL_ROOT", Path.home() / ".local" / "lib" / "pisec")).expanduser()
-    code, result = update(repo, args.commit, args.wait_seconds, state_root, install_root)
+    ref = args.commit or "HEAD"
+    code, result = update(repo, ref, args.wait_seconds, state_root, install_root, reject_dirty=args.commit is None)
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:

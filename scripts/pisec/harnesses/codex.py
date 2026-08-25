@@ -16,14 +16,14 @@ import stat
 import subprocess
 from typing import Any, Mapping, Sequence
 
-from ..adapters import AdapterHealth, HarnessArtifacts, HarnessManifest, RuntimeSurfaceArtifacts
+from ..adapters import AdapterHealth, HarnessArtifacts, HarnessManifest, RuntimeSurfaceArtifacts, StagedHarnessArtifacts, artifact_document
 from ..fsutil import _atomic_write, _read_runtime_secret, _secure_secret, _secure_tree
-from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canonical_json, validate_id
+from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canonical_json, validate_id, validate_sha256
 from ..platform import runtime_root
 from .omp import _copy_safe_entry, _file_digest, _normalize_owner_tree, _tree_digest
 
 
-CODEX_PROFILE_IDS = frozenset({"worker-default", "worker-networked"})
+CODEX_PROFILE_IDS = frozenset({"worker-default"})
 CODEX_BASELINE_DOMAINS = ("html.duckduckgo.com",)
 
 
@@ -61,6 +61,42 @@ def _codex_file_digest(path: Path) -> str:
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid not in {0, os.geteuid()} or info.st_mode & 0o002 or (info.st_mode & 0o020 and info.st_gid != os.getgid()):
         raise PisecError("Codex runtime input is unsafe")
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _safe_owned_tree(root: Path) -> None:
+    if not root.exists() or root.is_symlink():
+        raise NeedsAttentionError("current Codex runtime surface is missing or unsafe")
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise NeedsAttentionError("current Codex runtime surface is unsafe")
+    for child in sorted(root.rglob("*")):
+        child_info = child.lstat()
+        if child.is_symlink() or child_info.st_uid != os.geteuid() or child_info.st_mode & 0o022:
+            raise NeedsAttentionError("current Codex runtime surface contains an unsafe entry")
+
+
+def _activate_directory(staged: Path, target: Path) -> None:
+    backup = target.with_name(f".{target.name}.previous-{secrets.token_hex(8)}")
+    replaced = False
+    try:
+        if target.exists():
+            os.replace(target, backup)
+            replaced = True
+        os.replace(staged, target)
+        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except Exception:
+        if replaced and not target.exists() and backup.exists():
+            os.replace(backup, target)
+        raise
+    finally:
+        if staged.exists():
+            shutil.rmtree(staged)
+        if backup.exists():
+            shutil.rmtree(backup)
 
 
 def _validate_config(config: Mapping[str, Any], root_config: Mapping[str, Any]) -> dict[str, Any]:
@@ -109,7 +145,7 @@ def _prompt(scope: Mapping[str, Any]) -> str:
 
 
 class CodexHarnessAdapter:
-    manifest = HarnessManifest(adapter_id="codex", agent_kind="codex", version_label="0.147-compatible")
+    manifest = HarnessManifest(adapter_id="codex", agent_kind="codex", version_label="0.147.0", interface_version=1, supported_role_profiles=(("worker", "worker-default"),))
     launches_with_brief = True
     allow_unidentified_agent = True
 
@@ -136,19 +172,20 @@ class CodexHarnessAdapter:
         return tuple(sorted(values))
 
     def _surface_root(self, scope: Mapping[str, Any]) -> Path:
-        root_value = scope.get("runtimeReleaseRoot")
-        digest = scope.get("runtimeReleaseSha256")
-        if not isinstance(root_value, str) or not isinstance(digest, str) or len(digest) != 64:
+        root_value = scope.get("runtimeSurfaceRoot")
+        digest = scope.get("runtimeSurfaceSha256")
+        if not isinstance(root_value, str):
             raise InvalidRequestError("Codex runtime surface scope is incomplete")
+        validate_sha256(digest, "runtime surface digest")
         root = Path(root_value).absolute()
-        expected_parent = (self.state_root / "runtime-surfaces").absolute()
-        if root.parent != expected_parent or root.name != digest or root.is_symlink() or not root.is_dir() or _tree_digest(root) != digest:
+        expected_parent = (self.state_root / "runtime-current").absolute()
+        if root.parent != expected_parent or root.name != self.manifest.adapter_id or root.is_symlink() or not root.is_dir() or _tree_digest(root) != digest:
             raise NeedsAttentionError("Codex runtime surface root is invalid")
         return root
 
     def prepare_runtime_surface(self) -> RuntimeSurfaceArtifacts:
         executable_path, node_path = self._executables()
-        surfaces_root = self.state_root / "runtime-surfaces"
+        surfaces_root = self.state_root / "runtime-current"
         _secure_tree(self.state_root, surfaces_root)
         staged = surfaces_root / f".codex-staged-{secrets.token_hex(8)}"
         staged.mkdir(mode=0o700)
@@ -172,62 +209,86 @@ class CodexHarnessAdapter:
             _atomic_write(staged / "surface.json", canonical_json(manifest) + "\n")
             _normalize_owner_tree(staged)
             digest = _tree_digest(staged)
-            target = surfaces_root / digest
+            target = surfaces_root / self.manifest.adapter_id
             if target.exists():
-                if target.is_symlink() or not target.is_dir() or _tree_digest(target) != digest:
+                if target.is_symlink() or not target.is_dir():
                     raise PisecError("existing Codex runtime surface is unsafe or corrupt")
-                shutil.rmtree(staged)
-            else:
-                os.replace(staged, target)
+            _activate_directory(staged, target)
             return RuntimeSurfaceArtifacts(digest, manifest, str(target.absolute()))
         except Exception:
             if staged.exists():
                 shutil.rmtree(staged)
             raise
 
-    def build_runtime_release(self) -> RuntimeSurfaceArtifacts:
-        return self.prepare_runtime_surface()
     def current_runtime_surface(self) -> RuntimeSurfaceArtifacts:
-        return self.prepare_runtime_surface()
+        target = self.state_root / "runtime-current" / self.manifest.adapter_id
+        try:
+            _safe_owned_tree(target)
+            manifest = json.loads((target / "surface.json").read_text(encoding="utf-8"))
+            digest = _tree_digest(target)
+        except (NeedsAttentionError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise NeedsAttentionError("current runtime surface is missing or corrupt; run pisec update") from error
+        if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 1 or manifest.get("adapter") != self.manifest.adapter_id or not target.is_dir():
+            raise NeedsAttentionError("current runtime surface is missing or corrupt; run pisec update")
+        return RuntimeSurfaceArtifacts(digest, manifest, str(target.absolute()))
+
 
     def desired_generation(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> str:
-        if surface is None and not isinstance(scope.get("runtimeReleaseRoot"), str):
+        if surface is None and not isinstance(scope.get("runtimeSurfaceRoot"), str):
             surface = self.current_runtime_surface()
         if surface is not None:
-            scope = {**scope, "runtimeReleaseSha256": surface.content_sha256, "runtimeReleaseRoot": surface.root_path, "runtimeReleaseId": "surface_" + surface.content_sha256[:32]}
+            scope = {**scope, "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path, "runtimeSurfaceId": "surface_" + surface.content_sha256[:32]}
         profile = str(scope.get("executionProfile", ""))
         self.validate_execution_profile(profile, "worker")
-        surface_root = self._surface_root(scope)
+        self._surface_root(scope)
         values = {
             "adapter": self.manifest.adapter_id,
             "adapterVersion": self.manifest.version_label,
             "scope": {key: scope.get(key) for key in ("executionProfile", "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "externalDomains", "implementationModel", "harnessModel", "reasoningEffort", "pythonEnv")},
-            "runtimeSurfaceSha256": scope.get("runtimeReleaseSha256"),
-            "runtimeSurfaceRoot": str(surface_root),
+            "runtimeSurfaceSha256": scope.get("runtimeSurfaceSha256"),
         }
         return hashlib.sha256(canonical_json(values).encode()).hexdigest()
 
 
-    def materialize_profile(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> HarnessArtifacts:
-        if surface is None and not isinstance(scope.get("runtimeReleaseRoot"), str):
+    def _build_profile(
+        self,
+        scope: Mapping[str, Any],
+        surface: RuntimeSurfaceArtifacts | None = None,
+        *,
+        state_root: Path | None = None,
+        preserved_token: str | None = None,
+    ) -> HarnessArtifacts:
+        if surface is None and not isinstance(scope.get("runtimeSurfaceRoot"), str):
             surface = self.current_runtime_surface()
         if surface is not None:
-            scope = {**scope, "runtimeReleaseSha256": surface.content_sha256, "runtimeReleaseRoot": surface.root_path, "runtimeReleaseId": "surface_" + surface.content_sha256[:32]}
+            scope = {**scope, "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path, "runtimeSurfaceId": "surface_" + surface.content_sha256[:32]}
         workstream_id = validate_id(scope["workstreamId"], prefix="ws")
+        state_root = Path(state_root or self.state_root)
         profile = str(scope.get("executionProfile"))
         self.validate_execution_profile(profile, "worker")
         surface_root = self._surface_root(scope)
         executable_path, node_path = self._executables()
-        home = self.state_root / "codex" / workstream_id
-        _secure_tree(self.state_root, home)
-        _secure_tree(self.state_root, home / "sessions")
+        home = state_root / "codex" / workstream_id
+        prior_home = self.state_root / "codex" / workstream_id
+        if state_root != self.state_root and prior_home.exists():
+            if prior_home.is_symlink() or any(path.is_symlink() for path in prior_home.rglob("*")):
+                raise PisecError("existing Codex profile contains a symlink")
+            _secure_tree(state_root, home.parent)
+            _copy_safe_entry(prior_home, home)
+            _normalize_owner_tree(home)
+        else:
+            _secure_tree(state_root, home)
+        _secure_tree(state_root, home / "sessions")
         codex_home = home / "home"
-        _secure_tree(self.state_root, codex_home)
+        _secure_tree(state_root, codex_home)
         prompt_path = home / "worker-prompt.md"
         _atomic_write(prompt_path, _prompt(scope), mode=0o600)
-        runtime_secret = self.state_root / "secrets" / f"{workstream_id}.token"
-        _secure_tree(self.state_root, runtime_secret.parent)
-        if runtime_secret.exists() or runtime_secret.is_symlink():
+        runtime_secret = state_root / "secrets" / f"{workstream_id}.token"
+        _secure_tree(state_root, runtime_secret.parent)
+        if preserved_token is not None:
+            token = preserved_token
+            _atomic_write(runtime_secret, token + "\n", mode=0o600)
+        elif runtime_secret.exists() or runtime_secret.is_symlink():
             token = _read_runtime_secret(runtime_secret)
         else:
             token = secrets.token_urlsafe(48)
@@ -235,7 +296,7 @@ class CodexHarnessAdapter:
         model = str(scope.get("harnessModel") or scope.get("implementationModel") or "gpt-5.6-luna")
         effort = str(scope.get("reasoningEffort") or "high")
         runtime_root = home / "runtime"
-        _secure_tree(self.state_root, runtime_root)
+        _secure_tree(state_root, runtime_root)
         mcp_path = runtime_root / "codex_mcp.py"
         hook_path = runtime_root / "codex_hook.py"
         _copy_safe_entry(surface_root / "managed" / "codex_mcp.py", mcp_path)
@@ -270,7 +331,7 @@ class CodexHarnessAdapter:
             from ..fence import render_policy
             policy_renderer = render_policy
         policy_path, policy_digest = policy_renderer(
-            self.state_root,
+            state_root,
             scope,
             home,
             self.root_config,
@@ -304,10 +365,94 @@ class CodexHarnessAdapter:
                 "reasoningEffort": effort,
                 "gatewayTokenFile": self.harness_config["gateway"]["tokenFile"],
                 "gatewayBaseUrl": self.harness_config["gateway"]["baseUrl"],
-                "runtimeSurfaceId": str(scope["runtimeReleaseId"]),
+                "runtimeSurfaceId": str(scope["runtimeSurfaceId"]),
                 "launcherTemplate": str((surface_root / "managed" / "codex").absolute()),
             },
         )
+
+    def stage_profile(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, staging_root: Path) -> StagedHarnessArtifacts:
+        if not isinstance(surface, RuntimeSurfaceArtifacts):
+            raise InvalidRequestError("runtime surface snapshot is required")
+        root = Path(staging_root).resolve()
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        candidate_root = root / "candidate-state"
+        prior_secret = self.state_root / "secrets" / f"{validate_id(scope['workstreamId'], prefix='ws')}.token"
+        preserved_token = _read_runtime_secret(prior_secret) if prior_secret.exists() or prior_secret.is_symlink() else None
+        prior_home = self.state_root / "codex" / validate_id(scope["workstreamId"], prefix="ws")
+        prior_policy = self.state_root / "fence" / f"{validate_id(scope['workstreamId'], prefix='ws')}.json"
+        prior = None
+        if prior_home.is_dir() and prior_secret.is_file() and prior_policy.is_file():
+            prior = HarnessArtifacts(
+                harness_home=str(prior_home),
+                launch_secret_path=str(prior_secret),
+                policy_path=str(prior_policy),
+                policy_sha256=_file_digest(prior_policy),
+                runtime_token_sha256=hashlib.sha256(preserved_token.encode("utf-8")).hexdigest() if preserved_token is not None else "0" * 64,
+                generation_sha256=self.desired_generation(scope, surface),
+                adapter_data={},
+            )
+        candidate = self._build_profile(
+            {**scope, "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path, "runtimeSurfaceId": "surface_" + surface.content_sha256[:32]},
+            surface,
+            state_root=candidate_root,
+            preserved_token=preserved_token,
+        )
+        return StagedHarnessArtifacts(
+            operation_id=str(scope.get("operationId", "op_stage")),
+            workstream_id=validate_id(scope["workstreamId"], prefix="ws"),
+            staging_root=str(root),
+            candidate_manifest_json=artifact_document(self.manifest, candidate),
+            candidate_content_sha256=surface.content_sha256,
+            candidate=candidate,
+            prior=prior,
+            compensation_json=canonical_json({"paths": [candidate.harness_home, candidate.policy_path], "pointer": str(self.state_root / "codex" / str(scope["workstreamId"]))}),
+        )
+
+    def activate_profile(self, scope: Mapping[str, Any], staged: StagedHarnessArtifacts) -> HarnessArtifacts:
+        workstream_id = validate_id(scope["workstreamId"], prefix="ws")
+        staging_root = Path(staged.staging_root).resolve(strict=False)
+        candidate_root = Path(staged.candidate.harness_home).parents[1].resolve(strict=False)
+        if not candidate_root.is_relative_to(staging_root) or any(not Path(value).resolve(strict=False).is_relative_to(staging_root) for value in (staged.candidate.harness_home, staged.candidate.launch_secret_path, staged.candidate.policy_path)):
+            raise NeedsAttentionError("staged Codex profile escapes its operation root")
+        active_root = self.state_root
+        for relative in (Path("codex") / workstream_id, Path("secrets") / f"{workstream_id}.token", Path("fence") / f"{workstream_id}.json"):
+            source = candidate_root / relative
+            target = active_root / relative
+            if not source.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if source.is_dir():
+                _activate_directory(source, target)
+            else:
+                backup = target.with_name(f".{target.name}.previous-{secrets.token_hex(8)}")
+                if target.exists():
+                    os.replace(target, backup)
+                os.replace(source, target)
+                if backup.exists():
+                    backup.unlink()
+        prefix = str(candidate_root)
+        def rebase(value: str) -> str:
+            return value.replace(prefix, str(active_root), 1)
+        candidate = staged.candidate
+        active_policy = Path(rebase(candidate.policy_path))
+        policy_text = active_policy.read_text(encoding="utf-8").replace(prefix, str(active_root))
+        _atomic_write(active_policy, policy_text)
+        policy_digest = hashlib.sha256(policy_text.encode("utf-8")).hexdigest()
+        return HarnessArtifacts(
+            harness_home=rebase(candidate.harness_home), launch_secret_path=rebase(candidate.launch_secret_path),
+            policy_path=rebase(candidate.policy_path), policy_sha256=policy_digest,
+            runtime_token_sha256=candidate.runtime_token_sha256, generation_sha256=candidate.generation_sha256,
+            adapter_data={key: rebase(value) for key, value in candidate.adapter_data.items()},
+        )
+
+    def restore_profile(self, scope: Mapping[str, Any], previous: HarnessArtifacts) -> HarnessArtifacts:
+        del scope
+        return previous
+
+    def discard_staged_profile(self, staged: StagedHarnessArtifacts) -> None:
+        root = Path(staged.staging_root)
+        if root.exists() and root.is_dir():
+            shutil.rmtree(root)
 
     def _launcher_dir(self, workstream_id: str) -> Path:
         path = self.state_root / "launchers" / validate_id(workstream_id, prefix="ws")

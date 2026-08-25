@@ -11,7 +11,7 @@ from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now
 from .projects import observe_project, resolve_project
-from .releases import materialize_current_surface
+from .runtime_surface import materialize_current_surface
 from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent
 from .workstreams import APPLY_LOCK, _wait_for_agent
 
@@ -167,7 +167,7 @@ def _recover_workspace(workspace: WorkspaceAdapter, scope: Mapping[str, Any], ex
 def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdapter, scope: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
     observed = _observe_binding(workspace, scope, binding)
     agent = observed.agent if observed is not None else None
-    ready = agent is not None and agent.surface_id == binding["workspace_surface_id"] and agent.interactive_ready is True
+    ready = agent is not None and agent.surface_id == binding["workspace_surface_id"] and agent.identity_usable is True
     if not ready:
         with store.transaction():
             now = utc_now()
@@ -256,7 +256,6 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         if observed is None:
             raise NeedsAttentionError("First Mate workspace is missing after checkpoint")
     artifacts = None
-    release = None
     materialized_scope = scope
     if _rank(operation["step"]) < _rank("profile_materialized"):
         artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope)

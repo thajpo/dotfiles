@@ -14,7 +14,9 @@ from scripts.pisec.adapters import (
     AgentObservation,
     HarnessArtifacts,
     HarnessManifest,
+    RuntimeSurfaceArtifacts,
     RuntimeProcessObservation,
+    StagedHarnessArtifacts,
     WorkspaceManifest,
     WorkspaceObservation,
 )
@@ -33,7 +35,7 @@ def make_repo(path: Path) -> None:
 
 
 class FixtureHarness:
-    manifest = HarnessManifest("fixture-harness", "fixture-agent", "fixture-1")
+    manifest = HarnessManifest("fixture-harness", "fixture-agent", "fixture-1", 1, (("worker", "worker-default"), ("secretary", "secretary-project"), ("first_mate", "first-mate")))
 
     def __init__(self, root: Path):
         self.root = root
@@ -44,7 +46,7 @@ class FixtureHarness:
 
     def validate_execution_profile(self, profile: str, role: str) -> None:
         self.calls.append(("validate", (profile, role)))
-        expected = {"first-mate": "first_mate", "secretary-project": "secretary", "worker-default": "worker", "worker-networked": "worker"}.get(profile)
+        expected = {"first-mate": "first_mate", "secretary-project": "secretary", "worker-default": "worker"}.get(profile)
         if expected is None or role != expected:
             raise ValueError("fixture profile is invalid")
 
@@ -54,21 +56,30 @@ class FixtureHarness:
         self.validate_execution_profile(profile, role)
         return tuple(sorted({"fixture.test", *additional_domains}))
 
-    def desired_generation(self, scope: Mapping[str, Any]) -> str:
+    def current_runtime_surface(self) -> RuntimeSurfaceArtifacts:
+        root = self.root / "runtime-surface"
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        from scripts.pisec.runtime_surface import _tree_digest
+        return RuntimeSurfaceArtifacts(_tree_digest(root), {"adapter": self.manifest.adapter_id, "adapterVersion": self.manifest.version_label, "interfaceVersion": 1}, str(root))
+
+    def prepare_runtime_surface(self) -> RuntimeSurfaceArtifacts:
+        return self.current_runtime_surface()
+
+    def desired_generation(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> str:
         return hashlib.sha256(("fixture-generation:" + str(scope["executionProfile"])).encode()).hexdigest()
 
-    def materialize_profile(self, scope: Mapping[str, Any]) -> HarnessArtifacts:
+    def materialize_profile(self, scope: Mapping[str, Any], *, root: Path | None = None, runtime_token: str | None = None) -> HarnessArtifacts:
         workstream_id = str(scope["workstreamId"])
         self.calls.append(("materialize", workstream_id))
         self.profiles.append(workstream_id)
-        home = self.root / "harness" / workstream_id
+        home = (root or (self.root / "harness")) / workstream_id
         home.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(home, 0o700)
         session_root = home / "sessions"
         session_root.mkdir(mode=0o700, exist_ok=True)
         secret = home / "launch.secret"
         if not secret.exists():
-            secret.write_text(secrets.token_urlsafe(48) + "\n")
+            secret.write_text((runtime_token or secrets.token_urlsafe(48)) + "\n")
             os.chmod(secret, 0o600)
         policy = home / "policy.json"
         policy.write_text("{}\n")
@@ -83,6 +94,67 @@ class FixtureHarness:
             generation_sha256=self.desired_generation(scope),
             adapter_data={"fixtureRoot": str(home)},
         )
+
+    def stage_profile(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, staging_root: Path) -> StagedHarnessArtifacts:
+        candidate_root = Path(staging_root).resolve() / "candidate-harness"
+        prior_home = self.root / "harness" / str(scope["workstreamId"])
+        candidate_home = candidate_root / str(scope["workstreamId"])
+        if prior_home.is_dir():
+            if prior_home.is_symlink() or any(path.is_symlink() for path in prior_home.rglob("*")):
+                raise RuntimeError("fixture active profile contains a symlink")
+            candidate_home.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.copytree(prior_home, candidate_home, symlinks=False)
+        prior_secret = self.root / "harness" / f"{scope['workstreamId']}" / "launch.secret"
+        preserved_token = prior_secret.read_text().strip() if prior_secret.exists() else None
+        candidate = self.materialize_profile({**scope, "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path}, root=candidate_root, runtime_token=preserved_token)
+        prior = None
+        prior_policy = prior_home / "policy.json"
+        if prior_home.is_dir() and prior_secret.is_file() and prior_policy.is_file():
+            prior = HarnessArtifacts(
+                harness_home=str(prior_home), launch_secret_path=str(prior_secret), policy_path=str(prior_policy),
+                policy_sha256=hashlib.sha256(prior_policy.read_bytes()).hexdigest(),
+                runtime_token_sha256=hashlib.sha256(prior_secret.read_text().strip().encode()).hexdigest(),
+                generation_sha256=self.desired_generation(scope, surface), adapter_data={},
+            )
+        return StagedHarnessArtifacts(
+            operation_id=str(scope.get("operationId", "op_fixture")),
+            workstream_id=str(scope["workstreamId"]),
+            staging_root=str(Path(staging_root).resolve()),
+            candidate_manifest_json="{}",
+            candidate_content_sha256=surface.content_sha256,
+            candidate=candidate,
+            prior=prior,
+            compensation_json="{}",
+        )
+
+    def activate_profile(self, scope: Mapping[str, Any], staged: StagedHarnessArtifacts) -> HarnessArtifacts:
+        workstream_id = str(scope["workstreamId"])
+        candidate = staged.candidate
+        staging_root = Path(staged.staging_root).resolve(strict=False)
+        if any(not Path(value).resolve(strict=False).is_relative_to(staging_root) for value in (candidate.harness_home, candidate.launch_secret_path, candidate.policy_path)):
+            raise RuntimeError("fixture staged profile escapes its operation root")
+        active = self.root / "harness" / workstream_id
+        if active.exists():
+            shutil.rmtree(active)
+        active.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.copytree(candidate.harness_home, active)
+        prefix = str(Path(candidate.harness_home).parent)
+        def rebase(value: str) -> str:
+            return value.replace(prefix, str(active.parent), 1)
+        return HarnessArtifacts(
+            harness_home=str(active), launch_secret_path=rebase(candidate.launch_secret_path),
+            policy_path=rebase(candidate.policy_path), policy_sha256=candidate.policy_sha256,
+            runtime_token_sha256=candidate.runtime_token_sha256, generation_sha256=candidate.generation_sha256,
+            adapter_data={key: rebase(value) for key, value in candidate.adapter_data.items()},
+        )
+
+    def restore_profile(self, scope: Mapping[str, Any], previous: HarnessArtifacts) -> HarnessArtifacts:
+        return previous
+
+    def discard_staged_profile(self, staged: StagedHarnessArtifacts) -> None:
+        root = Path(staged.staging_root)
+        if root.exists():
+            shutil.rmtree(root)
 
     def commit_launch_binding(self, scope: Mapping[str, Any], artifacts: HarnessArtifacts, **_: Any) -> Path:
         workstream_id = str(scope["workstreamId"])
@@ -206,7 +278,7 @@ class FixtureWorkspace:
         self.runtime_states[moved.surface_id] = self.runtime_states.pop(surface_id, "stopped")
         for name, agent in list(self.agents.items()):
             if agent.surface_id == surface_id:
-                self.agents[name] = AgentObservation(agent.name, moved.surface_id, agent.interactive_ready, agent.state)
+                self.agents[name] = AgentObservation(agent.name, moved.surface_id, agent.identity_usable, agent.state)
         return moved
 
     def observe_tab(self, *, workspace_id: str, cwd: str) -> WorkspaceObservation | None:
@@ -266,11 +338,11 @@ class FixtureWorkspace:
         if self.store is None:
             from scripts.pisec.pi_store import PiStore
             with PiStore(self.root / "state") as store:
-                store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL WHERE workspace_surface_id=?", (runtime_instance, surface_id))
+                store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL WHERE workspace_surface_id=?", (runtime_instance, surface_id))
         else:
             row = self.store.conn.execute("SELECT workstream_id FROM runtime_bindings WHERE workspace_surface_id=?", (surface_id,)).fetchone()
             if row is not None:
-                self.store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL WHERE workstream_id=?", (runtime_instance, row["workstream_id"]))
+                self.store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL WHERE workstream_id=?", (runtime_instance, row["workstream_id"]))
         return {"started": True, "name": name, "surfaceId": surface_id}
 
     def run_command(self, surface_id: str, argv: Sequence[str], env: Mapping[str, str] | None = None) -> Mapping[str, Any]:
@@ -294,6 +366,9 @@ class FixtureWorkspace:
         self.calls.append(("prompt_nowait", (surface_id, text)))
         self.prompts.append((surface_id, text))
         return {"prompted": True}
+
+    def prompt_eligible(self, agent_observation: AgentObservation) -> bool:
+        return bool(agent_observation.identity_usable and agent_observation.state in {"idle", "done"})
 
     def focus_pane(self, surface_id: str) -> Mapping[str, Any]:
         self.calls.append(("focus", surface_id))
@@ -341,7 +416,7 @@ class UnattestedFixtureWorkspace(FixtureWorkspace):
         ).fetchone()
         if row is not None and row["kind"] == "secretary":
             self.store.conn.execute(
-                "UPDATE runtime_bindings SET runtime_instance_id='fixture-runtime',report_seq=1,observed_state='idle',applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL WHERE workspace_surface_id=?",
+                "UPDATE runtime_bindings SET runtime_instance_id='fixture-runtime',report_seq=1,observed_state='idle',applied_generation_sha256=COALESCE(launch_generation_sha256,applied_generation_sha256),launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL WHERE workspace_surface_id=?",
                 (surface_id,),
             )
         return {"started": True, "name": name, "surfaceId": surface_id}

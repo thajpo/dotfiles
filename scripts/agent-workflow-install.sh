@@ -361,7 +361,7 @@ from scripts.pisec.pi_store import default_state_root
 
 try:
     config = load_config(Path(sys.argv[1]))
-    build_adapters(config, default_state_root())
+    build_adapters(config, default_state_root(), prepare_surfaces=False)
 except Exception as error:
     raise SystemExit(str(error)[:512])
 PY
@@ -912,6 +912,8 @@ export PATH="$PISEC_BWRAP_DIR:/usr/local/bin:/usr/bin:/bin"
 exec \"$FENCE_REAL_PATH\" \"\$@\""
 write_wrapper "$PISC_BIN_DIR/pisec-broker" "#!/usr/bin/env bash
 set -euo pipefail
+current=\"$HOME/.local/lib/pisec/current/bin/pisec\"
+if [[ -x \"\$current\" ]]; then exec \"\$current\" broker \"\$@\"; fi
 exec \"$DOTFILES_DIR/bin/pisec\" broker \"\$@\""
 write_wrapper "$PISC_BIN_DIR/pisec-auth-broker" "#!/usr/bin/env bash
 set -euo pipefail
@@ -940,6 +942,11 @@ python3 "$DOTFILES_DIR/scripts/pisec/host_config.py" patch-bashrc "$HOME/.bashrc
 
 printf '\nSeeding Pisec configuration\n'
 mkdir -p "$HOME/.local/bin" "$HOME/.config/pisec"
+transaction_capture_path "$PISC_BIN_DIR/pisec-update"
+install -m 0700 "$DOTFILES_DIR/scripts/pisec-update.py" "$PISC_BIN_DIR/pisec-update"
+transaction_capture_path "$HOME/.config/pisec/source-root"
+printf '%s\n' "$DOTFILES_DIR" >"$HOME/.config/pisec/source-root"
+chmod 0600 "$HOME/.config/pisec/source-root"
 pisec_config="$HOME/.config/pisec/config.json"
 transaction_capture_path "$pisec_config"
 if [[ ! -e "$pisec_config" && ! -L "$pisec_config" ]]; then
@@ -1088,6 +1095,7 @@ verify_collie_surface
 
 printf '\nInstalling and refreshing the deployed Pisec runtime\n'
 if ! update_output="$(python3 "$HOME/.local/bin/pisec" --json update --commit HEAD --wait-seconds 300)"; then
+  printf '%s\n' "$update_output" >&2
   die "Pisec runtime update could not run"
 fi
 printf '%s\n' "$update_output"

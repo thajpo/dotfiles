@@ -162,22 +162,11 @@ unrelated Herdr key configuration is preserved.
 Every worker receives one linked Git worktree, one namespaced branch, one
 private Git object store, one isolated harness home, one rendered Fence
 policy, one immutable broker-owned task packet, and one adapter-owned
-workspace surface.
-Workers retain the OMP adapter's built-in `web_search` path through
-DuckDuckGo and include `html.duckduckgo.com` in the immutable approval scope:
-
-- `worker-default` permits only that web-search domain plus the loopback model
-  gateway.
-- `worker-networked` additionally permits the exact external domains named in
-  the approved proposal. It does not receive live policy widening.
-
-Both profiles deny undeclared domains and direct `curl`, `wget`, `http`, and
-`httpie` execution. They also deny push, publish, SSH, container engines, and
-other destructive Git maintenance. The networked profile widens destination
-reachability; it does not relax filesystem or command restrictions. A live
-Fence smoke check should use `real-omp search` from a materialized worker,
-because that exercises OMP's actual built-in search provider rather than a
-stand-in HTTP client.
+workspace surface. Workers use the single `worker-default` profile. Project
+permissions are complete project-wide replacements: approved existing paths
+are read-only and approved domains are added to every compatible current or
+future worker in that project. Fence and the broker retain all role and
+write boundaries.
 
 Tool lists and approval prompts are workflow/UX controls, not security
 boundaries. Fence remains the hard process, filesystem, and network boundary;
@@ -188,11 +177,11 @@ The OMP adapter keeps these execution profiles:
 | Profile | Network scope | Intended role |
 |---|---|---|
 | `secretary-project` | Loopback model gateway and approved public web access | Project secretary |
-| `worker-default` | Loopback model gateway plus `html.duckduckgo.com` | Isolated worker |
-| `worker-networked` | Worker baseline plus exact proposal domains | Worker needing approved external access |
+| `worker-default` | Loopback model gateway, web search, and current project permissions | Isolated worker |
 
-Additional worker domains are immutable approval inputs; no live policy
-widening is available.
+Permission changes use an exact prepare/apply approval and targeted runtime
+refresh. Tool and skill improvements are committed source changes distributed
+with `pisec update`.
 
 Pisec uses one bounded acceptance gate and then lets the project secretary own
 local integration. It does not use a pull request as the worker closeout
@@ -218,7 +207,15 @@ protocol. The closeout sequence is:
    judgment, dirty targets, and new capabilities remain user-visible stops.
 5. Delete the retained branch separately, only after verifying integration.
    Private-object purging is intentionally not part of cleanup; before adding
-   such a purge, prove no retained Git ref depends on that store.
+such a purge, prove no retained Git ref depends on that store.
+
+The installed full bundle is updated with `pisec update`. The stable updater
+archives one committed source bundle, switches one `current` deployment
+atomically, and refreshes runtimes by generation. Busy workers converge at an
+idle boundary; there is no automatic rollback. Pisec supports one exact
+epoch-15-to-16 database migration. Unsupported schemas require the explicit
+`--reset-pisec-state` archive-and-reset path. Chat files remain below each
+binding's private session home; they are not stored in `control.db`.
 
 The OMP harness is launched through the private `pisec/runtime-bin/omp`
 shim. Herdr workspace cold restore therefore re-enters Fence before OMP,
@@ -231,9 +228,8 @@ creation and workstream acceptance) remain separate extension-level checks.
 Pisec-owned OMP panes have exactly one lifecycle reporter. Each isolated OMP
 home excludes `herdr-omp-agent-state.ts`; the private launcher explicitly loads
 `omp/extensions/pisec.ts`, which publishes the per-runtime
-`pisec:omp:<hash>` source. Pisec never tries to release `herdr:omp`: Herdr 0.8
-intentionally ignores releases of official sources even though the protocol
-returns `type: ok`.
+`pisec:omp:<hash>` source. Pisec keeps one current mutable runtime surface per
+harness; per-binding homes retain only private sessions and launch state.
 
 Runtime-affecting inputs have a content-addressed generation. The digest covers
 the Pisec extension and private launcher, OMP/Fence executables and policy

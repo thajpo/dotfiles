@@ -1,4 +1,4 @@
-"""Adapter-neutral Pisec diagnostics and deployment policy checks."""
+"""Adapter-neutral Pisec diagnostics and runtime health checks."""
 
 from __future__ import annotations
 
@@ -11,10 +11,12 @@ from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .adapters import AdapterRegistry
+from .adapters import AdapterRegistry, validate_configured_routes
 from .models import NeedsAttentionError, canonical_json
 from .pi_schema import SCHEMA_NAME, SCHEMA_VERSION, schema_digest
 from .pi_store import default_state_root
+from .operations import authoritative_workstream_creation
+from .runtime_surface import capture_runtime_surface
 
 
 def _check(checks: list[dict[str, Any]], name: str, ok: bool, detail: str) -> None:
@@ -176,9 +178,17 @@ def run_doctor(
         workspace_ids = registry.workspace_ids()
         _check(checks, "Harness adapter registry", selected_harness_id in harness_ids, canonical_json({"selected": selected_harness_id, "ids": harness_ids}))
         _check(checks, "Workspace adapter registry", selected_workspace_id in workspace_ids, canonical_json({"selected": selected_workspace_id, "ids": workspace_ids}))
+        try:
+            validate_configured_routes(selected, registry)
+            _check(checks, "Configured worker routes", True, "all configured harnesses support their roles")
+        except Exception as error:
+            _check(checks, "Configured worker routes", False, str(error)[:256])
         if selected_harness_id in harness_ids:
             try:
-                for health in registry.resolve_harness(selected_harness_id).health_checks({}, {}):
+                selected_harness = registry.resolve_harness(selected_harness_id)
+                surface = capture_runtime_surface(selected_harness)
+                _check(checks, f"Harness {selected_harness_id}: current runtime surface", Path(surface.root_path).is_dir(), surface.root_path)
+                for health in selected_harness.health_checks({}, {}):
                     _check(checks, f"Harness {selected_harness_id}: {health.name}", health.ok, health.detail)
             except Exception as error:
                 _check(checks, f"Harness {selected_harness_id}: health", False, str(error)[:256])
@@ -198,6 +208,13 @@ def run_doctor(
             schema_identity = dict(row)
             expected = {"schema_name": SCHEMA_NAME, "schema_version": SCHEMA_VERSION, "schema_sha256": schema_digest()}
             _check(checks, "Schema identity", schema_identity == expected, canonical_json(schema_identity))
+        creation_errors: list[str] = []
+        for workstream in store.conn.execute("SELECT workstream_id FROM workstreams WHERE kind='worker'"):
+            try:
+                authoritative_workstream_creation(store, str(workstream["workstream_id"]))
+            except Exception as error:
+                creation_errors.append(f"{workstream['workstream_id']}: {str(error)[:160]}")
+        _check(checks, "Authoritative worker creation records", not creation_errors, canonical_json({"errors": creation_errors}))
         for row in store.conn.execute(
             "SELECT r.*,w.kind AS workstream_kind,w.desired_state AS workstream_desired_state,w.provisioning_state AS workstream_provisioning_state,w.execution_profile AS workstream_execution_profile,w.worktree_path AS workstream_worktree_path,w.harness_id AS workstream_harness_id,w.workspace_adapter_id AS workstream_workspace_adapter_id "
             "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) ORDER BY r.workstream_id"

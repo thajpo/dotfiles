@@ -229,7 +229,7 @@ def load_descriptor() -> tuple[dict[str, object], Path, Path]:
     profile = descriptor["executionProfile"]
     if role not in {"secretary", "first_mate", "worker"}:
         fail("binding role is invalid")
-    if (role == "secretary" and profile != "secretary-project") or (role == "first_mate" and profile != "first-mate") or (role == "worker" and profile not in {"worker-default", "worker-networked"}):
+    if (role == "secretary" and profile != "secretary-project") or (role == "first_mate" and profile != "first-mate") or (role == "worker" and profile != "worker-default"):
         fail("binding role and profile do not match")
     if role == "first_mate":
         if not isinstance(descriptor["fleetSocketPath"], str) or not descriptor["fleetSocketPath"]:

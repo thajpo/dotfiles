@@ -45,7 +45,7 @@ def _harness_identity(harness: Any) -> tuple[str, str]:
 
 
 class HerdrWorkspaceAdapter:
-    manifest = WorkspaceManifest(adapter_id="herdr", session_name="main", version_label="0.8.x", protocol_version=HERDR_PROTOCOL)
+    manifest = WorkspaceManifest(adapter_id="herdr", session_name="main", version_label="0.8.0", protocol_version=HERDR_PROTOCOL)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, timeout: float = 30.0, validate: bool = True) -> "HerdrWorkspaceAdapter":
@@ -129,10 +129,10 @@ class HerdrWorkspaceAdapter:
             self._validated_socket = None
             raise PisecError("workspace socket protocol mismatch")
         version = str(result.get("version", ""))
-        if _version_tuple(version) < HERDR_MIN_VERSION or _version_tuple(version) >= (0, 9, 0):
+        if version != "0.8.0":
             self._validated = False
             self._validated_socket = None
-            raise PisecError("workspace version is outside the tested 0.8.x range")
+            raise PisecError("workspace version is not the pinned v1 version")
         self._validated_socket = self._check_socket()
         self._validated = True
         return result
@@ -179,7 +179,7 @@ class HerdrWorkspaceAdapter:
             state = agent.get("agent_status", "unknown")
             if isinstance(name, str) and isinstance(surface_id, str):
                 state = state if state in {"unknown", "starting", "working", "blocked", "idle", "done", "stopped", "missing", "error"} else "unknown"
-                agent_observation = AgentObservation(name=name, surface_id=surface_id, interactive_ready=state in {"working", "blocked", "idle"}, state=state)
+                agent_observation = AgentObservation(name=name, surface_id=surface_id, identity_usable=state in {"working", "blocked", "idle"}, state=state)
         return WorkspaceObservation(
             workspace_id=str(identity["workspace_id"]),
             view_id=str(identity["view_id"]),
@@ -267,6 +267,9 @@ class HerdrWorkspaceAdapter:
         if result.get("type") != "agent_prompted":
             raise PisecError("workspace did not deliver the prompt")
         return result
+
+    def prompt_eligible(self, agent_observation: AgentObservation) -> bool:
+        return bool(agent_observation.identity_usable and agent_observation.state in {"idle", "done"})
 
     def focus_pane(self, surface_id: str) -> dict[str, Any]:
         return self._request("pane.focus", {"pane_id": surface_id})

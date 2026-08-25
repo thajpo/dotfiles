@@ -4,9 +4,25 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from .models import ConflictError, IdempotencyConflictError, NotFoundError, OperationRecord, canonical_json, json_digest, new_id, utc_now
+from .models import ConflictError, IdempotencyConflictError, NeedsAttentionError, NotFoundError, OperationRecord, canonical_json, json_digest, new_id, utc_now, validate_id
 
 _OPERATION_STATES = frozenset({"planned", "applying", "succeeded", "failed", "needs_attention", "cancelled"})
+
+
+def authoritative_workstream_creation(store: Any, workstream_id: str) -> dict[str, Any]:
+    """Return the one durable creation record or fail closed on contradiction."""
+    workstream_id = validate_id(workstream_id, prefix="ws")
+    rows = store.conn.execute(
+        "SELECT * FROM operations WHERE workstream_id=? AND kind='workstream.create' AND state IN ('planned','applying','needs_attention','succeeded') ORDER BY created_at,operation_id",
+        (workstream_id,),
+    ).fetchall()
+    if len(rows) != 1:
+        reason = "missing" if not rows else "multiple"
+        raise NeedsAttentionError(
+            f"authoritative workstream creation evidence is {reason}",
+            detail={"workstreamId": workstream_id, "count": len(rows)},
+        )
+    return dict(rows[0])
 
 
 def _record(store: Any, operation_id: str) -> OperationRecord:

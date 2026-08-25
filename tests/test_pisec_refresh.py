@@ -52,7 +52,10 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.assertTrue(first["ok"])
         self.assertEqual(len(first["upgraded"]), 1)
         upgraded = first["upgraded"][0]
-        self.assertEqual((upgraded["workspaceId"], upgraded["viewId"], upgraded["surfaceId"], upgraded["nativeSessionValue"]), self.identity)
+        self.assertEqual(set(upgraded), {"project", "workstreamId", "harnessId", "generation"})
+        with PiStore(self.root / "state") as store:
+            binding = store.conn.execute("SELECT workspace_id,workspace_view_id,workspace_surface_id,native_session_value FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            self.assertEqual(tuple(binding), self.identity)
         self.assertEqual(Path(self.identity[3]).read_text(), "retained session\n")
         stop_count = len([call for call in self.workspace.calls if call[0] == "stop"])
         second = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
@@ -102,15 +105,28 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.assertTrue(first["ok"])
         self.assertEqual(len(first["upgraded"]), 1)
         upgraded = first["upgraded"][0]
-        self.assertEqual(
-            (upgraded["workspaceId"], upgraded["viewId"], upgraded["surfaceId"], upgraded["nativeSessionValue"]),
-            self.identity,
-        )
+        self.assertEqual(set(upgraded), {"project", "workstreamId", "harnessId", "generation"})
         with PiStore(self.root / "state") as store:
             binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
             workstream = store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (self.workstream_id,)).fetchone()
             self.assertEqual(binding["applied_generation_sha256"], binding["desired_generation_sha256"])
             self.assertEqual(workstream["provisioning_state"], "bound")
+
+    def test_targeted_runtime_ensure_is_idempotent_and_starts_only_one_binding(self):
+        with PiStore(self.root / "state") as store:
+            store.conn.execute(
+                "UPDATE runtime_bindings SET applied_generation_sha256=desired_generation_sha256,refresh_pending=0,observed_state='idle' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+        already = self.dispatcher.dispatch("admin", "runtime.ensure", {"workstreamId": self.workstream_id})
+        self.assertEqual(already["action"], "already_live")
+        self.workspace.stop_runtime(self.identity[2])
+        started = self.dispatcher.dispatch("admin", "runtime.ensure", {"workstreamId": self.workstream_id})
+        self.assertEqual(started["action"], "started")
+        self.assertEqual(
+            self.dispatcher.dispatch("admin", "runtime.ensure", {"workstreamId": self.workstream_id})["action"],
+            "already_live",
+        )
 
     def test_binding_scope_injects_project_data_dirs(self):
         data = self.repo / "data"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import json
 import threading
@@ -19,7 +20,7 @@ from .policies import enforce_worker_creation_policy
 from .projects import _git, assert_project_writable, get_project
 from .project_workspaces import ensure_project_workspace
 from .research import issue_task_packet_in_transaction, validate_task_packet
-from .releases import materialize_current_surface
+from .runtime_surface import materialize_current_surface
 from .runtime import start_bound_agent
 APPLY_LOCK = threading.RLock()
 CHECKPOINTS = (
@@ -39,7 +40,7 @@ _FULL_SCOPE_FIELDS = frozenset({
     "targetRef", "baseCommitOid", "branchName",
     "worktreePath", "privateGitObjectDir", "gitCommonObjectDir", "agentName",
     "projectWorktreesDir", "projectGitObjectsDir",
-    "externalDomains", "dataDirs", "pythonEnv", "implementationModel", "harnessModel", "reasoningEffort", "effects", "nonEffects", "taskPacket",
+    "dataDirs", "pythonEnv", "implementationModel", "harnessModel", "reasoningEffort", "effects", "nonEffects", "taskPacket",
 })
 _PUBLIC_SCOPE_FIELDS = _FULL_SCOPE_FIELDS - {"privateGitObjectDir", "gitCommonObjectDir"}
 _OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "projectWorktreesDir", "projectGitObjectsDir", "learningSeam", "decisionIds", "implementationModel", "harnessModel", "reasoningEffort"})
@@ -115,7 +116,6 @@ def prepare_workstream(
     learning_seam: str | None = None,
     decision_ids: list[str] | tuple[str, ...] = (),
     target_ref: str | None = None,
-    external_domains: tuple[str, ...] | list[str] = (),
     python_env: str | None = None,
     implementation_model: str | None = None,
     harness_model: str | None = None,
@@ -132,9 +132,8 @@ def prepare_workstream(
     brief = bounded_text(brief, name="brief", limit=4096)
     normalized_task_packet = validate_task_packet(task_packet)
     harness.validate_execution_profile(execution_profile, "worker")
-    if not isinstance(external_domains, (list, tuple)):
-        raise InvalidRequestError("external domains must be a list")
-    domains = list(harness.profile_domains(execution_profile, external_domains))
+    if execution_profile != "worker-default":
+        raise InvalidRequestError("only the worker-default execution profile is supported")
     if python_env is None:
         candidate = Path(project["repository_path"]) / ".venv"
         python_env = str(candidate) if (candidate / "pyvenv.cfg").is_file() else None
@@ -178,7 +177,6 @@ def prepare_workstream(
         "learningSeam": learning_seam,
         "decisionIds": list(decision_ids),
         "targetRef": selected_ref,
-        "externalDomains": domains,
         "pythonEnv": normalized_python_env,
     }
     if implementation_model is not None:
@@ -197,9 +195,9 @@ def prepare_workstream(
             raise ScopeMismatchError("stored workstream proposal is invalid")
         return {"operation": dict(existing), "workstream": _workstream(store, scope["workstreamId"]), "approvalScope": _public_scope(scope)}
 
-    base_oid = _git(Path(project["repository_path"]), "rev-parse", "--verify", "--end-of-options", f"{selected_ref}^{{commit}}").lower()
-    if len(base_oid) not in (40, 64) or any(char not in "0123456789abcdef" for char in base_oid):
-        raise InvalidRequestError("target ref did not resolve to a full commit oid")
+    base_oid = _git(Path(project["repository_path"]), "rev-parse", "--verify", "--end-of-options", f"{selected_ref}^{{commit}}")
+    from .models import validate_git_oid
+    validate_git_oid(base_oid, "target base commit")
     operation_id = new_id("op")
     workstream_id = new_id("ws")
     branch = f"pisec/{workstream_id}/work"
@@ -232,7 +230,6 @@ def prepare_workstream(
         "projectWorktreesDir": str((worktrees_root / project_id).absolute()),
         "projectGitObjectsDir": str((objects_root / project_id).absolute()),
         "agentName": agent_name,
-        "externalDomains": domains,
         "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),
         "pythonEnv": normalized_python_env,
         "effects": ["create branch and execution workspace", "register private Git object store", "start fenced harness agent", "deliver full brief"],
@@ -303,7 +300,7 @@ def _wait_for_agent(
                     if agent is not None:
                         if agent.surface_id != surface_id:
                             raise NeedsAttentionError("workspace agent identity does not match the durable binding")
-                        if agent.interactive_ready is True:
+                        if agent.identity_usable is True:
                             matched_observation = observed
                     elif allow_unidentified_agent:
                         matched_observation = observed
@@ -351,11 +348,17 @@ def _ensure_git_worktree(project: Mapping[str, Any], scope: Mapping[str, Any]) -
             raise NeedsAttentionError("approved worktree path is unsafe")
         if not _git_worktree_identity(project_root, str(worktree_path), str(scope["branchName"])):
             raise NeedsAttentionError("existing path is not the approved Git worktree")
+        # Git creates the checkout using the host umask; normalize the managed
+        # root before the launch preflight evaluates its ownership boundary.
+        if worktree_path.stat().st_uid != os.geteuid():
+            raise NeedsAttentionError("approved worktree is not owner-controlled")
+        os.chmod(worktree_path, 0o700)
         return
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     _git(project_root, "worktree", "add", "-q", "-b", str(scope["branchName"]), str(worktree_path), str(scope["baseCommitOid"]))
     if not _git_worktree_identity(project_root, str(worktree_path), str(scope["branchName"])):
         raise NeedsAttentionError("created Git worktree is not the approved worktree")
+    os.chmod(worktree_path, 0o700)
 
 
 def _authorize_apply_workstream(

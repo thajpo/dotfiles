@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Any, Mapping
 
 from .events import append_event_in_transaction
-from .models import ConflictError, IdempotencyConflictError, InvalidRequestError, NotFoundError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id
+from .models import ConflictError, IdempotencyConflictError, InvalidRequestError, NotFoundError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_git_oid, validate_id, validate_sha256
 from .projects import _git, assert_project_writable, get_project
 
 PHASES = frozenset({"investigating", "implementing", "verifying", "needs_input", "ready_review"})
@@ -173,10 +173,9 @@ def acknowledge_issue(store: Any, *, project_id: str, issue_id: str, actor_id: s
 def link_issue_remediation(store: Any, *, project_id: str, issue_id: str, actor_id: str, kind: str, target_id: str, idempotency_key: str) -> dict[str, Any]:
     issue = _issue_row(store, issue_id, project_id)
     actor = _issue_actor(store, project_id, actor_id, kinds={"first_mate"})
-    columns = {"access_grant": "access_grant_id", "workstream": "workstream_id", "deployment": "deployment_id"}
-    column = columns.get(kind)
-    if column is None:
+    if kind != "workstream":
         raise InvalidRequestError("invalid remediation kind")
+    column = "workstream_id"
     if issue["state"] == "resolved":
         raise ConflictError("resolved issue cannot be remediated")
     with store.transaction():
@@ -286,26 +285,29 @@ def checkpoint(store: Any, *, workstream_id: str, runtime_instance_id: str, phas
     summary = bounded_text(summary, name="summary", limit=1024)
     next_action = bounded_text(next_action, name="next_action", limit=1024)
     evidence_json = canonical_json(evidence, max_bytes=32768, max_text=4096)
-    existing = store.conn.execute("SELECT * FROM workstream_checkpoints WHERE workstream_id=? AND idempotency_key=?", (workstream_id, idempotency_key)).fetchone()
-    if existing is not None:
-        if normalized_completion is not None:
-            matching_packet = store.conn.execute("SELECT 1 FROM completion_packets WHERE workstream_id=? AND packet_sha256=?", (workstream_id, completion_sha)).fetchone()
-            if matching_packet is None and store.conn.execute("SELECT 1 FROM completion_packets WHERE workstream_id=?", (workstream_id,)).fetchone() is not None:
-                raise IdempotencyConflictError("ready_review checkpoint idempotency key was reused with different completion evidence")
-            if matching_packet is None:
-                submit_completion(store, workstream_id=workstream_id, runtime_instance_id=runtime_instance_id, packet=normalized_completion)
-        return dict(existing)
-    sequence = int(store.conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM workstream_checkpoints WHERE workstream_id=?", (workstream_id,)).fetchone()[0])
     now = utc_now()
     checkpoint_id = new_id("cp")
     with store.transaction():
+        existing = store.conn.execute("SELECT * FROM workstream_checkpoints WHERE workstream_id=? AND idempotency_key=?", (workstream_id, idempotency_key)).fetchone()
+        if existing is not None:
+            if normalized_completion is not None:
+                matching_packet = store.conn.execute("SELECT 1 FROM completion_packets WHERE workstream_id=? AND packet_sha256=?", (workstream_id, completion_sha)).fetchone()
+                if matching_packet is None and store.conn.execute("SELECT 1 FROM completion_packets WHERE workstream_id=?", (workstream_id,)).fetchone() is not None:
+                    raise IdempotencyConflictError("ready_review checkpoint idempotency key was reused with different completion evidence")
+                if matching_packet is None:
+                    _submit_completion_in_transaction(store, workstream_id=workstream_id, runtime_instance_id=runtime_instance_id, packet=normalized_completion)
+            checkpoint_id = str(existing["checkpoint_id"])
+        else:
+            sequence = int(store.conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM workstream_checkpoints WHERE workstream_id=?", (workstream_id,)).fetchone()[0])
+            store.conn.execute(
+                "INSERT INTO workstream_checkpoints(checkpoint_id,workstream_id,runtime_instance_id,sequence,idempotency_key,phase,summary,next_action,blocker_code,blocker,evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (checkpoint_id, workstream_id, runtime_instance_id, sequence, idempotency_key, phase, summary, next_action, blocker_code, blocker, evidence_json, now),
+            )
         if normalized_completion is not None:
-            _submit_completion_in_transaction(store, workstream_id=workstream_id, runtime_instance_id=runtime_instance_id, packet=normalized_completion)
-        store.conn.execute(
-            "INSERT INTO workstream_checkpoints(checkpoint_id,workstream_id,runtime_instance_id,sequence,idempotency_key,phase,summary,next_action,blocker_code,blocker,evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (checkpoint_id, workstream_id, runtime_instance_id, sequence, idempotency_key, phase, summary, next_action, blocker_code, blocker, evidence_json, now),
-        )
-        append_event_in_transaction(store.conn, kind="workstream.checkpointed", project_id=binding["project_id"], workstream_id=workstream_id, payload={"checkpointId": checkpoint_id, "sequence": sequence, "phase": phase})
+            if existing is None:
+                _submit_completion_in_transaction(store, workstream_id=workstream_id, runtime_instance_id=runtime_instance_id, packet=normalized_completion)
+        if existing is None:
+            append_event_in_transaction(store.conn, kind="workstream.checkpointed", project_id=binding["project_id"], workstream_id=workstream_id, payload={"checkpointId": checkpoint_id, "sequence": sequence, "phase": phase})
     return dict(store.conn.execute("SELECT * FROM workstream_checkpoints WHERE checkpoint_id=?", (checkpoint_id,)).fetchone())
 
 
@@ -326,10 +328,8 @@ def _completion_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
         raise InvalidRequestError("verification must list exact commands and observed results")
     source = packet["sourceCommit"]
     digest = packet["taskPacketSha256"]
-    if not isinstance(source, str) or len(source) not in (40, 64) or any(c not in "0123456789abcdefABCDEF" for c in source):
-        raise InvalidRequestError("completion source commit is invalid")
-    if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
-        raise InvalidRequestError("completion task packet digest is invalid")
+    validate_git_oid(source, "completion source commit")
+    validate_sha256(digest, "completion task packet digest")
     return json.loads(canonical_json(dict(packet), max_bytes=65536, max_text=8192))
 
 

@@ -12,7 +12,8 @@ import tempfile
 from typing import Any, Mapping
 
 from .events import append_event_in_transaction
-from .models import ConflictError, InvalidRequestError, NeedsAttentionError, ScopeMismatchError, bounded_text, canonical_json, utc_now, validate_id
+from .models import ConflictError, InvalidRequestError, NeedsAttentionError, ScopeMismatchError, bounded_text, canonical_json, utc_now, validate_git_oid, validate_id, validate_sha256
+from .operations import authoritative_workstream_creation
 from .policies import enforce_merge_policy
 from .projects import get_project
 
@@ -96,8 +97,12 @@ def _oid(path: Path, revision: str, *, alternate_objects: tuple[Path, ...] = ())
         f"{revision}^{{commit}}",
         alternate_objects=alternate_objects,
     )
-    oid = value.strip().lower()
-    if len(oid) not in _OID_LENGTHS or any(char not in "0123456789abcdef" for char in oid):
+    oid = value.strip()
+    try:
+        validate_git_oid(oid, "Git commit object id")
+    except InvalidRequestError as error:
+        raise NeedsAttentionError("Git returned an invalid commit object id") from error
+    if oid != oid.lower():
         raise NeedsAttentionError("Git returned an invalid commit object id")
     return oid
 
@@ -339,11 +344,8 @@ def _private_objects(store: Any, workstream: Mapping[str, Any]) -> Path:
     ).fetchone()
     raw_path = None if binding is None else binding["private_git_object_dir"]
     if raw_path is None:
-        operation = store.conn.execute(
-            "SELECT result_json FROM operations WHERE kind='workstream.create' AND workstream_id=? ORDER BY created_at LIMIT 1",
-            (workstream["workstream_id"],),
-        ).fetchone()
-        if operation is None or operation["result_json"] is None:
+        operation = authoritative_workstream_creation(store, str(workstream["workstream_id"]))
+        if operation["result_json"] is None:
             raise NeedsAttentionError("worker Git object binding is unavailable")
         try:
             scope = json.loads(operation["result_json"])
@@ -559,12 +561,8 @@ def _validate_scope(scope_value: Mapping[str, Any]) -> dict[str, Any]:
     for field in ("targetBranch", "sourceBranch"):
         bounded_text(scope.get(field), name=field, limit=512)
     for field in ("targetCommitOid", "sourceCommitOid", "completionSourceCommitOid"):
-        value = scope.get(field)
-        if not isinstance(value, str) or len(value) not in _OID_LENGTHS or any(char not in "0123456789abcdef" for char in value):
-            raise InvalidRequestError("merge approval scope contains an invalid commit id")
-    value = scope.get("completionPacketSha256")
-    if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
-        raise InvalidRequestError("merge approval scope contains an invalid completion packet digest")
+        validate_git_oid(scope.get(field), f"merge approval scope {field}")
+    validate_sha256(scope.get("completionPacketSha256"), "merge approval scope completion packet digest")
     if scope["completionSourceCommitOid"] != scope["sourceCommitOid"]:
         raise InvalidRequestError("completion source commit does not match merge source")
     for field in ("effects", "nonEffects"):

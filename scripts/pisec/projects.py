@@ -12,7 +12,7 @@ from typing import Any
 
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
-from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, bounded_text, canonical_json, new_id, utc_now, validate_id
+from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, bounded_text, canonical_json, new_id, utc_now, validate_git_oid, validate_id, validate_remote_url
 from .policies import normalize_merge_policy, normalize_worker_policy
 from .research import research_counts
 
@@ -40,9 +40,7 @@ def _origin_url(path: Path) -> str | None:
         value = _git(path, "config", "--local", "--get", "remote.origin.url")
     except InvalidRequestError:
         return None
-    if not value or len(value) > 2048 or value.startswith("-") or any(ord(char) < 0x20 for char in value):
-        raise InvalidRequestError("origin remote URL is invalid")
-    return value
+    return validate_remote_url(value)
 
 
 def observe_project(path: str | Path, default_ref: str | None = None) -> dict[str, Any]:
@@ -58,9 +56,8 @@ def observe_project(path: str | Path, default_ref: str | None = None) -> dict[st
     ref = bounded_text(default_ref or "HEAD", name="default_ref", limit=512)
     if ref.startswith("-") or any(ord(char) < 0x20 for char in ref):
         raise InvalidRequestError("default_ref contains unsafe characters")
-    oid = _git(top, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}").lower()
-    if len(oid) not in (40, 64) or any(char not in "0123456789abcdef" for char in oid):
-        raise InvalidRequestError("Git returned an invalid commit object id")
+    oid = _git(top, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}")
+    validate_git_oid(oid, "Git commit object id")
     return {"repository_path": str(top), "git_common_dir": str(common), "default_ref": ref, "default_oid": oid, "remote_url": _origin_url(top)}
 
 
