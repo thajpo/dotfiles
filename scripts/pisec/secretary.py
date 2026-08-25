@@ -474,7 +474,11 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
                     payload={"previousDesiredState": "retired", "reopenedAt": now},
                 )
             existing = dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone())
-    if existing is not None and not _project_active(project):
+    deactivation_committed = store.conn.execute(
+        "SELECT 1 FROM operations WHERE project_id=? AND kind='project.deactivate' AND state='succeeded' LIMIT 1",
+        (project["project_id"],),
+    ).fetchone()
+    if existing is not None and not _project_active(project) and deactivation_committed is not None:
         operation = _operation(store, existing["workstream_id"])
         binding = _binding(store, existing["workstream_id"])
         if operation is not None and binding is None and operation["state"] in {"applying", "failed", "needs_attention"} and operation["step"] != "planned":

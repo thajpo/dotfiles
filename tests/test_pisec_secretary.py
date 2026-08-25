@@ -225,11 +225,11 @@ class SecretaryTests(unittest.TestCase):
                 workspace = FixtureWorkspace(root, store)
                 first = ensure_secretary(store, project["project_id"], harness, workspace)
                 workstream_id = first["workstream"]["workstream_id"]
+                deactivate_project(store, project["project_id"], workspace, harness)
                 workspace.agents.clear()
                 with store.transaction():
-                    store.conn.execute("DELETE FROM runtime_bindings WHERE workstream_id=?", (workstream_id,))
+                    store.conn.execute("UPDATE workstreams SET desired_state='active',provisioning_state='needs_attention',attention_reason='missing binding' WHERE workstream_id=?", (workstream_id,))
                     store.conn.execute("UPDATE projects SET active=0,lifecycle_attention_reason='project open requires repair' WHERE project_id=?", (project["project_id"],))
-                    store.conn.execute("UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='missing binding' WHERE workstream_id=?", (workstream_id,))
                     store.conn.execute("UPDATE operations SET state='needs_attention',step='map_committed' WHERE workstream_id=?", (workstream_id,))
 
                 reopened = ensure_secretary(store, project["project_id"], harness, workspace)
