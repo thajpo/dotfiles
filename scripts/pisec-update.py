@@ -544,7 +544,7 @@ def _post_switch(current: Path, wait_seconds: float) -> dict:
         reconcile_value = json.loads(reconcile.stdout)
     except json.JSONDecodeError as error:
         raise RuntimeError("reconcile returned invalid JSON") from error
-    if reconcile_value.get("reconciled") is not True or reconcile_value.get("errors"):
+    if not (reconcile_value.get("reconciled") is True or reconcile_value.get("ok") is True) or reconcile_value.get("errors"):
         raise RuntimeError(f"reconcile reported failed state: {reconcile.stdout[-512:]}")
     doctor_after = subprocess.run([str(current / "bin" / "pisec"), "doctor", "--json"], env=environment, text=True, capture_output=True)
     if doctor_after.returncode:
