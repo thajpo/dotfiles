@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.pisec.pi_store import PiStore
 
@@ -68,6 +69,23 @@ class UpdaterContractTests(unittest.TestCase):
         finally:
             module_globals["_broker_ready"] = old_ready
             module_globals["time"].sleep = old_sleep
+
+    def test_broker_readiness_requires_accepting_admin_socket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            socket_path = root / "admin" / "control.sock"
+            socket_path.parent.mkdir(mode=0o700)
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(str(socket_path))
+            os.chmod(socket_path, 0o600)
+            result = type("Result", (), {"returncode": 0})()
+            try:
+                with patch.dict(os.environ, {"PISEC_RUNTIME_ROOT": str(root)}), patch.object(self.updater["subprocess"], "run", return_value=result):
+                    self.assertFalse(self.updater["_broker_ready"]())
+                    server.listen()
+                    self.assertTrue(self.updater["_broker_ready"]())
+            finally:
+                server.close()
 
     def test_unsupported_state_writes_status_outside_state_root(self):
         with tempfile.TemporaryDirectory() as tmp:

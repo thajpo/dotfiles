@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -476,7 +477,15 @@ def _broker_ready() -> bool:
         info = socket_path.lstat()
     except OSError:
         return False
-    return stat.S_ISSOCK(info.st_mode) and info.st_uid == os.geteuid() and not (info.st_mode & 0o077)
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(0.2)
+            client.connect(str(socket_path))
+    except OSError:
+        return False
+    return True
 
 
 def _wait_for_broker(wait_seconds: float) -> None:
