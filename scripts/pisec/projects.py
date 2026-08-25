@@ -79,7 +79,64 @@ def resolve_project(store: Any, selector: str) -> dict[str, Any]:
     return get_project(store, row["project_id"])
 
 
-def register_project(store: Any, path: str | Path, *, display_name: str | None = None, default_ref: str | None = None, data_dirs: Any = None, external_domains: Any = None) -> dict[str, Any]:
+def _bound_runtime_is_usable(store: Any, workstream_id: str, workspace: Any) -> bool:
+    row = store.conn.execute(
+        "SELECT w.desired_state,w.provisioning_state,r.refresh_pending,r.launch_generation_sha256,r.applied_generation_sha256,r.desired_generation_sha256,r.observed_state,r.workspace_surface_id,r.policy_path "
+        "FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=?",
+        (workstream_id,),
+    ).fetchone()
+    if row is None or row["desired_state"] != "active" or row["provisioning_state"] != "bound":
+        return False
+    if int(row["refresh_pending"]) or row["launch_generation_sha256"] is not None or row["observed_state"] != "idle":
+        return False
+    if row["applied_generation_sha256"] is None or row["applied_generation_sha256"] != row["desired_generation_sha256"]:
+        return False
+    if workspace is None:
+        return False
+    try:
+        return workspace.observe_runtime(str(row["workspace_surface_id"]), str(row["policy_path"])).state == "live"
+    except Exception:
+        return False
+
+
+def change_project_mode(store: Any, selector: str, coordination_mode: str, *, workspace: Any) -> dict[str, Any]:
+    if coordination_mode not in COORDINATION_MODES:
+        raise InvalidRequestError("coordination_mode must be project or fleet")
+    project = resolve_project(store, selector)
+    if not project.get("active"):
+        raise ConflictError("project mode changes require an active project")
+    current = str(project.get("coordination_mode") or "project")
+    if current == coordination_mode:
+        return project
+    secretary_id = project.get("secretary_workstream_id")
+    if not isinstance(secretary_id, str) or not _bound_runtime_is_usable(store, secretary_id, workspace):
+        raise NeedsAttentionError("project mode changes require a usable bound Secretary")
+    first_mate_id: str | None = None
+    if coordination_mode == FLEET_COORDINATION_MODE:
+        first_mate = store.conn.execute(
+            "SELECT workstream_id FROM workstreams WHERE kind='first_mate' AND desired_state='active' AND provisioning_state='bound' ORDER BY created_at LIMIT 1"
+        ).fetchone()
+        if first_mate is None or not _bound_runtime_is_usable(store, str(first_mate["workstream_id"]), workspace):
+            raise NeedsAttentionError("entering fleet mode requires a usable bound First Mate")
+        first_mate_id = str(first_mate["workstream_id"])
+    else:
+        open_escalation = store.conn.execute(
+            "SELECT 1 FROM issues WHERE project_id=? AND reporter_kind='secretary' AND escalated_from_issue_id IS NOT NULL AND state IN ('open','acknowledged','remediating','verifying') LIMIT 1",
+            (project["project_id"],),
+        ).fetchone()
+        if open_escalation is not None:
+            raise ConflictError("leaving fleet mode requires all Secretary escalation issues to be closed")
+    with store.transaction():
+        store.conn.execute("UPDATE projects SET coordination_mode=?,updated_at=? WHERE project_id=? AND active=1 AND coordination_mode=?", (coordination_mode, utc_now(), project["project_id"], current))
+    if first_mate_id is not None:
+        from .attention import backfill_attention
+        backfill_attention(store, recipient_workstream_id=first_mate_id, limit=128)
+    return get_project(store, project["project_id"])
+
+
+def register_project(store: Any, path: str | Path, *, display_name: str | None = None, default_ref: str | None = None, data_dirs: Any = None, external_domains: Any = None, coordination_mode: str | None = None, workspace: Any = None) -> dict[str, Any]:
+    if coordination_mode is not None and coordination_mode not in COORDINATION_MODES:
+        raise InvalidRequestError("coordination_mode must be project or fleet")
     observed = observe_project(path, default_ref)
     resolved_data = resolve_data_dirs(data_dirs, Path(observed["repository_path"]))
     if external_domains is None:
@@ -93,6 +150,8 @@ def register_project(store: Any, path: str | Path, *, display_name: str | None =
     existing = store.conn.execute("SELECT * FROM projects WHERE git_common_dir=?", (observed["git_common_dir"],)).fetchone()
     if existing is not None:
         value = dict(existing)
+        if coordination_mode is not None and coordination_mode != value.get("coordination_mode", "project"):
+            value = change_project_mode(store, str(value["project_id"]), coordination_mode, workspace=workspace)
         registered_remote = value.get("remote_url")
         observed_remote = observed["remote_url"]
         if registered_remote is None and observed_remote is not None:
@@ -115,6 +174,8 @@ def register_project(store: Any, path: str | Path, *, display_name: str | None =
                 )
             return get_project(store, value["project_id"])
         return value
+    if coordination_mode not in {None, "project"}:
+        raise InvalidRequestError("new projects must be registered in project mode")
     project_id = new_id("prj")
     name = bounded_text(display_name or Path(observed["repository_path"]).name, name="display_name", limit=512)
     now = utc_now()

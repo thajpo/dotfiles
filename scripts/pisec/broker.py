@@ -18,8 +18,8 @@ from .adapters import AdapterRegistry, HarnessAdapter, WorkspaceAdapter
 from .attention import ATTENTION_WAKE_PROMPT, compact_attention, list_open_attention, wait_for_attention_hint
 from .cleanup import cleanup_workstream
 from .decisions import list_decisions, record_decision, resolve_decision
-from .events import list_events
-from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, PisecError, ScopeMismatchError, UnsafeStateError, bounded_text, utc_now, validate_id
+from .events import append_event_in_transaction, list_events
+from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, PisecError, ScopeMismatchError, UnsafeStateError, bounded_text, canonical_json, utc_now, validate_id
 from .pi_store import PiStore
 from .projects import assert_project_writable, fleet_activity, fleet_project_ids, get_project, list_fleet_projects, list_projects, project_activity, project_status, register_project, require_fleet_project, resolve_project
 from .protocol import MAX_MESSAGE_BYTES, decode_request, error_response, success_response
@@ -626,6 +626,66 @@ class BrokerDispatcher:
         with self._reconcile_lock:
             return self._reconcile_locked(store, payload)
 
+    def _recover_completed_refresh_operations(self, store: PiStore) -> list[dict[str, Any]]:
+        recovered: list[dict[str, Any]] = []
+        rows = store.conn.execute(
+            "SELECT o.operation_id,o.project_id,o.workstream_id,o.request_json,r.workspace_surface_id,r.policy_path,r.desired_generation_sha256,r.applied_generation_sha256,r.launch_generation_sha256,r.refresh_pending,r.refresh_operation_id,r.refresh_started_at,r.observed_state,r.runtime_instance_id,r.report_seq,r.session_start_event_sequence,r.session_start_report_seq "
+            "FROM operations o JOIN runtime_bindings r USING(workstream_id) "
+            "WHERE o.kind='runtime.refresh' AND o.state='applying'"
+        ).fetchall()
+        for row in rows:
+            if (
+                int(row["refresh_pending"])
+                or row["refresh_operation_id"] is not None
+                or row["refresh_started_at"] is not None
+                or row["launch_generation_sha256"] is not None
+                or row["observed_state"] != "idle"
+                or row["runtime_instance_id"] is None
+                or row["report_seq"] is None
+                or int(row["report_seq"]) < 1
+                or row["session_start_event_sequence"] is None
+                or row["session_start_report_seq"] != row["report_seq"]
+                or row["desired_generation_sha256"] is None
+                or row["applied_generation_sha256"] != row["desired_generation_sha256"]
+            ):
+                continue
+            try:
+                request = json.loads(str(row["request_json"]))
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(request, dict) or request.get("desiredGenerationSha256") != row["desired_generation_sha256"]:
+                continue
+            try:
+                if self.workspace.observe_runtime(str(row["workspace_surface_id"]), str(row["policy_path"])).state != "live":
+                    continue
+            except BaseException:
+                continue
+            now = utc_now()
+            result = {
+                "workstreamId": str(row["workstream_id"]),
+                "generationSha256": str(row["desired_generation_sha256"]),
+                "runtimeInstanceId": str(row["runtime_instance_id"]),
+                "reportSeq": int(row["report_seq"]),
+                "recovered": True,
+            }
+            with store.transaction():
+                cursor = store.conn.execute(
+                    "UPDATE operations SET state='succeeded',step='verified',result_json=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=? AND state='applying'",
+                    (canonical_json(result), now, row["operation_id"]),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                append_event_in_transaction(
+                    store.conn,
+                    kind="runtime.refresh_completed",
+                    project_id=str(row["project_id"]),
+                    workstream_id=str(row["workstream_id"]),
+                    operation_id=str(row["operation_id"]),
+                    payload=result,
+                )
+            recovered.append({"operationId": str(row["operation_id"]), "state": "succeeded", "recovered": True})
+        return recovered
+
     def _reconcile_locked(self, store: PiStore, payload: Mapping[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {"reconciled": False, "resumed": [], "errors": []}
         from .attention import backfill_attention
@@ -633,6 +693,7 @@ class BrokerDispatcher:
             backfill_attention(store, recipient_workstream_id=str(supervisor["workstream_id"]), limit=128)
         from .refresh import mark_stale_bindings
         result["generations"] = mark_stale_bindings(store, self.harness, harness_resolver=lambda workstream_id: self._harness_for_workstream(store, workstream_id), surface_resolver=self._surface_for_harness)
+        result["resumed"].extend(self._recover_completed_refresh_operations(store))
         reconciler_payload = dict(payload)
         reconciler_payload["skipWorkstreams"] = []
         resume_candidates = [
@@ -689,8 +750,9 @@ class BrokerDispatcher:
 
     def _admin(self, store: PiStore, operation: str, payload: dict[str, Any]) -> Any:
         if operation == "project.register":
-            _exact(payload, {"path"}, {"displayName", "defaultRef", "dataDirs", "externalDomains"})
-            return _public_project(register_project(store, payload["path"], display_name=payload.get("displayName"), default_ref=payload.get("defaultRef"), data_dirs=payload.get("dataDirs"), external_domains=payload.get("externalDomains")))
+            _exact(payload, {"path"}, {"displayName", "defaultRef", "dataDirs", "externalDomains", "coordinationMode"})
+            with self._reconcile_lock:
+                return _public_project(register_project(store, payload["path"], display_name=payload.get("displayName"), default_ref=payload.get("defaultRef"), data_dirs=payload.get("dataDirs"), external_domains=payload.get("externalDomains"), coordination_mode=payload.get("coordinationMode"), workspace=self.workspace))
         if operation == "project.list":
             _exact(payload, set(), {"includeInactive"})
             include_inactive = payload.get("includeInactive") is True

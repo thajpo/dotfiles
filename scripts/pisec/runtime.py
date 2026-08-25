@@ -12,7 +12,7 @@ from .adapters import HarnessAdapter, WorkspaceAdapter
 from .events import append_event_in_transaction
 from .attention import compact_attention, list_open_attention, present_attention_in_transaction
 from .worker_repo import validate_worker_resume_git
-from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, bounded_text, validate_id, validate_sha256
+from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, bounded_text, canonical_json, validate_id, validate_sha256
 from .models import utc_now
 
 RUNTIME_FIELDS = frozenset({"workstreamId", "runtimeInstanceId", "seq", "event", "reason", "state", "nativeSessionKind", "nativeSessionValue", "startSource", "surfaceId", "token", "generation"})
@@ -275,4 +275,28 @@ def report_runtime(store: Any, payload_value: Mapping[str, Any], harness: Harnes
             "UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=?,workspace_report_seq=?,native_session_kind=COALESCE(?,native_session_kind),native_session_value=COALESCE(?,native_session_value),observed_state=?,applied_generation_sha256=CASE WHEN ?='session_start' THEN ? ELSE applied_generation_sha256 END,launch_generation_sha256=CASE WHEN ?='session_start' THEN NULL ELSE launch_generation_sha256 END,refresh_pending=CASE WHEN ?='session_start' THEN 0 ELSE refresh_pending END,refresh_operation_id=CASE WHEN ?='session_start' THEN NULL ELSE refresh_operation_id END,refresh_started_at=CASE WHEN ?='session_start' THEN NULL ELSE refresh_started_at END,session_start_event_sequence=CASE WHEN ?='session_start' THEN ? ELSE session_start_event_sequence END,session_start_report_seq=CASE WHEN ?='session_start' THEN ? ELSE session_start_report_seq END,session_started_at=CASE WHEN ?='session_start' THEN ? ELSE session_started_at END,last_observed_at=?,updated_at=? WHERE workstream_id=?",
             (instance, seq, workspace_seq, kind, value, state, event, generation, event, event, event, event, event, session_event["sequence"] if session_event else None, event, seq, event, now, now, now, workstream_id),
         )
+        if event == "session_start" and current["refresh_operation_id"] is not None:
+            operation = store.conn.execute(
+                "SELECT operation_id,project_id,state FROM operations WHERE operation_id=? AND kind='runtime.refresh'",
+                (current["refresh_operation_id"],),
+            ).fetchone()
+            if operation is not None and operation["state"] in {"planned", "applying"}:
+                refresh_result = {
+                    "workstreamId": workstream_id,
+                    "generationSha256": generation,
+                    "runtimeInstanceId": instance,
+                    "reportSeq": seq,
+                }
+                store.conn.execute(
+                    "UPDATE operations SET state='succeeded',step='verified',result_json=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=? AND state IN ('planned','applying')",
+                    (canonical_json(refresh_result), now, operation["operation_id"]),
+                )
+                append_event_in_transaction(
+                    store.conn,
+                    kind="runtime.refresh_completed",
+                    project_id=str(operation["project_id"]),
+                    workstream_id=workstream_id,
+                    operation_id=str(operation["operation_id"]),
+                    payload=refresh_result,
+                )
     return {"accepted": True, "workstreamId": workstream_id, "seq": seq, "reason": reason, "workspaceReportSeq": workspace_seq}

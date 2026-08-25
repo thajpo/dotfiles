@@ -4,6 +4,7 @@ import unittest
 
 from scripts.pisec.adapters import AdapterRegistry
 from scripts.pisec.broker import BrokerDispatcher
+from scripts.pisec.operations import create_operation
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.refresh import _binding_scope
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
@@ -143,6 +144,63 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.assertEqual(result["upgraded"], [])
         self.assertEqual(result["pending"][0]["state"], "working")
         self.assertFalse(any(call[0] == "stop" for call in self.workspace.calls))
+
+    def test_session_attestation_completes_refresh_operation(self):
+        with PiStore(self.root / "state") as store:
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                idempotency_key="refresh-attestation-completes",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": binding["desired_generation_sha256"]},
+                state="applying",
+                step="reserved",
+            )
+            store.conn.execute(
+                "UPDATE runtime_bindings SET refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-25T00:00:00Z',launch_generation_sha256=?,runtime_instance_id=NULL,report_seq=0,session_start_event_sequence=NULL,session_start_report_seq=NULL,session_started_at=NULL,observed_state='starting' WHERE workstream_id=?",
+                (operation.operation_id, binding["desired_generation_sha256"], self.workstream_id),
+            )
+            payload = {
+                "workstreamId": self.workstream_id,
+                "runtimeInstanceId": "attested-refresh-runtime",
+                "seq": 1,
+                "event": "session_start",
+                "reason": None,
+                "state": "idle",
+                "nativeSessionKind": "path",
+                "nativeSessionValue": self.identity[3],
+                "startSource": "startup",
+                "surfaceId": self.identity[2],
+                "token": self.secretary_token,
+                "generation": binding["desired_generation_sha256"],
+            }
+        result = self.dispatcher.dispatch("runtime", "runtime.report", payload)
+        self.assertTrue(result["accepted"])
+        with PiStore(self.root / "state") as store:
+            operation = store.conn.execute("SELECT state,step FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()
+            self.assertEqual(tuple(operation), ("succeeded", "verified"))
+
+    def test_reconcile_recovers_current_refresh_operation(self):
+        with PiStore(self.root / "state") as store:
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                idempotency_key="refresh-reconcile-recovers",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": binding["desired_generation_sha256"]},
+                state="applying",
+                step="reserved",
+            )
+            store.conn.execute(
+                "UPDATE runtime_bindings SET refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,launch_generation_sha256=NULL,applied_generation_sha256=desired_generation_sha256,runtime_instance_id='recovered-refresh-runtime',report_seq=1,session_start_event_sequence=1,session_start_report_seq=1,session_started_at='2026-08-25T00:00:00Z',observed_state='idle' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+        result = self.dispatcher.startup_reconcile()
+        self.assertIn({"operationId": operation.operation_id, "state": "succeeded", "recovered": True}, result["resumed"])
 
 
 if __name__ == "__main__":
