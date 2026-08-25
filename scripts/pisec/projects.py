@@ -76,7 +76,7 @@ def resolve_project(store: Any, selector: str) -> dict[str, Any]:
         row = rows[0] if rows else None
     if row is None:
         raise NotFoundError("project was not found")
-    return dict(row)
+    return get_project(store, row["project_id"])
 
 
 def register_project(store: Any, path: str | Path, *, display_name: str | None = None, default_ref: str | None = None, data_dirs: Any = None, external_domains: Any = None) -> dict[str, Any]:
@@ -132,7 +132,7 @@ def list_projects(store: Any, include_inactive: bool = False) -> list[dict[str, 
         rows = store.conn.execute("SELECT * FROM projects ORDER BY display_name,project_id")
     else:
         rows = store.conn.execute("SELECT * FROM projects WHERE active=1 ORDER BY display_name,project_id")
-    return [dict(row) for row in rows]
+    return [get_project(store, row["project_id"]) for row in rows]
 
 
 def list_fleet_projects(store: Any) -> list[dict[str, Any]]:

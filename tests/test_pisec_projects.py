@@ -8,7 +8,7 @@ from scripts.pisec.decisions import list_decisions, record_decision, resolve_dec
 from scripts.pisec.models import ConflictError, InvalidRequestError
 from scripts.pisec.first_mate import ensure_first_mate
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.projects import deactivate_project, list_projects, observe_project, register_project
+from scripts.pisec.projects import deactivate_project, list_projects, observe_project, register_project, resolve_project
 from scripts.pisec.secretary import ensure_secretary
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace
 
@@ -75,6 +75,21 @@ class ProjectTests(unittest.TestCase):
                 self.assertEqual(store.conn.execute("SELECT data_dirs FROM projects WHERE project_id=?", (project["project_id"],)).fetchone()[0], json.dumps([str(data.resolve())], sort_keys=True))
                 with self.assertRaises(InvalidRequestError):
                     register_project(store, repo, default_ref="main", data_dirs=[str(root / "outside")])
+
+    def test_project_selectors_and_lists_return_typed_policy_arrays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo, default_ref="main")
+                selected = resolve_project(store, project["display_name"])
+                self.assertEqual(selected["data_dirs"], [])
+                self.assertEqual(selected["external_domains"], [])
+                store.conn.execute("UPDATE projects SET active=1 WHERE project_id=?", (project["project_id"],))
+                listed = list_projects(store)[0]
+                self.assertEqual(listed["data_dirs"], [])
+                self.assertEqual(listed["external_domains"], [])
 
     def test_linked_worktree_observes_same_common_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
