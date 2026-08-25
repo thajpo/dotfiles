@@ -1209,9 +1209,10 @@ class OmpHarnessAdapter:
         plugin_ok = copied_ok
         overlay_ok = copied_ok
         if artifacts_ok:
+            runtime_surface_root = Path(str(values["launcherTemplate"])).parent.parent
             for name in ("xdgDataHome", "xdgStateHome", "xdgCacheHome", "xdgConfigHome", "pluginRoot"):
                 path = Path(str(values[name]))
-                expected_root = surface_root if name in {"xdgDataHome", "pluginRoot"} else harness_home
+                expected_root = runtime_surface_root if name in {"xdgDataHome", "pluginRoot"} else harness_home
                 copied_ok = copied_ok and (path.is_relative_to(expected_root) or path == expected_root) and owner_directory(path, readonly=name in {"xdgDataHome", "pluginRoot"})
             tmp_dir = Path(str(values["tmpDir"]))
             copied_ok = copied_ok and tmp_dir.is_relative_to(self.state_root) and owner_directory(tmp_dir)
@@ -1242,7 +1243,7 @@ class OmpHarnessAdapter:
         check("overlay and MCP/search", overlay_ok, str(values.get("overlayPath", "")))
 
         policy_path = Path(str(binding.get("policy_path", "")))
-        policy_ok = owner_file(policy_path, mode=0o600)
+        policy_ok = owner_file(policy_path, mode=0o400)
         if policy_ok:
             try:
                 policy_ok = hashlib.sha256(policy_path.read_bytes()).hexdigest() == binding.get("policy_sha256")

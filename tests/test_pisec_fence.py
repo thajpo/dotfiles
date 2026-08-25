@@ -217,6 +217,11 @@ class RuntimeMaterializationTests(unittest.TestCase):
                 "policy_sha256": artifacts.policy_sha256,
             }
             checks = adapter.health_checks(binding, {"workstream_execution_profile": "secretary-project"})
+            health = {check.name: check for check in checks}
+            self.assertTrue(health["copied surface"].ok, health["copied surface"].detail)
+            self.assertTrue(health["plugin snapshot"].ok, health["plugin snapshot"].detail)
+            self.assertTrue(health["overlay and MCP/search"].ok, health["overlay and MCP/search"].detail)
+            self.assertTrue(health["policy digest"].ok, health["policy digest"].detail)
             descriptor_check = next(check for check in checks if check.name == "binding descriptor")
             self.assertTrue(descriptor_check.ok, descriptor_check.detail)
 
