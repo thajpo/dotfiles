@@ -80,7 +80,7 @@ def ensure_project_workspace(
             raise NeedsAttentionError("project workspace was not persisted")
     workspace_id = str(record["workspace_id"])
     if fleet_workspace_id is not None and workspace_id != fleet_workspace_id:
-        raise NeedsAttentionError("fleet project workspace requires topology migration")
+        raise NeedsAttentionError("fleet project workspace requires the bound First Mate workspace identity")
     if observed is None and create_tab:
         observed = workspace.observe_tab(workspace_id=workspace_id, cwd=repository)
         if observed is None:

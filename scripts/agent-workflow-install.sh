@@ -102,7 +102,7 @@ if [[ "$SKILLS_ONLY" -eq 0 && "$HOST_OS" == "Darwin" ]]; then
   if [[ ! -f "$DOTFILES_DIR/scripts/pisec-macos-install.sh" ]]; then
     die "full Pisec installation currently requires Linux; macOS installer is unavailable"
   fi
-  echo "Darwin host: delegating to the macOS Pisec installer (Treehouse/Collie remain Linux-only)"
+  echo "Darwin host: full Pisec is Linux-only; the macOS full-install path will exit without changing the home directory"
   exec bash "$DOTFILES_DIR/scripts/pisec-macos-install.sh"
 fi
 if [[ "$SKILLS_ONLY" -eq 0 && ( -z "$COLLIE_HOST" || -z "$COLLIE_TRUSTED_USER" ) ]]; then

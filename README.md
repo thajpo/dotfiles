@@ -16,10 +16,14 @@ The retired controller-driven Pi implementation is preserved under
 This repo keeps one canonical shared instruction file
 (`~/dotfiles/agent/AGENTS.md`) and one canonical Agent Skills directory
 (`~/dotfiles/skills`). The installer wires automatic instructions into OMP and
-Codex, and keeps OpenCode as an existing skills-only adapter through `~/.skills`:
+Codex. OpenCode remains available only as a shared skills adapter through
+`~/.skills`; it is not the default Pisec harness:
 
 - `git pull --rebase --autostash origin master`
 - commit/push only when there are local changes
+
+Those two bullets describe the separately owned shared-dotfiles synchronizer,
+not Pisec-managed worker repositories. Pisec workers never push.
 
 ### Linux (systemd user timer)
 
@@ -85,8 +89,9 @@ works on Linux and macOS.
 
 ## Agent Engineering Workflow
 
-The default agent workflow is harness-agnostic and uses OpenCode when a harness
-choice is needed.
+OMP and Codex are the current Pisec worker harnesses when configured. OpenCode
+is not a Pisec default; its shared skills link remains available for unrelated
+workflow use.
 
 Install or repair the shared memory/config symlinks:
 
@@ -99,27 +104,26 @@ Inspect the setup:
 ```bash
 ~/dotfiles/scripts/agent-workflow-doctor.sh
 ```
-On Apple Silicon macOS, the shared OMP/skills workflow and launchd sync are
-supported. The full Pisec fenced stack runs on both platforms: Linux enforces
-via bubblewrap/Landlock/seccomp and systemd user services, while macOS
-enforces via Fence's generated Seatbelt profiles (`sandbox-exec`) and launchd
-agents installed by `scripts/pisec-macos-install.sh` (Treehouse and Collie
-remain Linux-only). The installer probes the host first instead of silently
-weakening isolation; known Seatbelt caveat: GPU/Metal compute may be denied
-inside fenced agents until iokit access is explicitly approved.
+On macOS, the shared OMP/skills workflow and dotfiles synchronization are
+supported. Full fenced Pisec is Linux-only. The full-install path exits before
+modifying the macOS home directory; use `--skills-only` for shared workflow
+links and the separately owned dotfiles sync installer for synchronization.
 
 
 
 ### Pisec workflow broker
 
-Pisec is the durable, product-neutral workflow and security core. It owns
+Pisec product v1 is the durable, product-neutral workflow and security core. It owns
 projects, proposals, approvals, workstream intent, decisions, runtime
 bindings, research packets, and audit events. The selected `HarnessAdapter`
 and `WorkspaceAdapter` own product wire protocols and artifacts. The tested
-production adapters are OMP 17.3.4 (`omp`) and Herdr 0.8.0
-protocol 19 (`herdr`); Collie remains deployment and presentation glue.
+worker harnesses are OMP 17.3.4 (`omp`) and Codex 0.147.0 when configured;
+Herdr 0.8.0 protocol 19 (`herdr`) is the workspace adapter. Fence 0.1.66,
+Collie 0.28.0, the committed Collie unread-activity patch, and Reviewr 0.32.1
+are exact v1 pins. Collie remains presentation glue and Reviewr is review-only.
 
-The epoch-three configuration is explicit and adapter-neutral:
+The labels below are intentionally different: Pisec product v1, configuration
+format version 3, and control database `pisec-core-v1` version 1.
 
 ```json
 {
@@ -130,12 +134,12 @@ The epoch-three configuration is explicit and adapter-neutral:
 }
 ```
 
-The concrete adapter config fills the OMP executable/gateway/model/network
+The concrete adapter config fills the selected harness executable/gateway/model
 values and the dedicated Herdr session/socket. The installer validates the
-selected adapters and pinned public interfaces before mutating user state.
-`--reset-pisec-state` is an explicit epoch-two archive-and-reset operation,
-not an in-place migration: it atomically archives the owner-only state
-directory, deploys epoch three, retains the archive, and prints its path.
+selected adapters and exact public interfaces before mutating user state. There
+is no in-place predecessor migration. Unsupported old state is opaque input for
+the explicit archive/reset path, which archives the complete owner-only state
+root and initializes the exact v1 database.
 
 For an explicit archive-and-reset deployment:
 
@@ -146,11 +150,11 @@ For an explicit archive-and-reset deployment:
   --reset-pisec-state
 ```
 
-Review the printed epoch-two archive path after deployment. Pisec does not
-patch OMP, Herdr, or Fence source or binaries. The deployment applies one
-reviewed, fail-closed Collie 0.28.0 source patch at the presentation boundary;
-it derives `done` from Collie's existing shared unread ledger without changing
-Herdr or Pisec lifecycle authority.
+Review the printed archive path after deployment. Pisec does not patch OMP,
+Herdr, or Fence source or binaries. The deployment applies one reviewed,
+fail-closed Collie 0.28.0 source patch at the presentation boundary; it derives
+`done` from Collie's existing shared unread ledger without changing Herdr or
+Pisec lifecycle authority.
 
 The full deployment also links this repository's LazyVim configuration at
 `~/.config/nvim`, installs the `chmarax.herdr-nvim` and
@@ -159,14 +163,15 @@ The full deployment also links this repository's LazyVim configuration at
 `Ctrl-a Shift-f` (pick a file), and `Ctrl-a Shift-v` (toggle reviewr);
 unrelated Herdr key configuration is preserved.
 
-Every worker receives one linked Git worktree, one namespaced branch, one
-private Git object store, one isolated harness home, one rendered Fence
-policy, one immutable broker-owned task packet, and one adapter-owned
-workspace surface. Workers use the single `worker-default` profile. Project
-permissions are complete project-wide replacements: approved existing paths
-are read-only and approved domains are added to every exact pinned current or
-future worker in that project. Fence and the broker retain all role and
-write boundaries.
+Every worker receives one independent local Git repository with its own
+`HEAD`, refs, index, configuration, and object store; one namespaced branch;
+one private harness home containing materialized runtime snapshots and private
+sessions; one rendered Fence policy; one immutable broker-owned task packet;
+and one adapter-owned workspace surface. Worker commits use the fixed,
+non-secret identity `Pisec Worker <pisec-worker@invalid>` and workers never
+push. Project permissions are complete project-wide replacements: approved
+existing paths are read-only and approved domains are added to each exact
+worker binding. Fence and the broker retain all role and write boundaries.
 
 Tool lists and approval prompts are workflow/UX controls, not security
 boundaries. Fence remains the hard process, filesystem, and network boundary;
@@ -183,39 +188,41 @@ Permission changes use an exact prepare/apply approval and targeted runtime
 refresh. Tool and skill improvements are committed source changes distributed
 with `pisec update`.
 
-Pisec uses one bounded acceptance gate and then lets the project secretary own
-local integration. It does not use a pull request as the worker closeout
-protocol. The closeout sequence is:
+Pisec uses one exact human authorization for delegation and one exact human
+authorization for candidate acceptance, then lets the project Secretary own
+post-acceptance local integration. A Reviewr PR tab or comment is never Pisec
+lifecycle or authorization. The closeout sequence is:
 
-1. The worker commits reviewable changes on its Pisec branch and reports the
-   result to the project coordinator.
-2. The coordinator prepares a bounded workstream acceptance showing the
+1. The project Secretary prepares one bounded worker delegation. The user
+   authorizes that exact scope; the worker commits reviewable changes in its
+   independent repository and reports the result through typed records.
+2. The Secretary prepares a bounded workstream acceptance showing the
    immutable task and completion packet digests, candidate patch digest,
    changed paths, checks, conflict policy, effects, and non-effects. The user
    accepts that candidate once in the OMP UI. Target and final commit OIDs are
    refreshed integration state, not a second approval input.
-3. After acceptance, the secretary refreshes the target, asks the original
+3. After acceptance, the Secretary refreshes the target, asks the original
    worker to reconcile ordinary target drift within the accepted paths, reruns
-   bounded verification, promotes worker objects, and applies only a
+   bounded verification, imports the exact candidate, and applies only a
    `git merge --ff-only`. A successful integration records immutable acceptance
    and verification provenance; it never pushes or changes unrelated paths.
-4. The secretary then completes, retires, and cleans up the worker. Completion
+   Authenticated branch publication is a separate explicit host-side operation.
+4. The Secretary then completes, retires, and cleans up the worker. Completion
    records desired state; retirement closes the worker task tab and fenced
-   runtime; cleanup removes the linked checkout while retaining the branch and
-   private Git object store because the branch may still depend on those
-   objects. Material ambiguity, scope expansion, failed checks requiring
-   judgment, dirty targets, and new capabilities remain user-visible stops.
-5. Delete the retained branch separately, only after verifying integration.
-   Private-object purging is intentionally not part of cleanup; before adding
-such a purge, prove no retained Git ref depends on that store.
+   runtime; cleanup removes only an unchanged integrated retired worker
+   repository. Unintegrated, dirty, untracked, or otherwise retained worker
+   repositories stay in place. Material ambiguity, scope expansion, failed
+   checks requiring judgment, dirty targets, and new capabilities remain
+   user-visible stops.
 
 The installed full bundle is updated with `pisec update`. The stable updater
 archives one committed source bundle, switches one `current` deployment
 atomically, and refreshes runtimes by generation. Busy workers converge at an
-idle boundary; there is no automatic rollback. Pisec supports one exact
-epoch-15-to-16 database migration. Unsupported schemas require the explicit
-`--reset-pisec-state` archive-and-reset path. Chat files remain below each
-binding's private session home; they are not stored in `control.db`.
+idle boundary; a refresh failure becomes `needs_attention` and ordinary refresh
+does not promise automatic runtime restoration. The updater retains one manual
+last-known-good recovery bundle but never automatically rolls back. Unsupported
+database state requires the explicit archive/reset path. Chat files remain
+below each binding's private session home; they are not stored in `control.db`.
 
 The OMP harness is launched through the private `pisec/runtime-bin/omp`
 shim. Herdr workspace cold restore therefore re-enters Fence before OMP,
@@ -230,7 +237,8 @@ Pisec-owned OMP panes have exactly one lifecycle reporter. Each isolated OMP
 home excludes `herdr-omp-agent-state.ts`; the private launcher explicitly loads
 `omp/extensions/pisec.ts`, which publishes the per-runtime
 `pisec:omp:<hash>` source. Pisec keeps one current mutable runtime surface per
-harness; per-binding homes retain only private sessions and launch state.
+harness; each binding home contains the private materialized runtime snapshot
+and private sessions needed by that binding.
 
 Runtime-affecting inputs have a content-addressed generation. The digest covers
 the Pisec extension and private launcher, OMP/Fence executables and policy
@@ -243,12 +251,12 @@ launch.
 `pisec project refresh --all` rolls stale active bindings one at a time. It
 reserves the runtime against new turns, waits for `idle`, exits OMP gracefully
 without closing the pane, regenerates managed artifacts, preserves the native
-session and project/workstream/worktree/branch identities, resumes the same
+session and project/workstream/repository/branch identities, resumes the same
 session, and verifies fresh runtime attestation for the deployed generation.
-Busy bindings remain pending; failures are explicit and trigger a best-effort
-runtime restore. Repeating the command at the current generation performs no
-restart. The normal installer runs this refresh after migration and service
-startup and before the final doctor.
+Busy bindings remain pending; a failed refresh is explicit `needs_attention`.
+Repeating the command at the current generation performs no restart, and an
+ordinary refresh never promises automatic runtime restoration. The normal
+installer runs this refresh after service startup and before the final doctor.
 The secretary is trusted inside exactly one registered project and receives
 the standard OMP read/write/edit/bash/task/hub and web-search surface, installed
 plugins, project MCP, copied user extensions/skills/rules/commands/themes/agents,
@@ -282,6 +290,37 @@ project secretary. The First Mate can inspect fleet issue records through
 idempotent and read-only for the First Mate; they never auto-grant paths,
 change Fence policy, or approve worker creation.
 
+Every active project has one project Secretary. `project` mode ends automatic
+supervision at that Secretary; `fleet` mode permits escalation to the one
+active First Mate. Typed durable records remain authoritative. The deterministic
+attention watcher only indexes those records and schedules the recipient; it
+does not classify prose or replace either model supervisor. Worker help and
+issues reach the project Secretary first, and only a Secretary-owned fleet
+escalation reaches the First Mate.
+
+Default Pisec output is semantic: it explains status, needs attention, and the
+next action. `--json` retains exact machine identifiers and raw desired,
+provisioning, and observed fields. Runtime `working`, `blocked`, and `idle` are
+activity states; Herdr/Collie `done` is presentation-only. Reviewr
+`Resting`/`Working`/`Neither` is review presentation only. Pisec
+`ready_review`, `accepted`, `completed`, and `retired` mean candidate ready for
+review, one exact human approval, verified `ff-only` integration, and guarded
+terminal task closure respectively. Herdr supplies runtime activity and
+workspace identity; Pisec owns semantic task lifecycle; Collie `done` means
+unread presentation; Reviewr is review-only.
+
+Provider and auth-broker credentials stay outside worker homes. The shared
+loopback inference-gateway client token is intentionally role-readable and is
+not per-binding isolation; each binding separately has one Pisec control token.
+Explicitly approved data or Python paths may contain user data or credentials,
+so they are readable-data exceptions rather than an injection guarantee.
+
+Reviewr 0.32.1 opens the independent worker repository through inert base refs.
+Its PR tab and comments do not become Pisec lifecycle or authorization. Every
+delegation and candidate acceptance has its one exact human authorization;
+Secretary-owned post-acceptance integration adds no third merge approval, and
+v1 has no project setting that automates either decision.
+
 An idle, exited, or missing harness process never implies completion. Pisec
 records runtime state separately and requires an explicit completion decision.
 Unexpected cleanup failures persist `needs_attention` on both the operation
@@ -306,67 +345,46 @@ pisec workstream cleanup ws_<32-lowercase-hex> --confirm ws_<32-lowercase-hex>
 Running `pisec` without a command prints the command guide. Successful commands
 use concise human-readable output; add `--json` to any command when a script
 needs the complete response, for example `pisec doctor --json > doctor.json`.
+The bounded recovery commands are `pisec update --recover-previous`,
+`python3 scripts/pisec-update.py --install-updater-only --repo <repo> --ref
+<commit>`, and the explicit schema-boundary
+`python3 scripts/pisec-update.py --archive-reset-state --repo <repo> --ref
+<commit>`. The latter archives opaque prior state and creates fresh v1 state;
+it is not a migration.
+
+Final v1 acceptance evidence is written outside the repository only after the
+committed source gate and scenario matrix pass:
+`${XDG_STATE_HOME:-$HOME/.local/state}/pisec/release-evidence/<finalV1Commit>/acceptance.json`.
+The owner-only JSON records the two source commits and trees, bundle/schema
+identities, exact pins, commands and exit codes, actual counts, scenario IDs,
+sanitized result digests, deployment/current/last-known-good identities, the
+archive-manifest digest, timestamps, and an overall pass value. The README does
+not carry a mutable current test count; the external record is the current
+acceptance run.
 The old bare `pisec` secretary-grid launcher belonged to the retired
 controller-driven Pi implementation under `archive/custom-pi/`; the active
 Pisec command is the host administration CLI shown above.
 
-#### Verified epoch-three acceptance
+#### Historical acceptance evidence — tested commit `c816af1c`
 
-The live acceptance reset and adapter cutover were rerun on 2026-08-16. The
-installer archived the prior owner-only state and deployed schema epoch three.
-`pisec doctor --json` reported `schemaVersion=3`,
-`pisec-core-epoch-3`, selected harness `omp`, selected workspace `herdr`,
-OMP 17.3.4 health, Herdr protocol 19, launch-map v2, and healthy
-Fence/plugin/MCP/search checks. After worker cleanup, the same doctor command
-returned `ok: true`; cleaned retired bindings no longer require deleted
-harness artifacts.
-
-The disposable repository `/tmp/pisec-live-acceptance-epoch3` exercised the
-secretary and worker through the actual Herdr/OMP surfaces. Exact OMP approval
-scopes bound both adapter IDs before effects. The secretary performed local
-Git read/write/commit operations; the worker used a namespaced worktree,
-private Git objects, an immutable task packet, and the OMP adapter's
-`worker-default` Fence policy. The worker committed, completed, retired, and
-was cleaned without deleting its branch or private object store. Cleanup
-removed only the checkout, harness home, and launch-map entry.
-
-The acceptance run also verified copied user/plugin surface materialization
-at launch, project MCP/search settings, sibling/host-secret/metadata and
-denied raw-push/SSH/publish/privilege/container commands, baseline web search,
-unapproved-domain denial, approved fast-forward merge with object promotion,
-and no common Git alternate back-link. Built-in OMP `web_search` returned a
-public result; durable research produced one fixed `@smol` task batch for
-coalesced requests, schema-valid sourced packets, decline and
-needs-context/context-add paths, replay-safe acknowledgement, and no
-duplicate durable packets. Wake delivery remains at-least-once, so prompt
-retries are expected to be harmless.
-
-Broker, secretary, worker, and Herdr restart/reconcile checkpoints were
-exercised against SQLite, broker/Herdr observations, and Git state rather than
-model prose. The repository checks completed with:
-
-```text
-python3 -m unittest discover -s tests       93 tests, OK
-bun test omp/extensions/pisec.test.ts      3 pass, 0 fail
-```
-
-Workstream creation is deliberately two-stage. The secretary first prepares
-an immutable scope containing the title, purpose, full brief, target/base
-commit, branch, checkout, Fence profile, domains, and effect/non-effect
-lists. The user must approve that exact scope in the OMP UI; declining it
-creates no Git, harness, or workspace resource. Completion and retirement
-change desired state only: they never delete a checkout or branch. Cleanup is
-a separate host-admin operation, refuses active/dirty worktrees by default,
-removes the linked checkout, isolated harness home, and launch-map entry, and
-proves the branch and private Git object store remain.
+The 2026-08-16 acceptance run recorded on commit `c816af1c` is historical
+evidence, not current v1 proof. It exercised the Herdr/OMP surfaces, broker
+restart and reconciliation checkpoints, SQLite state, Git operations, Fence
+boundaries, durable research, and the repository checks available at that
+commit. Its implementation and results predate the current v1 contract, so
+they must not be used as evidence for the final source or live deployment.
+Phase 10 writes the current acceptance record outside the repository after the
+final committed run; no mutable current result is kept in this README.
 
 
 Collie is pinned to the Herdr `main` session and is a mobile presentation of
 Pisec project rooms, coordinator chats, and active worker tabs. It has no
-project registry or lifecycle authority. Herdr supplies semantic lifecycle
-state; the pinned downstream patch in `patches/collie-v0.28-unread-idle.patch`
-projects a resting agent as `done` only while Collie's persisted
-`lastActiveAt > lastSeenAt`, then returns it to `idle` after a Collie read.
+project registry or lifecycle authority. Pisec owns semantic task lifecycle;
+Herdr supplies runtime activity and workspace identity. The pinned downstream
+patch in `patches/collie-v0.28-unread-idle.patch` projects a resting agent as
+`done` only while Collie's persisted `lastActiveAt > lastSeenAt`, then returns
+it to `idle` after a Collie read. This presentation state never changes a
+Pisec task or runtime row.
 The installer applies the patch idempotently to the managed Collie checkout
 and fails closed if a future 0.28.0 source no longer matches.
 
@@ -386,7 +404,7 @@ The ordinary-shell `omp` command is an intentional blocker. Use
 explicit broad host work; it runs the pinned vendor OMP without Pisec
 credentials or isolated XDG/profile paths and is never broker-restored.
 
-The installer is fail-closed: it checks the pinned binaries, Fence
+The Linux installer is fail-closed: it checks the pinned binaries, Fence
 Bubblewrap/Landlock/network capabilities, configuration domains, executable
 targets, Collie inputs, and Funnel state before writing the user installation.
 It creates `~/.omp/auth-gateway.token` with mode `0600` when no bearer token
@@ -394,7 +412,7 @@ exists; existing token files must already be regular owner-only files. It then
 waits for the auth broker, auth gateway, Pisec broker, Pisec secretary, and
 Herdr sockets and runs the final live JSON doctor before reporting success.
 
-With user lingering enabled, the installed auth broker, auth gateway, Pisec
+With user lingering enabled on Linux, the installed auth broker, auth gateway, Pisec
 broker, and Herdr `main` session start from the user systemd boot target.
 Herdr persists normal terminal/workspace state while Pisec restores only
 durable active bindings through exact launchers; retired workers keep their
@@ -416,7 +434,7 @@ python3 -m unittest discover -s tests
 ```
 
 The deployment tests use isolated fake user homes and fake service commands.
-An actual full install additionally requires a host with user namespaces,
+An actual Linux full install additionally requires a host with user namespaces,
 Landlock, network namespaces, a configured auth-broker provider credential,
 a configured Tailscale identity, user-service lingering for reboot recovery,
 and a reachable Collie/Herdr deployment.

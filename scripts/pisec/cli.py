@@ -74,7 +74,7 @@ def parser() -> argparse.ArgumentParser:
         **_parser_kwargs(
             help="register, list, open, refresh, or deactivate Git projects",
             description="Manage the projects known to the Pisec broker.",
-            epilog="Examples:\n  pisec project register --path ~/src/project\n  pisec project list\n  pisec project open ~/src/project\n  pisec project deactivate ~/src/project --confirm ~/src/project\n  pisec project activate ~/src/project",
+            epilog="Examples:\n  pisec project register --path ~/src/project\n  pisec project list\n  pisec project open ~/src/project\n  pisec project deactivate ~/src/project --confirm ~/src/project",
         ),
     )
     _add_json_argument(project)
