@@ -189,6 +189,21 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
             self.assertEqual(store.conn.execute("SELECT state FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()["state"], "integrated")
             self.assertIsNone(store.conn.execute("SELECT 1 FROM runtime_bindings WHERE workstream_id=?", (worker_id,)).fetchone())
 
+    def test_project_permission_apply_runs_through_secretary_scope(self):
+        data = self.repo / "approved-data"
+        data.mkdir()
+        project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "defaultRef": "main"})
+        opened = self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
+        secretary_id = str(opened["workstream"]["workstream_id"])
+        with PiStore(self.root / "state") as store:
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (secretary_id,)).fetchone())
+        token = Path(str(binding["launch_secret_path"])).read_text().strip()
+        prepared = self.dispatcher.dispatch("secretary", "project.permissions.prepare", {"authToken": token, "dataDirs": [str(data)], "externalDomains": [], "idempotencyKey": "fixture-permissions-1"})
+        applied = self.dispatcher.dispatch("secretary", "project.permissions.apply", {"authToken": token, "approvalScope": prepared["approvalScope"]})
+        self.assertEqual(applied["operation"]["state"], "succeeded")
+        self.assertEqual(applied["operation"]["step"], "applied")
+        self.assertEqual(applied["refresh"]["failed"], [])
+
     def test_project_mode_change_requires_first_mate_and_backfills_fleet_scope(self):
         project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo)})
         self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})

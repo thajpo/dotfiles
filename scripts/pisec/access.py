@@ -111,7 +111,7 @@ def authorize_apply_project_permissions(store: Any, *, approval_scope: Mapping[s
     if operation is None:
         raise ScopeMismatchError("project permission operation was not found")
     bindings = [dict(row) for row in store.conn.execute(
-        "SELECT r.*,w.kind,w.execution_profile,w.worktree_path,w.desired_state,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE w.project_id=? AND w.desired_state='active' ORDER BY w.created_at,w.workstream_id",
+        "SELECT r.*,w.project_id,w.kind,w.execution_profile,w.worktree_path,w.desired_state,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE w.project_id=? AND w.desired_state='active' ORDER BY w.created_at,w.workstream_id",
         (project_id,),
     )]
     prepared: list[tuple[Mapping[str, Any], Any, Mapping[str, Any], Any, Path]] = []
