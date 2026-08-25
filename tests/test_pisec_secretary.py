@@ -6,7 +6,7 @@ import unittest
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.models import NeedsAttentionError, canonical_json
 from scripts.pisec.first_mate import ensure_first_mate
-from scripts.pisec.projects import register_project
+from scripts.pisec.projects import deactivate_project, register_project
 from scripts.pisec.secretary import ensure_secretary
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
@@ -189,6 +189,30 @@ class SecretaryTests(unittest.TestCase):
                 binding = store.conn.execute("SELECT desired_generation_sha256,applied_generation_sha256,launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()
                 self.assertEqual(binding["desired_generation_sha256"], binding["applied_generation_sha256"])
                 self.assertIsNone(binding["launch_generation_sha256"])
+
+    def test_deactivated_project_open_reuses_secretary_without_duplicate_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                first = ensure_secretary(store, project["project_id"], harness, workspace)
+                secretary_id = first["workstream"]["workstream_id"]
+                deactivate_project(store, project["project_id"], workspace, harness)
+                workspace.agents.clear()
+
+                reopened = ensure_secretary(store, project["project_id"], harness, workspace)
+
+                self.assertEqual(reopened["workstream"]["workstream_id"], secretary_id)
+                self.assertEqual(reopened["project"]["active"], 1)
+                self.assertEqual(reopened["workstream"]["desired_state"], "active")
+                self.assertEqual(
+                    store.conn.execute("SELECT COUNT(*) FROM workstreams WHERE project_id=? AND kind='secretary'", (project["project_id"],)).fetchone()[0],
+                    1,
+                )
 
     def test_secretary_replay_reuses_persisted_surface_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:

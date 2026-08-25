@@ -64,6 +64,14 @@ def _secretary(store: Any, project_id: str) -> dict[str, Any] | None:
     return None if row is None else dict(row)
 
 
+def _retired_secretary(store: Any, project_id: str) -> dict[str, Any] | None:
+    row = store.conn.execute(
+        "SELECT * FROM workstreams WHERE project_id=? AND kind='secretary' AND desired_state='retired' ORDER BY retired_at DESC,updated_at DESC LIMIT 1",
+        (project_id,),
+    ).fetchone()
+    return None if row is None else dict(row)
+
+
 def _binding(store: Any, workstream_id: str) -> dict[str, Any] | None:
     row = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()
     return None if row is None else dict(row)
@@ -440,6 +448,32 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
     harness.validate_execution_profile("secretary-project", "secretary")
     external_domains = tuple(harness.profile_domains("secretary-project", ()))
     existing = _secretary(store, project["project_id"])
+    if existing is None and not _project_active(project):
+        existing = _retired_secretary(store, project["project_id"])
+        if existing is not None:
+            operation = _operation(store, existing["workstream_id"])
+            if operation is None:
+                raise NeedsAttentionError("retired secretary cannot be reopened without its ensure operation")
+            now = utc_now()
+            scope = _scope(project, existing, operation["operation_id"], external_domains)
+            with store.transaction():
+                store.conn.execute(
+                    "UPDATE workstreams SET desired_state='active',retired_at=NULL,provisioning_state='creating',attention_reason=NULL,updated_at=? WHERE workstream_id=? AND desired_state='retired'",
+                    (now, existing["workstream_id"]),
+                )
+                store.conn.execute(
+                    "UPDATE operations SET state='applying',step='planned',result_json=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?",
+                    (canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), now, operation["operation_id"]),
+                )
+                append_event_in_transaction(
+                    store.conn,
+                    kind="secretary.reopened",
+                    project_id=project["project_id"],
+                    workstream_id=existing["workstream_id"],
+                    operation_id=operation["operation_id"],
+                    payload={"previousDesiredState": "retired", "reopenedAt": now},
+                )
+            existing = dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone())
     if existing is None:
         workstream_id = new_id("ws")
         operation_id = new_id("op")
