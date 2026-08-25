@@ -32,3 +32,7 @@
   - Commit OID: `e7a8869`
   - Checks: clean owner-only checkout at `e7a8869`: `python3 -m unittest discover -s tests -q` passed (206, 1 skipped); `bun test omp/extensions/pisec.test.ts` passed (7/7); `python3 -m compileall -q scripts tests` passed; operation catalogue `--check` passed; `bash -n scripts/*.sh` passed; `git diff --check` passed; focused updater/CLI/core/install tests and fail-first recovery matrix passed; static allowlist/status-root/marker/archive/current-link audits passed; no live-state cutover performed.
   - Current blocker: none.
+- Phase 9 status: complete; README, installer/platform truth, stale CLI help, and the authenticated runtime-state boundary now match the v1 contract. Raw Herdr `done` remains presentation-only and is rejected by the Pisec runtime report/database path.
+  - Commit OID: `d65ec88`
+  - Checks: clean owner-only checkout at `d65ec88`: `python3 -m unittest discover -s tests -q` passed (207, 1 skipped); `bun test omp/extensions/pisec.test.ts` passed (7/7); `python3 -m compileall -q scripts tests` passed; `bash -n scripts/*.sh` passed; operation catalogue `--check` passed; `bun build omp/extensions/pisec.ts --target bun` passed; `git diff --check` passed; README command/required-truth and prohibited-claim audit passed; macOS stub exited 1 without home mutation; runtime `done` fail-first rejection passed; no live-state cutover performed.
+  - Current blocker: none.
