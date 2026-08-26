@@ -12,11 +12,12 @@ from unittest.mock import patch
 from scripts.pisec.access import effective_runtime_scope
 from scripts.pisec.access import authorize_apply_project_permissions, prepare_project_permissions
 from scripts.pisec.adapters import AdapterRegistry, AgentObservation
-from scripts.pisec.broker import BrokerDispatcher
+from scripts.pisec.broker import BrokerDispatcher, BrokerService
 from scripts.pisec import codex_hook
 from scripts.pisec.first_mate import ensure_first_mate
 from scripts.pisec.models import ConflictError, NeedsAttentionError, ScopeMismatchError, canonical_json
 from scripts.pisec.pi_store import PiStore
+from scripts.pisec.protocol import request
 from scripts.pisec.projects import register_project
 from scripts.pisec.refresh import mark_stale_bindings
 from scripts.pisec.runtime import report_runtime, usable_runtime_binding
@@ -244,6 +245,142 @@ class Phase10ScopeParityTests(unittest.TestCase):
         self.assertIsNotNone(recording.payload)
         self.assertEqual(recording.payload["payload"]["state"], "working")
         self.assertEqual(recording.payload["payload"]["nativeSessionValue"], "native-session")
+
+    def test_codex_hook_restarts_new_runtime_instance_with_fresh_session_start(self):
+        class RecordingSocket:
+            def __init__(self):
+                self.payload = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                return None
+
+            def connect(self, _path):
+                return None
+
+            def sendall(self, data):
+                self.payload = json.loads(data.decode())
+
+            def recv(self, _size):
+                return b"{}"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "sessions").mkdir()
+            reports = []
+            for instance, event_name, native_session in (
+                ("a" * 32, "SessionStart", "first-session"),
+                ("a" * 32, "Stop", "first-session"),
+                ("b" * 32, "SessionStart", "second-session"),
+            ):
+                recording = RecordingSocket()
+                with patch.dict(
+                    os.environ,
+                    {
+                        "PISEC_RUNTIME_SOCKET": str(Path(tmp) / "runtime.sock"),
+                        "PISEC_RUNTIME_TOKEN": "t" * 48,
+                        "PISEC_WORKSTREAM_ID": "ws_" + "2" * 32,
+                        "PISEC_RUNTIME_INSTANCE_ID": instance,
+                        "PISEC_SURFACE_ID": "surface_" + "4" * 32,
+                        "PISEC_HARNESS_HOME": tmp,
+                        "PISEC_SESSION_START_SOURCE": "resume",
+                    },
+                ), patch("scripts.pisec.codex_hook.socket.socket", return_value=recording), patch(
+                    "sys.stdin", io.StringIO(json.dumps({"hook_event_name": event_name, "session_id": native_session}))
+                ):
+                    self.assertEqual(codex_hook.main(), 0)
+                self.assertIsNotNone(recording.payload)
+                reports.append(recording.payload["payload"])
+        self.assertEqual(
+            [(report["seq"], report["event"], report["state"]) for report in reports],
+            [(1, "session_start", "working"), (2, "lifecycle", "idle"), (1, "session_start", "working")],
+        )
+        self.assertEqual([report["startSource"] for report in reports], ["resume", "resume", "resume"])
+
+    def test_codex_restart_hook_attests_through_the_public_runtime_socket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            harness = FixtureHarness(root)
+            workspace = FixtureWorkspace(root)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo, default_ref="main")
+                secretary = ensure_secretary(store, project["project_id"], harness, workspace)
+                workstream_id = str(secretary["workstream"]["workstream_id"])
+                binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone())
+
+            registry = AdapterRegistry()
+            registry.register_harness(harness)
+            registry.register_workspace(workspace)
+            service = BrokerService(
+                BrokerDispatcher(lambda: PiStore(root / "state"), registry=registry, harness=harness, workspace=workspace),
+                runtime_root=root / "runtime",
+            )
+            service.start()
+            try:
+                def start_without_attestation(surface_id, name, agent_kind):
+                    workspace.calls.append(("start_without_attestation", (surface_id, name, agent_kind)))
+                    workspace.agents[name] = AgentObservation(name, surface_id, True, "working")
+                    workspace.runtime_states.pop(surface_id, None)
+                    return {"started": True, "name": name, "surfaceId": surface_id}
+
+                workspace.start_agent = start_without_attestation
+
+                def run_hook(instance, native_session):
+                    with PiStore(root / "state") as store:
+                        current = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone())
+                    with patch.dict(
+                        os.environ,
+                        {
+                            "PISEC_RUNTIME_SOCKET": str(service.paths["runtime"]),
+                            "PISEC_RUNTIME_TOKEN": Path(str(current["launch_secret_path"])).read_text().strip(),
+                            "PISEC_WORKSTREAM_ID": workstream_id,
+                            "PISEC_RUNTIME_INSTANCE_ID": instance,
+                            "PISEC_SURFACE_ID": str(current["workspace_surface_id"]),
+                            "PISEC_HARNESS_HOME": str(current["harness_home"]),
+                            "PISEC_SESSION_START_SOURCE": "startup",
+                            "PISEC_RUNTIME_GENERATION": str(current["applied_generation_sha256"]),
+                        },
+                    ), patch("sys.stdin", io.StringIO(json.dumps({"hook_event_name": "SessionStart", "session_id": native_session}))):
+                        self.assertEqual(codex_hook.main(), 0)
+
+                workspace.stop_runtime(str(binding["workspace_surface_id"]))
+                first_restart = request(service.paths["admin"], "runtime.ensure", {"workstreamId": workstream_id, "waitSeconds": 0})
+                self.assertEqual(first_restart["action"], "startup_in_progress")
+                run_hook("codex-runtime-first", "codex-session-first")
+                with PiStore(root / "state") as store:
+                    first = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone())
+                self.assertEqual(first["runtime_instance_id"], "codex-runtime-first")
+                self.assertEqual(first["report_seq"], 1)
+                self.assertIsNotNone(first["session_start_event_sequence"])
+
+                workspace.stop_runtime(str(binding["workspace_surface_id"]))
+                second_restart = request(service.paths["admin"], "runtime.ensure", {"workstreamId": workstream_id, "waitSeconds": 0})
+                self.assertEqual(second_restart["action"], "startup_in_progress")
+                run_hook("codex-runtime-second", "codex-session-second")
+                with PiStore(root / "state") as store:
+                    second = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone())
+                    event = store.conn.execute(
+                        "SELECT payload_json FROM events WHERE sequence=?",
+                        (second["session_start_event_sequence"],),
+                    ).fetchone()
+                self.assertEqual(second["runtime_instance_id"], "codex-runtime-second")
+                self.assertEqual(second["report_seq"], 1)
+                self.assertEqual(second["session_start_report_seq"], 1)
+                self.assertEqual(second["observed_state"], "working")
+                self.assertEqual(second["refresh_pending"], 0)
+                self.assertIsNone(second["refresh_operation_id"])
+                self.assertEqual(
+                    json.loads(str(event["payload_json"])),
+                    {"generationSha256": str(second["applied_generation_sha256"]), "reportSeq": 1, "runtimeInstanceId": "codex-runtime-second"},
+                )
+            finally:
+                service.stop()
 
     def test_codex_launcher_rejects_worker_created_user_configuration(self):
         with tempfile.TemporaryDirectory() as tmp:

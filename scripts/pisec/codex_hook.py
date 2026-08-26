@@ -29,7 +29,11 @@ def main() -> int:
     native_id = event.get("thread_id") or event.get("session_id") if isinstance(event, dict) else None
     if not isinstance(native_id, str) or not native_id:
         native_id = hashlib.sha256((workstream + instance).encode()).hexdigest()[:32]
-    sequence_path = Path(harness_home) / "codex-hook-sequence" if isinstance(harness_home, str) and harness_home else None
+    sequence_path = (
+        Path(harness_home) / "sessions" / f".pisec-hook-sequence-{hashlib.sha256(instance.encode('utf-8')).hexdigest()}"
+        if isinstance(harness_home, str) and harness_home
+        else None
+    )
     sequence = 1
     if sequence_path is not None:
         try:
@@ -44,7 +48,7 @@ def main() -> int:
         "workstreamId": workstream,
         "runtimeInstanceId": instance,
         "seq": sequence,
-        "event": "session_start" if sequence == 1 else "lifecycle",
+        "event": "session_start" if event_name == "SessionStart" else "lifecycle",
         "reason": None,
         "state": state,
         "nativeSessionKind": "id",
@@ -54,7 +58,8 @@ def main() -> int:
         "token": token,
         "generation": os.environ.get("PISEC_RUNTIME_GENERATION"),
     }
-    request = {"protocolVersion": 1, "requestId": "codex-hook", "operation": "runtime.report", "payload": payload}
+    request_id = "req_" + hashlib.sha256(f"{workstream}:{instance}:{sequence}".encode("utf-8")).hexdigest()[:32]
+    request = {"protocolVersion": 1, "requestId": request_id, "operation": "runtime.report", "payload": payload}
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(5)
