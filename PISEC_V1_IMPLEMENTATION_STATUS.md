@@ -36,7 +36,7 @@
   - Commit OID: `3125a65fc880ea5b37082a52aafd324cde302847`
   - Checks: clean owner-only checkout at `3125a65`: `python3 -m unittest discover -s tests -q` passed (207, 1 skipped); `bun test omp/extensions/pisec.test.ts` passed (7/7); `python3 -m compileall -q scripts tests` passed; `bash -n scripts/*.sh` passed; operation catalogue `--check` passed; `bun build omp/extensions/pisec.ts --target bun` passed; `git diff --check` passed; README command/required-truth and prohibited-claim audit passed; macOS stub exited 1 without home mutation; runtime `done` fail-first rejection passed; no live-state cutover performed.
   - Current blocker: none.
-- Phase 10 status: source core is committed and green after the bounded Codex hook-attestation launch repair; final documentation/status descendant pending.
-  - Commit OID: `5a53c33` (bootstrapV1Commit candidate; final documentation/status descendant pending)
-  - Checks: fail-first launcher assertion failed before repair and passed after repair; independent read-only audit passed the diagnosis; clean source gate passed with Python 268 tests, 0 failures, 0 errors, 1 skipped, Bun 9/9, compileall, shell syntax, catalogue parity, Bun build, and `git diff --check`; exact Codex `0.147.0` installed.
-  - Current blocker: commit the final documentation/status descendant, install/deploy the new candidate, archive/reset the failed-worker state, then complete the 51 scenarios, external acceptance evidence, local v1 tag, and final verification.
+- Phase 10 status: source acceptance is complete after the bounded Codex hook-attestation launch repair; live acceptance remains.
+  - Commit OID: `cd93dee` (bootstrapV1Commit `5a53c33`; finalV1Commit candidate)
+  - Checks: fail-first launcher assertion failed before repair and passed after repair; independent read-only audit passed the diagnosis; exact final-candidate gate passed with clean status, `git diff --check`, compileall, shell syntax, catalogue parity, Bun build, Python 268 tests with 0 failures, 0 errors, 1 skipped, Bun 9/9, and exact Codex `0.147.0`.
+  - Current blocker: archive/reset the failed-worker state, install the final candidate, complete the 51 scenarios, external acceptance evidence, local v1 tag, and final verification.
