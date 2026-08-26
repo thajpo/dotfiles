@@ -71,15 +71,16 @@ tags.
 - Earlier candidates and their live acceptance attempts are historical only;
   their identities must not be used for v1 release evidence.
 - The corrected source-core commit is
-  `c4e116cd4e1487b7160841b3b94f4c541e2a6402` with tree
-  `a5e1c11f01da4272effdb5310d83e3b050a8c513`. It contains the bounded
-  harness-aware fleet usability repair, exact binding-harness validation, and
-  the protected OMP activation repair.
+  `a076175c7407eb3ca47396369dd3f4e5a208bcbe` with tree
+  `a59773445a8cf07b020b3a9fbe679e2d8f69b97a`. It contains the bounded
+  harness-aware fleet usability repair, fail-closed binding-harness identity
+  validation, and the protected OMP activation repair.
 - Its clean source gate passed: Python 266 tests with 1 skipped, Bun 8/8,
   compileall, shell syntax, operation-catalogue parity, Bun build, and
   `git diff --check`. The focused Phase 10 scope/adapter slice passed 21/21,
-  including production OMP/Codex activation/sealing and the independent First
-  Mate harness-mismatch guard.
+  including production OMP/Codex activation/replacement/sealing, the
+  independent First Mate harness-mismatch guard, and fail-closed omitted
+  harness validation.
 - The final documentation/status descendant will be the new
   `finalV1Commit`; the corrected source-core commit above is the
   `bootstrapV1Commit`. The descendant's full OID and tree must be captured
@@ -101,10 +102,10 @@ required phase, commit, checks, and blocker fields.
   `c8854572d8ac7d37f002b5a45b9b7735bf2d7be612f4f15f92ac2c2c89b3861a`.
 - Stable updater SHA-256:
   `59fbb73053947de7a53a9d419546d87e3e574b6b5b583e084985eea4669edda7`.
-- The installed stable updater currently identifies final documentation
-  source `1c0769653309cf977bf807c9be358998a47fcf08`, tree
-  `7c9b44f7def9c6ca10b8506606394ba76835bcad`, and bundle
-  `f3486d65bbe863288cfe0cfc33aeabc1a4d9a25cdcd6837163bcbd26095ed8d8`.
+- The installed stable updater currently identifies the prior final
+  documentation source `503f71379a45de36dc29a78ba57b67628fbc339f`, tree
+  `1de067f2c3583d2f024ec956ccad714c1fb1346e`, and bundle
+  `4671069e15bad3566b937b1418993ac25503228690c59f80104d71256fa98289`.
   It must be refreshed from the final descendant after this source-core
   correction is recorded.
 - Database identity/version: `pisec-core-v1`, version `1`.
