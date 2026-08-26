@@ -93,8 +93,9 @@ The corrected source-core candidate is committed at
 `8fc9e21ad945763814cccee34956d8d731ecb49b`. Its exact clean Phase 10.1
 gate passed: compileall, shell syntax, catalogue parity, Bun build, Python 264
 tests with 1 skipped, and Bun 8/8. It is the current bootstrap candidate. The
-final documentation/status descendant is the candidate-identity descendant of
-this repair; its exact OID and tree will be recorded before live deployment.
+final documentation/status descendant is `8e67795eb765a22d614b941fc8394219dd104497`
+with tree `d7bf851823c457cd78cc04d95fa9cb70294d7df4`; its exact clean Phase
+10.1 gate passed with Python 264 tests and 1 skipped and Bun 8/8.
 
 This plan file is tracked and preserved as the executable handoff. The
 compact status journal remains the only status record and contains only the
