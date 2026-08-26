@@ -254,7 +254,7 @@ function registerRuntime(pi: ExtensionAPI): void {
     return task;
   };
   pi.on("session_start", async (_event, ctx) => {
-    rootSession = ctx.hasUI === true;
+    rootSession = ctx.hasUI === true || ROLE === "worker";
     if (!rootSession) return;
     agentActive = false;
     try {

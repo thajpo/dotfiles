@@ -348,6 +348,60 @@ test("only the root UI session reports idle-working-idle lifecycle", () => {
   assert.deepEqual(output.events, ["session_start", "lifecycle", "lifecycle"]);
 });
 
+test("worker non-UI root session reports authenticated startup", () => {
+  const output = runProbe(`
+    const { rm } = await import("node:fs/promises");
+    const socketPath = "/tmp/pisec-extension-worker-start-" + process.pid + "-" + Date.now() + ".sock";
+    await rm(socketPath, { force: true });
+    const reports = [];
+    const server = Bun.listen({
+      unix: socketPath,
+      socket: {
+        data(socket, data) {
+          const request = JSON.parse(data.toString().trim());
+          reports.push(request.payload);
+          socket.write(JSON.stringify({ requestId: request.requestId, ok: true, result: { accepted: true } }) + "\\n");
+          socket.end();
+        },
+      },
+    });
+    const handlers = {};
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain, regex: chain });
+    const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
+    Object.assign(process.env, {
+      PISEC_ROLE: "worker",
+      PISEC_RUNTIME_SOCKET: socketPath,
+      PISEC_RUNTIME_TOKEN: "t".repeat(48),
+      PISEC_WORKSTREAM_ID: "ws_" + "a".repeat(32),
+      PISEC_RUNTIME_INSTANCE_ID: "instance",
+      PISEC_SURFACE_ID: "w1:p2",
+      PISEC_RUNTIME_GENERATION: "g".repeat(64),
+    });
+    const pi = {
+      zod,
+      registerTool() {},
+      on(name, handler) { (handlers[name] ??= []).push(handler); },
+      setLabel() {},
+      setActiveTools() { return Promise.resolve(); },
+    };
+    const module = await import(${JSON.stringify(EXTENSION)} + "?worker-start=" + Date.now());
+    module.default(pi);
+    const workerRoot = { hasUI: false, sessionManager: { getSessionFile() {} }, ui: { notify() {} } };
+    await handlers.session_start[0]({}, workerRoot);
+    server.stop(true);
+    await rm(socketPath, { force: true });
+    console.log(JSON.stringify({ states: reports.map(report => report.state), events: reports.map(report => report.event), report: reports[0] }));
+  `);
+  assert.deepEqual(output.states, ["idle"]);
+  assert.deepEqual(output.events, ["session_start"]);
+  const report = asRecord(output.report);
+  assert.equal(stringValue(report, "workstreamId"), "ws_" + "a".repeat(32));
+  assert.equal(stringValue(report, "runtimeInstanceId"), "instance");
+  assert.equal(stringValue(report, "surfaceId"), "w1:p2");
+  assert.equal(stringValue(report, "token"), "t".repeat(48));
+  assert.equal(stringValue(report, "generation"), "g".repeat(64));
+});
+
 test("failed tool telemetry is bounded and excludes tool output", () => {
   const output = runProbe(`
     const { rm } = await import("node:fs/promises");
