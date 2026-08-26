@@ -157,7 +157,7 @@ def usable_runtime_binding(
     ).fetchone()
     if row is None or row["desired_state"] != "active" or row["provisioning_state"] != "bound":
         return False
-    if harness is not None and row["harness_id"] != harness.manifest.adapter_id:
+    if harness is None or row["harness_id"] != harness.manifest.adapter_id:
         return False
     if (
         int(row["refresh_pending"])
@@ -209,8 +209,7 @@ def usable_runtime_binding(
         if observed is None or observed.agent is None:
             return False
         expected_names = {str(row["agent_name"])}
-        if harness is not None:
-            expected_names.add(str(harness.manifest.agent_kind))
+        expected_names.add(str(harness.manifest.agent_kind))
         if (
             observed.agent.surface_id != str(row["workspace_surface_id"])
             or observed.agent.name not in expected_names

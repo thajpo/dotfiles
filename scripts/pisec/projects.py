@@ -82,7 +82,7 @@ def resolve_project(store: Any, selector: str) -> dict[str, Any]:
 def _bound_runtime_is_usable(store: Any, workstream_id: str, workspace: Any, harness: Any | None = None) -> bool:
     try:
         from .runtime import usable_runtime_binding
-        if workspace is None:
+        if workspace is None or harness is None:
             return False
         return usable_runtime_binding(store, workstream_id, workspace, harness, allowed_states={"idle", "working", "blocked"})
     except Exception:

@@ -1,6 +1,7 @@
 from pathlib import Path
 import contextlib
 import json
+import os
 import stat
 import tempfile
 import unittest
@@ -58,6 +59,13 @@ class Phase10ScopeParityTests(unittest.TestCase):
                             self.assertEqual(json.loads(active_policy.read_text())["network"]["allowedDomains"], scope["externalDomains"])
                             self.assertEqual(stat.S_IMODE(active_policy.stat().st_mode), 0o400)
                             self.assertEqual(stat.S_IMODE(Path(activated.adapter_data["surfaceRoot"]).stat().st_mode), 0o500)
+                            os.chmod(Path(activated.adapter_data["surfaceRoot"]), 0o500)
+                            replacement = adapter.stage_profile(scope, surface, root / (adapter_id + "-replacement"))
+                            try:
+                                replaced = adapter.activate_profile(scope, replacement)
+                                self.assertEqual(stat.S_IMODE(Path(replaced.adapter_data["surfaceRoot"]).stat().st_mode), 0o500)
+                            finally:
+                                adapter.discard_staged_profile(replacement)
                         finally:
                             adapter.discard_staged_profile(staged)
 
@@ -135,6 +143,7 @@ class Phase10ScopeParityTests(unittest.TestCase):
                     scope["externalDomains"],
                     list(harness.profile_domains("secretary-project", ())),
                 )
+                self.assertFalse(usable_runtime_binding(store, binding["workstream_id"], workspace, None))
 
     def test_worker_approval_scope_contains_profile_composed_domains(self):
         with tempfile.TemporaryDirectory() as tmp:
