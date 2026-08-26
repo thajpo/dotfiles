@@ -550,7 +550,7 @@ class BrokerDispatcher:
         if operation == "access.effective":
             _exact(payload, auth_fields)
             from .access import effective_runtime_scope
-            scope = effective_runtime_scope(store, binding)
+            scope = effective_runtime_scope(store, binding, harness=self._harness_for_workstream(store, workstream_id))
             return {"workstreamId": workstream_id, "readPaths": [{"path": path, "sources": scope.get("readPathSources", {}).get(path, [])} for path in scope.get("dataDirs", [])], "pythonEnv": scope.get("pythonEnv")}
         if operation == "workstream.checkpoint":
             _exact(payload, auth_fields | {"idempotencyKey", "phase", "summary", "nextAction", "evidence"}, {"remediationIssueId"})
@@ -586,7 +586,7 @@ class BrokerDispatcher:
             if isinstance(parsed_scope, dict) and isinstance(parsed_scope.get("pythonEnv"), str):
                 python_env = parsed_scope["pythonEnv"]
             from .access import effective_runtime_scope
-            scope = effective_runtime_scope(store, binding)
+            scope = effective_runtime_scope(store, binding, harness=self._harness_for_workstream(store, workstream_id))
             result["runtimeScope"] = {"pythonEnv": scope.get("pythonEnv"), "readPaths": [{"path": path, "sources": scope.get("readPathSources", {}).get(path, [])} for path in scope.get("dataDirs", [])]}
             result["pythonEnv"] = result["runtimeScope"]["pythonEnv"]
             return result

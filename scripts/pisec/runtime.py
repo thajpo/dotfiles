@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from pathlib import Path
 import re
 from typing import Any, Mapping
@@ -150,7 +151,7 @@ def usable_runtime_binding(
 ) -> bool:
     """Apply the common live, attested, unreserved binding predicate."""
     row = store.conn.execute(
-        "SELECT w.desired_state,w.provisioning_state,w.worktree_path,r.refresh_pending,r.refresh_operation_id,r.refresh_started_at,r.launch_generation_sha256,r.desired_generation_sha256,r.applied_generation_sha256,r.observed_state,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,r.agent_name,r.policy_path,r.runtime_instance_id,r.report_seq,r.session_start_event_sequence,r.session_start_report_seq,r.session_started_at "
+        "SELECT w.desired_state,w.provisioning_state,w.worktree_path,r.refresh_pending,r.refresh_operation_id,r.refresh_started_at,r.launch_generation_sha256,r.desired_generation_sha256,r.applied_generation_sha256,r.observed_state,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,r.agent_name,r.policy_path,r.adapter_artifacts_json,r.runtime_instance_id,r.report_seq,r.session_start_event_sequence,r.session_start_report_seq,r.session_started_at "
         "FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=?",
         (workstream_id,),
     ).fetchone()
@@ -172,6 +173,12 @@ def usable_runtime_binding(
         or not 1 <= int(row["session_start_report_seq"]) <= int(row["report_seq"])
         or row["session_started_at"] is None
     ):
+        return False
+    try:
+        artifacts = json.loads(str(row["adapter_artifacts_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(artifacts, dict) or artifacts.get("generationSha256") != row["desired_generation_sha256"]:
         return False
     event = store.conn.execute(
         "SELECT kind,workstream_id,payload_json FROM events WHERE sequence=?",

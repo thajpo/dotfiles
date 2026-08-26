@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from .adapters import HarnessAdapter, RuntimeSurfaceArtifacts, WorkspaceAdapter, WorkspaceObservation, artifact_document
+from .access import compose_runtime_domains
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .models import AuthorizationError, ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id
@@ -38,7 +39,7 @@ _FULL_SCOPE_FIELDS = frozenset({
     "harnessId", "workspaceAdapterId", "executionProfile", "workMode", "learningOverlay", "learningSeam", "decisionIds",
     "targetRef", "targetBranchRef", "baseCommitOid", "branchName",
     "worktreePath", "agentName",
-    "dataDirs", "pythonEnv", "implementationModel", "harnessModel", "reasoningEffort", "effects", "nonEffects", "taskPacket",
+    "dataDirs", "externalDomains", "pythonEnv", "implementationModel", "harnessModel", "reasoningEffort", "effects", "nonEffects", "taskPacket",
     "runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest",
 })
 _PUBLIC_SCOPE_FIELDS = _FULL_SCOPE_FIELDS
@@ -262,6 +263,13 @@ def prepare_workstream(
         "worktreePath": str(checkout.absolute()),
         "agentName": agent_name,
         "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),
+        "externalDomains": list(
+            compose_runtime_domains(
+                harness,
+                execution_profile,
+                json.loads(project.get("external_domains") or "[]"),
+            )
+        ),
         "pythonEnv": normalized_python_env,
         "effects": ["create independent worker repository and execution workspace", "start fenced harness agent", "deliver full brief"],
         "nonEffects": ["no push", "no merge", "no cleanup", "no branch deletion"],
@@ -459,6 +467,16 @@ def _authorize_apply_workstream(
     scope, surface = _ensure_surface_snapshot(store, operation, scope, harness)
     operation = _operation(store, operation_id)
     project = get_project(store, scope["projectId"])
+    current_data_dirs = resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"]))
+    current_external_domains = list(
+        compose_runtime_domains(
+            harness,
+            str(scope["executionProfile"]),
+            json.loads(project.get("external_domains") or "[]"),
+        )
+    )
+    if scope["dataDirs"] != current_data_dirs or scope["externalDomains"] != current_external_domains:
+        raise ScopeMismatchError("project permissions changed since worker proposal")
     current_oid = _git(Path(project["repository_path"]), "rev-parse", "--verify", "--end-of-options", f"{scope['targetRef']}^{{commit}}").lower()
     if current_oid != scope["baseCommitOid"]:
         _mark_attention(store, operation_id, workstream_id, "approved target ref moved")

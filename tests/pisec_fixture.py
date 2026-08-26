@@ -21,6 +21,7 @@ from scripts.pisec.adapters import (
     WorkspaceObservation,
 )
 from scripts.pisec.events import append_event_in_transaction
+from scripts.pisec.models import canonical_json
 
 
 def make_repo(path: Path) -> None:
@@ -74,9 +75,37 @@ class FixtureHarness:
         return self.current_runtime_surface()
 
     def desired_generation(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts | None = None) -> str:
-        return hashlib.sha256(("fixture-generation:" + str(scope["executionProfile"])).encode()).hexdigest()
+        if surface is not None:
+            scope = {
+                **scope,
+                "runtimeSurfaceSha256": surface.content_sha256,
+                "runtimeSurfaceRoot": surface.root_path,
+                "runtimeSurfaceId": "surface_" + surface.content_sha256[:32],
+            }
+        scope_dict = {
+            key: scope.get(key)
+            for key in (
+                "executionProfile",
+                "worktreePath",
+                "externalDomains",
+                "implementationModel",
+                "harnessModel",
+                "reasoningEffort",
+            )
+        }
+        if scope.get("dataDirs"):
+            scope_dict["dataDirs"] = scope["dataDirs"]
+        if scope.get("pythonEnv"):
+            scope_dict["pythonEnv"] = scope["pythonEnv"]
+        values = {
+            "adapter": self.manifest.adapter_id,
+            "adapterVersion": self.manifest.version_label,
+            "scope": scope_dict,
+            "runtimeSurfaceSha256": scope.get("runtimeSurfaceSha256"),
+        }
+        return hashlib.sha256(("fixture-generation:" + canonical_json(values)).encode()).hexdigest()
 
-    def materialize_profile(self, scope: Mapping[str, Any], *, root: Path | None = None, runtime_token: str | None = None) -> HarnessArtifacts:
+    def materialize_profile(self, scope: Mapping[str, Any], *, root: Path | None = None, runtime_token: str | None = None, surface: RuntimeSurfaceArtifacts | None = None) -> HarnessArtifacts:
         workstream_id = str(scope["workstreamId"])
         self.calls.append(("materialize", workstream_id))
         self.profiles.append(workstream_id)
@@ -99,7 +128,7 @@ class FixtureHarness:
             policy_path=str(policy),
             policy_sha256=hashlib.sha256(policy.read_bytes()).hexdigest(),
             runtime_token_sha256=hashlib.sha256(token.encode()).hexdigest(),
-            generation_sha256=self.desired_generation(scope),
+            generation_sha256=self.desired_generation(scope, surface),
             adapter_data={"fixtureRoot": str(home)},
         )
 
@@ -114,7 +143,7 @@ class FixtureHarness:
             shutil.copytree(prior_home, candidate_home, symlinks=False)
         prior_secret = self.root / "harness" / f"{scope['workstreamId']}" / "launch.secret"
         preserved_token = prior_secret.read_text().strip() if prior_secret.exists() else None
-        candidate = self.materialize_profile({**scope, "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path}, root=candidate_root, runtime_token=preserved_token)
+        candidate = self.materialize_profile({**scope, "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path}, root=candidate_root, runtime_token=preserved_token, surface=surface)
         prior = None
         prior_policy = prior_home / "policy.json"
         if prior_home.is_dir() and prior_secret.is_file() and prior_policy.is_file():

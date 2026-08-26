@@ -6,7 +6,7 @@ import json
 import stat
 import tempfile
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .fence import DOMAIN_RE
 from .models import ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, canonical_json, json_digest, new_id, utc_now
@@ -17,6 +17,19 @@ from .platform import runtime_root
 _VIRTUAL_ROOTS = tuple(Path(value) for value in ("/proc", "/sys", "/dev", "/run"))
 _CREDENTIAL_ROOTS = tuple(Path.home() / value for value in (".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".config/gh"))
 _MAX_PERMISSION_ENTRIES = 64
+_WORKER_PROFILE = "worker-default"
+_SUPERVISOR_PROFILES = frozenset({"secretary-project", "first-mate"})
+
+
+def compose_runtime_domains(harness: Any, profile: str, project_domains: Sequence[str]) -> tuple[str, ...]:
+    """Compose the network scope for one role without widening supervisors."""
+    if profile == _WORKER_PROFILE:
+        additional_domains = tuple(project_domains)
+    elif profile in _SUPERVISOR_PROFILES:
+        additional_domains = ()
+    else:
+        raise InvalidRequestError("runtime profile is invalid")
+    return tuple(harness.profile_domains(profile, additional_domains))
 
 
 def _project(store: Any, project_id: str) -> Mapping[str, Any]:
@@ -129,9 +142,11 @@ def authorize_apply_project_permissions(store: Any, *, approval_scope: Mapping[s
             if surface is None:
                 surface = surface_resolver(harness_id) if callable(surface_resolver) else capture_runtime_surface(selected_harness)
                 surfaces[harness_id] = verify_surface(surface)
-            scope = effective_runtime_scope(store, binding)
+            scope = effective_runtime_scope(store, binding, harness=selected_harness)
             scope["dataDirs"] = paths
-            scope["externalDomains"] = domains
+            scope["externalDomains"] = list(
+                compose_runtime_domains(selected_harness, str(binding["execution_profile"]), domains)
+            )
             desired = selected_harness.desired_generation({**scope, "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path, "runtimeSurfaceId": "surface_" + surface.content_sha256[:32]}, surface)
             stage_root = Path(tempfile.mkdtemp(prefix=f"pisec-permissions-{workstream_id}-"))
             staged = selected_harness.stage_profile({**scope, "operationId": str(operation["operation_id"]), "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path, "runtimeSurfaceId": "surface_" + surface.content_sha256[:32]}, surface, stage_root)
@@ -165,7 +180,7 @@ def authorize_apply_project_permissions(store: Any, *, approval_scope: Mapping[s
             selected_harness.discard_staged_profile(staged)
 
 
-def effective_runtime_scope(store: Any, binding: Mapping[str, Any]) -> dict[str, Any]:
+def effective_runtime_scope(store: Any, binding: Mapping[str, Any], *, harness: Any) -> dict[str, Any]:
     """Re-read current project permissions; historical scopes are evidence only."""
     kind = str(binding["kind"])
     operation_kind = {"secretary": "secretary.ensure", "first_mate": "first_mate.ensure"}.get(kind, "workstream.create")
@@ -179,6 +194,8 @@ def effective_runtime_scope(store: Any, binding: Mapping[str, Any]) -> dict[str,
     project = _project(store, str(binding["project_id"]))
     permissions = _current_permissions(store, project)
     scope["dataDirs"] = permissions["dataDirs"]
-    scope["externalDomains"] = permissions["externalDomains"]
+    scope["externalDomains"] = list(
+        compose_runtime_domains(harness, str(scope["executionProfile"]), permissions["externalDomains"])
+    )
     scope["readPathSources"] = {path: [{"kind": "project_data", "sourceId": str(binding["project_id"])}] for path in permissions["dataDirs"]}
     return scope

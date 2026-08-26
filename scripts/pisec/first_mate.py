@@ -7,13 +7,14 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .adapters import HarnessAdapter, RuntimeSurfaceArtifacts, WorkspaceAdapter, WorkspaceObservation, artifact_document
+from .access import compose_runtime_domains
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now, validate_sha256
 from .projects import observe_project, resolve_project
 from .runtime_surface import capture_runtime_surface, materialize_current_surface
-from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent
-from .workstreams import APPLY_LOCK, _wait_for_agent
+from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent, usable_runtime_binding
+from .workstreams import APPLY_LOCK, _session_attestation_matches, _wait_for_agent
 
 
 def _project_active(project: Mapping[str, Any]) -> bool:
@@ -86,7 +87,7 @@ def _hit(failpoint: Any, name: str, scope: Mapping[str, Any]) -> None:
         failpoint.hit(name, {"operation_id": str(scope["operationId"]), "workstream_id": str(scope["workstreamId"])})
 
 
-def _scope(project: Mapping[str, Any], workstream: Mapping[str, Any], operation_id: str) -> dict[str, Any]:
+def _scope(project: Mapping[str, Any], workstream: Mapping[str, Any], operation_id: str, external_domains: tuple[str, ...] = ("*",)) -> dict[str, Any]:
     return {
         "projectId": project["project_id"],
         "workstreamId": workstream["workstream_id"],
@@ -102,7 +103,7 @@ def _scope(project: Mapping[str, Any], workstream: Mapping[str, Any], operation_
         "branchName": workstream["branch_name"],
         "worktreePath": workstream["worktree_path"],
         "agentName": f"pisec-{workstream['workstream_id'][-12:]}",
-        "externalDomains": ["*"],
+        "externalDomains": list(external_domains),
         "dataDirs": resolve_data_dirs(project.get("data_dirs"), Path(project["repository_path"])),
         "effects": ["create execution workspace", "start fenced global coordinator", "read brokered project worker state and diffs", "route typed attention and workflow records to registered project secretaries"],
         "nonEffects": ["no host-secret access", "no project checkout or worker-worktree writes", "no raw push or publish", "no project registration or runtime administration", "no worker creation or workstream acceptance without exact user approval"],
@@ -289,7 +290,8 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
     if not _project_active(project):
         raise ConflictError("control project is inactive; choose an active project for the First Mate")
     harness.validate_execution_profile("first-mate", "first_mate")
-    external_domains = tuple(harness.profile_domains("first-mate", ()))
+    project_domains = json.loads(project["external_domains"] or "[]")
+    external_domains = compose_runtime_domains(harness, "first-mate", project_domains)
     existing = _first_mate(store)
     if existing is None:
         workstream_id = new_id("ws")
@@ -304,7 +306,7 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
                 (workstream_id, project["project_id"], "first_mate", "Global Pisec First Mate", "Manage all registered Pisec project secretaries.", FIRST_MATE_BRIEF, harness.manifest.adapter_id, workspace.manifest.adapter_id, "first-mate", project["default_ref"], base_oid, branch, str(scratch), "active", "proposed", now, now),
             )
             created = dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone())
-            scope = _scope(project, created, operation_id)
+            scope = _scope(project, created, operation_id, external_domains)
             request = {"projectId": project["project_id"], "kind": "first_mate.ensure"}
             store.conn.execute(
                 "INSERT INTO operations(operation_id,kind,project_id,workstream_id,idempotency_key,request_json,request_sha256,state,step,result_json,created_at,updated_at) VALUES(?,'first_mate.ensure',?,?,?,?,?,'applying','planned',?,?,?)",
@@ -319,7 +321,7 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         scope = json.loads(operation["result_json"])
     except (TypeError, json.JSONDecodeError) as error:
         raise NeedsAttentionError("First Mate ensure scope is missing or invalid") from error
-    fresh = _scope(project, existing, operation["operation_id"])
+    fresh = _scope(project, existing, operation["operation_id"], external_domains)
     if not isinstance(scope, dict) or {key: value for key, value in scope.items() if key not in _SURFACE_SCOPE_FIELDS} != fresh:
         raise NeedsAttentionError("First Mate ensure scope is missing or invalid")
     recoverable_missing = (
@@ -408,6 +410,8 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         operation = _operation(store, existing["workstream_id"])
     try:
         _recover_start(store, workspace, harness, scope, binding)
+    except NeedsAttentionError:
+        raise
     except Exception as error:
         _mark_attention(store, operation["operation_id"], existing["workstream_id"], str(error))
         raise NeedsAttentionError("First Mate runtime identity is missing or mismatched") from error
@@ -430,10 +434,41 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         operation = _operation(store, existing["workstream_id"])
     _hit(failpoint, "before_first_mate_final_event_commit", scope)
     if _rank(operation["step"]) < _rank("committed"):
+        expected_generation = str(binding["desired_generation_sha256"])
+        if not usable_runtime_binding(
+            store,
+            str(existing["workstream_id"]),
+            workspace,
+            harness,
+            allowed_states=frozenset({"idle", "working", "blocked"}),
+        ):
+            raise NeedsAttentionError("First Mate runtime binding is not usable at finalization")
         now = utc_now()
         with store.transaction():
-            store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, existing["workstream_id"]))
-            store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), now, operation["operation_id"]))
+            cursor = store.conn.execute(
+                "UPDATE runtime_bindings SET updated_at=updated_at WHERE workstream_id=? AND desired_generation_sha256=? AND applied_generation_sha256=? AND launch_generation_sha256 IS NULL AND refresh_pending=0 AND refresh_operation_id IS NULL AND refresh_started_at IS NULL AND observed_state IN ('idle','working','blocked')",
+                (existing["workstream_id"], expected_generation, expected_generation),
+            )
+            if cursor.rowcount != 1:
+                raise NeedsAttentionError("First Mate runtime binding changed before finalization")
+            current = store.conn.execute(
+                "SELECT r.*,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?",
+                (existing["workstream_id"],),
+            ).fetchone()
+            if current is None or not _session_attestation_matches(store, dict(current)):
+                raise NeedsAttentionError("First Mate runtime attestation changed before finalization")
+            try:
+                artifacts = json.loads(str(current["adapter_artifacts_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError) as error:
+                raise NeedsAttentionError("First Mate runtime artifact record is invalid") from error
+            if not isinstance(artifacts, dict) or artifacts.get("generationSha256") != expected_generation:
+                raise NeedsAttentionError("First Mate runtime artifact generation is stale")
+            cursor = store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=? AND provisioning_state='bound'", (now, existing["workstream_id"]))
+            if cursor.rowcount != 1:
+                raise NeedsAttentionError("First Mate workstream changed before finalization")
+            cursor = store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=? AND state='applying' AND step='observed'", (canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), now, operation["operation_id"]))
+            if cursor.rowcount != 1:
+                raise NeedsAttentionError("First Mate ensure operation changed before finalization")
             append_event_in_transaction(store.conn, kind="first_mate.bound", project_id=project["project_id"], workstream_id=existing["workstream_id"], operation_id=operation["operation_id"], payload={"workspaceId": binding["workspace_id"], "surfaceId": binding["workspace_surface_id"]})
     _hit(failpoint, "after_first_mate_final_event_commit", scope)
     return {"project": resolve_project(store, project["project_id"]), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "binding": _binding(store, existing["workstream_id"]), "reused": False}

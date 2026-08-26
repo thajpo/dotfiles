@@ -7,14 +7,15 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .adapters import HarnessAdapter, RuntimeSurfaceArtifacts, WorkspaceAdapter, WorkspaceObservation, artifact_document
+from .access import compose_runtime_domains
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now, validate_sha256
 from .projects import resolve_project
 from .project_workspaces import ensure_project_workspace
 from .runtime_surface import capture_runtime_surface, materialize_current_surface
-from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent
-from .workstreams import APPLY_LOCK, _wait_for_agent
+from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent, usable_runtime_binding
+from .workstreams import APPLY_LOCK, _session_attestation_matches, _wait_for_agent
 
 
 def _project_active(project: Mapping[str, Any]) -> bool:
@@ -485,7 +486,8 @@ def _recover_prompt(workspace: WorkspaceAdapter, project: Mapping[str, Any], sco
 def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, workspace: WorkspaceAdapter, failpoint: Any = None) -> dict[str, Any]:
     project = resolve_project(store, project_selector)
     harness.validate_execution_profile("secretary-project", "secretary")
-    external_domains = tuple(harness.profile_domains("secretary-project", ()))
+    project_domains = json.loads(project["external_domains"] or "[]")
+    external_domains = compose_runtime_domains(harness, "secretary-project", project_domains)
     existing = _secretary(store, project["project_id"])
     if existing is None and not _project_active(project):
         existing = _retired_secretary(store, project["project_id"])
@@ -598,6 +600,8 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
             ):
                 binding = _repair_launch_binding(store, workspace, harness, project, current_scope, binding, surface=surface)
             _recover_start(store, workspace, harness, project, current_scope, binding)
+        except NeedsAttentionError:
+            raise
         except Exception as error:
             _mark_attention(store, operation["operation_id"], existing["workstream_id"], str(error))
             raise NeedsAttentionError("secretary runtime identity is missing or mismatched") from error
@@ -686,6 +690,8 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         operation = _operation(store, existing["workstream_id"])
     try:
         _recover_start(store, workspace, harness, project, scope, binding)
+    except NeedsAttentionError:
+        raise
     except Exception as error:
         _mark_attention(store, operation["operation_id"], existing["workstream_id"], str(error))
         raise NeedsAttentionError("secretary runtime identity is missing or mismatched") from error
@@ -709,12 +715,43 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         operation = _operation(store, existing["workstream_id"])
     _hit(failpoint, "before_secretary_final_event_commit", scope)
     if _rank(operation["step"]) < _rank("committed"):
+        expected_generation = str(binding["desired_generation_sha256"])
+        if not usable_runtime_binding(
+            store,
+            str(existing["workstream_id"]),
+            workspace,
+            harness,
+            allowed_states=frozenset({"idle", "working", "blocked"}),
+        ):
+            raise NeedsAttentionError("secretary runtime binding is not usable at finalization")
         now = utc_now()
         result = {"workstreamId": existing["workstream_id"], "projectId": project["project_id"], "workspaceId": binding["workspace_id"], "viewId": binding["workspace_view_id"], "surfaceId": binding["workspace_surface_id"], "agentName": binding["agent_name"]}
         with store.transaction():
-            store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, existing["workstream_id"]))
+            cursor = store.conn.execute(
+                "UPDATE runtime_bindings SET updated_at=updated_at WHERE workstream_id=? AND desired_generation_sha256=? AND applied_generation_sha256=? AND launch_generation_sha256 IS NULL AND refresh_pending=0 AND refresh_operation_id IS NULL AND refresh_started_at IS NULL AND observed_state IN ('idle','working','blocked')",
+                (existing["workstream_id"], expected_generation, expected_generation),
+            )
+            if cursor.rowcount != 1:
+                raise NeedsAttentionError("secretary runtime binding changed before finalization")
+            current = store.conn.execute(
+                "SELECT r.*,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?",
+                (existing["workstream_id"],),
+            ).fetchone()
+            if current is None or not _session_attestation_matches(store, dict(current)):
+                raise NeedsAttentionError("secretary runtime attestation changed before finalization")
+            try:
+                artifacts = json.loads(str(current["adapter_artifacts_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError) as error:
+                raise NeedsAttentionError("secretary runtime artifact record is invalid") from error
+            if not isinstance(artifacts, dict) or artifacts.get("generationSha256") != expected_generation:
+                raise NeedsAttentionError("secretary runtime artifact generation is stale")
+            cursor = store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=? AND provisioning_state='bound'", (now, existing["workstream_id"]))
+            if cursor.rowcount != 1:
+                raise NeedsAttentionError("secretary workstream changed before finalization")
             store.conn.execute("UPDATE projects SET secretary_workstream_id=?,active=1,lifecycle_attention_reason=NULL,deactivated_at=NULL,updated_at=? WHERE project_id=?", (existing["workstream_id"], now, project["project_id"]))
-            store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), now, operation["operation_id"]))
+            cursor = store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=? AND state='applying' AND step='observed'", (canonical_json(scope, max_bytes=256 * 1024, max_text=64 * 1024), now, operation["operation_id"]))
+            if cursor.rowcount != 1:
+                raise NeedsAttentionError("secretary ensure operation changed before finalization")
             append_event_in_transaction(store.conn, kind="secretary.bound", project_id=project["project_id"], workstream_id=existing["workstream_id"], operation_id=operation["operation_id"], payload={"workspaceId": binding["workspace_id"], "surfaceId": binding["workspace_surface_id"]})
     _hit(failpoint, "after_secretary_final_event_commit", scope)
     return {"project": resolve_project(store, project["project_id"]), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "binding": dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "reused": False}

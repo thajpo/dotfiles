@@ -53,9 +53,9 @@ def _surface_for(binding: Mapping[str, Any], harness: HarnessAdapter, resolver: 
     return verify_surface(value)
 
 
-def _scope(store: Any, binding: Mapping[str, Any]) -> dict[str, Any]:
+def _scope(store: Any, binding: Mapping[str, Any], harness: HarnessAdapter) -> dict[str, Any]:
     from .access import effective_runtime_scope
-    return effective_runtime_scope(store, binding)
+    return effective_runtime_scope(store, binding, harness=harness)
 
 
 _binding_scope = _scope
@@ -131,7 +131,7 @@ def mark_stale_bindings(store: Any, harness: HarnessAdapter, *, harness_resolver
             if surface is None:
                 surface = _surface_for(binding, selected, surface_resolver)
                 surfaces[harness_id] = surface
-            desired = _desired(selected, _scope(store, binding), surface)
+            desired = _desired(selected, _scope(store, binding, selected), surface)
             with store.transaction():
                 store.conn.execute("UPDATE runtime_bindings SET desired_generation_sha256=?,updated_at=? WHERE workstream_id=?", (desired, utc_now(), binding["workstream_id"]))
             if binding["applied_generation_sha256"] == desired and not binding["refresh_pending"]:
@@ -203,7 +203,7 @@ def _wait_for_start(store: Any, workspace: WorkspaceAdapter, workstream_id: str,
 
 def _stage_profile(store: Any, harness: HarnessAdapter, binding: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, operation_id: str) -> Any:
     validate_worker_resume_git(store, binding)
-    scope = _scope(store, binding)
+    scope = _scope(store, binding, harness)
     verify_surface(surface)
     stage_root = Path(str(scope.get("profileStagingRoot", Path(binding["harness_home"]).parent / ".staging" / str(binding["workstream_id"]))))
     staged = harness.stage_profile({**scope, "operationId": operation_id, "runtimeSurfaceSha256": surface.content_sha256, "runtimeSurfaceRoot": surface.root_path, "runtimeSurfaceId": "surface_" + surface.content_sha256[:32]}, surface, stage_root)
@@ -213,7 +213,7 @@ def _stage_profile(store: Any, harness: HarnessAdapter, binding: Mapping[str, An
 
 def _materialize_and_launch(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, binding: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, desired: str, *, staged: Any | None = None) -> dict[str, Any]:
     validate_worker_resume_git(store, binding)
-    scope = _scope(store, binding)
+    scope = _scope(store, binding, harness)
     verify_surface(surface)
     if staged is None:
         staged = _stage_profile(store, harness, binding, surface, str(scope.get("operationId", "op_refresh")))
@@ -413,7 +413,7 @@ def ensure_runtime(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdap
     try:
         surface = _surface_for(binding, selected_harness, surface_resolver)
         surface_cache = {str(selected_harness.manifest.adapter_id): surface}
-        desired = _desired(selected_harness, _scope(store, binding), surface)
+        desired = _desired(selected_harness, _scope(store, binding, selected_harness), surface)
         if binding["desired_generation_sha256"] != desired:
             with store.transaction():
                 store.conn.execute("UPDATE runtime_bindings SET desired_generation_sha256=?,updated_at=? WHERE workstream_id=?", (desired, utc_now(), workstream_id))

@@ -313,7 +313,7 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "dataDirs": [str(data)]})
         with PiStore(self.root / "state") as store:
             binding = store.conn.execute("SELECT r.*,w.kind,w.project_id FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?", (self.workstream_id,)).fetchone()
-            scope = _binding_scope(store, binding)
+            scope = _binding_scope(store, binding, self.harness)
             self.assertIn(str(data.resolve()), scope["dataDirs"])
 
     def test_working_runtime_is_pending_and_not_interrupted(self):
