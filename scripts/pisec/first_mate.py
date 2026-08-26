@@ -345,6 +345,8 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
             ):
                 binding = _repair_launch_binding(store, workspace, harness, project, current_scope, binding, surface=surface)
             _recover_start(store, workspace, harness, current_scope, binding)
+        except NeedsAttentionError:
+            raise
         except Exception as error:
             _mark_attention(store, operation["operation_id"], existing["workstream_id"], str(error))
             raise NeedsAttentionError("First Mate runtime identity is missing or mismatched") from error

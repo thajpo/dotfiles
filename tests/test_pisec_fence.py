@@ -609,8 +609,9 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertEqual(policy["network"]["allowedDomains"], ["*"])
             self.assertIn(str(assigned.resolve()), policy["filesystem"]["allowRead"])
             self.assertIn(str(assigned.resolve()), policy["filesystem"]["allowWrite"])
-            with self.assertRaises(Exception):
-                render({**base, "executionProfile": "worker-default", "externalDomains": sorted([*WEB_SEARCH_DOMAINS, "example.com"])}, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
+            additional_scope = {**base, "executionProfile": "worker-default", "externalDomains": sorted([*WEB_SEARCH_DOMAINS, "example.com"])}
+            additional_policy, _ = render(additional_scope, root, agent, make_config(root), baseline=WEB_SEARCH_DOMAINS)
+            self.assertEqual(json.loads(additional_policy.read_text())["network"]["allowedDomains"], ["example.com", *WEB_SEARCH_DOMAINS])
 
     def test_real_fence_allows_assigned_write_and_denies_primary_checkout(self):
         features = subprocess.run(["fence", "--linux-features"], text=True, capture_output=True, check=True).stdout

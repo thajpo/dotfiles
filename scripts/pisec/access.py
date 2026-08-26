@@ -158,6 +158,9 @@ def authorize_apply_project_permissions(store: Any, *, approval_scope: Mapping[s
     now = utc_now()
     try:
         with store.transaction():
+            current_project = _project(store, project_id)
+            if json_digest(_current_permissions(store, current_project)) != approval_scope.get("previousPermissionsSha256"):
+                raise ScopeMismatchError("project permissions changed since approval")
             if store.conn.execute("SELECT 1 FROM authorizations WHERE operation_id=?", (operation["operation_id"],)).fetchone() is not None:
                 raise ScopeMismatchError("project permission operation was already authorized")
             store.conn.execute("INSERT INTO authorizations(authorization_id,operation_id,scope_sha256,kind,scope_json,actor,consumed_at) VALUES(?,?,?,?,?,?,?)", (new_id("az"), operation["operation_id"], json_digest(approval_scope), "project.permissions.update", canonical_json(approval_scope), actor, now))

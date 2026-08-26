@@ -257,8 +257,6 @@ def render_policy(
                 if child.resolve(strict=False) != worktree
             ],
         })
-        if profile == "worker-default" and baseline_domains and domains != sorted(set(baseline_domains)):
-            raise InvalidRequestError("default worker has unapproved additional external domains")
     data_dirs = scope.get("dataDirs")
     if data_dirs is None:
         data_dirs = []
