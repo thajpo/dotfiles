@@ -24,7 +24,7 @@ def main() -> int:
         event = json.load(sys.stdin)
     except (json.JSONDecodeError, UnicodeError):
         event = {}
-    event_name = str(event.get("event", "")) if isinstance(event, dict) else ""
+    event_name = str(event.get("hook_event_name", "")) if isinstance(event, dict) else ""
     state = "working" if event_name == "SessionStart" else "idle"
     native_id = event.get("thread_id") or event.get("session_id") if isinstance(event, dict) else None
     if not isinstance(native_id, str) or not native_id:

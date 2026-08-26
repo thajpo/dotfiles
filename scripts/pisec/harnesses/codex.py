@@ -364,8 +364,8 @@ class CodexHarnessAdapter:
         _secure_tree(state_root, tmp_dir)
         _secure_tree(state_root, surface_binding)
         _copy_safe_entry(surface_root / "managed", surface_binding / "managed")
-        codex_home = surface_binding / "home"
-        _secure_tree(surface_binding, codex_home)
+        config_root = surface_binding / "home"
+        _secure_tree(surface_binding, config_root)
         prompt_path = surface_binding / "worker-prompt.md"
         _atomic_write(prompt_path, _prompt(scope), mode=0o600)
         runtime_secret = state_root / "secrets" / f"{workstream_id}.token"
@@ -390,15 +390,16 @@ class CodexHarnessAdapter:
         os.chmod(mcp_path, 0o700)
         os.chmod(hook_path, 0o700)
         _atomic_write(
-            codex_home / "config.toml",
+            config_root / "config.toml",
             "\n".join(
                 (
                     f'model = {json.dumps(model)}',
                     f'model_reasoning_effort = {json.dumps(effort)}',
+                    f'openai_base_url = {json.dumps(str(self.harness_config["gateway"]["baseUrl"]).rstrip("/") + "/v1")}',
                     'approval_policy = "never"',
                     'sandbox_mode = "danger-full-access"',
                     "[features]",
-                    "codex_hooks = true",
+                    "hooks = true",
                     "[mcp_servers.pisec]",
                     f'command = {json.dumps(str(mcp_path))}',
                     "args = []",
@@ -408,7 +409,7 @@ class CodexHarnessAdapter:
             mode=0o600,
         )
         _atomic_write(
-            codex_home / "hooks.json",
+            config_root / "hooks.json",
             json.dumps({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": str(hook_path)}]}], "Stop": [{"hooks": [{"type": "command", "command": str(hook_path)}]}]}}, separators=(",", ":")) + "\n",
             mode=0o600,
         )
@@ -426,10 +427,10 @@ class CodexHarnessAdapter:
                 "HARNESS_EXECUTABLE": node_path,
                 "HARNESS_SCRIPT": executable_path,
                 "HARNESS_EXTENSION": hook_path,
-                "HARNESS_NATIVES": codex_home,
+                "HARNESS_NATIVES": home,
                 "HARNESS_RUN": home / "run",
                 "TMP_ROOT": tmp_dir,
-                "WORKSPACE_CONFIG": codex_home,
+                "WORKSPACE_CONFIG": Path.home() / ".config" / "herdr",
             },
             baseline_domains=CODEX_BASELINE_DOMAINS,
             template_root=surface_root / "managed" / "fence",
@@ -443,12 +444,12 @@ class CodexHarnessAdapter:
             runtime_token_sha256=hashlib.sha256(token.encode()).hexdigest(),
             generation_sha256=self.desired_generation(scope),
             adapter_data={
-                "codexHome": str(codex_home),
+                "codexHome": str(home),
                 "agentRoot": str(surface_binding),
                 "surfaceRoot": str(surface_binding),
-                "configPath": str(codex_home / "config.toml"),
+                "configPath": str(config_root / "config.toml"),
                 "promptPath": str(prompt_path),
-                "hooksPath": str(codex_home / "hooks.json"),
+                "hooksPath": str(config_root / "hooks.json"),
                 "mcpPath": str(mcp_path),
                 "hookPath": str(hook_path),
                 "model": model,

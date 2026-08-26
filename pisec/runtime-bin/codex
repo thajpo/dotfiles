@@ -48,6 +48,26 @@ def secure_readonly_tree(path: Path) -> None:
             fail(f"required immutable surface is unsafe: {path}")
 
 
+def reject_user_configuration(path: Path) -> None:
+    try:
+        children = tuple(path.iterdir())
+    except OSError:
+        fail(f"required directory is unavailable: {path}", 127)
+    for child in children:
+        if child.name == "hooks.json" or child.suffix == ".toml":
+            fail("worker-created user configuration is not permitted")
+
+
+def toml_string(value: str) -> str:
+    return json.dumps(str(value))
+
+
+def hook_override(event_name: str, hook_path: str) -> str:
+    return (
+        f"hooks.{event_name}=[{{hooks=[{{type=\"command\",command={toml_string(hook_path)}}}]}}]"
+    )
+
+
 def main() -> None:
     launcher = Path(__file__).absolute()
     secure_file(launcher, executable=True)
@@ -67,14 +87,18 @@ def main() -> None:
     surface = Path(str(descriptor["surfaceRoot"]))
     codex_home = Path(str(descriptor["codexHome"]))
     tmp_dir = Path(str(descriptor["tmpDir"]))
-    if not codex_home.is_relative_to(surface):
-        fail("Codex home escapes its immutable surface")
+    if codex_home != home or codex_home.is_relative_to(surface):
+        fail("Codex home is not the writable binding state")
     secure_directory(home)
     secure_directory(tmp_dir)
     secure_readonly_tree(surface)
-    secure_directory(codex_home, readonly=True)
+    secure_directory(codex_home)
+    reject_user_configuration(codex_home)
     for key in ("configPath", "promptPath", "mcpPath", "hookPath", "hooksPath", "policyPath"):
-        secure_file(Path(str(descriptor[key])))
+        path = Path(str(descriptor[key]))
+        if key in {"configPath", "promptPath", "mcpPath", "hookPath", "hooksPath", "policyPath"} and not path.is_relative_to(surface):
+            fail(f"{key} is outside the immutable surface")
+        secure_file(path)
     secure_file(Path(str(descriptor["launchSecretPath"])))
     secure_file(Path(str(descriptor["harnessExecutablePath"])))
     secure_file(Path(str(descriptor["nodeExecutablePath"])), executable=True)
@@ -135,7 +159,20 @@ def main() -> None:
         "GIT_CONFIG_VALUE_5": "false",
     }
     environment.update({key: value for key, value in os.environ.items() if key.startswith("LC_")})
+    codex_config = (
+        "features.hooks=true",
+        hook_override("SessionStart", str(descriptor["hookPath"])),
+        hook_override("Stop", str(descriptor["hookPath"])),
+        f"mcp_servers.pisec.command={toml_string(str(descriptor['mcpPath']))}",
+        "mcp_servers.pisec.args=[]",
+        f"openai_base_url={toml_string(str(descriptor['gatewayBaseUrl']).rstrip('/') + '/v1')}",
+        f"model_reasoning_effort={toml_string(str(descriptor['reasoningEffort']))}",
+        'approval_policy="never"',
+        'sandbox_mode="danger-full-access"',
+    )
     fence = [str(descriptor["fencePath"]), "--settings", str(descriptor["policyPath"]), "--", str(descriptor["nodeExecutablePath"]), str(descriptor["harnessExecutablePath"]), "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--no-alt-screen", "--cd", str(root), "--model", str(descriptor["model"])]
+    for override in codex_config:
+        fence.extend(("--config", override))
     if resume is None:
         fence.append(Path(str(descriptor["promptPath"])).read_text())
     else:

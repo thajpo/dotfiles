@@ -1,5 +1,6 @@
 from pathlib import Path
 import contextlib
+import io
 import json
 import os
 import stat
@@ -12,6 +13,7 @@ from scripts.pisec.access import effective_runtime_scope
 from scripts.pisec.access import authorize_apply_project_permissions, prepare_project_permissions
 from scripts.pisec.adapters import AdapterRegistry, AgentObservation
 from scripts.pisec.broker import BrokerDispatcher
+from scripts.pisec import codex_hook
 from scripts.pisec.first_mate import ensure_first_mate
 from scripts.pisec.models import ConflictError, NeedsAttentionError, ScopeMismatchError, canonical_json
 from scripts.pisec.pi_store import PiStore
@@ -139,6 +141,152 @@ class Phase10ScopeParityTests(unittest.TestCase):
             argv = json.loads(capture.read_text())
             codex_argv = argv[argv.index("--") + 1 :]
             self.assertIn("--dangerously-bypass-hook-trust", codex_argv)
+
+    def test_codex_launch_separates_writable_state_and_trusted_provider_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktree = root / "worker"
+            worktree.mkdir()
+            codex = dict(self._production_worker_adapters(root))["codex"]
+            capture = root / "fence-capture.json"
+            fence = Path(codex.root_config["fencePath"])
+            fence.write_text(
+                "#!/usr/bin/python3\n"
+                "import json\n"
+                "import os\n"
+                "from pathlib import Path\n"
+                "import sys\n"
+                f"Path({str(capture)!r}).write_text(json.dumps({{'argv': sys.argv[1:], 'env': {{key: os.environ.get(key) for key in ('CODEX_HOME', 'OPENAI_BASE_URL')}}}}))\n"
+            )
+            fence.chmod(0o700)
+            surface = codex.prepare_runtime_surface()
+            scope = {
+                "projectId": "prj_" + "f" * 32,
+                "workstreamId": "ws_" + "1" * 32,
+                "executionProfile": "worker-default",
+                "worktreePath": str(worktree),
+                "branchName": "pisec/ws_" + "1" * 32 + "/work",
+                "externalDomains": sorted(codex.profile_domains("worker-default", ("example.com",))),
+                "runtimeSurfaceSha256": surface.content_sha256,
+                "runtimeSurfaceRoot": surface.root_path,
+                "runtimeSurfaceId": "surface_" + surface.content_sha256[:32],
+            }
+            staged = codex.stage_profile(scope, surface, root / "codex-staging")
+            activated = codex.activate_profile(scope, staged)
+            launcher = codex.commit_launch_binding(
+                scope,
+                activated,
+                workspace_session_name="main",
+                workspace_id="w1",
+                workspace_view_id="w1:t1",
+                workspace_surface_id="w1:p1",
+            )
+
+            descriptor = json.loads((launcher.parent / "binding.json").read_text())
+            self.assertEqual(descriptor["codexHome"], activated.harness_home)
+            self.assertTrue(Path(descriptor["codexHome"]).is_relative_to(root / "codex-state" / "binding-state"))
+            self.assertTrue(Path(descriptor["configPath"]).is_relative_to(Path(activated.adapter_data["surfaceRoot"])))
+            self.assertNotEqual(descriptor["codexHome"], str(Path(activated.adapter_data["configPath"]).parent))
+            config_text = Path(descriptor["configPath"]).read_text()
+            self.assertIn('openai_base_url = "http://127.0.0.1:4000/v1"', config_text)
+
+            result = subprocess.run([str(launcher)], cwd=worktree, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            captured = json.loads(capture.read_text())
+            self.assertEqual(captured["env"]["CODEX_HOME"], activated.harness_home)
+            codex_argv = captured["argv"][captured["argv"].index("--") + 1 :]
+            config_values = [codex_argv[index + 1] for index, value in enumerate(codex_argv[:-1]) if value == "--config"]
+            self.assertIn('openai_base_url="http://127.0.0.1:4000/v1"', config_values)
+            self.assertIn("features.hooks=true", config_values)
+            self.assertTrue(any(value.startswith("hooks.SessionStart=") for value in config_values))
+            self.assertTrue(any(value.startswith("mcp_servers.pisec.command=") for value in config_values))
+
+    def test_codex_hook_classifies_native_session_start_as_working(self):
+        class RecordingSocket:
+            def __init__(self):
+                self.payload = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                return None
+
+            def connect(self, _path):
+                return None
+
+            def sendall(self, data):
+                self.payload = json.loads(data.decode())
+
+            def recv(self, _size):
+                return b"{}"
+
+        recording = RecordingSocket()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {
+                    "PISEC_RUNTIME_SOCKET": str(Path(tmp) / "runtime.sock"),
+                    "PISEC_RUNTIME_TOKEN": "t" * 48,
+                    "PISEC_WORKSTREAM_ID": "ws_" + "2" * 32,
+                    "PISEC_RUNTIME_INSTANCE_ID": "3" * 32,
+                    "PISEC_SURFACE_ID": "surface_" + "4" * 32,
+                    "PISEC_HARNESS_HOME": tmp,
+                    "PISEC_SESSION_START_SOURCE": "startup",
+                },
+            ), patch("scripts.pisec.codex_hook.socket.socket", return_value=recording), patch(
+                "sys.stdin", io.StringIO(json.dumps({"hook_event_name": "SessionStart", "session_id": "native-session"}))
+            ):
+                self.assertEqual(codex_hook.main(), 0)
+        self.assertIsNotNone(recording.payload)
+        self.assertEqual(recording.payload["payload"]["state"], "working")
+        self.assertEqual(recording.payload["payload"]["nativeSessionValue"], "native-session")
+
+    def test_codex_launcher_rejects_worker_created_user_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktree = root / "worker"
+            worktree.mkdir()
+            codex = dict(self._production_worker_adapters(root))["codex"]
+            capture = root / "fence-capture.json"
+            fence = Path(codex.root_config["fencePath"])
+            fence.write_text(
+                "#!/usr/bin/python3\n"
+                "import json\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                f"Path({str(capture)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+            )
+            fence.chmod(0o700)
+            surface = codex.prepare_runtime_surface()
+            scope = {
+                "projectId": "prj_" + "8" * 32,
+                "workstreamId": "ws_" + "9" * 32,
+                "executionProfile": "worker-default",
+                "worktreePath": str(worktree),
+                "branchName": "pisec/ws_" + "9" * 32 + "/work",
+                "externalDomains": sorted(codex.profile_domains("worker-default", ("example.com",))),
+                "runtimeSurfaceSha256": surface.content_sha256,
+                "runtimeSurfaceRoot": surface.root_path,
+                "runtimeSurfaceId": "surface_" + surface.content_sha256[:32],
+            }
+            staged = codex.stage_profile(scope, surface, root / "codex-staging")
+            activated = codex.activate_profile(scope, staged)
+            launcher = codex.commit_launch_binding(
+                scope,
+                activated,
+                workspace_session_name="main",
+                workspace_id="w1",
+                workspace_view_id="w1:t1",
+                workspace_surface_id="w1:p1",
+            )
+            Path(activated.harness_home, "config.toml").write_text("openai_base_url = \"https://evil.invalid\"\n")
+            result = subprocess.run([str(launcher)], cwd=worktree, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("user configuration", result.stderr)
 
     def test_fixture_generation_hashes_every_production_scope_input(self):
         with tempfile.TemporaryDirectory() as tmp:
