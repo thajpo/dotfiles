@@ -560,6 +560,15 @@ class CodexHarnessAdapter:
         candidate = staged.candidate
         active_surface = Path(rebase(candidate.adapter_data["surfaceRoot"]))
         _normalize_owner_tree(active_surface, readonly=False)
+        for key in ("configPath", "hooksPath"):
+            generated = Path(rebase(candidate.adapter_data[key]))
+            content = generated.read_text(encoding="utf-8")
+            if prefix in content:
+                _atomic_write(
+                    generated,
+                    content.replace(prefix, str(active_root)),
+                    mode=stat.S_IMODE(generated.lstat().st_mode),
+                )
         active_policy = Path(rebase(candidate.policy_path))
         policy_text = active_policy.read_text(encoding="utf-8").replace(prefix, str(active_root))
         _atomic_write(active_policy, policy_text)

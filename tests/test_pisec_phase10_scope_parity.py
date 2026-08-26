@@ -118,6 +118,12 @@ class Phase10ScopeParityTests(unittest.TestCase):
                 workspace_view_id="w1:t1",
                 workspace_surface_id="w1:p1",
             )
+            config_text = Path(activated.adapter_data["configPath"]).read_text()
+            hooks_text = Path(activated.adapter_data["hooksPath"]).read_text()
+            self.assertNotIn(str(Path(staged.staging_root).resolve()), config_text)
+            self.assertNotIn(str(Path(staged.staging_root).resolve()), hooks_text)
+            self.assertIn(activated.adapter_data["mcpPath"], config_text)
+            self.assertIn(activated.adapter_data["hookPath"], hooks_text)
             result = subprocess.run([str(launcher)], cwd=worktree, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 
