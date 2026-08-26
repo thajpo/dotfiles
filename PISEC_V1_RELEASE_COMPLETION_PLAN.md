@@ -71,17 +71,18 @@ tags.
 - Earlier candidates and their live acceptance attempts are historical only;
   their identities must not be used for v1 release evidence.
 - The corrected source-core commit is
-  `64f4b4641c57f59940fd053e36c975e141d49636` with tree
-  `b241f01848fb1d14e89e80e4e74ff2401f7a9fa8`. It contains the bounded
+  `fac003d6f69f2464a2ddc2c8d3d32d1cd781b44c` with tree
+  `a971bcd7cf027525c7c496dd07806fcda50dc5a6`. It contains the bounded
   harness-aware fleet usability repair, fail-closed binding-harness identity
   validation, protected OMP/Codex activation and retained-backup replacement
   parity, the role-aware OMP worker startup attestation repair, and the
   Codex launcher repair that separates writable native state from the sealed
   owner-controlled surface. It also passes trusted provider, MCP, and hook
   paths through explicit native configuration overrides, rejects worker-created
-  user configuration on later launches, and classifies native `SessionStart`
-  input correctly.
-- Its clean source gate passed: Python 271 tests with 1 skipped, Bun 9/9,
+  user configuration on later launches, classifies native `SessionStart`
+  input correctly, and preserves sequence-1 session-start attestation across
+  runtime-instance restarts.
+- Its clean source gate passed: Python 273 tests with 1 skipped, Bun 9/9,
   compileall, shell syntax, operation-catalogue parity, Bun build, and
   `git diff --check`. The focused Phase 10 scope-parity suite passed 19/19
   and the adjacent cluster passed 69 tests with 1 skipped.
@@ -168,9 +169,10 @@ surface enabled hooks without granting the exact pinned Codex automation
 invocation its documented hook-trust bypass. The generated launcher omitted
 `--dangerously-bypass-hook-trust`, so Codex never ran the authenticated
 `SessionStart` hook. The bounded launcher repair and argv-capture regression
-were folded into `64f4b46`, along with the writable native-state split,
+were folded into `fac003d`, along with the writable native-state split,
 explicit loopback/provider/MCP/hook overrides, native hook-event parsing, and
-fail-closed refusal of worker-created user configuration. The broker still
+fail-closed refusal of worker-created user configuration, per-instance
+Codex session sequencing, and valid runtime protocol request IDs. The broker still
 requires exact generation/session-start attestation, so this does not weaken
 the runtime boundary. The remaining work is the final documentation/status
 source-acceptance descendant, corrected deployment/recovery, archive/reset of

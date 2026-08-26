@@ -3033,18 +3033,18 @@ acceptance, evidence, and the local tag.
 At this handoff:
 
 - committed `HEAD` is the corrected source-core candidate
-  `64f4b4641c57f59940fd053e36c975e141d49636`, tree
-  `b241f01848fb1d14e89e80e4e74ff2401f7a9fa8`;
+  `fac003d6f69f2464a2ddc2c8d3d32d1cd781b44c`, tree
+  `a971bcd7cf027525c7c496dd07806fcda50dc5a6`;
 - the working tree contains only the in-scope final documentation/status
   update required to create the final descendant candidate;
 - no live reset, session wipe, tag, push, or remote mutation has been
   performed from this candidate;
-- focused Phase 10 scope-parity tests pass 19/19, including the fail-first
-  Codex writable-state/provider/hook boundary and worker-created user-config
-  refusal assertions;
+- focused Phase 10 scope-parity tests pass 21/21, including the fail-first
+  Codex writable-state/provider/hook boundary, restart-attestation, public
+  runtime-socket, and worker-created user-config refusal assertions;
 - the adjacent adapter, Fence, runtime-surface, installer, and updater suite
   passes 69 tests with 1 skipped, and the complete clean source gate passes
-  271 Python tests with 1 skipped and Bun 9/9;
+  273 Python tests with 1 skipped and Bun 9/9;
 - compileall, shell syntax, catalogue parity, Bun build, and `git diff --check`
   pass; the exact pinned Codex dependency reports `0.147.0`;
 - a direct exact Codex 0.147.0 control fired `SessionStart` and used the
