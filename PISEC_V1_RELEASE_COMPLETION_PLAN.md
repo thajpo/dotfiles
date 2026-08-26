@@ -88,13 +88,14 @@ that the test boundary did not model. They are not release proof. Neither OID
 above may be used as the final corrected `bootstrapV1Commit` or
 `finalV1Commit`.
 
-The corrected source-core candidate is now committed at
+The corrected source-core candidate is committed at
 `45eefe7f084f9568c362f869bb2dfa9611ce7576` with tree
 `bf33f52c4cf003ae50692e3c80b48f538bcf160f`. Its exact clean Phase 10.1 gate
 passed: compileall, shell syntax, catalogue parity, Bun build, Python 262
-tests with 1 skipped, and Bun 8/8. It is the current bootstrap candidate; the
-documentation/status descendant still must become the final candidate and
-pass the complete gate.
+tests with 1 skipped, and Bun 8/8. It is the current bootstrap candidate. The
+final documentation/status descendant is `97edbc3` with tree
+`23e92fd95edf2232e813c3bcbeba0383a82e9b50`; its exact clean Phase 10.1 gate
+also passed with Python 262 tests and 1 skipped and Bun 8/8.
 
 This plan file is tracked and preserved as the executable handoff. The
 compact status journal remains the only status record and contains only the
