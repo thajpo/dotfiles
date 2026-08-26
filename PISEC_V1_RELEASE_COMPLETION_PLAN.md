@@ -27,8 +27,8 @@ sections of the authoritative plan before changing source or live state:
 If this file and the authoritative plan differ about product behavior,
 architecture, safety, or acceptance, the authoritative plan controls. This
 file controls only the later factual handoff: current source/live state, the
-newly proven Phase 10 release blocker, and the ordered route from that blocker
-to completion. In particular, it supersedes stale statements that the commits
+newly proven and repaired Phase 10 source blocker, and the ordered route from
+that blocker to completion. In particular, it supersedes stale statements that the commits
 currently named as Phase 10 candidates are releasable without another source
 correction.
 
@@ -71,17 +71,17 @@ tags.
 - Earlier candidates and their live acceptance attempts are historical only;
   their identities must not be used for v1 release evidence.
 - The corrected source-core commit is
-  `773c034bb9b292b030df8a1662914af0ca62d6cb` with tree
-  `60e7237688d7ee1c3f13f246534b662bba039721`. It contains the bounded
+  `b41efa5a687bba9132cd318490b7b8e95b3d94bc` with tree
+  `07dc2bb82c51921d818607335ad4c9eefa2a7887`. It contains the bounded
   harness-aware fleet usability repair, fail-closed binding-harness identity
   validation, protected OMP/Codex activation and retained-backup replacement
-  parity, and the role-aware OMP worker startup attestation repair.
-- Its clean source gate passed: Python 266 tests with 1 skipped, Bun 9/9,
+  parity, the role-aware OMP worker startup attestation repair, and the
+  Codex launcher repair required to accept the sealed `CODEX_HOME` surface.
+- Its clean source gate passed: Python 267 tests with 1 skipped, Bun 9/9,
   compileall, shell syntax, operation-catalogue parity, Bun build, and
-  `git diff --check`. The focused Phase 10 scope/adapter slice passed 15/15,
-  including production OMP/Codex activation/replacement/sealing with sealed
-  existing targets and retained cross-tree backups, the independent First
-  Mate harness-mismatch guard, and fail-closed omitted harness validation.
+  `git diff --check`. The focused Pisec regression cluster passed 118 tests
+  with 1 skipped, including production Codex materialization, activation,
+  binding creation, and launcher execution against the immutable surface.
 - The final documentation/status descendant will be the new
   `finalV1Commit`; the corrected source-core commit above is the
   `bootstrapV1Commit`. The descendant's full OID and tree must be captured
@@ -94,18 +94,23 @@ required phase, commit, checks, and blocker fields.
 
 ### 3.2 Current deployment and retained recovery material
 
-- The current corrected bootstrap deployment is
-  `deploy-4c25f0eca4054299a9c89b1e469e0e53`.
-- Its deployed source is the corrected source core
+- The retained corrected-bootstrap deployment is
+  `deploy-c88a76f7927448f6b2762afc0e85e951`.
+- Its deployed source is the previous corrected source core
   `773c034bb9b292b030df8a1662914af0ca62d6cb`, tree
   `60e7237688d7ee1c3f13f246534b662bba039721`.
+- The currently installed deployment is the historical final candidate
+  `deploy-a4ac1a05453a4e57b9629dfbf291a412`, sourced from
+  `08d002759e06f0aa627be812ffe9294fa28523ae` with tree
+  `5c6186c052f46edb474e26ed26e971e109663ae4`; it is not final release
+  evidence and must be replaced by the new corrected candidates.
 - Its deployment bundle SHA-256 is
   `05e439ad244361a642c63072f8044a477174c09dea95809f08daa52894a84525`.
 - Stable updater SHA-256:
   `9dd93dd26ecd4635e888eec9ef63fa9480fd367066a11ed096d7448daaeb9846`.
-- The installed stable updater identifies the corrected source core
-  `773c034bb9b292b030df8a1662914af0ca62d6cb`, tree
-  `60e7237688d7ee1c3f13f246534b662bba039721`, and bundle
+- The installed stable updater still identifies the historical final candidate
+  `08d002759e06f0aa627be812ffe9294fa28523ae`, tree
+  `5c6186c052f46edb474e26ed26e971e109663ae4`, and bundle
   `05e439ad244361a642c63072f8044a477174c09dea95809f08daa52894a84525`.
   It must be refreshed from the final documentation/status descendant after
   that candidate is committed and accepted.
@@ -131,27 +136,41 @@ required phase, commit, checks, and blocker fields.
 
 ### 3.3 Current fresh-v1 live state
 
-- The corrected-bootstrap replay is complete: all 14 existing repositories
-  from the reviewed runbook are registered; the absent
-  `/tmp/pisec-live-acceptance-epoch3` placeholder is intentionally excluded.
-- Nine intended-active projects are open with bound, idle, usable Secretaries;
-  one canonical First Mate is bound, idle, and usable; four reviewed projects
-  are in fleet mode and five remain in project mode. All nine reviewed
-  permission replacements are `succeeded/committed`, including two affected
-  bindings for the control project. Doctor and reconcile are green.
-- This is corrected-bootstrap evidence, not final release evidence. The final
-  documentation/status candidate, clean descendant source acceptance, ordinary
-  update/LKG, recovery drill, 51-scenario evidence, external acceptance record,
-  and local tag remain outstanding.
+- The corrected-bootstrap replay was green before the mandatory live worker
+  probe: all 14 existing repositories from the reviewed runbook were
+  registered; the absent `/tmp/pisec-live-acceptance-epoch3` placeholder was
+  intentionally excluded; nine intended-active projects had bound, idle,
+  usable Secretaries; one canonical First Mate was bound, idle, and usable;
+  four reviewed projects were in fleet mode and five remained in project mode;
+  all nine reviewed permission replacements were `succeeded/committed`.
+- The live Codex worker probe then created one bounded worker operation,
+  `op_87057c8a94f31272d3f4896ef5773a60`, for workstream
+  `ws_87f7049dc746fc68b616948f4fbfdfa5`. It failed closed at
+  `profile_materialized` because the launcher rejected the sealed Codex home
+  before runtime attestation. Its Herdr pane is a shell with no session-start
+  evidence; no acceptance, integration, completion, or cleanup record exists.
+  This partial state is not final evidence and must be archived/reset through
+  the verified updater after the corrected candidates are installed.
+- The final documentation/status candidate, clean descendant source
+  acceptance, corrected deployment/LKG, recovery drill, 51-scenario evidence,
+  external acceptance record, and local tag remain outstanding.
 
 ## 4. Resolved source blockers and remaining release work
 
 The earlier deterministic scope, fleet-transition, and OMP worker-attestation
 blockers were reproduced, covered by fail-first tests, repaired in bounded
-source commits, and passed the clean source gate. The corrected-bootstrap live
-replay is green. The remaining work is the final documentation/status source
-acceptance descendant, ordinary update/recovery, and complete live acceptance;
-it must not introduce another source workaround.
+source commits, and passed the clean source gate. The mandatory live Codex
+worker probe exposed one additional root defect: profile construction seals
+`CODEX_HOME` as part of the immutable surface, while the Codex launcher
+required that directory to be writable and also called `secure_file` with an
+unsupported keyword. The fail-first production launcher test reproduced the
+exit-126 preflight failure; `b41efa5a687bba9132cd318490b7b8e95b3d94bc`
+corrects the launcher to validate immutable `0500` Codex home separately from
+the writable `0700` binding state and removes the invalid call. The corrected
+source gate and independent Luna audit are green. The remaining work is the
+final documentation/status source acceptance descendant, corrected
+deployment/recovery, archive/reset of the partial failed-worker state, and
+complete live acceptance; it must not introduce another source workaround.
 
 Historical diagnosis (retained to explain the fail-first evidence):
 
@@ -192,8 +211,9 @@ The bounded repair also covered two adjacent source blockers:
   local wait without a final authoritative usable-binding postcondition,
   leaving a reconcile race able to commit an already-stale success.
 
-No live worker was created during the diagnosis, so that defect did not widen
-live state.
+The failed live probe created no completion, acceptance, integration, merge, or
+cleanup record. Its single needs-attention worker operation is explicitly
+included in the reviewed partial-state archive/reset scope.
 
 ## 5. Required source correction
 
