@@ -60,9 +60,10 @@ class Phase10ScopeParityTests(unittest.TestCase):
                             self.assertEqual(stat.S_IMODE(active_policy.stat().st_mode), 0o400)
                             self.assertEqual(stat.S_IMODE(Path(activated.adapter_data["surfaceRoot"]).stat().st_mode), 0o500)
                             os.chmod(Path(activated.adapter_data["surfaceRoot"]), 0o500)
-                            replacement = adapter.stage_profile(scope, surface, root / (adapter_id + "-replacement"))
+                            replacement_scope = {**scope, "permissionBackupRoot": str(root / (adapter_id + "-backup"))}
+                            replacement = adapter.stage_profile(replacement_scope, surface, root / (adapter_id + "-replacement"))
                             try:
-                                replaced = adapter.activate_profile(scope, replacement)
+                                replaced = adapter.activate_profile(replacement_scope, replacement)
                                 self.assertEqual(stat.S_IMODE(Path(replaced.adapter_data["surfaceRoot"]).stat().st_mode), 0o500)
                             finally:
                                 adapter.discard_staged_profile(replacement)

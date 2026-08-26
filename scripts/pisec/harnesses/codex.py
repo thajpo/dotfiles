@@ -89,6 +89,8 @@ def _activate_directory(staged: Path, target: Path, retained_backup: Path | None
                     raise NeedsAttentionError("Codex permission backup already exists")
                 backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 os.chmod(backup.parent, 0o700)
+            if target.is_dir() and not target.is_symlink():
+                os.chmod(target, 0o700)
             os.replace(target, backup)
             replaced = True
         os.replace(staged, target)
