@@ -89,14 +89,12 @@ above may be used as the final corrected `bootstrapV1Commit` or
 `finalV1Commit`.
 
 The corrected source-core candidate is committed at
-`45eefe7f084f9568c362f869bb2dfa9611ce7576` with tree
-`bf33f52c4cf003ae50692e3c80b48f538bcf160f`. Its exact clean Phase 10.1 gate
-passed: compileall, shell syntax, catalogue parity, Bun build, Python 262
+`4127ebb6297043e0ec2e1f87ac6e949ac2e5c9a4` with tree
+`8fc9e21ad945763814cccee34956d8d731ecb49b`. Its exact clean Phase 10.1
+gate passed: compileall, shell syntax, catalogue parity, Bun build, Python 264
 tests with 1 skipped, and Bun 8/8. It is the current bootstrap candidate. The
-final documentation/status descendant is
-`5881772e601f377ec6fbfd217920d09b038a05a7` with tree
-`8e73ffa75d2af6bac69a95c943c250c850781cbc`; its exact clean Phase 10.1 gate
-also passed with Python 262 tests and 1 skipped and Bun 8/8.
+final documentation/status descendant is the candidate-identity descendant of
+this repair; its exact OID and tree will be recorded before live deployment.
 
 This plan file is tracked and preserved as the executable handoff. The
 compact status journal remains the only status record and contains only the
