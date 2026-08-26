@@ -164,13 +164,13 @@ def _plain(value: Any) -> Any:
     raise InvalidRequestError(f"unsupported JSON value type: {type(value).__name__}")
 
 
-def _check_json(value: Any, *, depth: int = 0, max_text: int = MAX_TEXT, counter: list[int] | None = None) -> None:
+def _check_json(value: Any, *, depth: int = 0, max_text: int = MAX_TEXT, max_items: int = MAX_JSON_ITEMS, counter: list[int] | None = None) -> None:
     if depth > MAX_JSON_DEPTH:
         raise InvalidRequestError("JSON nesting is too deep")
     if counter is None:
         counter = [0]
     counter[0] += 1
-    if counter[0] > MAX_JSON_ITEMS:
+    if counter[0] > max_items:
         raise InvalidRequestError("JSON contains too many values")
     if isinstance(value, str):
         if "\x00" in value or len(value) > max_text:
@@ -182,12 +182,12 @@ def _check_json(value: Any, *, depth: int = 0, max_text: int = MAX_TEXT, counter
         return
     elif isinstance(value, list):
         for item in value:
-            _check_json(item, depth=depth + 1, max_text=max_text, counter=counter)
+            _check_json(item, depth=depth + 1, max_text=max_text, max_items=max_items, counter=counter)
     elif isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str) or "\x00" in key or len(key) > max_text:
                 raise InvalidRequestError("JSON object key is invalid")
-            _check_json(item, depth=depth + 1, max_text=max_text, counter=counter)
+            _check_json(item, depth=depth + 1, max_text=max_text, max_items=max_items, counter=counter)
     else:
         raise InvalidRequestError(f"unsupported JSON value type: {type(value).__name__}")
 
@@ -201,7 +201,7 @@ def canonical_json(value: Any, *, max_bytes: int = MAX_JSON_BYTES, max_text: int
     return text
 
 
-def parse_json_strict(value: str | bytes, *, max_bytes: int = MAX_JSON_BYTES) -> Any:
+def parse_json_strict(value: str | bytes, *, max_bytes: int = MAX_JSON_BYTES, max_items: int = MAX_JSON_ITEMS) -> Any:
     raw = value.encode("utf-8") if isinstance(value, str) else value
     if len(raw) > max_bytes:
         raise InvalidRequestError("JSON value is too large")
@@ -220,7 +220,7 @@ def parse_json_strict(value: str | bytes, *, max_bytes: int = MAX_JSON_BYTES) ->
         raise InvalidRequestError("request is not UTF-8") from error
     except json.JSONDecodeError as error:
         raise InvalidRequestError("malformed JSON") from error
-    _check_json(parsed)
+    _check_json(parsed, max_items=max_items)
     return parsed
 
 

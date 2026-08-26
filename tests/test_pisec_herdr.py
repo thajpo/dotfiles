@@ -21,12 +21,24 @@ class FakeHerdrState:
         self.created = False
         self.agent_status = "idle"
         self.official_authority = True
+        self.large_snapshot = False
 
     def result(self, method, params):
         self.requests.append((method, params))
         if method == "ping":
             return {"type": "pong", "version": "0.8.0", "protocol": 19}
         if method == "session.snapshot":
+            if self.large_snapshot:
+                snapshot = {
+                    "version": "0.8.0",
+                    "protocol": 19,
+                    "workspaces": [],
+                    "tabs": [],
+                    "panes": [],
+                    "layouts": [{"layout_id": f"layout-{index}"} for index in range(4200)],
+                    "agents": [],
+                }
+                return {"type": "session_snapshot", "snapshot": snapshot}
             if not self.created:
                 snapshot = {"version": "0.8.0", "protocol": 19, "workspaces": [], "tabs": [], "panes": [], "layouts": [], "agents": []}
             else:
@@ -255,6 +267,11 @@ class HerdrTests(unittest.TestCase):
         os.chmod(self.path, 0o660)
         with self.assertRaises(Exception):
             self.adapter.snapshot()
+
+    def test_large_legitimate_snapshot_remains_bounded_and_readable(self):
+        self.state.large_snapshot = True
+        snapshot = self.adapter.snapshot()
+        self.assertEqual(len(snapshot["layouts"]), 4200)
 
     def test_idle_runtime_stop_uses_pane_preserving_eof(self):
         self.assertEqual(self.adapter.stop_runtime("w1:p1"), {"type": "ok"})

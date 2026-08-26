@@ -12,12 +12,13 @@ import stat
 from typing import Any, Mapping, Sequence
 
 from ..adapters import AdapterHealth, AgentObservation, HarnessManifest, RuntimeProcessObservation, WorkspaceAdapter, WorkspaceManifest, WorkspaceObservation
-from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canonical_json, new_id, parse_json_strict, utc_now
+from ..models import MAX_JSON_ITEMS, InvalidRequestError, NeedsAttentionError, PisecError, canonical_json, new_id, parse_json_strict, utc_now
 from ..runtime import WORKSPACE_RUNTIME_MISSING
 
 HERDR_PROTOCOL = 19
 HERDR_MIN_VERSION = (0, 8, 0)
 MAX_RESPONSE = 2 * 1024 * 1024
+MAX_SNAPSHOT_ITEMS = MAX_JSON_ITEMS * 4
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -110,7 +111,11 @@ class HerdrWorkspaceAdapter:
                 if size > MAX_RESPONSE:
                     raise PisecError("workspace response exceeds the safety bound")
                 chunks.append(chunk)
-        response = parse_json_strict(b"".join(chunks).rstrip(b"\n"), max_bytes=MAX_RESPONSE)
+        response = parse_json_strict(
+            b"".join(chunks).rstrip(b"\n"),
+            max_bytes=MAX_RESPONSE,
+            max_items=MAX_SNAPSHOT_ITEMS if method == "session.snapshot" else MAX_JSON_ITEMS,
+        )
         if not isinstance(response, dict) or response.get("id") != request_id:
             raise PisecError("workspace returned a mismatched response")
         if "error" in response:
