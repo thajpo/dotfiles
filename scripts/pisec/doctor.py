@@ -17,6 +17,7 @@ from .models import NeedsAttentionError, canonical_json
 from .pi_schema import SCHEMA_NAME, SCHEMA_VERSION, schema_digest
 from .pi_store import default_state_root
 from .operations import authoritative_workstream_creation
+from .runtime import usable_runtime_binding
 from .runtime_surface import capture_runtime_surface
 
 
@@ -228,14 +229,51 @@ def run_doctor(
                 creation_errors.append(f"{workstream['workstream_id']}: {str(error)[:160]}")
         _check(checks, "Authoritative worker creation records", not creation_errors, canonical_json({"errors": creation_errors}))
         for row in store.conn.execute(
+            "SELECT w.workstream_id,r.workstream_id AS binding_workstream_id FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) WHERE w.desired_state='active' ORDER BY w.workstream_id"
+        ):
+            exists = row["binding_workstream_id"] == row["workstream_id"]
+            _check(checks, f"Active binding {row['workstream_id']}", exists, "present" if exists else "active workstream has no runtime binding")
+        for row in store.conn.execute(
+            "SELECT p.project_id,p.secretary_workstream_id,w.project_id AS supervisor_project_id,w.kind,w.desired_state,w.provisioning_state,r.workstream_id AS binding_workstream_id "
+            "FROM projects p LEFT JOIN workstreams w ON w.workstream_id=p.secretary_workstream_id LEFT JOIN runtime_bindings r ON r.workstream_id=w.workstream_id "
+            "WHERE p.active=1 ORDER BY p.project_id"
+        ):
+            supervisor_ok = bool(
+                row["secretary_workstream_id"]
+                and row["supervisor_project_id"] == row["project_id"]
+                and row["kind"] == "secretary"
+                and row["desired_state"] == "active"
+                and row["provisioning_state"] == "bound"
+                and row["binding_workstream_id"] == row["secretary_workstream_id"]
+            )
+            _check(checks, f"Project supervisor {row['project_id']}", supervisor_ok, "bound Secretary" if supervisor_ok else "active project lacks one bound Secretary")
+        for row in store.conn.execute(
             "SELECT r.*,w.kind AS workstream_kind,w.desired_state AS workstream_desired_state,w.provisioning_state AS workstream_provisioning_state,w.execution_profile AS workstream_execution_profile,w.worktree_path AS workstream_worktree_path,w.harness_id AS workstream_harness_id,w.workspace_adapter_id AS workstream_workspace_adapter_id "
             "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) ORDER BY r.workstream_id"
         ):
             ids_ok = registry is not None and row["harness_id"] in harness_ids and row["workspace_adapter_id"] in workspace_ids and row["workspace_adapter_id"] == selected_workspace_id and row["harness_id"] == row["workstream_harness_id"] and row["workspace_adapter_id"] == row["workstream_workspace_adapter_id"]
-            _check(checks, f"Binding {row['workstream_id']}", ids_ok, f"harness={row['harness_id']} workspace={row['workspace_adapter_id']} state={row['observed_state']}")
-            generation_ok = row["workstream_desired_state"] != "active" or row["workstream_provisioning_state"] != "bound" or (isinstance(row["desired_generation_sha256"], str) and row["applied_generation_sha256"] == row["desired_generation_sha256"])
+            binding_ok = False
+            if ids_ok and registry is not None:
+                binding_ok = usable_runtime_binding(
+                    store,
+                    str(row["workstream_id"]),
+                    registry.resolve_workspace(str(row["workspace_adapter_id"])),
+                    registry.resolve_harness(str(row["harness_id"])),
+                    allowed_states=frozenset({"idle", "working", "blocked"}),
+                )
+            _check(checks, f"Binding {row['workstream_id']}", binding_ok, f"harness={row['harness_id']} workspace={row['workspace_adapter_id']} state={row['observed_state']} provisioning={row['workstream_provisioning_state']}")
+            generation_ok = (
+                row["workstream_desired_state"] == "active"
+                and row["workstream_provisioning_state"] == "bound"
+                and isinstance(row["desired_generation_sha256"], str)
+                and row["applied_generation_sha256"] == row["desired_generation_sha256"]
+                and row["launch_generation_sha256"] is None
+                and not row["refresh_pending"]
+                and row["refresh_operation_id"] is None
+                and row["refresh_started_at"] is None
+            )
             _check(checks, f"Binding generation {row['workstream_id']}", generation_ok, "current" if generation_ok else "stale; run pisec project refresh --all")
-            if ids_ok and registry is not None and row["workstream_desired_state"] == "active" and row["workstream_provisioning_state"] == "bound":
+            if binding_ok and registry is not None:
                 binding = dict(row)
                 workstream = {"kind": row["workstream_kind"], "worktree_path": row["workstream_worktree_path"], "desired_state": row["workstream_desired_state"], "execution_profile": row["workstream_execution_profile"]}
                 try:

@@ -275,11 +275,13 @@ class BrokerDispatcher:
                 if current_row is None or current_row["refresh_pending"] or current_row["desired_state"] != "active" or current_row["provisioning_state"] not in {"bound", "needs_attention"}:
                     continue
                 current_harness = self.registry.resolve_harness(str(current_row["harness_id"]))
-                selected_generation = current_row["launch_generation_sha256"] or current_row["applied_generation_sha256"]
+                selected_generation = current_row["applied_generation_sha256"]
                 from .models import validate_sha256
                 try:
                     validate_sha256(selected_generation, "runtime generation")
                 except InvalidRequestError:
+                    continue
+                if current_row["launch_generation_sha256"] is not None or current_row["desired_generation_sha256"] != selected_generation:
                     continue
                 binding = dict(current_row)
                 observation = self.workspace.observe_surface(
@@ -322,10 +324,12 @@ class BrokerDispatcher:
                 self._last_resume_attempt[workstream_id] = time.monotonic()
                 now = utc_now()
                 with store.transaction():
-                    store.conn.execute(
-                        "UPDATE runtime_bindings SET observed_state='starting',launch_generation_sha256=IFNULL(applied_generation_sha256,launch_generation_sha256),last_observed_at=?,updated_at=? WHERE workstream_id=?",
-                        (now, now, workstream_id),
+                    cursor = store.conn.execute(
+                        "UPDATE runtime_bindings SET observed_state='starting',runtime_instance_id=NULL,report_seq=0,session_start_event_sequence=NULL,session_start_report_seq=NULL,session_started_at=NULL,last_observed_at=?,updated_at=? WHERE workstream_id=? AND refresh_pending=0 AND refresh_operation_id IS NULL AND refresh_started_at IS NULL AND launch_generation_sha256 IS NULL AND desired_generation_sha256=? AND applied_generation_sha256=?",
+                        (now, now, workstream_id, selected_generation, selected_generation),
                     )
+                    if cursor.rowcount != 1:
+                        continue
                     store.conn.execute(
                         "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?",
                         (now, workstream_id),

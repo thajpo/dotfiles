@@ -145,6 +145,17 @@ class ProjectTests(unittest.TestCase):
                 )
                 with self.assertRaises(ConflictError):
                     deactivate_project(store, project["project_id"], None, None)
+                self.assertIsNone(
+                    store.conn.execute(
+                        "SELECT 1 FROM operations WHERE project_id=? AND kind='project.deactivate'",
+                        (project["project_id"],),
+                    ).fetchone()
+                )
+                state = store.conn.execute(
+                    "SELECT active,lifecycle_attention_reason FROM projects WHERE project_id=?",
+                    (project["project_id"],),
+                ).fetchone()
+                self.assertEqual(tuple(state), (1, None))
 
     def test_decisions_are_project_scoped_and_resolve_once(self):
         with tempfile.TemporaryDirectory() as tmp:

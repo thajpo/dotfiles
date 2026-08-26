@@ -13,6 +13,7 @@ from scripts.pisec.models import AuthorizationError, InvalidRequestError, PisecE
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
 from scripts.pisec.protocol import decode_request, request, success_response
+from scripts.pisec.runtime import usable_runtime_binding
 from scripts.pisec.secretary import ensure_secretary
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
@@ -159,7 +160,7 @@ class BrokerSocketTests(unittest.TestCase):
         finally:
             release.set()
             service.stop()
-    def test_startup_reconcile_relaunches_shell_with_stale_agent_metadata(self):
+    def test_startup_reconcile_leaves_stale_generation_stopped_for_refresh(self):
         repo_path = str(self.repo)
         self.workspace.worktrees[repo_path] = WorkspaceObservation(
             workspace_id=self.binding["workspace_id"],
@@ -186,22 +187,99 @@ class BrokerSocketTests(unittest.TestCase):
                 (self.binding["workstream_id"],),
             )
         result = self.service.dispatcher.startup_reconcile()
-        self.assertIn(
+        self.assertNotIn(
             {"workstreamId": self.binding["workstream_id"], "launched": True},
             result["resumed"],
         )
-        self.assertIn(self.binding["agent_name"], self.workspace.agents)
-        self.assertTrue(any(call[0] == "run" for call in self.workspace.calls))
+        self.assertFalse(any(call[0] == "run" for call in self.workspace.calls))
         with PiStore(self.state) as store:
             restored = store.conn.execute(
-                "SELECT desired_generation_sha256,applied_generation_sha256,launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?",
+                "SELECT desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,observed_state FROM runtime_bindings WHERE workstream_id=?",
                 (self.binding["workstream_id"],),
             ).fetchone()
-            # Startup restores the applied generation and leaves it stale until
-            # an explicit refresh upgrades the descriptor and artifacts.
             self.assertNotEqual(restored["desired_generation_sha256"], restored["applied_generation_sha256"])
             self.assertEqual(restored["applied_generation_sha256"], "a" * 64)
             self.assertIsNone(restored["launch_generation_sha256"])
+            self.assertEqual(restored["observed_state"], "idle")
+
+    def test_startup_reconcile_accepts_real_attestation_without_ownerless_launch(self):
+        repo_path = str(self.repo)
+        surface_id = str(self.binding["workspace_surface_id"])
+        workstream_id = str(self.binding["workstream_id"])
+        self.workspace.worktrees[repo_path] = WorkspaceObservation(
+            workspace_id=self.binding["workspace_id"],
+            view_id=self.binding["workspace_view_id"],
+            surface_id=surface_id,
+            worktree_path=repo_path,
+            branch_name=None,
+            agent=None,
+        )
+        self.workspace.runtime_states[surface_id] = "stopped"
+        with PiStore(self.state) as store:
+            generation = str(store.conn.execute(
+                "SELECT desired_generation_sha256 FROM runtime_bindings WHERE workstream_id=?",
+                (workstream_id,),
+            ).fetchone()[0])
+            store.conn.execute(
+                "UPDATE runtime_bindings SET observed_state='stopped',applied_generation_sha256=?,launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,runtime_instance_id=NULL,report_seq=0,session_start_event_sequence=NULL,session_start_report_seq=NULL,session_started_at=NULL WHERE workstream_id=?",
+                (generation, workstream_id),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL WHERE workstream_id=?",
+                (workstream_id,),
+            )
+
+        def launch_without_attestation(launched_surface_id, argv, env=None):
+            self.workspace.calls.append(("run", (launched_surface_id, tuple(argv), dict(env or {}))))
+            self.workspace.runtime_states[launched_surface_id] = "live"
+            self.workspace.agents[self.binding["agent_name"]] = AgentObservation(
+                self.binding["agent_name"], launched_surface_id, True, "working"
+            )
+            return {"started": True, "surfaceId": launched_surface_id}
+
+        self.workspace.run_command = launch_without_attestation
+        result = self.service.dispatcher.startup_reconcile()
+        self.assertIn({"workstreamId": workstream_id, "launched": True}, result["resumed"])
+        with PiStore(self.state) as store:
+            pending = store.conn.execute(
+                "SELECT observed_state,launch_generation_sha256,refresh_pending,refresh_operation_id,runtime_instance_id FROM runtime_bindings WHERE workstream_id=?",
+                (workstream_id,),
+            ).fetchone()
+            self.assertEqual(pending["observed_state"], "starting")
+            self.assertIsNone(pending["launch_generation_sha256"])
+            self.assertEqual(pending["refresh_pending"], 0)
+            self.assertIsNone(pending["refresh_operation_id"])
+            self.assertIsNone(pending["runtime_instance_id"])
+
+        session = Path(self.binding["harness_home"]) / "sessions" / "restored.jsonl"
+        session.write_text("restored\n")
+        payload = {
+            "workstreamId": workstream_id,
+            "runtimeInstanceId": "restored-runtime",
+            "seq": 1,
+            "event": "session_start",
+            "reason": None,
+            "state": "idle",
+            "nativeSessionKind": "path",
+            "nativeSessionValue": str(session),
+            "startSource": "startup",
+            "surfaceId": surface_id,
+            "token": self.token,
+            "generation": generation,
+        }
+        self.assertTrue(request(self.service.paths["runtime"], "runtime.report", payload)["accepted"])
+        with PiStore(self.state) as store:
+            restored = store.conn.execute(
+                "SELECT observed_state,applied_generation_sha256,launch_generation_sha256,refresh_pending,runtime_instance_id,session_start_event_sequence FROM runtime_bindings WHERE workstream_id=?",
+                (workstream_id,),
+            ).fetchone()
+            self.assertEqual(restored["observed_state"], "idle")
+            self.assertEqual(restored["applied_generation_sha256"], generation)
+            self.assertIsNone(restored["launch_generation_sha256"])
+            self.assertEqual(restored["refresh_pending"], 0)
+            self.assertEqual(restored["runtime_instance_id"], "restored-runtime")
+            self.assertIsNotNone(restored["session_start_event_sequence"])
+            self.assertTrue(usable_runtime_binding(store, workstream_id, self.workspace, self.harness))
 
     def test_startup_reconcile_does_not_duplicate_live_runtime_without_agent_metadata(self):
         repo_path = str(self.repo)

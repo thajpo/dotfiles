@@ -236,7 +236,27 @@ def deactivate_project(store: Any, selector: str, workspace: Any, harness: Any) 
     if not _project_lifecycle_state(store, project):
         return {"projectId": project_id, "displayName": project["display_name"], "workstreamId": None, "retainedSessionRoot": None, "reused": True}
 
-    key = f"project.deactivate:{project_id}"
+    live_rows = [dict(row) for row in store.conn.execute("SELECT * FROM workstreams WHERE project_id=? AND desired_state <> 'retired'", (project_id,))]
+    workers = [row for row in live_rows if row["kind"] == "worker"]
+    if workers:
+        raise ConflictError("project has active worker workstreams; complete or retire them before deactivation")
+    first_mates = [row for row in live_rows if row["kind"] == "first_mate"]
+    if first_mates:
+        raise ConflictError("global First Mate workstreams are managed separately from projects")
+    secretaries = [row for row in live_rows if row["kind"] == "secretary"]
+    secretary = secretaries[0] if secretaries else None
+    binding = None
+    if secretary is not None:
+        row = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (secretary["workstream_id"],)).fetchone()
+        binding = None if row is None else dict(row)
+    if binding is not None and binding["observed_state"] in {"starting", "working", "blocked"}:
+        raise ConflictError("project coordinator runtime is still active; wait for it to become idle")
+
+    lifecycle_index = int(store.conn.execute(
+        "SELECT COUNT(*) FROM events WHERE project_id=? AND kind='project.deactivated'",
+        (project_id,),
+    ).fetchone()[0])
+    key = f"project.deactivate:{project_id}:{lifecycle_index}"
     operation = store.conn.execute("SELECT * FROM operations WHERE idempotency_key=?", (key,)).fetchone()
     if operation is not None and operation["state"] == "succeeded":
         result = json.loads(operation["result_json"] or "{}")
@@ -256,21 +276,6 @@ def deactivate_project(store: Any, selector: str, workspace: Any, harness: Any) 
     stages = ("planned", "workspace_close_intent", "workspace_closed", "retained_root_committed", "binding_cleanup_intent", "binding_cleaned", "committed")
     rank = lambda value: stages.index(value) if value in stages else -1
 
-    live_rows = [dict(row) for row in store.conn.execute("SELECT * FROM workstreams WHERE project_id=? AND desired_state <> 'retired'", (project_id,))]
-    workers = [row for row in live_rows if row["kind"] == "worker"]
-    if workers:
-        raise ConflictError("project has active worker workstreams; complete or retire them before deactivation")
-    first_mates = [row for row in live_rows if row["kind"] == "first_mate"]
-    if first_mates:
-        raise ConflictError("global First Mate workstreams are managed separately from projects")
-    secretaries = [row for row in live_rows if row["kind"] == "secretary"]
-    secretary = secretaries[0] if secretaries else None
-    binding = None
-    if secretary is not None:
-        row = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (secretary["workstream_id"],)).fetchone()
-        binding = None if row is None else dict(row)
-    if binding is not None and binding["observed_state"] in {"starting", "working", "blocked"}:
-        raise ConflictError("project coordinator runtime is still active; wait for it to become idle")
     if binding is not None and (
         workspace is None or harness is None
         or binding["workspace_adapter_id"] != workspace.manifest.adapter_id

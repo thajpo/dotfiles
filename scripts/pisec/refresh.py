@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 from .adapters import HarnessAdapter, WorkspaceAdapter, RuntimeSurfaceArtifacts, artifact_document
 from .worker_repo import validate_worker_resume_git
 from .models import ConflictError, NeedsAttentionError, NotFoundError, PisecError, canonical_json, json_digest, new_id, utc_now, validate_sha256
-from .runtime import start_bound_agent
+from .runtime import start_bound_agent, usable_runtime_binding
 from .runtime_surface import capture_runtime_surface, verify_surface
 from .events import append_event_in_transaction
 
@@ -277,6 +277,13 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
             )
         else:
             operation_id = str(operation["operation_id"])
+            if operation["state"] == "needs_attention" and operation["step"] == "pre_stop_attention":
+                store.conn.execute(
+                    "UPDATE operations SET state='applying',step='reserved',result_json=NULL,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?",
+                    (now, operation_id),
+                )
+            elif operation["state"] == "needs_attention":
+                raise NeedsAttentionError("runtime refresh requires recorded compensation or reconciliation before retry")
         current = store.conn.execute("SELECT refresh_pending,refresh_operation_id,refresh_started_at,runtime_instance_id,report_seq,observed_state,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()
         if current is None:
             raise NotFoundError("runtime binding was removed")
@@ -309,7 +316,7 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
         raise
     if runtime.state == "live":
         if binding["observed_state"] not in {"idle", "stopped"}:
-            return {"pending": True, "reason": f"runtime is {binding['observed_state']}"}
+            return {"pending": True, "state": str(binding["observed_state"]), "reason": f"runtime is {binding['observed_state']}"}
         workspace.stop_runtime(str(binding["workspace_surface_id"]))
         _wait_for_exit(workspace, binding)
     current = _materialize_and_launch(store, harness, workspace, binding, surface, desired, staged=staged)
@@ -320,7 +327,7 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
         attested = _wait_for_start(store, workspace, str(binding["workstream_id"]), old_instance, desired, wait_seconds)
         if attested is not None:
             return {"pending": False, "binding": attested}
-    return {"pending": True, "binding": current, "reason": "startup attestation is still pending"}
+    return {"pending": True, "binding": current, "state": "startup_in_progress", "reason": "startup attestation is still pending"}
 
 
 def refresh_runtimes(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, wait_seconds: float = 300.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None, project_ids: Sequence[str] = (), harness_ids: Sequence[str] = (), workstream_ids: Sequence[str] = ()) -> dict[str, Any]:
@@ -366,7 +373,14 @@ def refresh_runtimes(store: Any, harness: HarnessAdapter, workspace: WorkspaceAd
                     continue
                 refreshed = _refresh_one(store, selected_harness, workspace, binding, surface, desired, wait_seconds=max(0.0, deadline - time.monotonic()))
                 if refreshed.get("pending"):
-                    result["pending"].append(_item(binding, desired, state=str(binding["observed_state"])))
+                    result["pending"].append(
+                        _item(
+                            binding,
+                            desired,
+                            state=str(refreshed.get("state", binding["observed_state"])),
+                            reason=str(refreshed.get("reason", "startup attestation is still pending")),
+                        )
+                    )
                     next_remaining.append(workstream_id)
                     continue
                 current = _state(store, workstream_id)
@@ -407,8 +421,21 @@ def ensure_runtime(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdap
         runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
         if runtime.state == "unknown":
             raise NeedsAttentionError("runtime process identity is ambiguous")
-        current = binding["applied_generation_sha256"] == desired and not binding["refresh_pending"]
-        if runtime.state == "live" and current and binding["observed_state"] not in {"starting", "unknown"}:
+        current = bool(
+            binding["provisioning_state"] == "bound"
+            and binding["applied_generation_sha256"] == desired
+            and not binding["refresh_pending"]
+            and binding["refresh_operation_id"] is None
+            and binding["refresh_started_at"] is None
+            and binding["launch_generation_sha256"] is None
+        )
+        if runtime.state == "live" and current and usable_runtime_binding(
+            store,
+            workstream_id,
+            workspace,
+            selected_harness,
+            allowed_states=frozenset({"idle", "working", "blocked"}),
+        ):
             return {"workstreamId": workstream_id, "action": "already_live", "state": "live", "generation": desired, "reason": None}
         if runtime.state == "live" and binding["observed_state"] == "starting":
             attested = _wait_for_start(store, workspace, workstream_id, str(binding["runtime_instance_id"]) if binding["runtime_instance_id"] else None, desired, float(wait_seconds)) if wait_seconds else None
@@ -420,9 +447,12 @@ def ensure_runtime(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdap
                 return {"workstreamId": workstream_id, "action": "pending_refresh", "state": str(binding["observed_state"]), "generation": desired, "reason": "runtime is busy"}
             refreshed = refresh_runtimes(store, harness, workspace, wait_seconds=wait_seconds, harness_resolver=harness_resolver, surface_resolver=lambda harness_id: surface_cache.get(str(harness_id), surface), workstream_ids=(workstream_id,))
             if refreshed["upgraded"]:
-                return {"workstreamId": workstream_id, "action": "refreshed_started", "state": "live" if wait_seconds else "starting", "generation": desired, "reason": None}
+                return {"workstreamId": workstream_id, "action": "refreshed_started" if wait_seconds else "startup_in_progress", "state": "live" if wait_seconds else "starting", "generation": desired, "reason": None}
             if refreshed["pending"]:
-                return {"workstreamId": workstream_id, "action": "pending_refresh", "state": str(binding["observed_state"]), "generation": desired, "reason": "runtime is busy"}
+                pending = refreshed["pending"][0]
+                if pending.get("state") == "startup_in_progress":
+                    return {"workstreamId": workstream_id, "action": "startup_in_progress", "state": "starting", "generation": desired, "reason": pending.get("reason")}
+                return {"workstreamId": workstream_id, "action": "pending_refresh", "state": str(pending.get("state", binding["observed_state"])), "generation": desired, "reason": pending.get("reason", "runtime is busy")}
             raise NeedsAttentionError((refreshed["failed"] or [{"reason": "targeted refresh failed"}])[0]["reason"])
         if runtime.state != "stopped":
             raise NeedsAttentionError(f"runtime state is {runtime.state}")
@@ -430,21 +460,28 @@ def ensure_runtime(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdap
             validate_worker_resume_git(store, binding)
             old_instance = str(binding["runtime_instance_id"]) if binding["runtime_instance_id"] else None
             now = utc_now()
-            _reserve_refresh(store, binding, desired, workspace)
             with store.transaction():
-                store.conn.execute("UPDATE runtime_bindings SET launch_generation_sha256=?,observed_state='starting',last_observed_at=?,updated_at=? WHERE workstream_id=?", (desired, now, now, workstream_id))
+                cursor = store.conn.execute(
+                    "UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,session_start_event_sequence=NULL,session_start_report_seq=NULL,session_started_at=NULL,observed_state='starting',last_observed_at=?,updated_at=? WHERE workstream_id=? AND refresh_pending=0 AND refresh_operation_id IS NULL AND refresh_started_at IS NULL AND launch_generation_sha256 IS NULL AND desired_generation_sha256=? AND applied_generation_sha256=? AND observed_state=? AND runtime_instance_id IS ? AND report_seq=?",
+                    (now, now, workstream_id, desired, desired, binding["observed_state"], binding["runtime_instance_id"], binding["report_seq"]),
+                )
+                if cursor.rowcount != 1:
+                    raise ConflictError("runtime binding changed before restart")
             start_bound_agent(store, workspace, selected_harness, _state(store, workstream_id), workstream_id=workstream_id, project_id=str(binding["project_id"]), cwd=str(binding["worktree_path"]))
             if wait_seconds:
                 attested = _wait_for_start(store, workspace, workstream_id, old_instance, desired, float(wait_seconds))
                 if attested:
                     return {"workstreamId": workstream_id, "action": "started", "state": "live", "generation": desired, "reason": None}
                 return {"workstreamId": workstream_id, "action": "startup_in_progress", "state": "starting", "generation": desired, "reason": "startup attestation is still pending"}
-            return {"workstreamId": workstream_id, "action": "started", "state": "starting", "generation": desired, "reason": None}
+            return {"workstreamId": workstream_id, "action": "startup_in_progress", "state": "starting", "generation": desired, "reason": "startup attestation is still pending"}
         refreshed = refresh_runtimes(store, harness, workspace, wait_seconds=wait_seconds, harness_resolver=harness_resolver, surface_resolver=lambda harness_id: surface_cache.get(str(harness_id), surface), workstream_ids=(workstream_id,))
         if refreshed["upgraded"]:
-            return {"workstreamId": workstream_id, "action": "refreshed_started", "state": "live" if wait_seconds else "starting", "generation": desired, "reason": None}
+            return {"workstreamId": workstream_id, "action": "refreshed_started" if wait_seconds else "startup_in_progress", "state": "live" if wait_seconds else "starting", "generation": desired, "reason": None}
         if refreshed["pending"]:
-            return {"workstreamId": workstream_id, "action": "pending_refresh", "state": "starting", "generation": desired, "reason": "startup attestation is pending"}
+            pending = refreshed["pending"][0]
+            if pending.get("state") == "startup_in_progress":
+                return {"workstreamId": workstream_id, "action": "startup_in_progress", "state": "starting", "generation": desired, "reason": pending.get("reason")}
+            return {"workstreamId": workstream_id, "action": "pending_refresh", "state": str(pending.get("state", "starting")), "generation": desired, "reason": pending.get("reason", "startup attestation is pending")}
         raise NeedsAttentionError((refreshed["failed"] or [{"reason": "targeted refresh failed"}])[0]["reason"])
     except Exception as error:
         _mark_attention(store, workstream_id, str(error))

@@ -6,10 +6,11 @@ import subprocess
 import tempfile
 import unittest
 
-from scripts.pisec.adapters import AdapterRegistry
-from scripts.pisec.broker import BrokerDispatcher
+from scripts.pisec.adapters import AdapterRegistry, AgentObservation
+from scripts.pisec.broker import BrokerDispatcher, BrokerService
 from scripts.pisec.models import AuthorizationError, ConflictError, NeedsAttentionError
 from scripts.pisec.pi_store import PiStore
+from scripts.pisec.protocol import request
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
@@ -188,6 +189,91 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
             self.assertEqual(retired["desired_state"], "retired")
             self.assertEqual(store.conn.execute("SELECT state FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()["state"], "integrated")
             self.assertIsNone(store.conn.execute("SELECT 1 FROM runtime_bindings WHERE workstream_id=?", (worker_id,)).fetchone())
+
+    def test_public_project_lifecycle_can_repeat_after_reopen(self):
+        project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "defaultRef": "main"})
+        service = BrokerService(self.dispatcher, runtime_root=self.root / "runtime")
+        service.start()
+        runtime_counter = 0
+
+        def public_start_agent(surface_id, name, agent_kind):
+            nonlocal runtime_counter
+            runtime_counter += 1
+            runtime_instance = f"public-lifecycle-runtime-{runtime_counter}"
+            self.workspace.agents[name] = AgentObservation(name, surface_id, True, "working")
+            self.workspace.runtime_states.pop(surface_id, None)
+            with PiStore(self.root / "state") as store:
+                row = store.conn.execute(
+                    "SELECT r.*,w.project_id FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workspace_surface_id=?",
+                    (surface_id,),
+                ).fetchone()
+                self.assertIsNotNone(row)
+                payload = {
+                    "workstreamId": str(row["workstream_id"]),
+                    "runtimeInstanceId": runtime_instance,
+                    "seq": 1,
+                    "event": "session_start",
+                    "reason": None,
+                    "state": "idle",
+                    "nativeSessionKind": None,
+                    "nativeSessionValue": None,
+                    "startSource": "startup",
+                    "surfaceId": surface_id,
+                    "token": Path(str(row["launch_secret_path"])).read_text().strip(),
+                    "generation": str(row["launch_generation_sha256"] or row["applied_generation_sha256"]),
+                }
+            self.assertTrue(request(service.paths["runtime"], "runtime.report", payload)["accepted"])
+            return {"started": True, "name": name, "surfaceId": surface_id}
+
+        self.workspace.start_agent = public_start_agent
+        try:
+            opened = self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
+            secretary_id = str(opened["workstream"]["workstream_id"])
+
+            first = self.dispatcher.dispatch(
+                "admin",
+                "project.deactivate",
+                {"project": project["project_id"], "confirm": project["project_id"]},
+            )
+            self.assertFalse(first["reused"])
+            self.assertFalse(first["project"]["active"])
+            self.workspace.agents.clear()
+
+            reopened = self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
+            self.assertEqual(reopened["workstream"]["workstream_id"], secretary_id)
+            self.assertTrue(reopened["project"]["active"])
+
+            second = self.dispatcher.dispatch(
+                "admin",
+                "project.deactivate",
+                {"project": project["project_id"], "confirm": project["project_id"]},
+            )
+            self.assertFalse(second["reused"])
+            self.assertFalse(second["project"]["active"])
+            with PiStore(self.root / "state") as store:
+                self.assertEqual(
+                    store.conn.execute(
+                        "SELECT COUNT(*) FROM events WHERE project_id=? AND kind='project.deactivated'",
+                        (project["project_id"],),
+                    ).fetchone()[0],
+                    2,
+                )
+                self.assertEqual(
+                    store.conn.execute(
+                        "SELECT COUNT(*) FROM workstreams WHERE project_id=? AND kind='secretary'",
+                        (project["project_id"],),
+                    ).fetchone()[0],
+                    1,
+                )
+                self.assertEqual(
+                    store.conn.execute(
+                        "SELECT COUNT(*) FROM operations WHERE project_id=? AND kind='project.deactivate' AND state='succeeded'",
+                        (project["project_id"],),
+                    ).fetchone()[0],
+                    2,
+                )
+        finally:
+            service.stop()
 
     def test_project_permission_apply_runs_through_secretary_scope(self):
         data = self.repo / "approved-data"

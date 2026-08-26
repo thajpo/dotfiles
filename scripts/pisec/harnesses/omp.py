@@ -500,7 +500,13 @@ def _safe_owned_tree(root: Path, *, readonly: bool = False) -> None:
         raise NeedsAttentionError("OMP harness home is unsafe")
     for child in sorted(root.rglob("*")):
         child_info = child.lstat()
-        if child.is_symlink() or child_info.st_uid != os.geteuid() or child_info.st_mode & 0o022 or (readonly and child_info.st_mode & 0o200):
+        if (
+            child.is_symlink()
+            or child_info.st_uid != os.geteuid()
+            or child_info.st_mode & 0o022
+            or (readonly and child_info.st_mode & 0o200)
+            or not (stat.S_ISDIR(child_info.st_mode) or stat.S_ISREG(child_info.st_mode))
+        ):
             raise NeedsAttentionError("OMP harness home contains an unsafe entry")
 
 
@@ -1019,20 +1025,28 @@ class OmpHarnessAdapter:
             raise NeedsAttentionError("OMP cleanup path is unsafe")
         if stat.S_ISDIR(info.st_mode):
             readonly = "binding-surfaces" in path.parts
-            if readonly:
-                # Older sealed surfaces could retain owner-writable directory
-                # modes below the sealed root.  Normalize only this owned,
-                # symlink-free tree before applying the readonly safety check.
-                _normalize_owner_tree(path, readonly=True)
             _safe_owned_tree(path, readonly=readonly)
             if readonly:
-                _normalize_owner_tree(path, readonly=False)
-            shutil.rmtree(path)
+                try:
+                    _normalize_owner_tree(path, readonly=False)
+                    shutil.rmtree(path)
+                finally:
+                    if path.exists() and not path.is_symlink():
+                        _normalize_owner_tree(path, readonly=True)
+            else:
+                shutil.rmtree(path)
         elif stat.S_ISREG(info.st_mode) and not info.st_mode & 0o022:
             if "binding-surfaces" in path.parts:
-                _safe_owned_tree(path.parent, readonly=True)
-                _normalize_owner_tree(path.parent, readonly=False)
-            path.unlink()
+                parent = path.parent
+                _safe_owned_tree(parent, readonly=True)
+                try:
+                    _normalize_owner_tree(parent, readonly=False)
+                    path.unlink()
+                finally:
+                    if parent.exists() and not parent.is_symlink():
+                        _normalize_owner_tree(parent, readonly=True)
+            else:
+                path.unlink()
         else:
             raise NeedsAttentionError("OMP cleanup path is unsupported")
 

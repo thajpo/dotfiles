@@ -4,6 +4,7 @@ import json
 import os
 import runpy
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -104,6 +105,8 @@ class RuntimeMaterializationTests(unittest.TestCase):
             policy = state / "binding-surfaces" / "omp" / workstream / "fence" / (workstream + ".json")
             policy.parent.mkdir(parents=True)
             policy.write_text("policy\n")
+            surface = state / "binding-surfaces" / "omp" / workstream
+            os.chmod(surface, 0o500)
             os.chmod(policy.parent, 0o500)
             os.chmod(policy, 0o400)
             adapter = OmpHarnessAdapter(state_root=state, config=make_config(root))
@@ -111,24 +114,53 @@ class RuntimeMaterializationTests(unittest.TestCase):
             adapter._remove_state_path(str(policy))
 
             self.assertFalse(policy.exists())
+            self.assertEqual(stat.S_IMODE(policy.parent.stat().st_mode), 0o500)
+            adapter._remove_state_path(str(surface))
+            self.assertFalse(surface.exists())
 
-    def test_cleanup_normalizes_legacy_writable_sealed_surface_before_remove(self):
+    def test_cleanup_rejects_special_file_and_keeps_sealed_parent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state = root / "state"
-            workstream = "ws_" + "0" * 32
+            workstream = "ws_" + "1" * 32
+            policy = state / "binding-surfaces" / "omp" / workstream / "fence" / (workstream + ".json")
+            policy.parent.mkdir(parents=True)
+            policy.write_text("policy\n")
+            os.mkfifo(policy.parent / "unexpected")
             surface = state / "binding-surfaces" / "omp" / workstream
-            fence = surface / "fence"
-            fence.mkdir(parents=True)
-            (fence / "template").write_text("template\n")
             os.chmod(surface, 0o500)
-            os.chmod(fence, 0o700)
-            os.chmod(fence / "template", 0o400)
+            os.chmod(policy.parent, 0o500)
+            os.chmod(policy, 0o400)
+            os.chmod(policy.parent / "unexpected", 0o400)
             adapter = OmpHarnessAdapter(state_root=state, config=make_config(root))
 
-            adapter._remove_state_path(str(surface))
+            with self.assertRaises(NeedsAttentionError):
+                adapter._remove_state_path(str(policy))
 
-            self.assertFalse(surface.exists())
+            self.assertEqual(stat.S_IMODE(policy.parent.stat().st_mode), 0o500)
+            self.assertTrue(policy.exists())
+
+    def test_cleanup_reseals_complete_surface_when_removal_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            workstream = "ws_" + "2" * 32
+            surface = state / "binding-surfaces" / "omp" / workstream
+            policy = surface / "fence" / (workstream + ".json")
+            policy.parent.mkdir(parents=True)
+            policy.write_text("policy\n")
+            os.chmod(surface, 0o500)
+            os.chmod(policy.parent, 0o500)
+            os.chmod(policy, 0o400)
+            adapter = OmpHarnessAdapter(state_root=state, config=make_config(root))
+
+            with patch("scripts.pisec.harnesses.omp.shutil.rmtree", side_effect=OSError("remove failed")):
+                with self.assertRaises(OSError):
+                    adapter._remove_state_path(str(surface))
+
+            self.assertEqual(stat.S_IMODE(surface.stat().st_mode), 0o500)
+            self.assertEqual(stat.S_IMODE(policy.parent.stat().st_mode), 0o500)
+            self.assertTrue(policy.exists())
 
     def test_surface_isolated_from_later_user_surface_edits(self):
         with tempfile.TemporaryDirectory() as tmp:

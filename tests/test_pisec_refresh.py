@@ -1,13 +1,14 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from scripts.pisec.adapters import AdapterRegistry
+from scripts.pisec.adapters import AdapterRegistry, AgentObservation
 from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.operations import create_operation
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.refresh import _binding_scope, _mark_attention, _mark_pre_stop_attention
+from scripts.pisec.refresh import _binding_scope
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
@@ -114,28 +115,112 @@ class RuntimeRefreshTests(unittest.TestCase):
             self.assertEqual(workstream["provisioning_state"], "bound")
 
     def test_pre_stop_staging_failure_preserves_idle_binding_for_retry(self):
+        with patch.object(self.harness, "stage_profile", side_effect=RuntimeError("staging failed before stop")):
+            failed = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+
+        self.assertFalse(failed["ok"])
+        self.assertEqual(len(failed["failed"]), 1)
+        self.assertFalse(any(call[0] == "stop" for call in self.workspace.calls))
         with PiStore(self.root / "state") as store:
             binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
-            operation, _ = create_operation(
-                store,
-                kind="runtime.refresh",
-                project_id=self.project_id,
-                workstream_id=self.workstream_id,
-                idempotency_key="pre-stop-staging-failure",
-                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": binding["desired_generation_sha256"]},
-                state="applying",
-                step="reserved",
-            )
-            store.conn.execute(
-                "UPDATE runtime_bindings SET refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-25T00:00:00Z',launch_generation_sha256=?,observed_state='idle' WHERE workstream_id=?",
-                (operation.operation_id, binding["desired_generation_sha256"], self.workstream_id),
-            )
-
-            _mark_pre_stop_attention(store, self.workstream_id, operation.operation_id, "staging failed before stop")
-            _mark_attention(store, self.workstream_id, "staging failed before stop")
-
-            binding = store.conn.execute("SELECT observed_state FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            operation = store.conn.execute(
+                "SELECT * FROM operations WHERE workstream_id=? AND kind='runtime.refresh'",
+                (self.workstream_id,),
+            ).fetchone()
             self.assertEqual(binding["observed_state"], "idle")
+            self.assertEqual(binding["refresh_pending"], 0)
+            self.assertIsNone(binding["refresh_operation_id"])
+            self.assertIsNone(binding["launch_generation_sha256"])
+            self.assertEqual(operation["state"], "needs_attention")
+            self.assertEqual(operation["step"], "pre_stop_attention")
+
+        def launch_without_attestation(surface_id, name, agent_kind):
+            self.workspace.calls.append(("start", (surface_id, name, agent_kind)))
+            self.workspace.agents[name] = AgentObservation(name, surface_id, True, "working")
+            self.workspace.runtime_states.pop(surface_id, None)
+            return {"started": True, "name": name, "surfaceId": surface_id}
+
+        with patch.object(self.workspace, "start_agent", side_effect=launch_without_attestation):
+            retried = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+
+        self.assertTrue(retried["ok"])
+        self.assertEqual(retried["upgraded"], [])
+        self.assertEqual([item["workstreamId"] for item in retried["pending"]], [self.workstream_id])
+        self.assertEqual(retried["pending"][0]["state"], "startup_in_progress")
+        with PiStore(self.root / "state") as store:
+            binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            operation = store.conn.execute(
+                "SELECT * FROM operations WHERE workstream_id=? AND kind='runtime.refresh'",
+                (self.workstream_id,),
+            ).fetchone()
+            generation = str(binding["launch_generation_sha256"])
+            self.assertEqual(binding["observed_state"], "starting")
+            self.assertEqual(binding["refresh_pending"], 1)
+            self.assertEqual(operation["state"], "applying")
+            self.assertEqual(operation["step"], "reserved")
+
+        report = self.dispatcher.dispatch(
+            "runtime",
+            "runtime.report",
+            {
+                "workstreamId": self.workstream_id,
+                "runtimeInstanceId": "refresh-retry-runtime",
+                "seq": 1,
+                "event": "session_start",
+                "reason": None,
+                "state": "idle",
+                "nativeSessionKind": "path",
+                "nativeSessionValue": self.identity[3],
+                "startSource": "startup",
+                "surfaceId": self.identity[2],
+                "token": self.secretary_token,
+                "generation": generation,
+            },
+        )
+        self.assertTrue(report["accepted"])
+        settled = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+        self.assertEqual([item["workstreamId"] for item in settled["skipped"]], [self.workstream_id])
+        with PiStore(self.root / "state") as store:
+            binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            workstream = store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            operation = store.conn.execute(
+                "SELECT * FROM operations WHERE workstream_id=? AND kind='runtime.refresh'",
+                (self.workstream_id,),
+            ).fetchone()
+            self.assertEqual(binding["observed_state"], "idle")
+            self.assertEqual(binding["applied_generation_sha256"], binding["desired_generation_sha256"])
+            self.assertEqual(binding["refresh_pending"], 0)
+            self.assertEqual(workstream["provisioning_state"], "bound")
+            self.assertEqual(operation["state"], "succeeded")
+            self.assertEqual(operation["step"], "verified")
+
+    def test_post_stop_refresh_attention_cannot_retry_as_success(self):
+        with patch.object(self.harness, "activate_profile", side_effect=RuntimeError("activation failed after stop")):
+            failed = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+
+        self.assertFalse(failed["ok"])
+        self.assertEqual(len([call for call in self.workspace.calls if call[0] == "stop"]), 1)
+        with PiStore(self.root / "state") as store:
+            binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            operation = store.conn.execute(
+                "SELECT * FROM operations WHERE workstream_id=? AND kind='runtime.refresh'",
+                (self.workstream_id,),
+            ).fetchone()
+            self.assertEqual(binding["refresh_pending"], 1)
+            self.assertEqual(binding["observed_state"], "error")
+            self.assertEqual(operation["state"], "needs_attention")
+            self.assertEqual(operation["step"], "attention")
+
+        call_count = len(self.workspace.calls)
+        retried = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+        self.assertFalse(retried["ok"])
+        self.assertEqual(len(self.workspace.calls), call_count)
+        with PiStore(self.root / "state") as store:
+            operation = store.conn.execute(
+                "SELECT state,step FROM operations WHERE workstream_id=? AND kind='runtime.refresh'",
+                (self.workstream_id,),
+            ).fetchone()
+            self.assertEqual(tuple(operation), ("needs_attention", "attention"))
 
     def test_targeted_runtime_ensure_is_idempotent_and_starts_only_one_binding(self):
         with PiStore(self.root / "state") as store:
@@ -152,6 +237,75 @@ class RuntimeRefreshTests(unittest.TestCase):
             self.dispatcher.dispatch("admin", "runtime.ensure", {"workstreamId": self.workstream_id})["action"],
             "already_live",
         )
+
+    def test_targeted_runtime_ensure_restarts_current_generation_without_refresh_reservation(self):
+        with PiStore(self.root / "state") as store:
+            store.conn.execute(
+                "UPDATE runtime_bindings SET applied_generation_sha256=desired_generation_sha256,launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,observed_state='idle' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+        self.workspace.stop_runtime(self.identity[2])
+
+        def launch_without_attestation(surface_id, name, agent_kind):
+            self.workspace.calls.append(("start", (surface_id, name, agent_kind)))
+            self.workspace.agents[name] = AgentObservation(name, surface_id, True, "working")
+            self.workspace.runtime_states.pop(surface_id, None)
+            return {"started": True, "name": name, "surfaceId": surface_id}
+
+        with patch.object(self.workspace, "start_agent", side_effect=launch_without_attestation):
+            started = self.dispatcher.dispatch(
+                "admin",
+                "runtime.ensure",
+                {"workstreamId": self.workstream_id, "waitSeconds": 0},
+            )
+
+        self.assertEqual(started["action"], "startup_in_progress")
+        self.assertEqual(started["state"], "starting")
+        with PiStore(self.root / "state") as store:
+            binding = store.conn.execute(
+                "SELECT * FROM runtime_bindings WHERE workstream_id=?",
+                (self.workstream_id,),
+            ).fetchone()
+            generation = str(binding["applied_generation_sha256"])
+            self.assertEqual(binding["observed_state"], "starting")
+            self.assertIsNone(binding["launch_generation_sha256"])
+            self.assertEqual(binding["refresh_pending"], 0)
+            self.assertIsNone(binding["refresh_operation_id"])
+            self.assertEqual(
+                store.conn.execute(
+                    "SELECT COUNT(*) FROM operations WHERE workstream_id=? AND kind='runtime.refresh'",
+                    (self.workstream_id,),
+                ).fetchone()[0],
+                0,
+            )
+
+        reported = self.dispatcher.dispatch(
+            "runtime",
+            "runtime.report",
+            {
+                "workstreamId": self.workstream_id,
+                "runtimeInstanceId": "ensure-restart-runtime",
+                "seq": 1,
+                "event": "session_start",
+                "reason": None,
+                "state": "idle",
+                "nativeSessionKind": "path",
+                "nativeSessionValue": self.identity[3],
+                "startSource": "startup",
+                "surfaceId": self.identity[2],
+                "token": self.secretary_token,
+                "generation": generation,
+            },
+        )
+        self.assertTrue(reported["accepted"])
+        with PiStore(self.root / "state") as store:
+            binding = store.conn.execute(
+                "SELECT observed_state,runtime_instance_id,session_start_event_sequence FROM runtime_bindings WHERE workstream_id=?",
+                (self.workstream_id,),
+            ).fetchone()
+            self.assertEqual(binding["observed_state"], "idle")
+            self.assertEqual(binding["runtime_instance_id"], "ensure-restart-runtime")
+            self.assertIsNotNone(binding["session_start_event_sequence"])
 
     def test_binding_scope_injects_project_data_dirs(self):
         data = self.repo / "data"
