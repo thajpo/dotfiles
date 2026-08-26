@@ -36,7 +36,7 @@
   - Commit OID: `3125a65fc880ea5b37082a52aafd324cde302847`
   - Checks: clean owner-only checkout at `3125a65`: `python3 -m unittest discover -s tests -q` passed (207, 1 skipped); `bun test omp/extensions/pisec.test.ts` passed (7/7); `python3 -m compileall -q scripts tests` passed; `bash -n scripts/*.sh` passed; operation catalogue `--check` passed; `bun build omp/extensions/pisec.ts --target bun` passed; `git diff --check` passed; README command/required-truth and prohibited-claim audit passed; macOS stub exited 1 without home mutation; runtime `done` fail-first rejection passed; no live-state cutover performed.
   - Current blocker: none.
-- Phase 10 status: reconciliation core committed and exact clean-core source acceptance passed; final documentation/status descendant and live cutover remain.
-  - Commit OID: `cae47c0` (corrected core; proposed `bootstrapV1Commit`)
-  - Checks: clean owner-only checkout passed `git status --short`, `git diff --check`, compileall, shell syntax, catalogue parity, Bun build, Python `unittest discover -s tests` (247 tests, 1 skipped), and Bun tests (8/8); focused reconciliation suite passed (81/81); no live-state cutover performed.
-  - Current blocker: none; create the final documentation/status descendant, rerun exact Phase 10.1, then inventory and gate live cutover.
+- Phase 10 status: source scope-convergence repair committed; live cutover remains frozen pending final source acceptance.
+  - Commit OID: `85e8479` (corrected source candidate; not yet final bootstrap/final candidate)
+  - Checks: Phase 10 fail-first suite passed (5/5); focused non-socket regressions passed (96/96); socket/adapter regressions passed with host permissions (21/21); compileall, shell syntax, catalogue parity, and `git diff --check` passed; full discovery reached one expected dirty-checkout installer failure before this commit and must be rerun clean; no live-state mutation after the recorded partial state.
+  - Current blocker: independent boundary audit and exact clean Phase 10.1 acceptance pending; then live recovery or archive/reset and 10.2–10.6 acceptance.
