@@ -28,12 +28,13 @@ def secure_file(path: Path, *, executable: bool = False) -> None:
         fail(f"required executable is not executable: {path}")
 
 
-def secure_directory(path: Path) -> None:
+def secure_directory(path: Path, *, readonly: bool = False) -> None:
     try:
         info = path.lstat()
     except OSError:
         fail(f"required directory is unavailable: {path}", 127)
-    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+    expected_mode = 0o500 if readonly else 0o700
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != expected_mode:
         fail(f"required directory is unsafe: {path}")
 
 
@@ -71,9 +72,9 @@ def main() -> None:
     secure_directory(home)
     secure_directory(tmp_dir)
     secure_readonly_tree(surface)
-    secure_directory(codex_home)
+    secure_directory(codex_home, readonly=True)
     for key in ("configPath", "promptPath", "mcpPath", "hookPath", "hooksPath", "policyPath"):
-        secure_file(Path(str(descriptor[key])), mode=None)
+        secure_file(Path(str(descriptor[key])))
     secure_file(Path(str(descriptor["launchSecretPath"])))
     secure_file(Path(str(descriptor["harnessExecutablePath"])))
     secure_file(Path(str(descriptor["nodeExecutablePath"])), executable=True)

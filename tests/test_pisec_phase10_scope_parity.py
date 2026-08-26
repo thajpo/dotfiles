@@ -3,6 +3,7 @@ import contextlib
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -88,6 +89,37 @@ class Phase10ScopeParityTests(unittest.TestCase):
         }
         codex = CodexHarnessAdapter(state_root=root / "codex-state", config=codex_config)
         return (("omp", omp), ("codex", codex))
+
+    def test_production_codex_launcher_accepts_immutable_surface(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktree = root / "worker"
+            worktree.mkdir()
+            codex = dict(self._production_worker_adapters(root))["codex"]
+            surface = codex.prepare_runtime_surface()
+            scope = {
+                "projectId": "prj_" + "d" * 32,
+                "workstreamId": "ws_" + "e" * 32,
+                "executionProfile": "worker-default",
+                "worktreePath": str(worktree),
+                "branchName": "pisec/ws_" + "e" * 32 + "/work",
+                "externalDomains": sorted(codex.profile_domains("worker-default", ("example.com",))),
+                "runtimeSurfaceSha256": surface.content_sha256,
+                "runtimeSurfaceRoot": surface.root_path,
+                "runtimeSurfaceId": "surface_" + surface.content_sha256[:32],
+            }
+            staged = codex.stage_profile(scope, surface, root / "codex-staging")
+            activated = codex.activate_profile(scope, staged)
+            launcher = codex.commit_launch_binding(
+                scope,
+                activated,
+                workspace_session_name="main",
+                workspace_id="w1",
+                workspace_view_id="w1:t1",
+                workspace_surface_id="w1:p1",
+            )
+            result = subprocess.run([str(launcher)], cwd=worktree, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_fixture_generation_hashes_every_production_scope_input(self):
         with tempfile.TemporaryDirectory() as tmp:
