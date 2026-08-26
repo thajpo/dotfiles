@@ -71,15 +71,18 @@ tags.
 - Earlier candidates and their live acceptance attempts are historical only;
   their identities must not be used for v1 release evidence.
 - The corrected source-core commit is
-  `b41efa5a687bba9132cd318490b7b8e95b3d94bc` with tree
-  `07dc2bb82c51921d818607335ad4c9eefa2a7887`. It contains the bounded
+  `3c1034ff4334f605a8839690eaad0da36b4ebaa6` with tree
+  `cbcf96bd784d627b18a3bbf450e3d630a4ec6363`. It contains the bounded
   harness-aware fleet usability repair, fail-closed binding-harness identity
   validation, protected OMP/Codex activation and retained-backup replacement
   parity, the role-aware OMP worker startup attestation repair, and the
   Codex launcher repair required to accept the sealed `CODEX_HOME` surface.
+  It also rebases generated Codex MCP and lifecycle-hook paths when a staged
+  profile is activated, so the immutable surface cannot retain deleted staging
+  paths.
 - Its clean source gate passed: Python 267 tests with 1 skipped, Bun 9/9,
   compileall, shell syntax, operation-catalogue parity, Bun build, and
-  `git diff --check`. The focused Pisec regression cluster passed 118 tests
+  `git diff --check`. The focused Pisec regression cluster passed 111 tests
   with 1 skipped, including production Codex materialization, activation,
   binding creation, and launcher execution against the immutable surface.
 - The final documentation/status descendant will be the new
@@ -95,34 +98,31 @@ required phase, commit, checks, and blocker fields.
 ### 3.2 Current deployment and retained recovery material
 
 - The retained corrected-bootstrap deployment is
-  `deploy-c88a76f7927448f6b2762afc0e85e951`.
-- Its deployed source is the previous corrected source core
-  `773c034bb9b292b030df8a1662914af0ca62d6cb`, tree
-  `60e7237688d7ee1c3f13f246534b662bba039721`.
+  `deploy-7c4e57da95c145fc8c73cab53fd809c6`, sourced from
+  `b41efa5a687bba9132cd318490b7b8e95b3d94bc` with tree
+  `07dc2bb82c51921d818607335ad4c9eefa2a7887`.
 - The currently installed deployment is the historical final candidate
-  `deploy-a4ac1a05453a4e57b9629dfbf291a412`, sourced from
-  `08d002759e06f0aa627be812ffe9294fa28523ae` with tree
-  `5c6186c052f46edb474e26ed26e971e109663ae4`; it is not final release
+  `deploy-8174d5c6c29241faabdafa9a461dc781`, sourced from
+  `4b5ed46aaa230372247060cbf15b25c63b0e9b8e` with tree
+  `53eedd177cb2273eb6a3563e2b74a5e18fb96571`; it is not final release
   evidence and must be replaced by the new corrected candidates.
 - Its deployment bundle SHA-256 is
-  `05e439ad244361a642c63072f8044a477174c09dea95809f08daa52894a84525`.
+  `f7110673283c056711fd46a6e324e4005ea89f3789acc880fd92e2e86ceb4837`.
 - Stable updater SHA-256:
   `9dd93dd26ecd4635e888eec9ef63fa9480fd367066a11ed096d7448daaeb9846`.
 - The installed stable updater still identifies the historical final candidate
-  `08d002759e06f0aa627be812ffe9294fa28523ae`, tree
-  `5c6186c052f46edb474e26ed26e971e109663ae4`, and bundle
-  `05e439ad244361a642c63072f8044a477174c09dea95809f08daa52894a84525`.
+  `4b5ed46aaa230372247060cbf15b25c63b0e9b8e`, tree
+  `53eedd177cb2273eb6a3563e2b74a5e18fb96571`, and bundle
+  `f7110673283c056711fd46a6e324e4005ea89f3789acc880fd92e2e86ceb4837`.
   It must be refreshed from the final documentation/status descendant after
   that candidate is committed and accepted.
 - Database identity/version: `pisec-core-v1`, version `1`.
 - Schema SHA-256:
   `8f844d7e1835ec966041c79c70545a4f1def83cbf4f9dae19f94496388c633c5`.
 - The corrected-bootstrap archive is
-  `/home/j/.local/state/pisec.archive-20260826T162028Z`; its owner-only
+  `/home/j/.local/state/pisec.archive-20260826T175017Z`; its owner-only
   manifest is
-  `/home/j/.local/lib/pisec/archive-manifests/pisec.archive-20260826T162028Z.json`
-  with manifest SHA-256
-  `ab9d8675f3bfc3de95a6b127e1a6429e58884da7277a18c5653224ccd880e2fb`.
+  `/home/j/.local/lib/pisec/archive-manifests/pisec.archive-20260826T175017Z.json`.
 - The original pre-v1 archive and its reviewed inventory/runbook remain
   preserved at their previously recorded paths. A final cutover archive must
   also be preserved and referenced by the external acceptance record.
@@ -144,11 +144,12 @@ required phase, commit, checks, and blocker fields.
   four reviewed projects were in fleet mode and five remained in project mode;
   all nine reviewed permission replacements were `succeeded/committed`.
 - The live Codex worker probe then created one bounded worker operation,
-  `op_87057c8a94f31272d3f4896ef5773a60`, for workstream
-  `ws_87f7049dc746fc68b616948f4fbfdfa5`. It failed closed at
-  `profile_materialized` because the launcher rejected the sealed Codex home
-  before runtime attestation. Its Herdr pane is a shell with no session-start
-  evidence; no acceptance, integration, completion, or cleanup record exists.
+  `op_f2f8538eb9e67c0a7eaa98a760039308`, for workstream
+  `ws_69c36af52cde2c1d07e598ca801248bb`. It failed closed after
+  `profile_materialized` because the activated Codex config and hooks retained
+  deleted staging paths, so no runtime attestation arrived. Its Herdr pane is
+  a shell with no session-start evidence; no acceptance, integration,
+  completion, or cleanup record exists.
   This partial state is not final evidence and must be archived/reset through
   the verified updater after the corrected candidates are installed.
 - The final documentation/status candidate, clean descendant source
@@ -160,17 +161,22 @@ required phase, commit, checks, and blocker fields.
 The earlier deterministic scope, fleet-transition, and OMP worker-attestation
 blockers were reproduced, covered by fail-first tests, repaired in bounded
 source commits, and passed the clean source gate. The mandatory live Codex
-worker probe exposed one additional root defect: profile construction seals
-`CODEX_HOME` as part of the immutable surface, while the Codex launcher
+worker probe exposed two bounded root defects. First, profile construction
+seals `CODEX_HOME` as part of the immutable surface, while the Codex launcher
 required that directory to be writable and also called `secure_file` with an
 unsupported keyword. The fail-first production launcher test reproduced the
-exit-126 preflight failure; `b41efa5a687bba9132cd318490b7b8e95b3d94bc`
-corrects the launcher to validate immutable `0500` Codex home separately from
-the writable `0700` binding state and removes the invalid call. The corrected
-source gate and independent Luna audit are green. The remaining work is the
-final documentation/status source acceptance descendant, corrected
-deployment/recovery, archive/reset of the partial failed-worker state, and
-complete live acceptance; it must not introduce another source workaround.
+exit-126 preflight failure; the earlier corrected source commit
+`b41efa5a687bba9132cd318490b7b8e95b3d94bc` fixed that boundary. Second,
+activation rebased returned artifact paths and policy but not generated Codex
+`config.toml` and `hooks.json` contents. The live surface therefore pointed
+at deleted staging files and Codex exited before its hook could report
+attestation. The fail-first path assertions and source repair are in
+`3c1034ff4334f605a8839690eaad0da36b4ebaa6`. The corrected source gate is
+green, and the host Codex dependency now reports the exact pinned `0.147.0`.
+The remaining work is the final documentation/status source-acceptance
+descendant, corrected deployment/recovery, archive/reset of the partial
+failed-worker state, and complete live acceptance; it must not introduce
+another source workaround.
 
 Historical diagnosis (retained to explain the fail-first evidence):
 
