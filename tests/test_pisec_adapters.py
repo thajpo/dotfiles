@@ -298,6 +298,12 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         self.dispatcher.dispatch("admin", "first_mate.ensure", {"project": project["project_id"]})
         for name, agent in list(self.workspace.agents.items()):
             self.workspace.agents[name] = type(agent)(agent.name, agent.surface_id, agent.identity_usable, "idle")
+        with PiStore(self.root / "state") as store:
+            secretary_id = str(store.conn.execute("SELECT secretary_workstream_id FROM projects WHERE project_id=?", (project["project_id"],)).fetchone()[0])
+            secretary_surface = str(store.conn.execute("SELECT workspace_surface_id FROM runtime_bindings WHERE workstream_id=?", (secretary_id,)).fetchone()[0])
+        for name, agent in list(self.workspace.agents.items()):
+            if agent.surface_id == secretary_surface:
+                self.workspace.agents[name] = AgentObservation(self.harness.manifest.agent_kind, agent.surface_id, agent.identity_usable, agent.state)
         changed = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "coordinationMode": "fleet"})
         self.assertEqual(changed["coordination_mode"], "fleet")
         restored = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "coordinationMode": "project"})

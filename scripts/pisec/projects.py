@@ -79,17 +79,17 @@ def resolve_project(store: Any, selector: str) -> dict[str, Any]:
     return get_project(store, row["project_id"])
 
 
-def _bound_runtime_is_usable(store: Any, workstream_id: str, workspace: Any) -> bool:
+def _bound_runtime_is_usable(store: Any, workstream_id: str, workspace: Any, harness: Any | None = None) -> bool:
     try:
         from .runtime import usable_runtime_binding
         if workspace is None:
             return False
-        return usable_runtime_binding(store, workstream_id, workspace, allowed_states={"idle", "working", "blocked"})
+        return usable_runtime_binding(store, workstream_id, workspace, harness, allowed_states={"idle", "working", "blocked"})
     except Exception:
         return False
 
 
-def change_project_mode(store: Any, selector: str, coordination_mode: str, *, workspace: Any) -> dict[str, Any]:
+def change_project_mode(store: Any, selector: str, coordination_mode: str, *, workspace: Any, harness: Any | None = None) -> dict[str, Any]:
     if coordination_mode not in COORDINATION_MODES:
         raise InvalidRequestError("coordination_mode must be project or fleet")
     project = resolve_project(store, selector)
@@ -100,14 +100,14 @@ def change_project_mode(store: Any, selector: str, coordination_mode: str, *, wo
         return project
     assert_project_writable(store, str(project["project_id"]))
     secretary_id = project.get("secretary_workstream_id")
-    if not isinstance(secretary_id, str) or not _bound_runtime_is_usable(store, secretary_id, workspace):
+    if not isinstance(secretary_id, str) or not _bound_runtime_is_usable(store, secretary_id, workspace, harness):
         raise NeedsAttentionError("project mode changes require a usable bound Secretary")
     first_mate_id: str | None = None
     if coordination_mode == FLEET_COORDINATION_MODE:
         first_mate = store.conn.execute(
             "SELECT workstream_id FROM workstreams WHERE kind='first_mate' AND desired_state='active' AND provisioning_state='bound' ORDER BY created_at LIMIT 1"
         ).fetchone()
-        if first_mate is None or not _bound_runtime_is_usable(store, str(first_mate["workstream_id"]), workspace):
+        if first_mate is None or not _bound_runtime_is_usable(store, str(first_mate["workstream_id"]), workspace, harness):
             raise NeedsAttentionError("entering fleet mode requires a usable bound First Mate")
         first_mate_id = str(first_mate["workstream_id"])
     else:
@@ -127,7 +127,7 @@ def change_project_mode(store: Any, selector: str, coordination_mode: str, *, wo
     return get_project(store, project["project_id"])
 
 
-def register_project(store: Any, path: str | Path, *, display_name: str | None = None, default_ref: str | None = None, data_dirs: Any = None, external_domains: Any = None, coordination_mode: str | None = None, workspace: Any = None) -> dict[str, Any]:
+def register_project(store: Any, path: str | Path, *, display_name: str | None = None, default_ref: str | None = None, data_dirs: Any = None, external_domains: Any = None, coordination_mode: str | None = None, workspace: Any = None, harness: Any | None = None) -> dict[str, Any]:
     if coordination_mode is not None and coordination_mode not in COORDINATION_MODES:
         raise InvalidRequestError("coordination_mode must be project or fleet")
     observed = observe_project(path, default_ref)
@@ -144,7 +144,7 @@ def register_project(store: Any, path: str | Path, *, display_name: str | None =
     if existing is not None:
         value = dict(existing)
         if coordination_mode is not None and coordination_mode != value.get("coordination_mode", "project"):
-            value = change_project_mode(store, str(value["project_id"]), coordination_mode, workspace=workspace)
+            value = change_project_mode(store, str(value["project_id"]), coordination_mode, workspace=workspace, harness=harness)
         registered_remote = value.get("remote_url")
         observed_remote = observed["remote_url"]
         if registered_remote is None and observed_remote is not None:

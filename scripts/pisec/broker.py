@@ -777,7 +777,7 @@ class BrokerDispatcher:
         if operation == "project.register":
             _exact(payload, {"path"}, {"displayName", "defaultRef", "dataDirs", "externalDomains", "coordinationMode"})
             with self._reconcile_lock:
-                return _public_project(register_project(store, payload["path"], display_name=payload.get("displayName"), default_ref=payload.get("defaultRef"), data_dirs=payload.get("dataDirs"), external_domains=payload.get("externalDomains"), coordination_mode=payload.get("coordinationMode"), workspace=self.workspace))
+                return _public_project(register_project(store, payload["path"], display_name=payload.get("displayName"), default_ref=payload.get("defaultRef"), data_dirs=payload.get("dataDirs"), external_domains=payload.get("externalDomains"), coordination_mode=payload.get("coordinationMode"), workspace=self.workspace, harness=self.harness))
         if operation == "project.list":
             _exact(payload, set(), {"includeInactive"})
             include_inactive = payload.get("includeInactive") is True
