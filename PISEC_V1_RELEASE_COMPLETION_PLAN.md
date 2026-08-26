@@ -88,11 +88,17 @@ that the test boundary did not model. They are not release proof. Neither OID
 above may be used as the final corrected `bootstrapV1Commit` or
 `finalV1Commit`.
 
-This new plan file is intentional operator-approved dirty planning work. On
-resumption, inspect and preserve it. Commit it unchanged as a small planning
-handoff before source work, or include it in the first coherent source commit;
-in either case, no candidate may pass Phase 10.1 while it remains untracked or
-uncommitted.
+The corrected source-core candidate is now committed at
+`45eefe7f084f9568c362f869bb2dfa9611ce7576` with tree
+`bf33f52c4cf003ae50692e3c80b48f538bcf160f`. Its exact clean Phase 10.1 gate
+passed: compileall, shell syntax, catalogue parity, Bun build, Python 262
+tests with 1 skipped, and Bun 8/8. It is the current bootstrap candidate; the
+documentation/status descendant still must become the final candidate and
+pass the complete gate.
+
+This plan file is tracked and preserved as the executable handoff. The
+compact status journal remains the only status record and contains only the
+required phase, commit, checks, and blocker fields.
 
 ### 3.2 Current deployment and retained recovery material
 

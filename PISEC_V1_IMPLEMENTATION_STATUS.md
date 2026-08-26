@@ -36,7 +36,7 @@
   - Commit OID: `3125a65fc880ea5b37082a52aafd324cde302847`
   - Checks: clean owner-only checkout at `3125a65`: `python3 -m unittest discover -s tests -q` passed (207, 1 skipped); `bun test omp/extensions/pisec.test.ts` passed (7/7); `python3 -m compileall -q scripts tests` passed; `bash -n scripts/*.sh` passed; operation catalogue `--check` passed; `bun build omp/extensions/pisec.ts --target bun` passed; `git diff --check` passed; README command/required-truth and prohibited-claim audit passed; macOS stub exited 1 without home mutation; runtime `done` fail-first rejection passed; no live-state cutover performed.
   - Current blocker: none.
-- Phase 10 status: source scope-convergence and boundary-audit repairs committed; live cutover remains frozen pending exact clean source acceptance.
-  - Commit OID: `b02ecae` (corrected source candidate; not yet final bootstrap/final candidate)
-  - Checks: first repair fail-first suite passed (5/5); boundary-audit fail-first evidence reproduced OMP/Codex worker-policy rejection, First Mate generic error masking, and permission-approval drift acceptance; repaired Phase 10 regression slice passed (10/10); focused production Pisec regressions passed with host socket permissions (129/129); compileall, shell syntax, catalogue parity, and `git diff --check` passed; no live-state mutation after the recorded partial state.
-  - Current blocker: exact clean Phase 10.1 acceptance and final independent boundary audit pending; then live recovery or archive/reset and 10.2–10.6 acceptance.
+- Phase 10 status: corrected source core committed and exact clean source acceptance passed; live cutover remains frozen pending final descendant and controlled live inventory/approval gate.
+  - Commit OID: `45eefe7f084f9568c362f869bb2dfa9611ce7576` (corrected source core candidate)
+  - Checks: boundary-audit fail-first suite passed (5/5); focused repair/regression slice passed (47/47); exact clean Phase 10.1 gate passed: status clean, diff check, compileall, shell syntax, catalogue parity, Bun build, Python 262 tests with 1 skipped, and Bun 8/8; no live-state mutation after the recorded partial state.
+  - Current blocker: final documentation/status descendant and clean-gate rerun, then live re-inventory, guarded recovery or archive/reset, 51 scenarios, external evidence, local v1 tag, and final verification.
