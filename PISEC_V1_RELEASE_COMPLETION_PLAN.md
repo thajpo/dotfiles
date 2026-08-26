@@ -93,8 +93,9 @@ The corrected source-core candidate is committed at
 `bf33f52c4cf003ae50692e3c80b48f538bcf160f`. Its exact clean Phase 10.1 gate
 passed: compileall, shell syntax, catalogue parity, Bun build, Python 262
 tests with 1 skipped, and Bun 8/8. It is the current bootstrap candidate. The
-final documentation/status descendant is `97edbc3` with tree
-`23e92fd95edf2232e813c3bcbeba0383a82e9b50`; its exact clean Phase 10.1 gate
+final documentation/status descendant is
+`5881772e601f377ec6fbfd217920d09b038a05a7` with tree
+`8e73ffa75d2af6bac69a95c943c250c850781cbc`; its exact clean Phase 10.1 gate
 also passed with Python 262 tests and 1 skipped and Bun 8/8.
 
 This plan file is tracked and preserved as the executable handoff. The
