@@ -68,34 +68,20 @@ tags.
 
 ### 3.1 Repository state before this handoff
 
-- Prior final-candidate source commit:
-  `605f371f804f78a08520db53951160b7484bb8b1`.
-- Its tree:
-  `7e8f6759c1d9b125d7f7597d5d59c11659ca86f7`.
-- Prior bootstrap-candidate source commit:
-  `cae47c0422f3471f54ac83fbf59ce87d5303ea28`.
-- Its tree:
-  `f37f8154e1cb040a171a28bf381966c7ea01c4f2`.
-- `master` was clean and 91 commits ahead of `origin/master` before this plan
-  file was added.
+- Earlier candidates and their live acceptance attempts are historical only;
+  their identities must not be used for v1 release evidence.
+- The corrected source-core commit is
+  `7282eb5c5d5478d2be15838ed1e7e0625f3e7887` with tree
+  `a9e20e97e9203b86f516ebfc34f8a29e71857bf4`. It contains the bounded
+  harness-aware fleet usability repair and the protected OMP activation repair.
+- Its clean source gate passed: Python 265 tests with 1 skipped, Bun 8/8,
+  compileall, shell syntax, operation-catalogue parity, Bun build, and
+  `git diff --check`.
+- The final documentation/status descendant will be the new
+  `finalV1Commit`; the corrected source-core commit above is the
+  `bootstrapV1Commit`. The descendant's full OID and tree must be captured
+  after the final documentation update and before live mutation.
 - No local `pisec-v1.0.0` tag exists.
-
-Clean source acceptance previously passed from the prior candidate: Python
-247 tests with 1 skipped, Bun 8/8, focused reconciliation 81/81, compileall,
-shell syntax, operation-catalogue parity, Bun build, and `git diff --check`.
-Those are valid historical results, but live acceptance exposed an invariant
-that the test boundary did not model. They are not release proof. Neither OID
-above may be used as the final corrected `bootstrapV1Commit` or
-`finalV1Commit`.
-
-The corrected source-core candidate is committed at
-`4127ebb6297043e0ec2e1f87ac6e949ac2e5c9a4` with tree
-`8fc9e21ad945763814cccee34956d8d731ecb49b`. Its exact clean Phase 10.1
-gate passed: compileall, shell syntax, catalogue parity, Bun build, Python 264
-tests with 1 skipped, and Bun 8/8. It is the current bootstrap candidate. The
-final documentation/status descendant is `8e67795eb765a22d614b941fc8394219dd104497`
-with tree `d7bf851823c457cd78cc04d95fa9cb70294d7df4`; its exact clean Phase
-10.1 gate passed with Python 264 tests and 1 skipped and Bun 8/8.
 
 This plan file is tracked and preserved as the executable handoff. The
 compact status journal remains the only status record and contains only the
@@ -103,79 +89,84 @@ required phase, commit, checks, and blocker fields.
 
 ### 3.2 Current deployment and retained recovery material
 
-- Current deployment:
-  `deploy-54d6bc3a585a42b79bb88e133458a0ce`.
-- Deployed source:
-  `cae47c0422f3471f54ac83fbf59ce87d5303ea28`.
-- Deployment bundle SHA-256:
-  `275aacfbaf25351285842416941096092f75f821fc51f4b0b0edf155cced6265`.
+- The current intermediate deployment is
+  `deploy-84f1b7e70f4545b9a348f001f52613a8`.
+- Its deployed source is the older bootstrap replay candidate
+  `4127ebb6297043e0ec2e1f87ac6e949ac2e5c9a4`, tree
+  `8fc9e21ad945763814cccee34956d8d731ecb49b`.
+- Its deployment bundle SHA-256 is
+  `c8854572d8ac7d37f002b5a45b9b7735bf2d7be612f4f15f92ac2c2c89b3861a`.
 - Stable updater SHA-256:
-  `9dd93dd26ecd4635e888eec9ef63fa9480fd367066a11ed096d7448daaeb9846`.
+  `59fbb73053947de7a53a9d419546d87e3e574b6b5b583e084985eea4669edda7`.
+- The installed stable updater currently identifies corrected source
+  `7282eb5c5d5478d2be15838ed1e7e0625f3e7887`, tree
+  `a9e20e97e9203b86f516ebfc34f8a29e71857bf4`, and bundle
+  `f3486d65bbe863288cfe0cfc33aeabc1a4d9a25cdcd6837163bcbd26095ed8d8`.
 - Database identity/version: `pisec-core-v1`, version `1`.
 - Schema SHA-256:
   `8f844d7e1835ec966041c79c70545a4f1def83cbf4f9dae19f94496388c633c5`.
-- Pre-v1 archive:
-  `/home/j/.local/state/pisec.archive-20260826T013340Z`.
-- Archive manifest:
-  `/home/j/.local/lib/pisec/archive-manifests/pisec.archive-20260826T013340Z.json`.
+- The latest intermediate v1 archive is
+  `/home/j/.local/state/pisec.archive-20260826T141551Z`; its owner-only
+  manifest is
+  `/home/j/.local/lib/pisec/archive-manifests/pisec.archive-20260826T141551Z.json`
+  with manifest SHA-256
+  `55a8c4a1f135a6ad50ee8e2fd43a7d39f0f5c939654123bdd3bf0250d22e129f`.
+- The original pre-v1 archive and its reviewed inventory/runbook remain
+  preserved at their previously recorded paths. A final cutover archive must
+  also be preserved and referenced by the external acceptance record.
 - Reviewed re-registration runbook:
-  `/home/j/.local/lib/pisec/cutover-runbooks/pisec-v1-reregister-20260826T012408Z.json`.
+  `/home/j/.local/lib/pisec/cutover-runbooks/pisec-v1-reregister-20260826T124752Z.json`.
 - Pre-cutover inventory:
-  `/home/j/.local/lib/pisec/cutover-inventories/pisec-v1-precutover-20260826T012408Z.json`.
-- There is not yet a compatible v1 last-known-good deployment, and the required
-  recovery drill has not run.
-
-The stable-updater install-only step and the archive/reset completed. The
-remaining work is a source correction followed by recovery or a clean replay
-of registration, then full acceptance.
+  `/home/j/.local/lib/pisec/cutover-inventories/pisec-v1-precutover-20260826T124752Z.json`.
+- The intermediate reset intentionally has no compatible last-known-good
+  deployment. The final corrected-bootstrap reset must establish the LKG during
+  the ordinary update to `finalV1Commit`, after which the recovery drill runs.
 
 ### 3.3 Current fresh-v1 live state
 
-- 15 projects are registered: 5 active and 10 inactive.
-- The five active projects are CSV Agent, Dreamer³, OpenVLA_Patching_Experiment,
-  ScaleTraining, and Tokenthing.
-- Five Secretary bindings exist; no First Mate and no worker exist.
-- Every active binding has
-  `desired_generation_sha256 != applied_generation_sha256`.
-- Four bindings look provisioned/bound/succeeded but fail the authoritative
-  usable-binding predicate because their generations differ.
-- Dreamer³ provisioning and its `secretary.ensure` operation are
-  `needs_attention` with `effect_mismatch`.
-- Installed `pisec doctor --json` reports `ok: false`, five stale-generation
-  errors, and no usable Dreamer³ Secretary.
-- Pisec broker, auth broker, auth gateway, and Herdr are active. Collie is
-  inactive.
+- The intermediate reset is clean: all 14 existing repositories from the
+  reviewed runbook are registered inactive in project mode; the absent
+  `/tmp/pisec-live-acceptance-epoch3` placeholder is intentionally excluded.
+- Nine intended-active projects are open in project mode with bound, idle,
+  usable Secretaries; one canonical First Mate is bound and idle. No worker,
+  reservation, or attention is present.
+- Fleet transitions were intentionally attempted only as a fail-first probe
+  on the older `4127ebb` replay and refused because that candidate lacks the
+  corrected harness-aware usability path. No live mode was changed by that
+  refusal.
+- This is an intermediate replay, not final release evidence. The final
+  corrected-bootstrap reset, fleet transitions, permissions, ordinary update,
+  recovery drill, 51-scenario evidence, and tag remain outstanding.
 
-Freeze live mutation until corrected source is deployed. In particular, do not
-run the current `project refresh --all`, open the remaining projects, ensure a
-First Mate, change fleet modes, apply permissions, run a final update, recover,
-or tag. A refresh under the current code would materialize the wrong scope and
-could obscure the defect without satisfying the invariant.
+## 4. Resolved source blockers and remaining release work
 
-## 4. Confirmed Phase 10 release blocker
+The earlier deterministic scope and fleet-transition blockers were reproduced,
+covered by fail-first tests, repaired in bounded source commits, and passed the
+clean source gate. The remaining work is live cutover and acceptance proof; it
+must not introduce another source workaround.
 
-This is deterministic scope drift, not a capacity problem and not a
-multi-project limitation.
+Historical diagnosis (retained to explain the fail-first evidence):
 
-1. Initial Secretary materialization obtains
+1. Initial Secretary materialization obtained
    `externalDomains = ["*"]` from the existing
    `harness.profile_domains("secretary-project", ())` adapter contract.
-2. The authoritative desired-generation payload hashes `externalDomains`.
-3. `effective_runtime_scope` in `scripts/pisec/access.py` later replaces the
+2. The authoritative desired-generation payload hashed `externalDomains`.
+3. `effective_runtime_scope` in `scripts/pisec/access.py` then replaced the
    role-composed domain scope with the raw project `external_domains`, which is
    currently `[]`.
-4. Broker reconciliation calls `mark_stale_bindings`, recomputes the desired
+4. Broker reconciliation called `mark_stale_bindings`, recomputed the desired
    generation from that different scope, and marks every binding stale.
-5. For all five current bindings, the initial-materialization generation equals
+5. For the affected bindings, the initial-materialization generation equaled
    the applied generation and artifact generation; the refresh-composed
    generation equals the current desired generation.
-6. `_recover_start` correctly refuses a stale applied generation, but a broad
+6. `_recover_start` correctly refused a stale applied generation, but a broad
    wrapper degrades the useful error into “secretary runtime identity is
    missing or mismatched.”
 
-The usable-binding predicate is behaving correctly by rejecting all five.
-Never weaken it, exempt supervisors from stale checks, or assign desired equal
-to applied without reproducing and attesting the exact authoritative scope.
+The usable-binding predicate correctly rejected the stale bindings. The repair
+preserves that predicate, does not exempt supervisors, and does not assign
+desired equal to applied without reproducing and attesting the exact
+authoritative scope.
 
 ### 4.1 Why prior tests were green
 
@@ -184,8 +175,7 @@ to applied without reproducing and attesting the exact authoritative scope.
 data directories, model fields, and surface digest. The fixture therefore
 made two different production scopes look identical.
 
-There are two adjacent source blockers that must be corrected in the same
-bounded repair:
+The bounded repair also covered two adjacent source blockers:
 
 - worker proposal scopes in `scripts/pisec/workstreams.py` omit
   `externalDomains` from `_FULL_SCOPE_FIELDS` and from the immutable proposed
@@ -194,8 +184,8 @@ bounded repair:
   local wait without a final authoritative usable-binding postcondition,
   leaving a reconcile race able to commit an already-stale success.
 
-No live worker was created, so the worker defect has not widened live state,
-but it is a source-release blocker.
+No live worker was created during the diagnosis, so that defect did not widen
+live state.
 
 ## 5. Required source correction
 
