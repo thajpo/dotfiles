@@ -71,12 +71,12 @@ tags.
 - Earlier candidates and their live acceptance attempts are historical only;
   their identities must not be used for v1 release evidence.
 - The corrected source-core commit is
-  `3eb53de5764c40744499812388e3bdcef93b5860` with tree
-  `786dc295def4da640b0feaf67b56560ecb675d50`. It contains the bounded
+  `773c034bb9b292b030df8a1662914af0ca62d6cb` with tree
+  `60e7237688d7ee1c3f13f246534b662bba039721`. It contains the bounded
   harness-aware fleet usability repair, fail-closed binding-harness identity
-  validation, and the protected OMP/Codex activation and retained-backup
-  replacement parity repair.
-- Its clean source gate passed: Python 266 tests with 1 skipped, Bun 8/8,
+  validation, protected OMP/Codex activation and retained-backup replacement
+  parity, and the role-aware OMP worker startup attestation repair.
+- Its clean source gate passed: Python 266 tests with 1 skipped, Bun 9/9,
   compileall, shell syntax, operation-catalogue parity, Bun build, and
   `git diff --check`. The focused Phase 10 scope/adapter slice passed 15/15,
   including production OMP/Codex activation/replacement/sealing with sealed
@@ -94,30 +94,30 @@ required phase, commit, checks, and blocker fields.
 
 ### 3.2 Current deployment and retained recovery material
 
-- The current intermediate deployment is
-  `deploy-090c19bfeaa24881a72deb5e17e61c71`.
-- Its deployed source is the reviewed pre-correction replay candidate
-  `c4e116cd4e1487b7160841b3b94f4c541e2a6402`, tree
-  `a5e1c11f01da4272effdb5310d83e3b050a8c513`.
+- The current corrected bootstrap deployment is
+  `deploy-4c25f0eca4054299a9c89b1e469e0e53`.
+- Its deployed source is the corrected source core
+  `773c034bb9b292b030df8a1662914af0ca62d6cb`, tree
+  `60e7237688d7ee1c3f13f246534b662bba039721`.
 - Its deployment bundle SHA-256 is
-  `4671069e15bad3566b937b1418993ac25503228690c59f80104d71256fa98289`.
+  `05e439ad244361a642c63072f8044a477174c09dea95809f08daa52894a84525`.
 - Stable updater SHA-256:
-  `59fbb73053947de7a53a9d419546d87e3e574b6b5b583e084985eea4669edda7`.
-- The installed stable updater currently identifies the prior final
-  documentation source `503f71379a45de36dc29a78ba57b67628fbc339f`, tree
-  `1de067f2c3583d2f024ec956ccad714c1fb1346e`, and bundle
-  `4671069e15bad3566b937b1418993ac25503228690c59f80104d71256fa98289`.
-  It must be refreshed from the final descendant after this source-core
-  correction is recorded.
+  `9dd93dd26ecd4635e888eec9ef63fa9480fd367066a11ed096d7448daaeb9846`.
+- The installed stable updater identifies the corrected source core
+  `773c034bb9b292b030df8a1662914af0ca62d6cb`, tree
+  `60e7237688d7ee1c3f13f246534b662bba039721`, and bundle
+  `05e439ad244361a642c63072f8044a477174c09dea95809f08daa52894a84525`.
+  It must be refreshed from the final documentation/status descendant after
+  that candidate is committed and accepted.
 - Database identity/version: `pisec-core-v1`, version `1`.
 - Schema SHA-256:
   `8f844d7e1835ec966041c79c70545a4f1def83cbf4f9dae19f94496388c633c5`.
-- The latest intermediate v1 archive is
-  `/home/j/.local/state/pisec.archive-20260826T141551Z`; its owner-only
+- The corrected-bootstrap archive is
+  `/home/j/.local/state/pisec.archive-20260826T162028Z`; its owner-only
   manifest is
-  `/home/j/.local/lib/pisec/archive-manifests/pisec.archive-20260826T141551Z.json`
+  `/home/j/.local/lib/pisec/archive-manifests/pisec.archive-20260826T162028Z.json`
   with manifest SHA-256
-  `55a8c4a1f135a6ad50ee8e2fd43a7d39f0f5c939654123bdd3bf0250d22e129f`.
+  `ab9d8675f3bfc3de95a6b127e1a6429e58884da7277a18c5653224ccd880e2fb`.
 - The original pre-v1 archive and its reviewed inventory/runbook remain
   preserved at their previously recorded paths. A final cutover archive must
   also be preserved and referenced by the external acceptance record.
@@ -125,32 +125,33 @@ required phase, commit, checks, and blocker fields.
   `/home/j/.local/lib/pisec/cutover-runbooks/pisec-v1-reregister-20260826T124752Z.json`.
 - Pre-cutover inventory:
   `/home/j/.local/lib/pisec/cutover-inventories/pisec-v1-precutover-20260826T124752Z.json`.
-- The intermediate reset intentionally has no compatible last-known-good
-  deployment. The final corrected-bootstrap reset must establish the LKG during
-  the ordinary update to `finalV1Commit`, after which the recovery drill runs.
+- The corrected-bootstrap reset intentionally has no compatible last-known-good
+  deployment. The ordinary update to the final documentation/status descendant
+  must establish the LKG, after which the recovery drill runs.
 
 ### 3.3 Current fresh-v1 live state
 
-- The intermediate reset is clean: all 14 existing repositories from the
-  reviewed runbook are registered inactive in project mode; the absent
+- The corrected-bootstrap replay is complete: all 14 existing repositories
+  from the reviewed runbook are registered; the absent
   `/tmp/pisec-live-acceptance-epoch3` placeholder is intentionally excluded.
-- Nine intended-active projects are open in project mode with bound, idle,
-  usable Secretaries; one canonical First Mate is bound and idle. No worker,
-  reservation, or attention is present.
-- Fleet transitions were intentionally attempted only as a fail-first probe
-  on the older `4127ebb` replay and refused because that candidate lacks the
-  corrected harness-aware usability path. No live mode was changed by that
-  refusal.
-- This is an intermediate replay, not final release evidence. The final
-  corrected-bootstrap reset, fleet transitions, permissions, ordinary update,
-  recovery drill, 51-scenario evidence, and tag remain outstanding.
+- Nine intended-active projects are open with bound, idle, usable Secretaries;
+  one canonical First Mate is bound, idle, and usable; four reviewed projects
+  are in fleet mode and five remain in project mode. All nine reviewed
+  permission replacements are `succeeded/committed`, including two affected
+  bindings for the control project. Doctor and reconcile are green.
+- This is corrected-bootstrap evidence, not final release evidence. The final
+  documentation/status candidate, clean descendant source acceptance, ordinary
+  update/LKG, recovery drill, 51-scenario evidence, external acceptance record,
+  and local tag remain outstanding.
 
 ## 4. Resolved source blockers and remaining release work
 
-The earlier deterministic scope and fleet-transition blockers were reproduced,
-covered by fail-first tests, repaired in bounded source commits, and passed the
-clean source gate. The remaining work is live cutover and acceptance proof; it
-must not introduce another source workaround.
+The earlier deterministic scope, fleet-transition, and OMP worker-attestation
+blockers were reproduced, covered by fail-first tests, repaired in bounded
+source commits, and passed the clean source gate. The corrected-bootstrap live
+replay is green. The remaining work is the final documentation/status source
+acceptance descendant, ordinary update/recovery, and complete live acceptance;
+it must not introduce another source workaround.
 
 Historical diagnosis (retained to explain the fail-first evidence):
 
