@@ -163,10 +163,16 @@ at deleted staging files and Codex exited before its hook could report
 attestation. The fail-first path assertions and source repair are in
 `3c1034ff4334f605a8839690eaad0da36b4ebaa6`. The corrected source gate is
 green, and the host Codex dependency now reports the exact pinned `0.147.0`.
-The remaining work is the final documentation/status source-acceptance
-descendant, corrected deployment/recovery, archive/reset of the partial
-failed-worker state, and complete live acceptance; it must not introduce
-another source workaround.
+The third fail-first live worker probe then showed that the sealed Codex
+surface enabled hooks without granting the exact pinned Codex automation
+invocation its documented hook-trust bypass. The generated launcher omitted
+`--dangerously-bypass-hook-trust`, so Codex never ran the authenticated
+`SessionStart` hook. The bounded launcher repair and argv-capture regression
+are in `5a53c33`; the broker still requires exact generation/session-start
+attestation, so this does not weaken the runtime boundary. The remaining work
+is the final documentation/status source-acceptance descendant, corrected
+deployment/recovery, archive/reset of the failed-worker state, and complete
+live acceptance; it must not introduce another source workaround.
 
 Historical diagnosis (retained to explain the fail-first evidence):
 
