@@ -20,7 +20,7 @@ from scripts.pisec.projects import register_project
 from scripts.pisec.runtime import prepare_runtime_turn, report_runtime, usable_runtime_binding
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
-from scripts.pisec.harnesses.omp import OmpHarnessAdapter, _copy_user_surface
+from scripts.pisec.harnesses.omp import OmpHarnessAdapter, _activate_directory, _copy_user_surface
 WEB_SEARCH_DOMAINS = ("html.duckduckgo.com",)
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
@@ -69,6 +69,31 @@ def stage_and_activate(adapter: OmpHarnessAdapter, scope: dict):
 
 
 class RuntimeMaterializationTests(unittest.TestCase):
+    def test_activate_directory_opens_protected_target_before_cross_tree_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "state" / "binding-surfaces" / "omp" / "ws_target"
+            staged = root / "candidate" / "binding-surfaces" / "omp" / "ws_target"
+            backup = root / "operation" / "previous" / "binding-surfaces" / "omp" / "ws_target"
+            target.mkdir(parents=True)
+            staged.mkdir(parents=True)
+            backup.parent.mkdir(parents=True)
+            os.chmod(target, 0o500)
+
+            real_replace = os.replace
+
+            def host_cross_tree_rename(source, destination):
+                if Path(source) == target and stat.S_IMODE(target.stat().st_mode) == 0o500:
+                    raise PermissionError(13, "Permission denied", str(source), str(destination))
+                return real_replace(source, destination)
+
+            with patch("scripts.pisec.harnesses.omp.os.replace", side_effect=host_cross_tree_rename):
+                _activate_directory(staged, target, backup)
+
+            self.assertTrue(target.exists())
+            self.assertTrue(backup.exists())
+            os.chmod(backup, 0o700)
+
     def test_stage_profile_retries_after_stale_sealed_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
