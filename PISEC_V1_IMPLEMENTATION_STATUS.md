@@ -36,7 +36,7 @@
   - Commit OID: `3125a65fc880ea5b37082a52aafd324cde302847`
   - Checks: clean owner-only checkout at `3125a65`: `python3 -m unittest discover -s tests -q` passed (207, 1 skipped); `bun test omp/extensions/pisec.test.ts` passed (7/7); `python3 -m compileall -q scripts tests` passed; `bash -n scripts/*.sh` passed; operation catalogue `--check` passed; `bun build omp/extensions/pisec.ts --target bun` passed; `git diff --check` passed; README command/required-truth and prohibited-claim audit passed; macOS stub exited 1 without home mutation; runtime `done` fail-first rejection passed; no live-state cutover performed.
   - Current blocker: none.
-- Phase 10 status: source acceptance complete at the repaired final source; live bootstrap/reset and prior final4 recovery evidence remain recorded, and the bounded Fence temp-root repair is ready for live deployment and re-registration.
-  - Commit OID: `ab57354af4bcf8a7a699f476a60b1df2c1b7c733`
-  - Checks: clean committed worktree passed 212 Python tests/1 skip, Bun 7/7, Bun build, compileall, shell syntax, operation catalogue, and diff checks; exact Collie patch SHA `032d0b629fc5ffa18317fc8ba11671130ab81cc0131cce3b70815195f24a0d32`; installed Reviewr binary is present at pinned `0.32.1`; source temp-root regression passed 37/37.
-  - Current blocker: none; live deployment update and normal project re-registration are the next required operations.
+- Phase 10 status: reconciliation core committed and exact clean-core source acceptance passed; final documentation/status descendant and live cutover remain.
+  - Commit OID: `cae47c0` (corrected core; proposed `bootstrapV1Commit`)
+  - Checks: clean owner-only checkout passed `git status --short`, `git diff --check`, compileall, shell syntax, catalogue parity, Bun build, Python `unittest discover -s tests` (247 tests, 1 skipped), and Bun tests (8/8); focused reconciliation suite passed (81/81); no live-state cutover performed.
+  - Current blocker: none; create the final documentation/status descendant, rerun exact Phase 10.1, then inventory and gate live cutover.

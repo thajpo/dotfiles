@@ -3017,6 +3017,254 @@ Commit documentation/platform truth separately. Do not push.
 Prove the source, deployment, runtime, database, supervision, Git, and recovery
 contracts together before calling the system v1.
 
+#### Phase 10.0 — Reconciliation and resumption directive
+
+This subsection is an authoritative execution addendum for resuming Phase 10.
+It supersedes earlier status claims that source acceptance or live readiness
+was complete, but it does not change any v1 architecture, authority boundary,
+state vocabulary, scenario, or Definition of Done elsewhere in this plan.
+Phases 0–9 are not restarted. The remaining work is Phase 10 release
+reconciliation, clean source acceptance, controlled archive/reset, live
+acceptance, evidence, and the local tag.
+
+##### Handoff state
+
+At this handoff:
+
+- committed `HEAD` is
+  `334c6acc6fe41b30161fc84f1fd47a7d8cfff6c7`;
+- the working tree contains an uncommitted, in-scope reconciliation draft in
+  `scripts/pisec/broker.py`, `scripts/pisec/doctor.py`,
+  `scripts/pisec/harnesses/omp.py`, `scripts/pisec/projects.py`,
+  `scripts/pisec/refresh.py`, `tests/test_pisec_adapters.py`,
+  `tests/test_pisec_doctor.py`, `tests/test_pisec_fence.py`,
+  `tests/test_pisec_projects.py`, `tests/test_pisec_protocol.py`, and
+  `tests/test_pisec_refresh.py`;
+- this plan addendum is also intentional in-scope work and must be preserved;
+- no reconciliation commit, live reset, session wipe, tag, push, or remote
+  mutation has been performed from that draft;
+- eight focused lifecycle/restart/doctor/cleanup tests passed together after
+  their initial fail-first runs;
+- the adjacent refresh, protocol, project, Secretary, doctor, Fence, and
+  adapter suite passed 93 tests before the final missing-binding doctor
+  assertion was added; that assertion then passed alone;
+- compileall, shell syntax, catalogue parity, Bun build, and Bun 8/8 passed
+  before that final doctor addition and therefore must be rerun;
+- the installer suite's only observed failure was its intentional refusal to
+  install from a dirty source checkout. It must be rerun from the exact clean
+  committed candidate; and
+- the compact status journal is stale and must not be trusted as proof that
+  Phase 10 is complete or ready for live deployment.
+
+After any compaction or model handoff, first reread this complete plan, the
+compact status journal, Git history, current status, and current diff. Preserve
+the draft. Do not restore it, restart completed phases, or infer completion
+from the old Phase 10 journal entry.
+
+##### Confirmed root defects
+
+The reconciliation is required because clean source tests and live behavior
+diverged in these concrete ways:
+
+1. A successful `project.deactivate` operation was keyed permanently by
+   project ID. After `project.open` reactivated the same project, the next
+   deactivation replayed the prior result, left the project active, and emitted
+   no new deactivation event.
+2. A pre-stop staging failure left the old runtime truthfully idle but left the
+   durable `runtime.refresh` operation in
+   `needs_attention/pre_stop_attention`. A public retry could attest and appear
+   upgraded while that operation remained nonterminal.
+3. Broker startup restore set `launch_generation_sha256` without the required
+   reservation owner. Fixture startup wrote attestation rows directly and hid
+   the fact that the real authenticated `runtime.report` path rejects that
+   ownerless launch.
+4. Targeted `runtime.ensure` used the refresh reservation fields to restart an
+   unchanged, already-applied generation. That is not a generation refresh and
+   creates the same false/ownerless lifecycle pressure on repeated restarts.
+5. Doctor treated adapter identity as binding health, automatically treated
+   unbound or `needs_attention` generation state as acceptable, and inspected
+   only binding rows that existed. It could return `ok=true` for active
+   `error`, `missing`, stale, or absent bindings and for an active project whose
+   Secretary binding had vanished.
+6. OMP cleanup removed a read-only policy file by unsealing its parent and
+   leaving that parent writable. A later repair compensated by normalizing an
+   already-contaminated sealed tree during deletion. That compatibility
+   behavior concealed the cleanup ordering defect.
+7. Several post-Phase-9 tests used fixture methods that directly mutated
+   runtime bindings and emitted session-start evidence instead of exercising
+   the authenticated public report path. Those tests could prove the fixture
+   while missing a production authorization failure.
+
+A Pisec/session wipe alone cannot correct these source and state-machine
+defects. Conversely, deleting current source mechanisms cannot repair already
+persisted live residue. Finish and freeze the narrow source corrections first,
+then archive/reset Pisec-owned live state.
+
+##### Required reconciliation outcome
+
+Complete the current draft without adding a compatibility layer or alternate
+lifecycle:
+
+1. Each active project lifecycle receives a distinct replay-safe
+   `project.deactivate` operation. Repeating deactivate while already inactive
+   remains an idempotent read. Reopening and deactivating again commits a new
+   successful operation and event. A clean precondition conflict, including an
+   active worker, creates no applying deactivation operation and leaves
+   lifecycle state writable and truthful.
+2. Only the exact pre-stop staging failure may reopen its existing
+   `runtime.refresh` operation from `needs_attention/pre_stop_attention` to
+   `applying/reserved`. A real authenticated session-start report must complete
+   it as `succeeded/verified`. Post-stop ambiguity must remain reserved or
+   `needs_attention` as specified in Section 9.1.
+3. Broker restore and targeted ensure may restart only a generation that is
+   already applied and still equals desired. They clear obsolete runtime
+   instance/report/session-start evidence before launch, do not set a launch
+   generation, and do not invent a refresh reservation. The ordinary
+   authenticated `session_start` path establishes the new evidence. A stale
+   desired/applied pair stays stopped for the normal refresh path.
+4. “Already live” ensure and doctor consume the authoritative usable-binding
+   predicate. Doctor additionally inventories every active workstream binding
+   and every active project's one bound Secretary, so an absent row cannot be
+   skipped. `starting`, `stopped`, `missing`, `error`, `unknown`, stale,
+   reserved, ownerless, or unattested state makes overall health false.
+5. Valid OMP sealed cleanup may temporarily unseal the exact read-only policy
+   parent, must reseal it in a `finally` path, and may then validate and remove
+   the complete sealed surface. Remove the legacy writable-sealed-tree
+   normalization. Preserve fail-closed rejection of a genuinely writable or
+   unsafe sealed tree.
+
+##### Repair-cluster disposition
+
+Use this disposition when reviewing `3125a65..HEAD` and the current draft:
+
+- Keep the strict runtime attestation and common usable-binding work, protected
+  permission-scope composition, exact initial applied-generation invariant,
+  missing-workspace recreation behavior, and deterministic stale staging-root
+  recovery.
+- Consolidate the deactivation, refresh-retry, startup-restore,
+  current-generation ensure, and doctor logic around the exact invariants
+  above. Do not retain symptom-specific branches once the public transition is
+  proven.
+- Remove the legacy writable sealed-surface cleanup normalization. Keep the
+  current-contract behavior needed to remove a valid read-only policy and
+  valid sealed surface.
+- Keep normal retired-Secretary reuse. Do not delete the bounded interrupted
+  Secretary-open/re-registration recovery merely because the live database
+  will be reset: scenario 48 explicitly requires interrupted normal commands
+  to resume. Consolidate overlapping branches only when fail-first crash tests
+  prove the same required recovery with less code.
+- Do not add a typed adapter framework merely to replace one exact
+  workspace-not-found message during v1 finalization. Keep or simplify that
+  bounded behavior within the existing adapter contract.
+- Do not reintroduce migrations, release channels, split Git objects, direct
+  messages, policy compatibility, or another updater/recovery mechanism.
+
+##### Required integration evidence before a source commit
+
+Retain the existing broad production-dispatcher test covering registration,
+open, worker preparation/authorization, runtime reporting, research,
+completion, human acceptance, integration, retirement, and cleanup. Add or
+retain these missing public-path tests; they must use broker operations and the
+real runtime report transition rather than private state helpers:
+
+1. `project.register -> project.open -> project.deactivate -> project.open ->
+   project.deactivate`, ending inactive with one reused Secretary row and two
+   successful deactivation operations/events.
+2. Public refresh staging failure before stop, public retry, explicit
+   `startup_in_progress`, real authenticated session-start report, terminal
+   refresh success, exact applied generation, and no remaining reservation.
+3. Broker restart of a stopped current generation followed by real runtime
+   attestation; prove no ownerless launch generation or refresh reservation.
+4. Broker restart with desired/applied mismatch; prove the stale generation is
+   not launched and remains available to the normal refresh operation.
+5. Targeted `runtime.ensure` restart of a stopped current generation followed
+   by real attestation; prove it creates no `runtime.refresh` operation or
+   reservation.
+6. Doctor negative matrix for active `needs_attention`, `error`, `missing`,
+   `starting`, stale-generation, reservation, absent-binding, and missing
+   project-Secretary cases, plus a green usable-binding control.
+7. Valid sealed-policy cleanup reseals its parent before complete surface
+   removal; a writable contaminated sealed tree fails closed; deterministic
+   retry of an operation-owned sealed staging root remains green.
+8. Preserve the existing whole worker action/data path. If multi-target
+   permission replacement and dropped-hint/restart attention are not already
+   exercised through public dispatch or sockets, add one bounded integration
+   test for each rather than another generic end-to-end framework.
+
+Record the initial failing assertion for each new invariant and its later green
+result. Do not weaken an assertion to fit fixture behavior. Where fixture and
+production transitions differ, make the test drive the production transition.
+
+##### Reconciliation verification and commits
+
+Proceed in this order:
+
+1. Review the complete current diff against this subsection and remove any
+   unrelated or compatibility behavior.
+2. Run the focused tests above and the full adjacent regression set.
+3. Complete a fresh independent Luna max-reasoning, read-only audit of the
+   actual diff against this plan. Resolve every concrete contract defect.
+4. Commit only the coherent runtime/lifecycle/health source and tests as the
+   corrected core candidate. Do not include unrelated files and do not push.
+5. From a clean checkout exactly at that commit, run the complete Phase 10.1
+   source acceptance, including the installer test that refuses dirty input.
+6. Update `PISEC_V1_IMPLEMENTATION_STATUS.md` using only its allowed compact
+   fields: phase status, exact OID, checks/results, and current blocker.
+7. Commit this authoritative addendum, the compact status correction, and any
+   remaining final documentation truth as one descendant final candidate.
+8. Rerun all of Phase 10.1 from a clean checkout exactly at that descendant.
+   Any tracked change invalidates acceptance and requires a new final OID and
+   complete rerun.
+
+The corrected core commit may serve as the new verified
+`bootstrapV1Commit`; the documentation/status-only descendant may serve as the
+new `finalV1Commit`, but only after both exact OIDs pass their required gates.
+The old recorded Phase 8/9/final identities are stale because later source
+repairs changed runtime behavior. Do not deploy or cite them as final evidence.
+
+##### Controlled reset and cutover scope
+
+The user has authorized wiping all Pisec and Pisec-worker sessions if that is
+the simpler clean cutover. Interpret that authorization narrowly:
+
+- archive and reset the Pisec control database, Pisec-owned runtime/binding
+  surfaces, Pisec-created worker repositories, and Pisec-owned model-session
+  state identified by the reviewed inventory;
+- preserve every project repository and its Git data, unrelated Herdr panes or
+  histories, unrelated OMP/Codex state, deployment bundles needed for
+  recovery, the verified LKG, all existing v1 cutover archives, and the
+  untouched pre-v1 archive;
+- never manually delete rows or ad hoc runtime directories as a substitute for
+  the stable updater's archive/reset path; and
+- create an owner-only manifest with exact paths, types, modes, digests, source
+  OIDs, archive destination, and recovery path before destructive action.
+
+Before using the authorization, re-inventory live state. The last observed
+state had 15 active projects, no active workers or nonterminal semantic
+records, and two Secretary bindings in `needs_attention/error`; treat those
+numbers only as a lead, not current truth. Review the exact 15-project
+registration/mode/permission input. Zero-project reset must create no
+supervisor. Re-register through normal v1 commands in the order required by
+scenarios 47–48: open projects in project mode, ensure the one First Mate only
+when needed, then apply reviewed fleet modes and exact permissions.
+
+Deploy and verify the corrected bootstrap before deploying final. Prove manual
+`recover-previous`, return to final, and verify exact bundle digests and schema
+compatibility. Then run all 51 scenarios in Section 10.2, including real
+project and fleet workflows, restarts, dropped hints, permission replacement,
+Reviewr, Collie, remediation, integration, recovery, and interrupted
+re-registration. Produce owner-only external acceptance evidence and create
+the annotated local `pisec-v1.0.0` tag only after every Definition of Done item
+is proven. Never push the commits or tag.
+
+##### Resume condition
+
+There is no known architectural contradiction or technical blocker at this
+handoff. Execution is intentionally paused for model handoff. Resume at the
+first item under “Reconciliation verification and commits”; do not repeat the
+completed investigation and do not begin live cutover until the source is
+committed, independently audited, and green from exact clean OIDs.
+
 #### Phase 10.1 — Source acceptance
 
 Identify and record two immutable commits before touching the live system:
