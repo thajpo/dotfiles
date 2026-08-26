@@ -71,16 +71,17 @@ tags.
 - Earlier candidates and their live acceptance attempts are historical only;
   their identities must not be used for v1 release evidence.
 - The corrected source-core commit is
-  `a076175c7407eb3ca47396369dd3f4e5a208bcbe` with tree
-  `a59773445a8cf07b020b3a9fbe679e2d8f69b97a`. It contains the bounded
+  `3eb53de5764c40744499812388e3bdcef93b5860` with tree
+  `786dc295def4da640b0feaf67b56560ecb675d50`. It contains the bounded
   harness-aware fleet usability repair, fail-closed binding-harness identity
-  validation, and the protected OMP activation repair.
+  validation, and the protected OMP/Codex activation and retained-backup
+  replacement parity repair.
 - Its clean source gate passed: Python 266 tests with 1 skipped, Bun 8/8,
   compileall, shell syntax, operation-catalogue parity, Bun build, and
-  `git diff --check`. The focused Phase 10 scope/adapter slice passed 21/21,
-  including production OMP/Codex activation/replacement/sealing, the
-  independent First Mate harness-mismatch guard, and fail-closed omitted
-  harness validation.
+  `git diff --check`. The focused Phase 10 scope/adapter slice passed 15/15,
+  including production OMP/Codex activation/replacement/sealing with sealed
+  existing targets and retained cross-tree backups, the independent First
+  Mate harness-mismatch guard, and fail-closed omitted harness validation.
 - The final documentation/status descendant will be the new
   `finalV1Commit`; the corrected source-core commit above is the
   `bootstrapV1Commit`. The descendant's full OID and tree must be captured
@@ -94,12 +95,12 @@ required phase, commit, checks, and blocker fields.
 ### 3.2 Current deployment and retained recovery material
 
 - The current intermediate deployment is
-  `deploy-84f1b7e70f4545b9a348f001f52613a8`.
-- Its deployed source is the older bootstrap replay candidate
-  `4127ebb6297043e0ec2e1f87ac6e949ac2e5c9a4`, tree
-  `8fc9e21ad945763814cccee34956d8d731ecb49b`.
+  `deploy-090c19bfeaa24881a72deb5e17e61c71`.
+- Its deployed source is the reviewed pre-correction replay candidate
+  `c4e116cd4e1487b7160841b3b94f4c541e2a6402`, tree
+  `a5e1c11f01da4272effdb5310d83e3b050a8c513`.
 - Its deployment bundle SHA-256 is
-  `c8854572d8ac7d37f002b5a45b9b7735bf2d7be612f4f15f92ac2c2c89b3861a`.
+  `4671069e15bad3566b937b1418993ac25503228690c59f80104d71256fa98289`.
 - Stable updater SHA-256:
   `59fbb73053947de7a53a9d419546d87e3e574b6b5b583e084985eea4669edda7`.
 - The installed stable updater currently identifies the prior final
