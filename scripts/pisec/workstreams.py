@@ -20,8 +20,8 @@ from .projects import _git, assert_project_writable, get_project
 from .project_workspaces import ensure_project_workspace
 from .research import issue_task_packet_in_transaction, validate_task_packet
 from .runtime_surface import capture_runtime_surface, materialize_current_surface, verify_surface
-from .runtime import start_bound_agent
-from .worker_repo import create_worker_repository, project_git_lock, project_target_state, validate_worker_repository
+from .runtime import start_bound_agent, usable_runtime_binding
+from .worker_repo import create_worker_repository, project_git_lock, project_permissions_lock, project_target_state, validate_worker_repository
 APPLY_LOCK = threading.RLock()
 CHECKPOINTS = (
     "authorized",
@@ -593,7 +593,7 @@ def _authorize_apply_workstream(
         with store.transaction():
             store.conn.execute(
                 "INSERT OR REPLACE INTO runtime_bindings(workstream_id,workspace_adapter_id,workspace_session_name,workspace_id,workspace_view_id,workspace_surface_id,agent_name,harness_id,harness_home,adapter_artifacts_json,native_session_kind,native_session_value,launch_secret_path,policy_path,policy_sha256,runtime_token_sha256,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,runtime_instance_id,observed_state,report_seq,workspace_report_seq,last_observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (workstream_id, workspace.manifest.adapter_id, workspace.manifest.session_name, observation.workspace_id, observation.view_id, observation.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_json, None, None, artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, artifacts.generation_sha256, None, None, "starting", 0, 0, None, now),
+                (workstream_id, workspace.manifest.adapter_id, workspace.manifest.session_name, observation.workspace_id, observation.view_id, observation.surface_id, scope["agentName"], harness.manifest.adapter_id, artifacts.harness_home, artifact_json, None, None, artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, artifacts.generation_sha256, None, artifacts.generation_sha256, None, "starting", 0, 0, None, now),
             )
         harness.commit_launch_binding(
             materialized_scope,
@@ -673,6 +673,23 @@ def _authorize_apply_workstream(
     if _rank(operation["step"]) < _rank("committed"):
         now = utc_now()
         with store.transaction():
+            store.conn.execute("UPDATE workstreams SET provisioning_state='bound',updated_at=? WHERE workstream_id=? AND provisioning_state='creating'", (now, workstream_id))
+            if not usable_runtime_binding(
+                store,
+                workstream_id,
+                workspace,
+                harness,
+                allowed_states=frozenset({"idle", "working", "blocked"}),
+            ):
+                raise NeedsAttentionError("worker runtime binding is not usable at finalization")
+            if not usable_runtime_binding(
+                store,
+                workstream_id,
+                workspace,
+                harness,
+                allowed_states=frozenset({"idle", "working", "blocked"}),
+            ):
+                raise NeedsAttentionError("worker runtime identity changed before finalization")
             packet = issue_task_packet_in_transaction(store.conn, scope=scope)
             result = {"workstreamId": workstream_id, "projectId": scope["projectId"], "workspaceId": binding["workspace_id"], "viewId": binding["workspace_view_id"], "surfaceId": binding["workspace_surface_id"], "agentName": scope["agentName"], "taskPacketId": packet["task_packet_id"], "taskPacketSha256": packet["packet_sha256"]}
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, workstream_id))
@@ -695,7 +712,7 @@ def authorize_apply_workstream(
     actor: str = "secretary",
 ) -> dict[str, Any]:
     assert_project_writable(store, str(scope["projectId"]))
-    with APPLY_LOCK:
+    with project_permissions_lock(store.state_root, str(scope["projectId"])), APPLY_LOCK:
         try:
             return _authorize_apply_workstream(store, scope=scope, harness=harness, workspace=workspace, failpoint=failpoint, actor=actor)
         except NeedsAttentionError as error:

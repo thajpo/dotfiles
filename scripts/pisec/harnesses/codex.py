@@ -77,13 +77,18 @@ def _safe_owned_tree(root: Path, *, readonly: bool = False) -> None:
             raise NeedsAttentionError("current Codex runtime surface contains an unsafe entry")
 
 
-def _activate_directory(staged: Path, target: Path) -> None:
-    backup = target.with_name(f".{target.name}.previous-{secrets.token_hex(8)}")
+def _activate_directory(staged: Path, target: Path, retained_backup: Path | None = None) -> None:
+    backup = retained_backup or target.with_name(f".{target.name}.previous-{secrets.token_hex(8)}")
     replaced = False
     try:
         if staged.is_dir() and not staged.is_symlink():
             os.chmod(staged, 0o700)
         if target.exists():
+            if retained_backup is not None:
+                if backup.exists() or backup.is_symlink():
+                    raise NeedsAttentionError("Codex permission backup already exists")
+                backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                os.chmod(backup.parent, 0o700)
             os.replace(target, backup)
             replaced = True
         os.replace(staged, target)
@@ -101,10 +106,64 @@ def _activate_directory(staged: Path, target: Path) -> None:
             if staged.is_dir() and not staged.is_symlink():
                 _normalize_owner_tree(staged, readonly=False)
             shutil.rmtree(staged)
-        if backup.exists():
+        if backup.exists() and retained_backup is None:
             if backup.is_dir() and not backup.is_symlink():
                 _normalize_owner_tree(backup, readonly=False)
             shutil.rmtree(backup)
+
+
+def _permission_backup_root(value: Any) -> Path | None:
+    if value is None:
+        return None
+    root = Path(str(value)).absolute()
+    if root.is_symlink() or root.resolve(strict=False) != root:
+        raise NeedsAttentionError("Codex permission backup root is unsafe")
+    if root.exists():
+        info = root.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise NeedsAttentionError("Codex permission backup root is unsafe")
+    else:
+        root.mkdir(parents=True, mode=0o700)
+        os.chmod(root, 0o700)
+    return root
+
+
+def _remove_owned_path(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    info = path.lstat()
+    if info.st_uid != os.geteuid() or stat.S_ISLNK(info.st_mode):
+        raise NeedsAttentionError("Codex permission restore path is unsafe")
+    if stat.S_ISDIR(info.st_mode):
+        _normalize_owner_tree(path, readonly=False)
+        shutil.rmtree(path)
+    elif stat.S_ISREG(info.st_mode):
+        path.unlink()
+    else:
+        raise NeedsAttentionError("Codex permission restore path is unsupported")
+
+
+def _restore_permission_backup(state_root: Path, scope: Mapping[str, Any]) -> None:
+    backup_root = _permission_backup_root(scope.get("permissionBackupRoot"))
+    if backup_root is None:
+        raise NeedsAttentionError("Codex permission backup is unavailable")
+    relative_paths = (
+        Path("binding-state") / "codex" / str(scope["workstreamId"]),
+        Path("binding-surfaces") / "codex" / str(scope["workstreamId"]),
+        Path("tmp") / str(scope["workstreamId"]),
+        Path("secrets") / f"{scope['workstreamId']}.token",
+    )
+    for relative in relative_paths:
+        backup = backup_root / relative
+        target = state_root / relative
+        if not backup.exists() and not backup.is_symlink():
+            continue
+        if backup.is_symlink() or not backup.resolve(strict=False).is_relative_to(backup_root):
+            raise NeedsAttentionError("Codex permission backup is unsafe")
+        _remove_owned_path(target)
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(target.parent, 0o700)
+        os.replace(backup, target)
 
 
 def _validate_config(config: Mapping[str, Any], root_config: Mapping[str, Any]) -> dict[str, Any]:
@@ -449,6 +508,7 @@ class CodexHarnessAdapter:
         workstream_id = validate_id(scope["workstreamId"], prefix="ws")
         staging_root = Path(staged.staging_root).resolve(strict=False)
         candidate_root = staging_root / "candidate-state"
+        backup_root = _permission_backup_root(scope.get("permissionBackupRoot"))
         candidate_paths = [
             staged.candidate.harness_home,
             staged.candidate.launch_secret_path,
@@ -478,13 +538,19 @@ class CodexHarnessAdapter:
                 continue
             _secure_tree(active_root, target.parent)
             if source.is_dir():
-                _activate_directory(source, target)
+                retained = backup_root / relative if backup_root is not None else None
+                _activate_directory(source, target, retained)
             else:
-                backup = target.with_name(f".{target.name}.previous-{secrets.token_hex(8)}")
+                backup = backup_root / relative if backup_root is not None else target.with_name(f".{target.name}.previous-{secrets.token_hex(8)}")
                 if target.exists():
+                    if backup_root is not None:
+                        if backup.exists() or backup.is_symlink():
+                            raise NeedsAttentionError("Codex permission backup already exists")
+                        backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        os.chmod(backup.parent, 0o700)
                     os.replace(target, backup)
                 os.replace(source, target)
-                if backup.exists():
+                if backup_root is None and backup.exists():
                     backup.unlink()
         prefix = str(candidate_root)
         def rebase(value: str) -> str:
@@ -505,7 +571,7 @@ class CodexHarnessAdapter:
         )
 
     def restore_profile(self, scope: Mapping[str, Any], previous: HarnessArtifacts) -> HarnessArtifacts:
-        del scope
+        _restore_permission_backup(self.state_root, scope)
         return previous
 
     def discard_staged_profile(self, staged: StagedHarnessArtifacts) -> None:

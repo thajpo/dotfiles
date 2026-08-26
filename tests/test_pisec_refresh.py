@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.pisec.adapters import AdapterRegistry, AgentObservation
+from scripts.pisec.access import authorize_apply_project_permissions, prepare_project_permissions
 from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.operations import create_operation
@@ -310,8 +311,23 @@ class RuntimeRefreshTests(unittest.TestCase):
     def test_binding_scope_injects_project_data_dirs(self):
         data = self.repo / "data"
         data.mkdir()
-        self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "dataDirs": [str(data)]})
         with PiStore(self.root / "state") as store:
+            prepared = prepare_project_permissions(
+                store,
+                project_id=self.project_id,
+                data_dirs=[str(data)],
+                external_domains=[],
+                issue_id=None,
+                idempotency_key="refresh-binding-scope-data-dir",
+            )
+            authorize_apply_project_permissions(
+                store,
+                approval_scope=prepared["approvalScope"],
+                harness_resolver=lambda _workstream_id: self.harness,
+                surface_resolver=lambda _harness_id: self.harness.current_runtime_surface(),
+                workspace=self.workspace,
+                actor="secretary",
+            )
             binding = store.conn.execute("SELECT r.*,w.kind,w.project_id FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?", (self.workstream_id,)).fetchone()
             scope = _binding_scope(store, binding, self.harness)
             self.assertIn(str(data.resolve()), scope["dataDirs"])

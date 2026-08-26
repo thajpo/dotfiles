@@ -24,7 +24,7 @@ class CrashOnce:
 
 
 class SecretaryTests(unittest.TestCase):
-    def test_initial_secretary_binding_uses_applied_generation_for_session_start(self):
+    def test_initial_secretary_binding_reserves_launch_generation_for_session_start(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -46,8 +46,8 @@ class SecretaryTests(unittest.TestCase):
                     ensure_secretary(store, project["project_id"], harness, workspace)
 
                 self.assertEqual(len(captured), 1)
-                self.assertIsNotNone(captured[0][0])
-                self.assertIsNone(captured[0][1], captured)
+                self.assertIsNone(captured[0][0])
+                self.assertIsNotNone(captured[0][1], captured)
 
     def test_fleet_secretary_is_a_tab_in_first_mate_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:

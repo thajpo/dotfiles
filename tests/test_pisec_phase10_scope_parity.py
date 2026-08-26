@@ -7,11 +7,14 @@ from unittest.mock import patch
 
 from scripts.pisec.access import effective_runtime_scope
 from scripts.pisec.access import authorize_apply_project_permissions, prepare_project_permissions
+from scripts.pisec.adapters import AdapterRegistry, AgentObservation
+from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.first_mate import ensure_first_mate
-from scripts.pisec.models import NeedsAttentionError, ScopeMismatchError, canonical_json
+from scripts.pisec.models import ConflictError, NeedsAttentionError, ScopeMismatchError, canonical_json
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
 from scripts.pisec.refresh import mark_stale_bindings
+from scripts.pisec.runtime import report_runtime, usable_runtime_binding
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import prepare_workstream
 from scripts.pisec.harnesses.codex import CodexHarnessAdapter
@@ -86,6 +89,8 @@ class Phase10ScopeParityTests(unittest.TestCase):
                 "runtimeSurfaceSha256": "a" * 64,
             }
             for field, changed in (
+                ("executionProfile", "secretary-project"),
+                ("worktreePath", str(Path(tmp) / "other-worktree")),
                 ("externalDomains", ["example.test"]),
                 ("dataDirs", [str(Path(tmp) / "other-data")]),
                 ("implementationModel", "model-b"),
@@ -313,6 +318,197 @@ class Phase10ScopeParityTests(unittest.TestCase):
                 current = store.conn.execute("SELECT external_domains FROM projects WHERE project_id=?", (project["project_id"],)).fetchone()
                 self.assertEqual(json.loads(current["external_domains"]), ["drifted.example"])
                 self.assertIsNone(store.conn.execute("SELECT 1 FROM authorizations WHERE operation_id=?", (prepared["operation"]["operation_id"],)).fetchone())
+
+    def test_first_mate_startup_uses_authenticated_runtime_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+
+                class AuthenticatedWorkspace(FixtureWorkspace):
+                    def start_agent(self, surface_id, name, agent_kind):
+                        row = self.store.conn.execute(
+                            "SELECT r.*,w.kind,w.project_id FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workspace_surface_id=?",
+                            (surface_id,),
+                        ).fetchone()
+                        if row is None or row["kind"] != "first_mate":
+                            return super().start_agent(surface_id, name, agent_kind)
+                        self.calls.append(("start", (surface_id, name, agent_kind)))
+                        self.agents[name] = AgentObservation(name, surface_id, True, "working")
+                        self.runtime_states.pop(surface_id, None)
+                        report_runtime(
+                            self.store,
+                            {
+                                "workstreamId": str(row["workstream_id"]),
+                                "runtimeInstanceId": "authenticated-first-mate-runtime",
+                                "seq": 1,
+                                "event": "session_start",
+                                "reason": None,
+                                "state": "idle",
+                                "nativeSessionKind": None,
+                                "nativeSessionValue": None,
+                                "startSource": "startup",
+                                "surfaceId": surface_id,
+                                "token": Path(str(row["launch_secret_path"])).read_text().strip(),
+                                "generation": str(row["launch_generation_sha256"] or row["applied_generation_sha256"]),
+                            },
+                            harness,
+                            self,
+                        )
+                        return {"started": True, "name": name, "surfaceId": surface_id}
+
+                workspace = AuthenticatedWorkspace(root, store)
+                ensure_secretary(store, project["project_id"], harness, workspace)
+                first_mate = ensure_first_mate(store, project["project_id"], harness, workspace)
+                self.assertEqual(first_mate["workstream"]["provisioning_state"], "bound")
+                self.assertTrue(usable_runtime_binding(store, first_mate["workstream"]["workstream_id"], workspace, harness, allowed_states={"idle", "working", "blocked"}))
+
+    def test_permission_apply_is_a_protected_batch_not_an_immediate_project_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                ensure_secretary(store, project["project_id"], harness, workspace)
+                prepared = prepare_project_permissions(
+                    store,
+                    project_id=project["project_id"],
+                    data_dirs=[],
+                    external_domains=["approved.example"],
+                    issue_id=None,
+                    idempotency_key="phase10-protected-permission-batch",
+                )
+                applied = authorize_apply_project_permissions(
+                    store,
+                    approval_scope=prepared["approvalScope"],
+                    harness_resolver=lambda _workstream_id: harness,
+                    surface_resolver=lambda _harness_id: harness.current_runtime_surface(),
+                    workspace=workspace,
+                    actor="secretary",
+                )
+                operation = store.conn.execute("SELECT state,step FROM operations WHERE operation_id=?", (prepared["operation"]["operation_id"],)).fetchone()
+                self.assertEqual(applied["operation"]["state"], "succeeded")
+                self.assertEqual(operation["state"], "succeeded")
+                self.assertEqual(operation["step"], "committed")
+                self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM authorizations WHERE operation_id=?", (prepared["operation"]["operation_id"],)).fetchone()[0], 1)
+
+    def test_permission_batch_compensates_before_relaunching_a_safe_old_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+
+                class AmbiguousOnceWorkspace(FixtureWorkspace):
+                    def __init__(self, fixture_root, fixture_store):
+                        super().__init__(fixture_root, fixture_store)
+                        self.ambiguous = False
+
+                    def observe_runtime(self, surface_id, process_identity):
+                        if self.ambiguous:
+                            self.ambiguous = False
+                            return type(super().observe_runtime(surface_id, process_identity))("unknown", "injected ambiguity")
+                        return super().observe_runtime(surface_id, process_identity)
+
+                workspace = AmbiguousOnceWorkspace(root, store)
+                ensure_secretary(store, project["project_id"], harness, workspace)
+                prepared = prepare_project_permissions(
+                    store,
+                    project_id=project["project_id"],
+                    data_dirs=[],
+                    external_domains=["approved.example"],
+                    issue_id=None,
+                    idempotency_key="phase10-permission-compensation",
+                )
+                workspace.ambiguous = True
+                with self.assertRaises(NeedsAttentionError):
+                    authorize_apply_project_permissions(
+                        store,
+                        approval_scope=prepared["approvalScope"],
+                        harness_resolver=lambda _workstream_id: harness,
+                        surface_resolver=lambda _harness_id: harness.current_runtime_surface(),
+                        workspace=workspace,
+                        actor="secretary",
+                    )
+                operation = store.conn.execute("SELECT state,step FROM operations WHERE operation_id=?", (prepared["operation"]["operation_id"],)).fetchone()
+                binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=(SELECT secretary_workstream_id FROM projects WHERE project_id=?)", (project["project_id"],)).fetchone()
+                current = store.conn.execute("SELECT data_dirs,external_domains FROM projects WHERE project_id=?", (project["project_id"],)).fetchone()
+                self.assertEqual((operation["state"], operation["step"]), ("failed", "compensated"), store.conn.execute("SELECT error_message FROM operations WHERE operation_id=?", (prepared["operation"]["operation_id"],)).fetchone()[0])
+                self.assertEqual(json.loads(current["external_domains"]), [])
+                self.assertEqual(binding["refresh_pending"], 0)
+                self.assertTrue(usable_runtime_binding(store, binding["workstream_id"], workspace, harness, allowed_states={"idle", "working", "blocked"}))
+
+    def test_project_register_cannot_bypass_protected_permission_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo, external_domains=["approved.example"])
+                with self.assertRaisesRegex((ConflictError, NeedsAttentionError), "permission"):
+                    register_project(store, repo, data_dirs=[], external_domains=[])
+                current = store.conn.execute("SELECT external_domains FROM projects WHERE project_id=?", (project["project_id"],)).fetchone()
+                self.assertEqual(json.loads(current["external_domains"]), ["approved.example"])
+
+    def test_secretary_finalization_rechecks_live_identity_inside_guarded_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+
+                def invalidate_after_predicate(*args, **kwargs):
+                    result = usable_runtime_binding(*args, **kwargs)
+                    if result:
+                        workspace.worktrees.clear()
+                        workspace.agents.clear()
+                    return result
+
+                with patch("scripts.pisec.secretary.usable_runtime_binding", side_effect=invalidate_after_predicate):
+                    with self.assertRaises(NeedsAttentionError):
+                        ensure_secretary(store, project["project_id"], harness, workspace)
+                self.assertFalse(store.conn.execute("SELECT active FROM projects WHERE project_id=?", (project["project_id"],)).fetchone()[0])
+                self.assertNotEqual(store.conn.execute("SELECT state FROM operations WHERE kind='secretary.ensure'").fetchone()[0], "succeeded")
+
+    def test_public_project_open_and_first_mate_ensure_hold_reconcile_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            harness = FixtureHarness(root)
+            workspace = FixtureWorkspace(root)
+            registry = AdapterRegistry()
+            registry.register_harness(harness)
+            registry.register_workspace(workspace)
+            dispatcher = BrokerDispatcher(lambda: PiStore(root / "state"), registry=registry, harness=harness, workspace=workspace)
+            try:
+                project = dispatcher.dispatch("admin", "project.register", {"path": str(repo)})
+                class ProbeLock:
+                    def __init__(self):
+                        self.entries = 0
+                    def __enter__(self):
+                        self.entries += 1
+                        return self
+                    def __exit__(self, *_args):
+                        return False
+                probe = ProbeLock()
+                dispatcher._reconcile_lock = probe
+                dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
+                dispatcher.dispatch("admin", "first_mate.ensure", {"project": project["project_id"]})
+                self.assertEqual(probe.entries, 2)
+            finally:
+                dispatcher.stop_background()
 
 
 if __name__ == "__main__":

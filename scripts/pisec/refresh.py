@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .adapters import HarnessAdapter, WorkspaceAdapter, RuntimeSurfaceArtifacts, artifact_document
 from .worker_repo import validate_worker_resume_git
+from .worker_repo import project_permissions_lock
 from .models import ConflictError, NeedsAttentionError, NotFoundError, PisecError, canonical_json, json_digest, new_id, utc_now, validate_sha256
 from .runtime import start_bound_agent, usable_runtime_binding
 from .runtime_surface import capture_runtime_surface, verify_surface
@@ -330,7 +332,7 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
     return {"pending": True, "binding": current, "state": "startup_in_progress", "reason": "startup attestation is still pending"}
 
 
-def refresh_runtimes(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, wait_seconds: float = 300.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None, project_ids: Sequence[str] = (), harness_ids: Sequence[str] = (), workstream_ids: Sequence[str] = ()) -> dict[str, Any]:
+def _refresh_runtimes_unlocked(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, wait_seconds: float = 300.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None, project_ids: Sequence[str] = (), harness_ids: Sequence[str] = (), workstream_ids: Sequence[str] = ()) -> dict[str, Any]:
     if not isinstance(wait_seconds, (int, float)) or isinstance(wait_seconds, bool) or not 0 <= wait_seconds <= 3600:
         raise PisecError("refresh wait must be between 0 and 3600 seconds")
     selected = _active_bindings(store, project_ids=project_ids, harness_ids=harness_ids, workstream_ids=workstream_ids)
@@ -395,6 +397,25 @@ def refresh_runtimes(store: Any, harness: HarnessAdapter, workspace: WorkspaceAd
             break
     result["ok"] = not result["failed"]
     return result
+
+
+def refresh_runtimes(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, wait_seconds: float = 300.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None, project_ids: Sequence[str] = (), harness_ids: Sequence[str] = (), workstream_ids: Sequence[str] = ()) -> dict[str, Any]:
+    selected = _active_bindings(store, project_ids=project_ids, harness_ids=harness_ids, workstream_ids=workstream_ids)
+    selected_projects = sorted({str(row["project_id"]) for row in selected})
+    with ExitStack() as locks:
+        for project_id in selected_projects:
+            locks.enter_context(project_permissions_lock(store.state_root, project_id))
+        return _refresh_runtimes_unlocked(
+            store,
+            harness,
+            workspace,
+            wait_seconds=wait_seconds,
+            harness_resolver=harness_resolver,
+            surface_resolver=surface_resolver,
+            project_ids=project_ids,
+            harness_ids=harness_ids,
+            workstream_ids=workstream_ids,
+        )
 
 
 def refresh_projects(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, wait_seconds: float = 300.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None) -> dict[str, Any]:

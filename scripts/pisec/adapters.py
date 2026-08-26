@@ -82,6 +82,24 @@ class HarnessArtifacts:
         }
 
 
+def artifacts_from_mapping(value: Mapping[str, Any]) -> HarnessArtifacts:
+    """Reconstruct persisted, non-secret harness artifact identity."""
+    if not isinstance(value, Mapping):
+        raise InvalidRequestError("harness artifacts are invalid")
+    adapter_data = value.get("adapterData", {})
+    if not isinstance(adapter_data, Mapping):
+        raise InvalidRequestError("harness adapter artifacts are invalid")
+    return HarnessArtifacts(
+        harness_home=str(value.get("harnessHome", "")),
+        launch_secret_path=str(value.get("launchSecretPath", "")),
+        policy_path=str(value.get("policyPath", "")),
+        policy_sha256=str(value.get("policySha256", "")),
+        runtime_token_sha256=str(value.get("runtimeTokenSha256", "")),
+        generation_sha256=str(value.get("generationSha256", "")),
+        adapter_data=dict(adapter_data),
+    )
+
+
 @dataclass(frozen=True)
 class RuntimeSurfaceArtifacts:
     content_sha256: str

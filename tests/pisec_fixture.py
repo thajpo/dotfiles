@@ -172,7 +172,15 @@ class FixtureHarness:
             raise RuntimeError("fixture staged profile escapes its operation root")
         active = self.root / "harness" / workstream_id
         if active.exists():
-            shutil.rmtree(active)
+            backup_root = scope.get("permissionBackupRoot")
+            if backup_root is not None:
+                backup = Path(str(backup_root)) / "harness" / workstream_id
+                backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                if backup.exists():
+                    shutil.rmtree(backup)
+                shutil.move(str(active), str(backup))
+            else:
+                shutil.rmtree(active)
         active.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         shutil.copytree(candidate.harness_home, active)
         prefix = str(Path(candidate.harness_home).parent)
@@ -186,6 +194,15 @@ class FixtureHarness:
         )
 
     def restore_profile(self, scope: Mapping[str, Any], previous: HarnessArtifacts) -> HarnessArtifacts:
+        backup_root = scope.get("permissionBackupRoot")
+        if backup_root is not None:
+            backup = Path(str(backup_root)) / "harness" / str(scope["workstreamId"])
+            active = self.root / "harness" / str(scope["workstreamId"])
+            if backup.exists():
+                if active.exists():
+                    shutil.rmtree(active)
+                active.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                shutil.move(str(backup), str(active))
         return previous
 
     def discard_staged_profile(self, staged: StagedHarnessArtifacts) -> None:
@@ -373,13 +390,17 @@ class FixtureWorkspace:
         self._runtime_counter += 1
         runtime_instance = f"fixture-runtime-{self._runtime_counter}-{secrets.token_hex(4)}"
         def attest(store: Any) -> None:
-            row = store.conn.execute("SELECT r.workstream_id,w.project_id,r.desired_generation_sha256,r.launch_generation_sha256 FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workspace_surface_id=?", (surface_id,)).fetchone()
+            row = store.conn.execute("SELECT r.workstream_id,w.project_id,r.desired_generation_sha256,r.launch_generation_sha256,r.refresh_operation_id,r.refresh_started_at FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workspace_surface_id=?", (surface_id,)).fetchone()
             if row is None:
                 return
             generation = row["launch_generation_sha256"] or row["desired_generation_sha256"]
+            permission_batch = store.conn.execute(
+                "SELECT 1 FROM operations WHERE operation_id=? AND kind='project.permissions.update' AND state='applying'",
+                (row["refresh_operation_id"],),
+            ).fetchone() is not None if row["refresh_operation_id"] is not None else False
             with store.transaction():
                 event = append_event_in_transaction(store.conn, kind="runtime.session_started", project_id=row["project_id"], workstream_id=row["workstream_id"], payload={"runtimeInstanceId": runtime_instance, "generationSha256": generation, "reportSeq": 1})
-                store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_generation_sha256=?,launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,session_start_event_sequence=?,session_start_report_seq=1,session_started_at=? WHERE workstream_id=?", (runtime_instance, generation, event["sequence"], "fixture", row["workstream_id"]))
+                store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=?,report_seq=1,observed_state='idle',applied_generation_sha256=?,launch_generation_sha256=CASE WHEN ? THEN launch_generation_sha256 ELSE NULL END,refresh_pending=CASE WHEN ? THEN 1 ELSE 0 END,refresh_operation_id=CASE WHEN ? THEN ? ELSE NULL END,refresh_started_at=CASE WHEN ? THEN ? ELSE NULL END,session_start_event_sequence=?,session_start_report_seq=1,session_started_at=? WHERE workstream_id=?", (runtime_instance, generation, permission_batch, permission_batch, permission_batch, row["refresh_operation_id"], permission_batch, row["refresh_started_at"], event["sequence"], "fixture", row["workstream_id"]))
         if self.store is None:
             from scripts.pisec.pi_store import PiStore
             with PiStore(self.root / "state") as store:

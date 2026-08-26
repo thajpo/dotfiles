@@ -703,6 +703,19 @@ class BrokerDispatcher:
         from .attention import backfill_attention
         for supervisor in store.conn.execute("SELECT workstream_id FROM workstreams WHERE kind IN ('secretary','first_mate') AND desired_state='active' AND provisioning_state='bound'"):
             backfill_attention(store, recipient_workstream_id=str(supervisor["workstream_id"]), limit=128)
+        from .access import recover_project_permission_operation
+        for operation in store.conn.execute("SELECT * FROM operations WHERE kind='project.permissions.update' AND state='applying' ORDER BY created_at,operation_id").fetchall():
+            project_id = operation["project_id"]
+            if project_id is None:
+                continue
+            try:
+                from .worker_repo import project_permissions_lock
+                with project_permissions_lock(store.state_root, str(project_id)):
+                    recovered = recover_project_permission_operation(store, operation=operation, harness_resolver=lambda value: self._harness_for_workstream(store, value), workspace=self.workspace)
+                if recovered is not None:
+                    result["resumed"].append({"operationId": operation["operation_id"], "state": recovered["operation"]["state"], "recovered": True})
+            except BaseException as error:
+                result["errors"].append({"operationId": operation["operation_id"], "code": getattr(error, "code", "internal_error")})
         from .refresh import mark_stale_bindings
         result["generations"] = mark_stale_bindings(store, self.harness, harness_resolver=lambda workstream_id: self._harness_for_workstream(store, workstream_id), surface_resolver=self._surface_for_harness)
         result["resumed"].extend(self._recover_completed_refresh_operations(store))
@@ -806,8 +819,9 @@ class BrokerDispatcher:
         if operation == "project.open":
             _exact(payload, {"project"})
             from .secretary import ensure_secretary, focus_secretary
-            result = ensure_secretary(store, str(payload["project"]), self.harness, self.workspace)
-            focus_secretary(store, str(payload["project"]), self.workspace)
+            with self._reconcile_lock:
+                result = ensure_secretary(store, str(payload["project"]), self.harness, self.workspace)
+                focus_secretary(store, str(payload["project"]), self.workspace)
             return {
                 "project": _public_project(result["project"]),
                 "workstream": _public_workstream(result["workstream"]),
@@ -860,7 +874,8 @@ class BrokerDispatcher:
         if operation == "secretary.ensure":
             _exact(payload, {"project"})
             from .secretary import ensure_secretary
-            result = ensure_secretary(store, str(payload["project"]), self.harness, self.workspace)
+            with self._reconcile_lock:
+                result = ensure_secretary(store, str(payload["project"]), self.harness, self.workspace)
             return {
                 "project": _public_project(result["project"]),
                 "workstream": _public_workstream(result["workstream"]),
@@ -869,7 +884,8 @@ class BrokerDispatcher:
             }
         if operation == "first_mate.ensure":
             _exact(payload, {"project"})
-            result = ensure_first_mate(store, str(payload["project"]), self.harness, self.workspace)
+            with self._reconcile_lock:
+                result = ensure_first_mate(store, str(payload["project"]), self.harness, self.workspace)
             return {
                 "project": _public_project(result["project"]),
                 "workstream": _public_workstream(result["workstream"]),
@@ -991,11 +1007,12 @@ class BrokerDispatcher:
         if operation == "project.permissions.prepare":
             _exact(payload, {"dataDirs", "externalDomains", "idempotencyKey"}, {"issueId"})
             from .access import prepare_project_permissions
-            return prepare_project_permissions(store, project_id=project_id, data_dirs=payload["dataDirs"], external_domains=payload["externalDomains"], issue_id=payload.get("issueId"), idempotency_key=payload["idempotencyKey"])
+            return prepare_project_permissions(store, project_id=project_id, data_dirs=payload["dataDirs"], external_domains=payload["externalDomains"], issue_id=payload.get("issueId"), idempotency_key=payload["idempotencyKey"], harness_resolver=lambda value: self._harness_for_workstream(store, value), surface_resolver=self._surface_for_harness)
         if operation == "project.permissions.apply":
             _exact(payload, {"approvalScope"})
             from .access import authorize_apply_project_permissions
-            return authorize_apply_project_permissions(store, approval_scope=payload["approvalScope"], harness_resolver=lambda value: self._harness_for_workstream(store, value), surface_resolver=self._surface_for_harness, workspace=self.workspace, actor="secretary")
+            with self._reconcile_lock:
+                return authorize_apply_project_permissions(store, approval_scope=payload["approvalScope"], harness_resolver=lambda value: self._harness_for_workstream(store, value), surface_resolver=self._surface_for_harness, workspace=self.workspace, actor="secretary")
         if operation == "issue.report":
             _exact(payload, {"category", "severity", "summary", "details", "requestedAction", "evidence", "idempotencyKey"}, {"escalatedFromIssueId"})
             return report_issue(store, project_id=project_id, reporter_workstream_id=secretary_workstream_id, category=payload["category"], severity=payload["severity"], summary=payload["summary"], details=payload["details"], requested_action=payload["requestedAction"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"], escalated_from_issue_id=payload.get("escalatedFromIssueId"))

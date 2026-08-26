@@ -15,6 +15,7 @@ from .projects import observe_project, resolve_project
 from .runtime_surface import capture_runtime_surface, materialize_current_surface
 from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent, usable_runtime_binding
 from .workstreams import APPLY_LOCK, _session_attestation_matches, _wait_for_agent
+from .worker_repo import project_permissions_lock
 
 
 def _project_active(project: Mapping[str, Any]) -> bool:
@@ -217,7 +218,7 @@ def _recover_start(store: Any, workspace: WorkspaceAdapter, harness: HarnessAdap
     if not ready:
         with store.transaction():
             now = utc_now()
-            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=?,observed_state='starting',updated_at=? WHERE workstream_id=?", (desired_generation, now, scope["workstreamId"]))
+            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0,launch_generation_sha256=?,refresh_pending=1,refresh_operation_id=?,refresh_started_at=?,observed_state='starting',updated_at=? WHERE workstream_id=?", (desired_generation, scope["operationId"], now, now, scope["workstreamId"]))
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',updated_at=? WHERE workstream_id=?", (now, scope["workstreamId"]))
         start_error: Exception | None = None
         try:
@@ -275,8 +276,8 @@ def _repair_launch_binding(
     now = utc_now()
     with store.transaction():
         store.conn.execute(
-            "UPDATE runtime_bindings SET harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_generation_sha256=?,applied_generation_sha256=NULL,launch_generation_sha256=?,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,runtime_instance_id=NULL,report_seq=0,session_start_event_sequence=NULL,session_start_report_seq=NULL,session_started_at=NULL,observed_state='starting',last_observed_at=NULL,updated_at=? WHERE workstream_id=?",
-            (artifacts.harness_home, artifact_document(harness.manifest, artifacts), artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, desired, desired, now, binding["workstream_id"]),
+            "UPDATE runtime_bindings SET harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_generation_sha256=?,applied_generation_sha256=NULL,launch_generation_sha256=?,refresh_pending=1,refresh_operation_id=?,refresh_started_at=?,runtime_instance_id=NULL,report_seq=0,session_start_event_sequence=NULL,session_start_report_seq=NULL,session_started_at=NULL,observed_state='starting',last_observed_at=NULL,updated_at=? WHERE workstream_id=?",
+            (artifacts.harness_home, artifact_document(harness.manifest, artifacts), artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, desired, desired, scope["operationId"], now, now, binding["workstream_id"]),
         )
         append_event_in_transaction(store.conn, kind="first_mate.binding.repaired", project_id=project["project_id"], workstream_id=scope["workstreamId"], operation_id=scope["operationId"], payload={"reason": "reopen after deployed runtime binding change"})
     repaired = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (binding["workstream_id"],)).fetchone()
@@ -437,16 +438,24 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
     _hit(failpoint, "before_first_mate_final_event_commit", scope)
     if _rank(operation["step"]) < _rank("committed"):
         expected_generation = str(binding["desired_generation_sha256"])
-        if not usable_runtime_binding(
-            store,
-            str(existing["workstream_id"]),
-            workspace,
-            harness,
-            allowed_states=frozenset({"idle", "working", "blocked"}),
-        ):
-            raise NeedsAttentionError("First Mate runtime binding is not usable at finalization")
         now = utc_now()
         with store.transaction():
+            if not usable_runtime_binding(
+                store,
+                str(existing["workstream_id"]),
+                workspace,
+                harness,
+                allowed_states=frozenset({"idle", "working", "blocked"}),
+            ):
+                raise NeedsAttentionError("First Mate runtime binding is not usable at finalization")
+            if not usable_runtime_binding(
+                store,
+                str(existing["workstream_id"]),
+                workspace,
+                harness,
+                allowed_states=frozenset({"idle", "working", "blocked"}),
+            ):
+                raise NeedsAttentionError("First Mate runtime identity changed before finalization")
             cursor = store.conn.execute(
                 "UPDATE runtime_bindings SET updated_at=updated_at WHERE workstream_id=? AND desired_generation_sha256=? AND applied_generation_sha256=? AND launch_generation_sha256 IS NULL AND refresh_pending=0 AND refresh_operation_id IS NULL AND refresh_started_at IS NULL AND observed_state IN ('idle','working','blocked')",
                 (existing["workstream_id"], expected_generation, expected_generation),
@@ -477,7 +486,8 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
 
 
 def ensure_first_mate(store: Any, control_project_selector: str, harness: HarnessAdapter, workspace: WorkspaceAdapter, failpoint: Any = None) -> dict[str, Any]:
-    with APPLY_LOCK:
+    project = resolve_project(store, control_project_selector)
+    with project_permissions_lock(store.state_root, str(project["project_id"])), APPLY_LOCK:
         try:
             result = _ensure_locked(store, control_project_selector, harness, workspace, failpoint)
             from .attention import backfill_attention

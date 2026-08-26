@@ -160,12 +160,7 @@ def register_project(store: Any, path: str | Path, *, display_name: str | None =
             old_domains = value.get("external_domains")
             if value.get("data_dirs") == data_json and old_domains == domains_json:
                 return get_project(store, value["project_id"])
-            with store.transaction():
-                store.conn.execute(
-                    "UPDATE projects SET data_dirs=?,external_domains=?,updated_at=? WHERE project_id=?",
-                    (data_json, domains_json, utc_now(), value["project_id"]),
-                )
-            return get_project(store, value["project_id"])
+            raise ConflictError("project permissions must be replaced through the protected permission operation")
         return value
     if coordination_mode not in {None, "project"}:
         raise InvalidRequestError("new projects must be registered in project mode")

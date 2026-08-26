@@ -287,7 +287,7 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         prepared = self.dispatcher.dispatch("secretary", "project.permissions.prepare", {"authToken": token, "dataDirs": [str(data)], "externalDomains": [], "idempotencyKey": "fixture-permissions-1"})
         applied = self.dispatcher.dispatch("secretary", "project.permissions.apply", {"authToken": token, "approvalScope": prepared["approvalScope"]})
         self.assertEqual(applied["operation"]["state"], "succeeded")
-        self.assertEqual(applied["operation"]["step"], "applied")
+        self.assertEqual(applied["operation"]["step"], "committed")
         self.assertEqual(applied["refresh"]["failed"], [])
 
     def test_project_mode_change_requires_first_mate_and_backfills_fleet_scope(self):

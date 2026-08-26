@@ -117,6 +117,30 @@ def project_git_lock(state_root: Path | str, project_id: str, *, timeout: float 
         os.close(descriptor)
 
 
+@contextmanager
+def project_permissions_lock(state_root: Path | str, project_id: str, *, timeout: float = 5.0) -> Iterator[None]:
+    """Serialize one project's permission replacement and runtime materialization."""
+    validate_id(project_id, prefix="prj")
+    root = Path(state_root) / "locks" / "projects"
+    _secure_tree(Path(state_root), root)
+    path = root / f"{project_id}.permissions.lock"
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = __import__("time").monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if __import__("time").monotonic() >= deadline:
+                    raise ConflictError("project permission lock is busy")
+                __import__("time").sleep(0.05)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def _git_dir(repository: Path) -> Path:
     marker = repository / ".git"
     if marker.is_symlink() or not marker.is_dir():
