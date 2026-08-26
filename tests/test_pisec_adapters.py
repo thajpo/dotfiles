@@ -309,6 +309,25 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         restored = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "coordinationMode": "project"})
         self.assertEqual(restored["coordination_mode"], "project")
 
+    def test_project_mode_change_rejects_harness_mismatched_first_mate(self):
+        project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo)})
+        self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
+        self.dispatcher.dispatch("admin", "first_mate.ensure", {"project": project["project_id"]})
+        with PiStore(self.root / "state") as store:
+            first_mate_id = store.conn.execute(
+                "SELECT workstream_id FROM workstreams WHERE kind='first_mate' AND desired_state='active'"
+            ).fetchone()[0]
+            store.conn.execute(
+                "UPDATE runtime_bindings SET harness_id=? WHERE workstream_id=?",
+                ("mismatched-harness", first_mate_id),
+            )
+        with self.assertRaisesRegex(NeedsAttentionError, "usable bound First Mate"):
+            self.dispatcher.dispatch(
+                "admin",
+                "project.register",
+                {"path": str(self.repo), "coordinationMode": "fleet"},
+            )
+
     def test_first_mate_retries_a_recoverable_needs_attention_saga(self):
         project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo)})
         self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})

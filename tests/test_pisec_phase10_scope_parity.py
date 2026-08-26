@@ -1,6 +1,7 @@
 from pathlib import Path
 import contextlib
 import json
+import stat
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -52,6 +53,11 @@ class Phase10ScopeParityTests(unittest.TestCase):
                             self.assertEqual(policy["network"]["allowedDomains"], scope["externalDomains"])
                             self.assertIn(extra, policy["network"]["allowedDomains"])
                             self.assertEqual(staged.candidate.generation_sha256, adapter.desired_generation(scope, surface))
+                            activated = adapter.activate_profile(scope, staged)
+                            active_policy = Path(activated.policy_path)
+                            self.assertEqual(json.loads(active_policy.read_text())["network"]["allowedDomains"], scope["externalDomains"])
+                            self.assertEqual(stat.S_IMODE(active_policy.stat().st_mode), 0o400)
+                            self.assertEqual(stat.S_IMODE(Path(activated.adapter_data["surfaceRoot"]).stat().st_mode), 0o500)
                         finally:
                             adapter.discard_staged_profile(staged)
 

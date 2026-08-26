@@ -151,11 +151,13 @@ def usable_runtime_binding(
 ) -> bool:
     """Apply the common live, attested, unreserved binding predicate."""
     row = store.conn.execute(
-        "SELECT w.desired_state,w.provisioning_state,w.worktree_path,r.refresh_pending,r.refresh_operation_id,r.refresh_started_at,r.launch_generation_sha256,r.desired_generation_sha256,r.applied_generation_sha256,r.observed_state,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,r.agent_name,r.policy_path,r.adapter_artifacts_json,r.runtime_instance_id,r.report_seq,r.session_start_event_sequence,r.session_start_report_seq,r.session_started_at "
+        "SELECT w.desired_state,w.provisioning_state,w.worktree_path,r.harness_id,r.refresh_pending,r.refresh_operation_id,r.refresh_started_at,r.launch_generation_sha256,r.desired_generation_sha256,r.applied_generation_sha256,r.observed_state,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,r.agent_name,r.policy_path,r.adapter_artifacts_json,r.runtime_instance_id,r.report_seq,r.session_start_event_sequence,r.session_start_report_seq,r.session_started_at "
         "FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=?",
         (workstream_id,),
     ).fetchone()
     if row is None or row["desired_state"] != "active" or row["provisioning_state"] != "bound":
+        return False
+    if harness is not None and row["harness_id"] != harness.manifest.adapter_id:
         return False
     if (
         int(row["refresh_pending"])
