@@ -3032,30 +3032,27 @@ acceptance, evidence, and the local tag.
 
 At this handoff:
 
-- committed `HEAD` is
-  `334c6acc6fe41b30161fc84f1fd47a7d8cfff6c7`;
-- the working tree contains an uncommitted, in-scope reconciliation draft in
-  `scripts/pisec/broker.py`, `scripts/pisec/doctor.py`,
-  `scripts/pisec/harnesses/omp.py`, `scripts/pisec/projects.py`,
-  `scripts/pisec/refresh.py`, `tests/test_pisec_adapters.py`,
-  `tests/test_pisec_doctor.py`, `tests/test_pisec_fence.py`,
-  `tests/test_pisec_projects.py`, `tests/test_pisec_protocol.py`, and
-  `tests/test_pisec_refresh.py`;
-- this plan addendum is also intentional in-scope work and must be preserved;
-- no reconciliation commit, live reset, session wipe, tag, push, or remote
-  mutation has been performed from that draft;
-- eight focused lifecycle/restart/doctor/cleanup tests passed together after
-  their initial fail-first runs;
-- the adjacent refresh, protocol, project, Secretary, doctor, Fence, and
-  adapter suite passed 93 tests before the final missing-binding doctor
-  assertion was added; that assertion then passed alone;
-- compileall, shell syntax, catalogue parity, Bun build, and Bun 8/8 passed
-  before that final doctor addition and therefore must be rerun;
-- the installer suite's only observed failure was its intentional refusal to
-  install from a dirty source checkout. It must be rerun from the exact clean
-  committed candidate; and
-- the compact status journal is stale and must not be trusted as proof that
-  Phase 10 is complete or ready for live deployment.
+- committed `HEAD` is the corrected source-core candidate
+  `64f4b4641c57f59940fd053e36c975e141d49636`, tree
+  `b241f01848fb1d14e89e80e4e74ff2401f7a9fa8`;
+- the working tree contains only the in-scope final documentation/status
+  update required to create the final descendant candidate;
+- no live reset, session wipe, tag, push, or remote mutation has been
+  performed from this candidate;
+- focused Phase 10 scope-parity tests pass 19/19, including the fail-first
+  Codex writable-state/provider/hook boundary and worker-created user-config
+  refusal assertions;
+- the adjacent adapter, Fence, runtime-surface, installer, and updater suite
+  passes 69 tests with 1 skipped, and the complete clean source gate passes
+  271 Python tests with 1 skipped and Bun 9/9;
+- compileall, shell syntax, catalogue parity, Bun build, and `git diff --check`
+  pass; the exact pinned Codex dependency reports `0.147.0`;
+- a direct exact Codex 0.147.0 control fired `SessionStart` and used the
+  loopback provider override; the real-Fence disposable probe is blocked only
+  by this environment's unavailable Linux bridge sockets; and
+- the compact status journal records the source-core result and the remaining
+  final-descendant/live-release work. It is not evidence that Phase 10 is
+  complete or ready for live deployment.
 
 After any compaction or model handoff, first reread this complete plan, the
 compact status journal, Git history, current status, and current diff. Preserve
