@@ -272,9 +272,10 @@ That condition is a plausible cause of the previously observed broken worker
 - A failed candidate may remain current and `needs_attention`; the retained
   bundle is recovery evidence, not a second active runtime surface.
 - The incompatible pre-v1 archive is never a runtime rollback target. The
-  controlled cutover first verifies the Phase 8 v1 deployment and then deploys
-  the final Phase 9 commit, making Phase 8 the one real schema-compatible
-  predecessor. Do not manufacture a fake recovery guarantee across reset.
+  controlled cutover first verifies the `bootstrapV1Commit` v1 deployment and
+  then deploys `finalV1Commit`, making the bootstrap the one real
+  schema-compatible predecessor. Do not manufacture a fake recovery guarantee
+  across reset.
 
 ### 3.11 Product and platform boundary
 
@@ -2867,8 +2868,8 @@ second deployment control plane.
     state-root write.
 11. The first deployment after the incompatible archive/reset may truthfully
     report no compatible predecessor. Phase 10 therefore deploys the fully
-    tested Phase 8 commit first, verifies it on fresh v1 state, and then deploys
-    the final Phase 9 commit. Only the second successful deployment establishes
+    tested `bootstrapV1Commit` first, verifies it on fresh v1 state, and then
+    deploys `finalV1Commit`. Only the second successful deployment establishes
     the required compatible last-known-good v1 bundle.
 
 #### Primary files
@@ -3269,9 +3270,9 @@ committed, independently audited, and green from exact clean OIDs.
 
 Identify and record two immutable commits before touching the live system:
 
-- `bootstrapV1Commit`: the Phase 8 commit containing the complete v1 runtime,
-  database, cleanup, and updater/recovery implementation; and
-- `finalV1Commit`: the Phase 9 commit containing that same core plus final
+- `bootstrapV1Commit`: the corrected source-core commit containing the complete
+  v1 runtime, database, cleanup, and updater/recovery implementation; and
+- `finalV1Commit`: the clean descendant containing that same core plus final
   documentation/platform truth.
 
 `bootstrapV1Commit` must be an ancestor of `finalV1Commit`, and both must have
@@ -3735,8 +3736,9 @@ Pisec v1 is complete only when all statements below are true:
 - Permission apply and runtime refresh never report a stronger result than the
   evidence supports.
 - One current runtime surface is used consistently per operation.
-- Final `current` is the exact Phase 9 commit; one verified schema-compatible
-  Phase 8 v1 deployment is retained and proven by manual recovery.
+- Final `current` is the exact `finalV1Commit`; one verified
+  schema-compatible `bootstrapV1Commit` deployment is retained and proven by
+  manual recovery.
 - CLI/Herdr board task state is derived from durable Pisec records and remains
   separate from runtime, Collie unread, and Reviewr turn state.
 - Unsupported macOS/full-install behavior, old migrations, old deployment
