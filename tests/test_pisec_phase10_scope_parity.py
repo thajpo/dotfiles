@@ -96,6 +96,16 @@ class Phase10ScopeParityTests(unittest.TestCase):
             worktree = root / "worker"
             worktree.mkdir()
             codex = dict(self._production_worker_adapters(root))["codex"]
+            capture = root / "fence-argv.json"
+            fence = Path(codex.root_config["fencePath"])
+            fence.write_text(
+                "#!/usr/bin/python3\n"
+                "import json\n"
+                "from pathlib import Path\n"
+                "import sys\n"
+                f"Path({str(capture)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+            )
+            fence.chmod(0o700)
             surface = codex.prepare_runtime_surface()
             scope = {
                 "projectId": "prj_" + "d" * 32,
@@ -126,6 +136,9 @@ class Phase10ScopeParityTests(unittest.TestCase):
             self.assertIn(activated.adapter_data["hookPath"], hooks_text)
             result = subprocess.run([str(launcher)], cwd=worktree, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
+            argv = json.loads(capture.read_text())
+            codex_argv = argv[argv.index("--") + 1 :]
+            self.assertIn("--dangerously-bypass-hook-trust", codex_argv)
 
     def test_fixture_generation_hashes_every_production_scope_input(self):
         with tempfile.TemporaryDirectory() as tmp:

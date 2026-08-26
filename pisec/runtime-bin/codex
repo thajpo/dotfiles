@@ -135,7 +135,7 @@ def main() -> None:
         "GIT_CONFIG_VALUE_5": "false",
     }
     environment.update({key: value for key, value in os.environ.items() if key.startswith("LC_")})
-    fence = [str(descriptor["fencePath"]), "--settings", str(descriptor["policyPath"]), "--", str(descriptor["nodeExecutablePath"]), str(descriptor["harnessExecutablePath"]), "--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen", "--cd", str(root), "--model", str(descriptor["model"])]
+    fence = [str(descriptor["fencePath"]), "--settings", str(descriptor["policyPath"]), "--", str(descriptor["nodeExecutablePath"]), str(descriptor["harnessExecutablePath"]), "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--no-alt-screen", "--cd", str(root), "--model", str(descriptor["model"])]
     if resume is None:
         fence.append(Path(str(descriptor["promptPath"])).read_text())
     else:
