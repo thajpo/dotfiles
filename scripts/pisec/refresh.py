@@ -12,7 +12,7 @@ from .adapters import HarnessAdapter, WorkspaceAdapter, RuntimeSurfaceArtifacts,
 from .worker_repo import validate_worker_resume_git
 from .worker_repo import project_permissions_lock
 from .models import ConflictError, NeedsAttentionError, NotFoundError, PisecError, canonical_json, json_digest, new_id, utc_now, validate_sha256
-from .runtime import start_bound_agent, usable_runtime_binding
+from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent, usable_runtime_binding
 from .runtime_surface import capture_runtime_surface, verify_surface
 from .events import append_event_in_transaction
 
@@ -271,6 +271,12 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
             raise ConflictError("runtime became busy before refresh reservation")
     with store.transaction():
         operation = store.conn.execute("SELECT * FROM operations WHERE idempotency_key=?", (key,)).fetchone()
+        pre_stop_retry = bool(
+            operation is not None
+            and operation["kind"] == "runtime.refresh"
+            and operation["state"] == "needs_attention"
+            and operation["step"] == "pre_stop_attention"
+        )
         if operation is None:
             operation_id = new_id("op")
             store.conn.execute(
@@ -286,19 +292,38 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
                 )
             elif operation["state"] == "needs_attention":
                 raise NeedsAttentionError("runtime refresh requires recorded compensation or reconciliation before retry")
-        current = store.conn.execute("SELECT refresh_pending,refresh_operation_id,refresh_started_at,runtime_instance_id,report_seq,observed_state,desired_generation_sha256,applied_generation_sha256,launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()
+        current = store.conn.execute(
+            "SELECT r.refresh_pending,r.refresh_operation_id,r.refresh_started_at,r.runtime_instance_id,r.report_seq,r.observed_state,r.desired_generation_sha256,r.applied_generation_sha256,r.launch_generation_sha256,w.desired_state,w.provisioning_state,w.attention_reason,p.active AS project_active,p.lifecycle_attention_reason "
+            "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) JOIN projects p USING(project_id) WHERE r.workstream_id=?",
+            (workstream_id,),
+        ).fetchone()
         if current is None:
             raise NotFoundError("runtime binding was removed")
         for field in ("runtime_instance_id", "report_seq", "observed_state", "desired_generation_sha256", "applied_generation_sha256", "launch_generation_sha256"):
             if current[field] != binding.get(field):
                 raise ConflictError("runtime binding changed before refresh reservation", detail={"field": field})
+        pre_stop_retry = pre_stop_retry and current["attention_reason"] == operation["error_message"]
+        lifecycle_ready = (
+            int(current["project_active"]) == 1
+            and current["lifecycle_attention_reason"] is None
+            and current["desired_state"] == "active"
+            and (
+                (current["provisioning_state"] == "bound" and current["attention_reason"] is None)
+                or (
+                    current["provisioning_state"] == "needs_attention"
+                    and (current["attention_reason"] == WORKSPACE_RUNTIME_MISSING or pre_stop_retry)
+                )
+            )
+        )
+        if not lifecycle_ready:
+            raise ConflictError("workstream changed before refresh reservation", detail={"field": "lifecycle"})
         if int(current["refresh_pending"]) and current["refresh_operation_id"] != operation_id:
             raise NeedsAttentionError("runtime binding is already reserved by another refresh")
         if current["refresh_pending"] and current["refresh_operation_id"] is None:
             raise NeedsAttentionError("runtime binding has an ownerless refresh reservation")
         cursor = store.conn.execute(
-            "UPDATE runtime_bindings SET refresh_pending=1,refresh_operation_id=?,refresh_started_at=?,launch_generation_sha256=?,updated_at=? WHERE workstream_id=? AND refresh_pending=0 AND observed_state IN ('idle','stopped') AND desired_generation_sha256=? AND runtime_instance_id IS ? AND report_seq=? AND applied_generation_sha256 IS ? AND launch_generation_sha256 IS ?",
-            (operation_id, now, desired, now, workstream_id, desired, binding.get("runtime_instance_id"), binding.get("report_seq"), binding.get("applied_generation_sha256"), binding.get("launch_generation_sha256")),
+            "UPDATE runtime_bindings SET refresh_pending=1,refresh_operation_id=?,refresh_started_at=?,launch_generation_sha256=?,updated_at=? WHERE workstream_id=? AND refresh_pending=0 AND observed_state IN ('idle','stopped') AND desired_generation_sha256=? AND runtime_instance_id IS ? AND report_seq=? AND applied_generation_sha256 IS ? AND launch_generation_sha256 IS ? AND EXISTS (SELECT 1 FROM workstreams w JOIN projects p USING(project_id) WHERE w.workstream_id=runtime_bindings.workstream_id AND p.active=1 AND p.lifecycle_attention_reason IS NULL AND w.desired_state='active' AND ((w.provisioning_state='bound' AND w.attention_reason IS NULL) OR (w.provisioning_state='needs_attention' AND w.attention_reason=?) OR (w.provisioning_state='needs_attention' AND EXISTS (SELECT 1 FROM operations o WHERE o.operation_id=? AND o.kind='runtime.refresh' AND o.state='applying' AND o.step='reserved'))) )",
+            (operation_id, now, desired, now, workstream_id, desired, binding.get("runtime_instance_id"), binding.get("report_seq"), binding.get("applied_generation_sha256"), binding.get("launch_generation_sha256"), WORKSPACE_RUNTIME_MISSING, operation_id),
         )
         if cursor.rowcount != 1 and not (int(current["refresh_pending"]) and current["refresh_operation_id"] == operation_id):
             raise ConflictError("runtime binding changed before refresh reservation")

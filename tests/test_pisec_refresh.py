@@ -9,7 +9,8 @@ from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.operations import create_operation
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.refresh import _binding_scope
+from scripts.pisec.refresh import _binding_scope, _reserve_refresh
+from scripts.pisec.models import ConflictError
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
@@ -114,6 +115,46 @@ class RuntimeRefreshTests(unittest.TestCase):
             workstream = store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (self.workstream_id,)).fetchone()
             self.assertEqual(binding["applied_generation_sha256"], binding["desired_generation_sha256"])
             self.assertEqual(workstream["provisioning_state"], "bound")
+
+    def test_refresh_reservation_rechecks_workstream_lifecycle_state(self):
+        with PiStore(self.root / "state") as store:
+            binding = dict(
+                store.conn.execute(
+                    "SELECT r.*,w.kind,w.project_id FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?",
+                    (self.workstream_id,),
+                ).fetchone()
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='unrelated lifecycle attention' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+            with self.assertRaises(ConflictError):
+                _reserve_refresh(store, binding, str(binding["desired_generation_sha256"]), None)
+            current = store.conn.execute(
+                "SELECT refresh_pending,refresh_operation_id,launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?",
+                (self.workstream_id,),
+            ).fetchone()
+            self.assertEqual(tuple(current), (0, None, None))
+
+    def test_refresh_reservation_rechecks_project_lifecycle_state(self):
+        with PiStore(self.root / "state") as store:
+            binding = dict(
+                store.conn.execute(
+                    "SELECT r.*,w.kind,w.project_id FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?",
+                    (self.workstream_id,),
+                ).fetchone()
+            )
+            store.conn.execute(
+                "UPDATE projects SET active=0,lifecycle_attention_reason='project lifecycle changed' WHERE project_id=?",
+                (self.project_id,),
+            )
+            with self.assertRaises(ConflictError):
+                _reserve_refresh(store, binding, str(binding["desired_generation_sha256"]), None)
+            current = store.conn.execute(
+                "SELECT refresh_pending,refresh_operation_id,launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?",
+                (self.workstream_id,),
+            ).fetchone()
+            self.assertEqual(tuple(current), (0, None, None))
 
     def test_pre_stop_staging_failure_preserves_idle_binding_for_retry(self):
         with patch.object(self.harness, "stage_profile", side_effect=RuntimeError("staging failed before stop")):
