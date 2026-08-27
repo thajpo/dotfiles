@@ -178,6 +178,25 @@ def _normalize_owner_tree(root: Path, *, readonly: bool = False) -> None:
             raise PisecError("isolated OMP surface contains an unsupported file")
 
 
+def _prepare_generated_backup_for_removal(root: Path) -> None:
+    """Make a generated backup removable without following links."""
+    info = root.lstat()
+    if info.st_uid != os.geteuid() or info.st_mode & 0o002:
+        raise NeedsAttentionError("OMP generated backup is not owner-controlled")
+    for path in [root, *sorted(root.rglob("*"))]:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            continue
+        if info.st_uid != os.geteuid() or info.st_mode & 0o002:
+            raise NeedsAttentionError("OMP generated backup is not owner-controlled")
+        if stat.S_ISDIR(info.st_mode):
+            os.chmod(path, 0o700)
+        elif stat.S_ISREG(info.st_mode):
+            os.chmod(path, 0o600 | (0o100 if info.st_mode & 0o100 else 0))
+        else:
+            raise NeedsAttentionError("OMP generated backup contains an unsupported file")
+
+
 def _activate_directory(staged: Path, target: Path, retained_backup: Path | None = None) -> None:
     backup = retained_backup or target.with_name(f".{target.name}.previous-{secrets.token_hex(8)}")
     replaced = False
@@ -217,7 +236,13 @@ def _activate_directory(staged: Path, target: Path, retained_backup: Path | None
             shutil.rmtree(staged)
         if backup.exists() and retained_backup is None:
             if backup.is_dir() and not backup.is_symlink():
-                _normalize_owner_tree(backup, readonly=False)
+                # This is a Pisec-generated disposable backup. Its contents
+                # may include harmless application symlinks (for example
+                # pytest's ``*-current`` links). rmtree removes links as
+                # directory entries and does not follow them, so normalizing
+                # the whole backup here would turn routine refresh cleanup
+                # into a post-activation failure.
+                _prepare_generated_backup_for_removal(backup)
             shutil.rmtree(backup)
 
 

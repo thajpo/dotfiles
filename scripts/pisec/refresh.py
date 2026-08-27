@@ -22,6 +22,7 @@ _RECOVERABLE_STOPPED_REFRESH_ERRORS = frozenset(
     {
         "runtime process identity became ambiguous during refresh",
         "workstream changed before refresh reservation",
+        "isolated OMP surface contains a symlink",
     }
 )
 
