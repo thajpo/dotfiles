@@ -266,6 +266,20 @@ def _mark_pre_stop_attention(store: Any, workstream_id: str, operation_id: str, 
             )
 
 
+def _has_recorded_pre_stop_failure(store: Any, operation_id: str) -> bool:
+    row = store.conn.execute(
+        "SELECT payload_json FROM events WHERE operation_id=? AND kind='runtime.refresh_failed' ORDER BY sequence DESC LIMIT 1",
+        (operation_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    try:
+        payload = json.loads(str(row["payload_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("reason"), str) and bool(payload["reason"])
+
+
 def _recover_stopped_refresh_attention(
     store: Any,
     current: Mapping[str, Any],
@@ -435,7 +449,10 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
         for field in ("runtime_instance_id", "report_seq", "observed_state", "desired_generation_sha256", "applied_generation_sha256", "launch_generation_sha256"):
             if current[field] != expected_binding.get(field):
                 raise ConflictError("runtime binding changed before refresh reservation", detail={"field": field})
-        pre_stop_retry = pre_stop_retry and current["attention_reason"] == pre_stop_error_message
+        pre_stop_retry = pre_stop_retry and (
+            current["attention_reason"] == pre_stop_error_message
+            or _has_recorded_pre_stop_failure(store, str(operation_id))
+        )
         lifecycle_ready = (
             int(current["project_active"]) == 1
             and current["lifecycle_attention_reason"] is None

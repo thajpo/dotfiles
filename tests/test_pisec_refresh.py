@@ -175,6 +175,10 @@ class RuntimeRefreshTests(unittest.TestCase):
             self.assertIsNone(binding["launch_generation_sha256"])
             self.assertEqual(operation["state"], "needs_attention")
             self.assertEqual(operation["step"], "pre_stop_attention")
+            store.conn.execute(
+                "UPDATE workstreams SET attention_reason='secretary ensure requires attention' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
 
         def launch_without_attestation(surface_id, name, agent_kind):
             self.workspace.calls.append(("start", (surface_id, name, agent_kind)))
