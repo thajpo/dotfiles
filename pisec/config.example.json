@@ -52,7 +52,7 @@
       "id": "codex",
       "config": {
         "executablePath": "~/.nvm/versions/node/v22.19.0/bin/codex",
-        "versionPrefix": "0.147.0"
+        "versionPrefix": "0.150.0"
       }
     }
   },

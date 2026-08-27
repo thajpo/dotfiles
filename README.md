@@ -117,7 +117,7 @@ Pisec product v1 is the durable, product-neutral workflow and security core. It 
 projects, proposals, approvals, workstream intent, decisions, runtime
 bindings, research packets, and audit events. The selected `HarnessAdapter`
 and `WorkspaceAdapter` own product wire protocols and artifacts. The tested
-worker harnesses are OMP 17.3.4 (`omp`) and Codex 0.147.0 when configured;
+worker harnesses are OMP 17.3.4 (`omp`) and Codex 0.150.0 when configured;
 Herdr 0.8.0 protocol 19 (`herdr`) is the workspace adapter. Fence 0.1.66,
 Collie 0.28.0, the committed Collie unread-activity patch, and Reviewr 0.32.1
 are exact v1 pins. Collie remains presentation glue and Reviewr is review-only.

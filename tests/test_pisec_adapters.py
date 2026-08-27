@@ -309,6 +309,36 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         restored = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "coordinationMode": "project"})
         self.assertEqual(restored["coordination_mode"], "project")
 
+    def test_public_mode_transition_moves_secretary_surface_and_durable_identity(self):
+        project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo)})
+        self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})
+        self.dispatcher.dispatch("admin", "first_mate.ensure", {"project": project["project_id"]})
+        with PiStore(self.root / "state") as store:
+            secretary_id = str(store.conn.execute("SELECT secretary_workstream_id FROM projects WHERE project_id=?", (project["project_id"],)).fetchone()[0])
+            secretary_binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (secretary_id,)).fetchone())
+            first_mate_workspace = str(store.conn.execute("SELECT r.workspace_id FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE w.kind='first_mate' AND w.desired_state='active' AND w.provisioning_state='bound'").fetchone()[0])
+            old_workspace = str(secretary_binding["workspace_id"])
+
+        changed = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "coordinationMode": "fleet"})
+        self.assertEqual(changed["coordination_mode"], "fleet")
+        with PiStore(self.root / "state") as store:
+            fleet_binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (secretary_id,)).fetchone())
+            fleet_workspace = dict(store.conn.execute("SELECT * FROM project_workspaces WHERE project_id=?", (project["project_id"],)).fetchone())
+        self.assertEqual(fleet_binding["workspace_id"], first_mate_workspace)
+        self.assertEqual(fleet_workspace["workspace_id"], first_mate_workspace)
+        self.assertNotEqual(fleet_binding["workspace_id"], old_workspace)
+        self.assertNotEqual(fleet_binding["workspace_surface_id"], secretary_binding["workspace_surface_id"])
+
+        restored = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo), "coordinationMode": "project"})
+        self.assertEqual(restored["coordination_mode"], "project")
+        with PiStore(self.root / "state") as store:
+            project_binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (secretary_id,)).fetchone())
+            project_workspace = dict(store.conn.execute("SELECT * FROM project_workspaces WHERE project_id=?", (project["project_id"],)).fetchone())
+        self.assertNotEqual(project_binding["workspace_id"], first_mate_workspace)
+        self.assertEqual(project_binding["workspace_id"], project_workspace["workspace_id"])
+        self.assertNotEqual(project_binding["workspace_surface_id"], fleet_binding["workspace_surface_id"])
+        self.assertGreaterEqual(len([call for call in self.workspace.calls if call[0] == "move_surface_to_tab"]), 2)
+
     def test_project_mode_change_rejects_harness_mismatched_first_mate(self):
         project = self.dispatcher.dispatch("admin", "project.register", {"path": str(self.repo)})
         self.dispatcher.dispatch("admin", "project.open", {"project": project["project_id"]})

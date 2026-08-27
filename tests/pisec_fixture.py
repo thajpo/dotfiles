@@ -256,6 +256,7 @@ class FixtureWorkspace:
         self.root = root
         self.store = store
         self.worktrees: dict[str, WorkspaceObservation] = {}
+        self._observations: list[WorkspaceObservation] = []
         self.agents: dict[str, AgentObservation] = {}
         self.prompts: list[tuple[str, str]] = []
         self.calls: list[tuple[str, Any]] = []
@@ -280,11 +281,22 @@ class FixtureWorkspace:
             agent=None,
         )
         self.worktrees[path] = current
+        self._observations.append(current)
         return current
     def create_workspace(self, cwd: str, label: str, focus: bool = False) -> WorkspaceObservation:
         self.calls.append(("create_workspace", (cwd, label, focus)))
         path = str(Path(cwd).resolve(strict=False))
-        observation = self._observation(path)
+        self._counter += 1
+        observation = WorkspaceObservation(
+            workspace_id=f"fixture-workspace-{self._counter}",
+            view_id=f"fixture-view-{self._counter}",
+            surface_id=f"fixture-surface-{self._counter}",
+            worktree_path=path,
+            branch_name=None,
+            agent=None,
+        )
+        self.worktrees[path] = observation
+        self._observations.append(observation)
         self.project_workspace_ids[path] = observation.workspace_id
         self.project_workspace_id = observation.workspace_id
         return observation
@@ -306,6 +318,7 @@ class FixtureWorkspace:
             agent=None,
         )
         self.worktrees[path] = observation
+        self._observations.append(observation)
         return observation
 
 
@@ -316,7 +329,7 @@ class FixtureWorkspace:
 
     def move_surface_to_tab(self, *, surface_id: str, workspace_id: str, label: str, focus: bool = False) -> WorkspaceObservation:
         self.calls.append(("move_surface_to_tab", (surface_id, workspace_id, label, focus)))
-        item = next((value for value in self.worktrees.values() if value.surface_id == surface_id), None)
+        item = next((value for value in self._observations if value.surface_id == surface_id), None)
         if item is None:
             raise RuntimeError("fixture pane is missing")
         self._counter += 1
@@ -330,7 +343,11 @@ class FixtureWorkspace:
         )
         if item.worktree_path is not None:
             self.worktrees[str(Path(item.worktree_path).resolve(strict=False))] = moved
-        self.runtime_states[moved.surface_id] = self.runtime_states.pop(surface_id, "stopped")
+        self._observations.append(moved)
+        previous_state = self.runtime_states.pop(surface_id, None)
+        if previous_state is None:
+            previous_state = "live" if any(agent.surface_id == surface_id for agent in self.agents.values()) else "stopped"
+        self.runtime_states[moved.surface_id] = previous_state
         for name, agent in list(self.agents.items()):
             if agent.surface_id == surface_id:
                 self.agents[name] = AgentObservation(agent.name, moved.surface_id, agent.identity_usable, agent.state)
@@ -352,17 +369,7 @@ class FixtureWorkspace:
         return WorkspaceObservation(observed.workspace_id, observed.view_id, observed.surface_id, observed.worktree_path, observed.branch_name, agent)
 
     def observe_surface(self, *, workspace_id: str, view_id: str, surface_id: str, cwd: str) -> WorkspaceObservation | None:
-        observed = next(
-            (
-                item
-                for item in self.worktrees.values()
-                if item.workspace_id == workspace_id
-                and item.view_id == view_id
-                and item.surface_id == surface_id
-                and str(Path(str(item.worktree_path)).resolve(strict=False)) == str(Path(cwd).resolve(strict=False))
-            ),
-            None,
-        )
+        observed = next((item for item in self._observations if item.workspace_id == workspace_id and item.view_id == view_id and item.surface_id == surface_id and str(Path(str(item.worktree_path)).resolve(strict=False)) == str(Path(cwd).resolve(strict=False))), None)
         if observed is None:
             return None
         agent = next((item for item in self.agents.values() if item.surface_id == surface_id), None)

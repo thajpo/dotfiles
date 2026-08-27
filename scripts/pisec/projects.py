@@ -9,7 +9,7 @@ from typing import Any
 
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
-from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, bounded_text, canonical_json, new_id, utc_now, validate_git_oid, validate_id, validate_remote_url
+from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, PisecError, bounded_text, canonical_json, new_id, utc_now, validate_git_oid, validate_id, validate_remote_url
 from .research import research_counts
 from .git_runner import git_text
 
@@ -89,6 +89,130 @@ def _bound_runtime_is_usable(store: Any, workstream_id: str, workspace: Any, har
         return False
 
 
+def _project_mode_target(store: Any, project: Mapping[str, Any], workspace: Any, *, first_mate_workspace_id: str) -> tuple[str, bool, str | None]:
+    """Select or create a project-owned destination for a project-mode Secretary."""
+    from .project_workspaces import _record, _validate_observation
+
+    repository = str(project["repository_path"])
+    record = _record(store, project, workspace)
+    if record is not None and str(record["workspace_id"]) != first_mate_workspace_id:
+        target_id = str(record["workspace_id"])
+        observed = workspace.observe_tab(workspace_id=target_id, cwd=repository)
+        if observed is not None:
+            return target_id, False, None
+        try:
+            observed = _validate_observation(workspace.create_tab(workspace_id=target_id, cwd=repository, label=f"Project: {project['display_name']}", focus=False), target_id)
+        except PisecError as error:
+            if str(error) != f"workspace {target_id} not found":
+                raise
+        else:
+            return target_id, False, observed.view_id
+
+    observed = _validate_observation(workspace.create_workspace(repository, f"Project: {project['display_name']}", focus=False))
+    if observed.workspace_id == first_mate_workspace_id:
+        raise NeedsAttentionError("project mode workspace creation returned the First Mate workspace")
+    return observed.workspace_id, True, observed.view_id
+
+
+def _move_secretary_surface(
+    store: Any,
+    project: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    *,
+    target_workspace_id: str,
+    created_workspace: bool,
+    created_view_id: str | None,
+    workspace: Any,
+    harness: Any,
+    coordination_mode: str,
+    first_mate_id: str | None,
+) -> dict[str, Any]:
+    """Move a live Secretary through the workspace adapter before changing mode."""
+    from .project_workspaces import _record, _validate_observation
+
+    project_id = str(project["project_id"])
+    workstream_id = str(binding["workstream_id"])
+    repository = str(project["repository_path"])
+    old_workspace_id = str(binding["workspace_id"])
+    moved = False
+    try:
+        moved_observation = _validate_observation(
+            workspace.move_surface_to_tab(
+                surface_id=str(binding["workspace_surface_id"]),
+                workspace_id=target_workspace_id,
+                label=f"Secretary: {project['display_name']}",
+                focus=False,
+            ),
+            target_workspace_id,
+        )
+        moved = True
+        observed = workspace.observe_surface(
+            workspace_id=moved_observation.workspace_id,
+            view_id=moved_observation.view_id,
+            surface_id=moved_observation.surface_id,
+            cwd=repository,
+        )
+        observed = _validate_observation(observed, target_workspace_id)
+        if observed.worktree_path is not None and str(Path(observed.worktree_path).resolve(strict=False)) != str(Path(repository).resolve(strict=False)):
+            raise NeedsAttentionError("moved Secretary surface escaped the approved repository")
+        agent = observed.agent
+        expected_names = {str(binding["agent_name"]), str(harness.manifest.agent_kind)}
+        if agent is None or agent.name not in expected_names or agent.surface_id != observed.surface_id or not agent.identity_usable:
+            raise NeedsAttentionError("moved Secretary surface lost its durable agent identity")
+        if workspace.observe_runtime(observed.surface_id, str(binding["policy_path"])).state != "live":
+            raise NeedsAttentionError("moved Secretary surface is not live")
+    except Exception:
+        if not moved:
+            if created_workspace:
+                workspace.close_workspace(target_workspace_id)
+            elif created_view_id is not None:
+                workspace.close_tab(created_view_id)
+        raise
+
+    record = _record(store, project, workspace)
+    now = utc_now()
+    with store.transaction():
+        if record is None:
+            store.conn.execute(
+                "INSERT INTO project_workspaces(project_id,workspace_adapter_id,workspace_session_name,workspace_id,repository_path,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (project_id, workspace.manifest.adapter_id, workspace.manifest.session_name, target_workspace_id, repository, now, now),
+            )
+        else:
+            store.conn.execute(
+                "UPDATE project_workspaces SET workspace_id=?,updated_at=? WHERE project_id=?",
+                (target_workspace_id, now, project_id),
+            )
+        cursor = store.conn.execute(
+            "UPDATE runtime_bindings SET workspace_id=?,workspace_view_id=?,workspace_surface_id=?,updated_at=? WHERE workstream_id=? AND workspace_id=? AND workspace_view_id=? AND workspace_surface_id=?",
+            (observed.workspace_id, observed.view_id, observed.surface_id, now, workstream_id, old_workspace_id, binding["workspace_view_id"], binding["workspace_surface_id"]),
+        )
+        if cursor.rowcount != 1:
+            raise NeedsAttentionError("Secretary binding changed while its workspace surface was moving")
+        cursor = store.conn.execute(
+            "UPDATE projects SET coordination_mode=?,updated_at=? WHERE project_id=? AND active=1 AND lifecycle_attention_reason IS NULL AND coordination_mode=?",
+            (coordination_mode, now, project_id, project["coordination_mode"]),
+        )
+        if cursor.rowcount != 1:
+            raise NeedsAttentionError("project mode changed while its Secretary workspace surface was moving")
+        append_event_in_transaction(
+            store.conn,
+            kind="project.mode.changed",
+            project_id=project_id,
+            workstream_id=workstream_id,
+            payload={
+                "from": project["coordination_mode"],
+                "to": coordination_mode,
+                "workspaceId": observed.workspace_id,
+                "workspaceViewId": observed.view_id,
+                "workspaceSurfaceId": observed.surface_id,
+            },
+        )
+        if first_mate_id is not None:
+            from .attention import backfill_attention
+            backfill_attention(store, recipient_workstream_id=first_mate_id, limit=128)
+    return {"workspace_id": observed.workspace_id, "workspace_view_id": observed.view_id, "workspace_surface_id": observed.surface_id}
+
+
 def change_project_mode(store: Any, selector: str, coordination_mode: str, *, workspace: Any, harness: Any | None = None) -> dict[str, Any]:
     if coordination_mode not in COORDINATION_MODES:
         raise InvalidRequestError("coordination_mode must be project or fleet")
@@ -103,9 +227,13 @@ def change_project_mode(store: Any, selector: str, coordination_mode: str, *, wo
     if not isinstance(secretary_id, str) or not _bound_runtime_is_usable(store, secretary_id, workspace, harness):
         raise NeedsAttentionError("project mode changes require a usable bound Secretary")
     first_mate_id: str | None = None
+    first_mate_workspace_id: str | None = None
     if coordination_mode == FLEET_COORDINATION_MODE:
+        from .project_workspaces import _first_mate_workspace
+        first_mate_workspace_id = _first_mate_workspace(store, workspace)
         first_mate = store.conn.execute(
-            "SELECT workstream_id FROM workstreams WHERE kind='first_mate' AND desired_state='active' AND provisioning_state='bound' ORDER BY created_at LIMIT 1"
+            "SELECT w.workstream_id,r.workspace_id FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id IN (SELECT workstream_id FROM workstreams WHERE kind='first_mate' AND desired_state='active' AND provisioning_state='bound') AND r.workspace_id=?",
+            (first_mate_workspace_id,),
         ).fetchone()
         if first_mate is None or not _bound_runtime_is_usable(store, str(first_mate["workstream_id"]), workspace, harness):
             raise NeedsAttentionError("entering fleet mode requires a usable bound First Mate")
@@ -117,13 +245,32 @@ def change_project_mode(store: Any, selector: str, coordination_mode: str, *, wo
         ).fetchone()
         if open_escalation is not None:
             raise ConflictError("leaving fleet mode requires all Secretary escalation issues to be closed")
-    with store.transaction():
-        cursor = store.conn.execute("UPDATE projects SET coordination_mode=?,updated_at=? WHERE project_id=? AND active=1 AND lifecycle_attention_reason IS NULL AND coordination_mode=?", (coordination_mode, utc_now(), project["project_id"], current))
-        if cursor.rowcount != 1:
-            raise ConflictError("project mode changed before the guarded update")
-        if first_mate_id is not None:
-            from .attention import backfill_attention
-            backfill_attention(store, recipient_workstream_id=first_mate_id, limit=128)
+    binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (secretary_id,)).fetchone()
+    if binding is None:
+        raise NeedsAttentionError("project Secretary binding is missing")
+    if coordination_mode == FLEET_COORDINATION_MODE:
+        target_workspace_id = str(first_mate_workspace_id)
+        created_workspace = False
+        created_view_id = None
+    else:
+        target_workspace_id, created_workspace, created_view_id = _project_mode_target(
+            store,
+            project,
+            workspace,
+            first_mate_workspace_id=str(binding["workspace_id"]),
+        )
+    _move_secretary_surface(
+        store,
+        project,
+        dict(binding),
+        target_workspace_id=target_workspace_id,
+        created_workspace=created_workspace,
+        created_view_id=created_view_id,
+        workspace=workspace,
+        harness=harness,
+        coordination_mode=coordination_mode,
+        first_mate_id=first_mate_id,
+    )
     return get_project(store, project["project_id"])
 
 

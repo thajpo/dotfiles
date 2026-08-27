@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import runpy
 import stat
 import subprocess
 import tempfile
@@ -30,6 +31,16 @@ from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
 class Phase10ScopeParityTests(unittest.TestCase):
+    def test_codex_launcher_accepts_system_owned_pinned_node(self):
+        node = Path("/usr/bin/node")
+        if not node.is_file() or node.is_symlink() or node.stat().st_uid != 0:
+            self.skipTest("Linux acceptance host does not provide a system-owned /usr/bin/node")
+        launcher = Path(__file__).resolve().parents[1] / "pisec" / "runtime-bin" / "codex"
+        namespace = runpy.run_path(str(launcher))
+        with self.assertRaises(SystemExit):
+            namespace["secure_file"](node, executable=True)
+        namespace["secure_file"](node, executable=True, allow_system_owner=True)
+
     def test_production_omp_and_codex_worker_materialization_preserves_additions(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -75,7 +86,7 @@ class Phase10ScopeParityTests(unittest.TestCase):
                             adapter.discard_staged_profile(staged)
 
     @staticmethod
-    def _production_worker_adapters(root):
+    def _production_worker_adapters(root, *, codex_node_path=None):
         omp_home = root / "omp-home"
         (omp_home / ".omp" / "agent").mkdir(parents=True)
         omp = OmpHarnessAdapter(state_root=root / "omp-state", config=make_config(root))
@@ -88,9 +99,11 @@ class Phase10ScopeParityTests(unittest.TestCase):
         codex_config = {
             "fencePath": make_config(root)["fencePath"],
             "harness": {"config": {"executablePath": str(codex_exec), "gateway": {"baseUrl": "http://127.0.0.1:4000", "tokenFile": str(token)}}},
-            "workerHarnesses": {"codex": {"id": "codex", "config": {"executablePath": str(codex_exec), "versionPrefix": "0.147.0"}}},
+            "workerHarnesses": {"codex": {"id": "codex", "config": {"executablePath": str(codex_exec), "versionPrefix": "0.150.0"}}},
         }
-        codex = CodexHarnessAdapter(state_root=root / "codex-state", config=codex_config)
+        node_lookup = patch("scripts.pisec.harnesses.codex.shutil.which", return_value=codex_node_path) if codex_node_path is not None else contextlib.nullcontext()
+        with node_lookup:
+            codex = CodexHarnessAdapter(state_root=root / "codex-state", config=codex_config)
         return (("omp", omp), ("codex", codex))
 
     def test_production_codex_launcher_accepts_immutable_surface(self):
@@ -98,7 +111,9 @@ class Phase10ScopeParityTests(unittest.TestCase):
             root = Path(tmp)
             worktree = root / "worker"
             worktree.mkdir()
-            codex = dict(self._production_worker_adapters(root))["codex"]
+            system_node = Path("/usr/bin/node")
+            node_path = str(system_node) if system_node.is_file() and not system_node.is_symlink() and system_node.stat().st_uid == 0 else None
+            codex = dict(self._production_worker_adapters(root, codex_node_path=node_path))["codex"]
             capture = root / "fence-argv.json"
             fence = Path(codex.root_config["fencePath"])
             fence.write_text(

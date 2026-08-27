@@ -177,8 +177,8 @@ def _validate_config(config: Mapping[str, Any], root_config: Mapping[str, Any]) 
     if set(value) != {"executablePath", "versionPrefix"}:
         raise InvalidRequestError("Codex worker harness configuration fields are invalid")
     version_prefix = value["versionPrefix"]
-    if version_prefix != "0.147.0":
-        raise InvalidRequestError("Codex version pin must be exactly 0.147.0")
+    if version_prefix != "0.150.0":
+        raise InvalidRequestError("Codex version pin must be exactly 0.150.0")
     gateway = config.get("harness", {}).get("config", {}).get("gateway") if isinstance(config.get("harness"), Mapping) else None
     if not isinstance(gateway, Mapping) or set(gateway) != {"baseUrl", "tokenFile"}:
         raise InvalidRequestError("Codex requires the configured loopback gateway")
@@ -221,7 +221,7 @@ def _prompt(scope: Mapping[str, Any]) -> str:
 
 
 class CodexHarnessAdapter:
-    manifest = HarnessManifest(adapter_id="codex", agent_kind="codex", version_label="0.147.0", interface_version=1, supported_role_profiles=(("worker", "worker-default"),))
+    manifest = HarnessManifest(adapter_id="codex", agent_kind="codex", version_label="0.150.0", interface_version=1, supported_role_profiles=(("worker", "worker-default"),))
     launches_with_brief = True
     allow_unidentified_agent = True
 
@@ -720,7 +720,7 @@ class CodexHarnessAdapter:
             try:
                 result = subprocess.run([str(node), str(executable), "--version"], capture_output=True, text=True, timeout=5, check=False)
                 detail = (result.stdout or result.stderr).strip()
-                version_ok = result.returncode == 0 and detail.strip() in {"0.147.0", "codex 0.147.0"}
+                version_ok = result.returncode == 0 and detail.strip() in {"0.150.0", "codex 0.150.0"}
             except (OSError, subprocess.SubprocessError) as error:
                 detail = str(error)
         elif "error_detail" in locals():
