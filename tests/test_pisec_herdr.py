@@ -22,6 +22,8 @@ class FakeHerdrState:
         self.agent_status = "idle"
         self.official_authority = True
         self.large_snapshot = False
+        self.ready_reads = 0
+        self.ready_after_reads = 0
 
     def result(self, method, params):
         self.requests.append((method, params))
@@ -72,8 +74,14 @@ class FakeHerdrState:
         if method == "tab.create":
             self.created = True
             return {"type": "tab_created", "workspace": {"workspace_id": params["workspace_id"]}, "tab": {"tab_id": "t3"}, "root_pane": {"pane_id": f"{params['workspace_id']}:p3"}}
-        if method == "pane.send_input":
-            return {"type": "pane_input_sent"}
+        if method == "pane.read":
+            self.ready_reads += 1
+            text = "" if self.ready_reads <= self.ready_after_reads else "$ "
+            return {"type": "pane_read", "read": {"text": text, "truncated": False, "revision": self.ready_reads}}
+        if method == "pane.send_text":
+            return {"type": "pane_text_sent"}
+        if method == "pane.send_keys":
+            return {"type": "ok"}
         if method == "pane.focus":
             return {"type": "pane_focused"}
         if method == "pane.move":
@@ -153,18 +161,26 @@ class HerdrTests(unittest.TestCase):
         self.assertIn("workspace.create", methods)
         self.assertIn("tab.create", methods)
         self.assertIn("tab.rename", methods)
-        self.assertIn("pane.send_input", methods)
+        self.assertIn("pane.send_text", methods)
+        self.assertIn("pane.send_keys", methods)
         self.assertNotIn("worktree.create", methods)
         self.assertNotIn("agent.start", methods)
         self.assertIn("pane.focus", methods)
         self.assertIn("pane.move", methods)
         self.assertIn("tab.close", methods)
-        command = next(params for method, params in self.state.requests if method == "pane.send_input")
+        command = next(params for method, params in self.state.requests if method == "pane.send_text")
         self.assertEqual(command["text"], "HERDR_SESSION=main HERDR_PANE_ID=w2:p1 '/tmp/launcher with spaces' --resume=abc 'quoted value'")
-        self.assertEqual(command["keys"], ["Enter"])
+        enter = next(params for method, params in self.state.requests if method == "pane.send_keys")
+        self.assertEqual(enter, {"pane_id": "w2:p1", "keys": ["Enter"]})
         prompt = next(params for method, params in self.state.requests if method == "agent.prompt")
         self.assertEqual(prompt["text"], "full brief")
         self.assertEqual(prompt["wait"]["until"], ["working", "blocked", "idle"])
+
+    def test_create_waits_for_a_new_pane_shell_to_be_ready(self):
+        self.state.ready_after_reads = 2
+        created = self.adapter.create_tab(workspace_id="w1", cwd="/tmp/work", label="Task: delayed", focus=False)
+        self.assertEqual(created.surface_id, "w1:p3")
+        self.assertEqual(self.state.ready_reads, 3)
 
     def test_observe_tab_requires_exact_workspace_and_cwd(self):
         self.adapter.snapshot = lambda: {

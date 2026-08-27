@@ -369,7 +369,9 @@ class FixtureWorkspace:
         return WorkspaceObservation(observed.workspace_id, observed.view_id, observed.surface_id, observed.worktree_path, observed.branch_name, agent)
 
     def observe_surface(self, *, workspace_id: str, view_id: str, surface_id: str, cwd: str) -> WorkspaceObservation | None:
-        observed = next((item for item in self._observations if item.workspace_id == workspace_id and item.view_id == view_id and item.surface_id == surface_id and str(Path(str(item.worktree_path)).resolve(strict=False)) == str(Path(cwd).resolve(strict=False))), None)
+        active = list(self.worktrees.values())
+        active.extend(item for item in self._observations if item.surface_id in self.runtime_states or any(agent.surface_id == item.surface_id for agent in self.agents.values()))
+        observed = next((item for item in active if item.workspace_id == workspace_id and item.view_id == view_id and item.surface_id == surface_id and str(Path(str(item.worktree_path)).resolve(strict=False)) == str(Path(cwd).resolve(strict=False))), None)
         if observed is None:
             return None
         agent = next((item for item in self.agents.values() if item.surface_id == surface_id), None)

@@ -999,6 +999,25 @@ class RuntimeReportTests(unittest.TestCase):
         with self.assertRaises(ConflictError):
             report_runtime(self.store, self.payload(seq=2, event="lifecycle", state="idle", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
 
+    def test_initial_launch_session_start_accepts_reserved_unapplied_generation(self):
+        self.store.conn.execute(
+            "UPDATE workstreams SET provisioning_state='creating' WHERE workstream_id=?",
+            (self.workstream_id,),
+        )
+        self.store.conn.execute(
+            "UPDATE runtime_bindings SET applied_generation_sha256=NULL,launch_generation_sha256=desired_generation_sha256,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL WHERE workstream_id=?",
+            (self.workstream_id,),
+        )
+        result = report_runtime(self.store, self.payload(), self.harness, self.workspace)
+        self.assertEqual(result["workstreamId"], self.workstream_id)
+        binding = self.store.conn.execute(
+            "SELECT applied_generation_sha256,launch_generation_sha256,refresh_pending FROM runtime_bindings WHERE workstream_id=?",
+            (self.workstream_id,),
+        ).fetchone()
+        self.assertEqual(binding[0], self.binding["desired_generation_sha256"])
+        self.assertIsNone(binding[1])
+        self.assertEqual(binding[2], 0)
+
     def test_session_start_requires_a_owned_refresh_reservation(self):
         self.store.conn.execute(
             "UPDATE workstreams SET provisioning_state='needs_attention' WHERE workstream_id=?",

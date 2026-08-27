@@ -7,6 +7,7 @@ import hmac
 import json
 from pathlib import Path
 import re
+import time
 from typing import Any, Mapping
 
 from .adapters import HarnessAdapter, WorkspaceAdapter
@@ -86,11 +87,27 @@ def start_bound_agent(
     argv = [str(launcher)]
     if row["native_session_kind"] is not None:
         argv.append(f"--resume={row['native_session_value']}")
-    workspace.run_command(
-        str(row["workspace_surface_id"]),
-        argv,
-        env={"HERDR_SESSION": workspace.manifest.session_name, "HERDR_PANE_ID": str(row["workspace_surface_id"])},
-    )
+    surface_id = str(row["workspace_surface_id"])
+    environment = {"HERDR_SESSION": workspace.manifest.session_name, "HERDR_PANE_ID": surface_id}
+    workspace.run_command(surface_id, argv, env=environment)
+    # A persistent Herdr pane can acknowledge input while still dropping the
+    # first command during PTY reattachment.  Re-observe the exact bound
+    # process before one bounded retry; never retry a live or ambiguous tree.
+    retry_at = time.monotonic() + 2.0
+    retry_deadline = retry_at + 2.0
+    retried = False
+    while time.monotonic() < retry_deadline:
+        try:
+            process = workspace.observe_runtime(surface_id, str(row["policy_path"]))
+        except Exception:
+            process = None
+        if process is not None and process.state == "live":
+            return {"launched": True, "observation": observation}
+        if not retried and process is not None and process.state == "stopped" and time.monotonic() >= retry_at:
+            workspace.run_command(surface_id, argv, env=environment)
+            retried = True
+            return {"launched": True, "observation": observation}
+        time.sleep(0.1)
     return {"launched": True, "observation": observation}
 
 
@@ -112,6 +129,16 @@ def verify_runtime_binding(store: Any, payload: Mapping[str, Any], *, worker_onl
         "SELECT r.*,w.project_id,w.kind,w.execution_profile,w.desired_state,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?",
         (workstream_id,),
     ).fetchone()
+    initial_session_start_pending = (
+        allow_session_start
+        and row is not None
+        and row["launch_generation_sha256"] is not None
+        and row["applied_generation_sha256"] is None
+        and row["provisioning_state"] == "creating"
+        and not int(row["refresh_pending"])
+        and row["refresh_operation_id"] is None
+        and row["refresh_started_at"] is None
+    )
     session_start_pending = (
         allow_session_start
         and row is not None
@@ -119,7 +146,7 @@ def verify_runtime_binding(store: Any, payload: Mapping[str, Any], *, worker_onl
         and int(row["refresh_pending"]) == 1
         and row["refresh_operation_id"] is not None
         and row["refresh_started_at"] is not None
-    )
+    ) or initial_session_start_pending
     if row is None or row["desired_state"] == "retired" or (
         allow_session_start and row["launch_generation_sha256"] is not None and not session_start_pending
     ) or (

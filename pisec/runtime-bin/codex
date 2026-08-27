@@ -49,14 +49,46 @@ def secure_readonly_tree(path: Path) -> None:
             fail(f"required immutable surface is unsafe: {path}")
 
 
-def reject_user_configuration(path: Path) -> None:
+def reject_user_configuration(path: Path, *, allowed_config: Path | None = None, allowed_config_text: str | None = None) -> None:
     try:
         children = tuple(path.iterdir())
     except OSError:
         fail(f"required directory is unavailable: {path}", 127)
     for child in children:
+        if allowed_config is not None and child == allowed_config:
+            secure_file(child)
+            if allowed_config_text is None or child.read_text() != allowed_config_text:
+                fail("worker-created user configuration is not permitted")
+            continue
         if child.name == "hooks.json" or child.suffix == ".toml":
             fail("worker-created user configuration is not permitted")
+
+
+def ensure_trusted_project_config(path: Path, root: Path) -> tuple[Path, str]:
+    config_path = path / "config.toml"
+    config_text = f"[projects.{toml_string(str(root))}]\ntrust_level = \"trusted\"\n"
+    try:
+        fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        pass
+    except OSError:
+        fail(f"required file is unavailable: {config_path}", 127)
+    else:
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(config_text)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError:
+            fail(f"required file is unavailable: {config_path}", 127)
+    secure_file(config_path)
+    try:
+        actual = config_path.read_text()
+    except OSError:
+        fail(f"required file is unavailable: {config_path}", 127)
+    if actual != config_text:
+        fail("worker-created user configuration is not permitted")
+    return config_path, config_text
 
 
 def toml_string(value: str) -> str:
@@ -94,7 +126,8 @@ def main() -> None:
     secure_directory(tmp_dir)
     secure_readonly_tree(surface)
     secure_directory(codex_home)
-    reject_user_configuration(codex_home)
+    trusted_config_path, trusted_config_text = ensure_trusted_project_config(codex_home, root)
+    reject_user_configuration(codex_home, allowed_config=trusted_config_path, allowed_config_text=trusted_config_text)
     for key in ("configPath", "promptPath", "mcpPath", "hookPath", "hooksPath", "policyPath"):
         path = Path(str(descriptor[key]))
         if key in {"configPath", "promptPath", "mcpPath", "hookPath", "hooksPath", "policyPath"} and not path.is_relative_to(surface):
@@ -164,8 +197,15 @@ def main() -> None:
         "features.hooks=true",
         hook_override("SessionStart", str(descriptor["hookPath"])),
         hook_override("Stop", str(descriptor["hookPath"])),
+        f"projects.{toml_string(str(root))}.trust_level=\"trusted\"",
         f"mcp_servers.pisec.command={toml_string(str(descriptor['mcpPath']))}",
         "mcp_servers.pisec.args=[]",
+        'model_provider="openai-codex"',
+        'model_providers.openai-codex.name="openai-codex"',
+        f"model_providers.openai-codex.base_url={toml_string(str(descriptor['gatewayBaseUrl']).rstrip('/') + '/v1')}",
+        'model_providers.openai-codex.wire_api="responses"',
+        'model_providers.openai-codex.env_key="OPENAI_API_KEY"',
+        'model_providers.openai-codex.requires_openai_auth=false',
         f"openai_base_url={toml_string(str(descriptor['gatewayBaseUrl']).rstrip('/') + '/v1')}",
         f"model_reasoning_effort={toml_string(str(descriptor['reasoningEffort']))}",
         'approval_policy="never"',

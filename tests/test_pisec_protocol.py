@@ -203,6 +203,7 @@ class BrokerSocketTests(unittest.TestCase):
             self.assertEqual(restored["observed_state"], "idle")
 
     def test_startup_reconcile_accepts_real_attestation_without_ownerless_launch(self):
+        self.service.dispatcher.stop_background()
         repo_path = str(self.repo)
         surface_id = str(self.binding["workspace_surface_id"])
         workstream_id = str(self.binding["workstream_id"])

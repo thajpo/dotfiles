@@ -9,6 +9,7 @@ import re
 import shlex
 import socket
 import stat
+import time
 from typing import Any, Mapping, Sequence
 
 from ..adapters import AdapterHealth, AgentObservation, HarnessManifest, RuntimeProcessObservation, WorkspaceAdapter, WorkspaceManifest, WorkspaceObservation
@@ -175,6 +176,29 @@ class HerdrWorkspaceAdapter:
             raise PisecError("workspace create response contains invalid identity")
         return identity, result
 
+    def _wait_for_pane_ready(self, surface_id: str) -> None:
+        deadline = time.monotonic() + min(max(float(self.timeout), 0.1), 5.0)
+        while True:
+            try:
+                result = self._request(
+                    "pane.read",
+                    {"pane_id": surface_id, "source": "recent", "lines": 1, "format": "text"},
+                )
+                read = result.get("read")
+                if result.get("type") == "pane_read" and isinstance(read, dict) and isinstance(read.get("text"), str) and read["text"]:
+                    # Herdr can expose the shell prompt before its PTY accepts
+                    # the first input.  Let the newly created pane settle so
+                    # the launch command is not silently dropped.  A short
+                    # settle is not enough on a busy persistent session; keep
+                    # this bounded by the existing readiness deadline.
+                    time.sleep(min(1.5, max(0.0, deadline - time.monotonic())))
+                    return
+            except PisecError:
+                pass
+            if time.monotonic() >= deadline:
+                raise NeedsAttentionError("workspace pane did not become ready")
+            time.sleep(0.05)
+
     @staticmethod
     def _observation(identity: Mapping[str, Any], *, worktree_path: str | None, branch_name: str | None, agent: Mapping[str, Any] | None) -> WorkspaceObservation:
         agent_observation = None
@@ -197,6 +221,7 @@ class HerdrWorkspaceAdapter:
     def create_workspace(self, cwd: str, label: str, focus: bool = False) -> WorkspaceObservation:
         params: dict[str, Any] = {"cwd": cwd, "label": label, "focus": focus}
         identity, _result = self._created(self._request("workspace.create", params), "workspace_created")
+        self._wait_for_pane_ready(identity["surface_id"])
         return self._observation(identity, worktree_path=None, branch_name=None, agent=None)
 
 
@@ -205,6 +230,7 @@ class HerdrWorkspaceAdapter:
         identity, _result = self._created(self._request("tab.create", params), "tab_created")
         if identity["workspace_id"] != workspace_id:
             raise NeedsAttentionError("workspace tab create response escaped the project workspace")
+        self._wait_for_pane_ready(identity["surface_id"])
         return self._observation(identity, worktree_path=None, branch_name=None, agent=None)
     def rename_tab(self, view_id: str, label: str) -> dict[str, Any]:
         if not isinstance(view_id, str) or not view_id or not isinstance(label, str) or not label or "\x00" in label:
@@ -251,7 +277,13 @@ class HerdrWorkspaceAdapter:
         command = shlex.join(values)
         if assignments:
             command = " ".join((*assignments, command))
-        return self._request("pane.send_input", {"pane_id": surface_id, "text": command, "keys": ["Enter"]})
+        sent = self._request("pane.send_text", {"pane_id": surface_id, "text": command})
+        if sent.get("type") not in {"ok", "pane_text_sent"}:
+            raise PisecError("workspace did not accept the runtime command text")
+        entered = self._request("pane.send_keys", {"pane_id": surface_id, "keys": ["Enter"]})
+        if entered.get("type") != "ok":
+            raise PisecError("workspace did not accept the runtime command submission")
+        return entered
 
     def stop_runtime(self, surface_id: str) -> dict[str, Any]:
         if not isinstance(surface_id, str) or not surface_id or "\x00" in surface_id:

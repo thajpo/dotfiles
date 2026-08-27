@@ -68,6 +68,12 @@ class Phase10ScopeParityTests(unittest.TestCase):
                             policy = json.loads(Path(staged.candidate.policy_path).read_text())
                             self.assertEqual(policy["network"]["allowedDomains"], scope["externalDomains"])
                             self.assertIn(extra, policy["network"]["allowedDomains"])
+                            if adapter_id == "codex":
+                                codex_package_root = Path(adapter.harness_config["executablePath"]).parent.parent
+                                self.assertIn(str(codex_package_root), policy["filesystem"]["allowRead"])
+                                self.assertNotIn("codex", policy["command"]["deny"])
+                                self.assertNotIn(str(adapter.harness_config["nodePath"]), policy["command"]["deny"])
+                                self.assertNotIn(str(adapter.harness_config["executablePath"]), policy["command"]["deny"])
                             self.assertEqual(staged.candidate.generation_sha256, adapter.desired_generation(scope, surface))
                             activated = adapter.activate_profile(scope, staged)
                             active_policy = Path(activated.policy_path)
@@ -204,15 +210,31 @@ class Phase10ScopeParityTests(unittest.TestCase):
             self.assertTrue(Path(descriptor["configPath"]).is_relative_to(Path(activated.adapter_data["surfaceRoot"])))
             self.assertNotEqual(descriptor["codexHome"], str(Path(activated.adapter_data["configPath"]).parent))
             config_text = Path(descriptor["configPath"]).read_text()
+            self.assertIn('model = "openai-codex/gpt-5.6-luna"', config_text)
             self.assertIn('openai_base_url = "http://127.0.0.1:4000/v1"', config_text)
+            self.assertIn('model_provider = "openai-codex"', config_text)
+            self.assertIn('model_providers.openai-codex.base_url = "http://127.0.0.1:4000/v1"', config_text)
+            self.assertIn('model_providers.openai-codex.wire_api = "responses"', config_text)
+            self.assertIn('model_providers.openai-codex.env_key = "OPENAI_API_KEY"', config_text)
 
             result = subprocess.run([str(launcher)], cwd=worktree, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             captured = json.loads(capture.read_text())
             self.assertEqual(captured["env"]["CODEX_HOME"], activated.harness_home)
+            self.assertEqual(
+                Path(activated.harness_home, "config.toml").read_text(),
+                f'[projects.{json.dumps(str(worktree))}]\ntrust_level = "trusted"\n',
+            )
             codex_argv = captured["argv"][captured["argv"].index("--") + 1 :]
             config_values = [codex_argv[index + 1] for index, value in enumerate(codex_argv[:-1]) if value == "--config"]
+            self.assertEqual(codex_argv[codex_argv.index("--model") + 1], "openai-codex/gpt-5.6-luna")
             self.assertIn('openai_base_url="http://127.0.0.1:4000/v1"', config_values)
+            self.assertIn('model_provider="openai-codex"', config_values)
+            self.assertIn('model_providers.openai-codex.base_url="http://127.0.0.1:4000/v1"', config_values)
+            self.assertIn('model_providers.openai-codex.wire_api="responses"', config_values)
+            self.assertIn('model_providers.openai-codex.env_key="OPENAI_API_KEY"', config_values)
+            self.assertIn('model_providers.openai-codex.requires_openai_auth=false', config_values)
+            self.assertIn(f'projects.{json.dumps(str(worktree))}.trust_level="trusted"', config_values)
             self.assertIn("features.hooks=true", config_values)
             self.assertTrue(any(value.startswith("hooks.SessionStart=") for value in config_values))
             self.assertTrue(any(value.startswith("mcp_servers.pisec.command=") for value in config_values))

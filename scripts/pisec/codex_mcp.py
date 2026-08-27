@@ -98,6 +98,10 @@ def main() -> int:
                 result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "pisec", "version": "1"}}
             elif method == "notifications/initialized":
                 continue
+            elif method == "resources/list":
+                result = {"resources": []}
+            elif method == "resources/templates/list":
+                result = {"resourceTemplates": []}
             elif method == "tools/list":
                 result = {"tools": [{"name": name, "description": TOOL_DESCRIPTIONS.get(name, f"Use to perform the typed {operation} transition; inspect the result and follow its next action."), "inputSchema": schema} for name, (operation, schema) in TOOLS.items()]}
             elif method == "tools/call":

@@ -337,7 +337,7 @@ def _wait_for_agent(
     view_id: str,
     surface_id: str,
     allow_unidentified_agent: bool = False,
-    timeout: float = 5.0,
+    timeout: float = 30.0,
 ) -> WorkspaceObservation:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None

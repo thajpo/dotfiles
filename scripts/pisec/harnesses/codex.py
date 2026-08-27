@@ -379,6 +379,8 @@ class CodexHarnessAdapter:
             token = secrets.token_urlsafe(48)
             _atomic_write(runtime_secret, token + "\n", mode=0o600)
         model = str(scope.get("harnessModel") or scope.get("implementationModel") or "gpt-5.6-luna")
+        if "/" not in model:
+            model = f"openai-codex/{model}"
         effort = str(scope.get("reasoningEffort") or "high")
         runtime_root = surface_binding / "runtime"
         _secure_tree(surface_binding, runtime_root)
@@ -395,6 +397,12 @@ class CodexHarnessAdapter:
                 (
                     f'model = {json.dumps(model)}',
                     f'model_reasoning_effort = {json.dumps(effort)}',
+                    'model_provider = "openai-codex"',
+                    'model_providers.openai-codex.name = "openai-codex"',
+                    f'model_providers.openai-codex.base_url = {json.dumps(str(self.harness_config["gateway"]["baseUrl"]).rstrip("/") + "/v1")}',
+                    'model_providers.openai-codex.wire_api = "responses"',
+                    'model_providers.openai-codex.env_key = "OPENAI_API_KEY"',
+                    'model_providers.openai-codex.requires_openai_auth = false',
                     f'openai_base_url = {json.dumps(str(self.harness_config["gateway"]["baseUrl"]).rstrip("/") + "/v1")}',
                     'approval_policy = "never"',
                     'sandbox_mode = "danger-full-access"',
@@ -417,6 +425,10 @@ class CodexHarnessAdapter:
         if policy_renderer is None:
             from ..fence import render_policy
             policy_renderer = render_policy
+        codex_executable = Path(executable_path)
+        codex_package_root = codex_executable.parent.parent
+        if not codex_package_root.is_dir() or codex_package_root.is_symlink():
+            raise NeedsAttentionError("Codex package support directory is unavailable")
         policy_path, policy_digest = policy_renderer(
             surface_binding,
             scope,
@@ -425,12 +437,37 @@ class CodexHarnessAdapter:
             harness_home=home,
             adapter_replacements={
                 "HARNESS_EXECUTABLE": node_path,
-                "HARNESS_SCRIPT": executable_path,
+                # The Node entry point resolves the platform package at runtime;
+                # Fence must expose that package directory for the initial launch.
+                "HARNESS_SCRIPT": codex_package_root,
                 "HARNESS_EXTENSION": hook_path,
                 "HARNESS_NATIVES": home,
                 "HARNESS_RUN": home / "run",
                 "TMP_ROOT": tmp_dir,
                 "WORKSPACE_CONFIG": Path.home() / ".config" / "herdr",
+                # The generic worker policy denies a bare `codex` command.  The
+                # Codex launcher itself must be able to invoke the pinned Node
+                # entry point and spawn its native child; those exact approved
+                # argv entries are therefore omitted from command deny while
+                # the worker still has no unrelated command on PATH.
+                "${DENIED_COMMANDS}": [
+                    "omp",
+                    "omp-admin",
+                    "treehouse",
+                    "herdr",
+                    "pisec",
+                    "pisec-broker",
+                    "pisec-auth-broker",
+                    "pisec-auth-gateway",
+                    str(Path.home() / ".local" / "bin" / "omp"),
+                    str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "omp"),
+                    str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "omp-admin"),
+                    str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "herdr"),
+                    str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "pisec"),
+                    str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "pisec-broker"),
+                    str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "pisec-auth-broker"),
+                    str(Path.home() / ".local" / "lib" / "pisec" / "bin" / "pisec-auth-gateway"),
+                ],
             },
             baseline_domains=CODEX_BASELINE_DOMAINS,
             template_root=surface_root / "managed" / "fence",
