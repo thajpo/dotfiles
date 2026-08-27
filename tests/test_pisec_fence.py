@@ -280,6 +280,8 @@ class RuntimeMaterializationTests(unittest.TestCase):
             connection.close()
             self.assertEqual(providers, ["deepseek", "openai-codex"])
             self.assertNotEqual(surface_catalog.read_bytes(), catalog.read_bytes())
+            state_models = json.loads((Path(artifacts.harness_home) / "models.yml").read_text())
+            self.assertEqual(set(state_models["providers"]), {"deepseek", "openai-codex"})
 
     def test_config_validation_and_gateway_only_models(self):
         with tempfile.TemporaryDirectory() as tmp:

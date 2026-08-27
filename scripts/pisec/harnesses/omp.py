@@ -883,7 +883,9 @@ class OmpHarnessAdapter:
             _atomic_write(secret_path, token + "\n")
         roles = self.harness_config["modelRoles"]
         providers = self._model_providers(str(profile), scope.get("externalDomains") if isinstance(scope.get("externalDomains"), list) else [])
-        _atomic_write(surface_agent / "models.yml", json.dumps({"providers": providers}, indent=2, sort_keys=True) + "\n")
+        models_document = json.dumps({"providers": providers}, indent=2, sort_keys=True) + "\n"
+        _atomic_write(surface_agent / "models.yml", models_document)
+        _atomic_write(state_binding / "models.yml", models_document)
         overlay: dict[str, Any] = {
             "setupVersion": 2,
             "modelRoles": roles,
