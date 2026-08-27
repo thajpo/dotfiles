@@ -215,6 +215,24 @@ lifecycle or authorization. The closeout sequence is:
    checks requiring judgment, dirty targets, and new capabilities remain
    user-visible stops.
 
+To load existing local Git work for review, prepare a normal Pisec worker with
+the optional `source` selector: use `{"path": "/absolute/path/to/checkout"}`
+for a clean worktree in the registered project repository, or
+`{"ref": "branch-or-ref"}` for a committed ref in the registered project
+checkout. Dirty, conflicted, unrelated, and separately cloned sources are
+rejected; commit the work and expose the ref through the registered repository
+first. Pisec pins the source commit, applies its changes to a Pisec-owned
+worker, and leaves the source checkout untouched. The worker branch receives
+one Pisec-owned normalization commit, so external author identities and source
+history are not adopted into the candidate branch. If the pinned source cannot
+apply cleanly to the approved target, creation stops and the source must be
+rebased before retrying. The resulting worker is created through the ordinary
+`pisec_prepare_workstream` then approved `pisec_create_workstream` flow and is
+therefore visible as a Herdr project tab. Generic task agents, shell PTYs, and
+manual Git worktrees do not create project worker tabs. Use
+`pisec_list_workstreams`, `pisec_inspect_workstream`, and
+`pisec_focus_workstream` to resume an existing Pisec worker.
+
 The installed full bundle is updated with `pisec update`. The stable updater
 archives one committed source bundle, switches one `current` deployment
 atomically, and refreshes runtimes by generation. Busy workers converge at an

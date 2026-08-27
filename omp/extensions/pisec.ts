@@ -15,6 +15,7 @@ const RUNTIME_SOCKET = process.env.PISEC_RUNTIME_SOCKET;
 const SECRETARY_SOCKET = process.env.PISEC_SECRETARY_SOCKET;
 const FLEET_SOCKET = process.env.PISEC_FLEET_SOCKET;
 const RUNTIME_TOKEN = process.env.PISEC_RUNTIME_TOKEN;
+const RUNTIME_GENERATION = process.env.PISEC_RUNTIME_GENERATION;
 const WORKSTREAM_ID = process.env.PISEC_WORKSTREAM_ID;
 const INSTANCE_ID = process.env.PISEC_RUNTIME_INSTANCE_ID;
 const START_SOURCE = process.env.PISEC_SESSION_START_SOURCE === "resume" ? "resume" : "startup";
@@ -90,7 +91,7 @@ function runtimePayload(
     startSource: START_SOURCE,
     surfaceId: SURFACE_ID,
     token: RUNTIME_TOKEN,
-    generation: process.env.PISEC_RUNTIME_GENERATION,
+    generation: RUNTIME_GENERATION,
   };
 }
 
@@ -100,6 +101,7 @@ function runtimeAuth(): JsonObject {
     runtimeInstanceId: INSTANCE_ID,
     surfaceId: SURFACE_ID,
     token: RUNTIME_TOKEN,
+    generation: RUNTIME_GENERATION,
   };
 }
 
@@ -167,12 +169,12 @@ function socketRequest(socketPath: string, operation: string, payload: JsonObjec
 }
 
 async function runtimeRequest(payload: JsonObject, signal?: AbortSignal): Promise<unknown> {
-    if (!RUNTIME_SOCKET || !RUNTIME_TOKEN || !WORKSTREAM_ID || !INSTANCE_ID || !SURFACE_ID) throw new Error("Pisec runtime binding is incomplete");
+  if (!RUNTIME_SOCKET || !RUNTIME_TOKEN || !RUNTIME_GENERATION || !WORKSTREAM_ID || !INSTANCE_ID || !SURFACE_ID) throw new Error("Pisec runtime binding is incomplete");
   return socketRequest(RUNTIME_SOCKET, "runtime.report", payload, signal);
 }
 
 async function runtimeOperation(operation: string, payload: JsonObject = {}, signal?: AbortSignal): Promise<unknown> {
-  if (!RUNTIME_SOCKET || !RUNTIME_TOKEN || !WORKSTREAM_ID || !INSTANCE_ID || !SURFACE_ID) throw new Error("Pisec runtime binding is incomplete");
+  if (!RUNTIME_SOCKET || !RUNTIME_TOKEN || !RUNTIME_GENERATION || !WORKSTREAM_ID || !INSTANCE_ID || !SURFACE_ID) throw new Error("Pisec runtime binding is incomplete");
   return socketRequest(RUNTIME_SOCKET, operation, { ...runtimeAuth(), ...payload }, signal);
 }
 async function semanticRequest(operation: string, payload: JsonObject, signal?: AbortSignal): Promise<unknown> {
@@ -189,6 +191,8 @@ function renderTaskPacket(value: unknown): string {
   }
 }
 
+const WORKER_ROUTING_CONTRACT = "Project worker routing: when the user asks to spawn, open, start, make headful, or load a worker, create a Pisec workstream with pisec_prepare_workstream followed by the exact approved pisec_create_workstream transition. A project worker is the Pisec runtime bound to a Herdr tab in the recorded project workspace. Generic task agents, hub processes, shell PTYs, JavaScript agent() handles, and manual Git worktrees are helper sessions only; they do not create project worker tabs and must never be reported as such. For an existing Pisec workstream, list, inspect, and focus it. For an unregistered local Git branch or worktree, use the external source/import option and never attach directly to the source checkout. Only claim success after the Pisec result contains and corroborates workspace, view/tab, and surface identities.";
+
 function renderExactScope(value: unknown): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "Pisec refused: approval scope is not an object";
   const scope = value as JsonObject;
@@ -196,6 +200,12 @@ function renderExactScope(value: unknown): string {
   const allowed = Array.isArray(packet.boundaries) ? packet.boundaries.join("; ") || "(none)" : "(invalid)";
   const acceptance = Array.isArray(packet.acceptance) ? packet.acceptance.join("; ") || "(none)" : "(invalid)";
   const nonEffects = Array.isArray(scope.nonEffects) ? scope.nonEffects.join("; ") : "(invalid)";
+  const importSource = scope.importSource && typeof scope.importSource === "object" && !Array.isArray(scope.importSource)
+    ? scope.importSource as JsonObject
+    : null;
+  const sourceDescription = importSource
+    ? `${String(importSource.kind ?? "external Git")} ${String(importSource.path ?? importSource.ref ?? "(unspecified)")}; normalize the pinned clean commit into the worker`
+    : "(none)";
   const readable = [
     ...(Array.isArray(scope.dataDirs) ? scope.dataDirs.map(String) : []),
     ...(typeof scope.pythonEnv === "string" ? [scope.pythonEnv] : []),
@@ -205,6 +215,7 @@ function renderExactScope(value: unknown): string {
     `intended outcome: ${String(packet.outcome ?? scope.purpose ?? scope.title ?? "")}`,
     `allowed paths and changes: ${allowed}`,
     `non-effects: ${nonEffects}`,
+    `external source: ${sourceDescription}`,
     `acceptance tests: ${acceptance}`,
     `harness/model: ${String(scope.harnessId ?? "")} / ${String(scope.implementationModel ?? scope.harnessModel ?? "configured default")}`,
     `approved readable data: ${readable.join(", ") || "(none)"}`,
@@ -303,19 +314,21 @@ function registerRuntime(pi: ExtensionAPI): void {
   });
   pi.on("before_agent_start", async (event, ctx) => {
     if (ROLE === "first_mate") {
-      await runtimeOperation("runtime.turn.prepare");
+      await runtimeOperation("runtime.turn.prepare", { sessionKey: sessionReference(ctx).value ?? "implicit" });
       return {
         systemPrompt: [
           ...event.systemPrompt,
+          WORKER_ROUTING_CONTRACT,
            "Pisec First Mate contract: you are the coordinator for projects in the configured First Mate fleet scope. Use explicit projectId on every fleet operation. You may inspect fleet status, in-scope project secretaries, in-scope worker worktrees, Git objects, and durable research metadata through the authenticated fleet broker. Read-only filesystem access covers Pisec-managed in-scope project worktrees and Git objects only. Never write project files, worktrees, or Git objects; never raw-push; never register projects, refresh runtimes, administer the host, read host secrets, or self-approve worker creation or workstream acceptance. Do not change lifecycle, Git, or host authority rules; use only brokered operations after exact user approval. Worker creation and bounded workstream acceptance require exact interactive user approval in this surface. After acceptance, the project secretary owns target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without a second merge approval. Default replies must fit a short screen and use only Status, Needs attention, and Next action when applicable. Report material exceptions, active work, blockers, decisions needed, and next actions; omit healthy or idle project listings, raw metadata, timestamps, event history, and implementation narration. Include projectId or workstreamId only when the user must approve, inspect, or act on that item. If nothing needs action, say so in one sentence. Give detailed evidence only for explicit drill-down requests.",
         ],
       };
     }
     if (ROLE === "secretary") {
-      await runtimeOperation("runtime.turn.prepare");
+      await runtimeOperation("runtime.turn.prepare", { sessionKey: sessionReference(ctx).value ?? "implicit" });
       return {
         systemPrompt: [
           ...event.systemPrompt,
+          WORKER_ROUTING_CONTRACT,
            "Pisec secretary contract: you are trusted inside exactly one registered project Fence. You may use the full standard OMP tool surface, installed plugins, project MCP, approved user-authored skills/rules/commands/themes/agents/instructions, normal local Git, project writes, and broad public web access. Plugins and MCP are trusted code inside this same Fence boundary, not extra sandboxes. Fence denies sibling projects, host secrets, metadata IP, and the real harness/workspace state. Raw git push remains denied; publish an existing non-default branch with pisec_push_branch, which performs only a pinned-origin fast-forward through the host broker without exposing credentials. Keep worker creation and bounded workstream acceptance behind exact interactive approval. After acceptance, own target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without requesting a second merge approval. For independent worker research requests, list pending packets and launch the exact @smol pisec-web-research agent in one task batch; return every answer through durable Pisec research tools. Do not claim product state from memory; inspect through Pisec adapters.",
         ],
       };
@@ -324,6 +337,16 @@ function registerRuntime(pi: ExtensionAPI): void {
       const turn = await runtimeOperation("runtime.turn.prepare", { sessionKey: sessionReference(ctx).value ?? "implicit" });
       const fullPacket = turn && typeof turn === "object" ? (turn as JsonObject).taskPacket : null;
       const taskPacket = fullPacket && typeof fullPacket === "object" ? (fullPacket as JsonObject).packet ?? fullPacket : {};
+      const packetObject = taskPacket && typeof taskPacket === "object" && !Array.isArray(taskPacket) ? taskPacket as JsonObject : {};
+      const execution = packetObject.execution && typeof packetObject.execution === "object" && !Array.isArray(packetObject.execution)
+        ? packetObject.execution as JsonObject
+        : {};
+      const importSource = execution.importSource && typeof execution.importSource === "object" && !Array.isArray(execution.importSource)
+        ? execution.importSource as JsonObject
+        : null;
+      const importContract = importSource
+        ? `EXTERNAL_GIT_IMPORT\nThis worker owns the Pisec-normalized candidate. The approved source checkout is clean, committed, read-only, and was never attached or modified. Review the normalized import and continue from the Pisec-owned branch.`
+        : "EXTERNAL_GIT_IMPORT\nNo external source snapshot is attached to this workstream.";
       const pythonEnv = turn && typeof turn === "object" && typeof (turn as JsonObject).pythonEnv === "string"
         ? String((turn as JsonObject).pythonEnv)
         : "";
@@ -334,6 +357,7 @@ function registerRuntime(pi: ExtensionAPI): void {
         systemPrompt: [
           ...event.systemPrompt,
            "Pisec worker contract: the following broker-authenticated immutable task packet is authoritative for this workstream. Use durable checkpoints and coordination requests for semantic progress. Ordinary chat is transient. When implementation and verification are complete, submit one ready_review checkpoint with exact completion evidence; that checkpoint submits the immutable completion packet automatically. Acceptance is a separate user gate owned by the secretary; never claim acceptance or request a second merge approval. If the secretary reports bounded target drift, rebase only within the accepted task scope, rerun verification, and submit a new ready_review checkpoint.",
+          importContract,
           ...(fullPacket ? [`IMMUTABLE_TASK_PACKET\n${renderTaskPacket(taskPacket)}`] : ["IMMUTABLE_TASK_PACKET\nNo packet body changed in this session; retain the previously accepted packet."]),
           pythonContract,
         ],
@@ -408,6 +432,7 @@ function secretaryTools(pi: ExtensionAPI): void {
     });
   };
   const taskPacketSchema = z.object({ schemaVersion: z.literal(1), outcome: z.string().min(1).max(4096), boundaries: z.array(z.string().min(1).max(4096)).max(16), acceptance: z.array(z.string().min(1).max(4096)).max(16), openQuestions: z.array(z.string().min(1).max(4096)).max(16), evidence: z.array(z.string().min(1).max(4096)).max(16) });
+  const importSourceSchema = z.object({ ref: z.string().min(1).max(512).optional(), path: z.string().min(1).max(4096).optional() });
   semantic("pisec_list_attention", "List attention", "attention.list", z.object({ limit: z.number().int().min(1).max(32).optional() }), "read", params => params.limit === undefined ? {} : { limit: params.limit });
   semantic("pisec_inspect_attention", "Inspect attention", "attention.inspect", z.object({ attention_id: z.string().min(1).max(128) }), "read", params => ({ attentionId: params.attention_id }));
   semantic("pisec_project_activity", "Pisec project activity", "project.activity", z.object({ after: z.number().int().min(0).optional() }), "read", params => params.after === undefined ? {} : { after: params.after });
@@ -444,11 +469,11 @@ function secretaryTools(pi: ExtensionAPI): void {
   semantic("pisec_inspect_workstream", "Inspect Pisec workstream", "workstream.inspect", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }));
   semantic("pisec_list_integrations", "List Pisec integrations", "integration.list", z.object({ state: z.enum(["queued", "refreshing", "awaiting_worker", "verifying", "applying", "integrated", "needs_attention"]).optional() }), "read", params => params.state ? { state: params.state } : {});
   semantic("pisec_inspect_integration", "Inspect Pisec integration", "integration.inspect", z.object({ integration_id: z.string().min(1).max(128) }), "read", params => ({ integrationId: params.integration_id }));
-  semantic("pisec_prepare_workstream", "Prepare Pisec workstream", "workstream.prepare", z.object({ title: z.string().min(1).max(512), purpose: z.string().min(1).max(4096), brief: z.string().min(1).max(4096), task_packet: taskPacketSchema, idempotency_key: z.string().min(1).max(256), target_ref: z.string().min(1).max(512).optional(), implementation_model: z.string().min(1).max(256).optional(), execution_profile: z.literal("worker-default").optional(), work_mode: z.enum(["FAST", "RIP", "BUILD", "MAJOR"]).optional(), learning_overlay: z.enum(["OFF", "LIGHT", "DEEP"]).optional(), learning_seam: z.string().min(1).max(1024).optional(), decision_ids: z.array(z.string().min(1).max(128)).max(16).optional(), python_env: z.string().min(1).max(4096).optional() }), "read", params => ({ title: params.title, purpose: params.purpose, brief: params.brief, taskPacket: params.task_packet, idempotencyKey: params.idempotency_key, ...(params.target_ref ? { targetRef: params.target_ref } : {}), ...(params.implementation_model ? { implementationModel: params.implementation_model } : {}), ...(params.execution_profile ? { executionProfile: params.execution_profile } : {}), ...(params.work_mode ? { workMode: params.work_mode } : {}), ...(params.learning_overlay ? { learningOverlay: params.learning_overlay } : {}), ...(params.learning_seam ? { learningSeam: params.learning_seam } : {}), ...(params.decision_ids ? { decisionIds: params.decision_ids } : {}), ...(params.python_env ? { pythonEnv: params.python_env } : {}) }));
+  semantic("pisec_prepare_workstream", "Prepare Pisec workstream", "workstream.prepare", z.object({ title: z.string().min(1).max(512), purpose: z.string().min(1).max(4096), brief: z.string().min(1).max(4096), task_packet: taskPacketSchema, idempotency_key: z.string().min(1).max(256), target_ref: z.string().min(1).max(512).optional(), source: importSourceSchema.optional(), implementation_model: z.string().min(1).max(256).optional(), execution_profile: z.literal("worker-default").optional(), work_mode: z.enum(["FAST", "RIP", "BUILD", "MAJOR"]).optional(), learning_overlay: z.enum(["OFF", "LIGHT", "DEEP"]).optional(), learning_seam: z.string().min(1).max(1024).optional(), decision_ids: z.array(z.string().min(1).max(128)).max(16).optional(), python_env: z.string().min(1).max(4096).optional() }), "read", params => ({ title: params.title, purpose: params.purpose, brief: params.brief, taskPacket: params.task_packet, idempotencyKey: params.idempotency_key, ...(params.target_ref ? { targetRef: params.target_ref } : {}), ...(params.source ? { source: params.source } : {}), ...(params.implementation_model ? { implementationModel: params.implementation_model } : {}), ...(params.execution_profile ? { executionProfile: params.execution_profile } : {}), ...(params.work_mode ? { workMode: params.work_mode } : {}), ...(params.learning_overlay ? { learningOverlay: params.learning_overlay } : {}), ...(params.learning_seam ? { learningSeam: params.learning_seam } : {}), ...(params.decision_ids ? { decisionIds: params.decision_ids } : {}), ...(params.python_env ? { pythonEnv: params.python_env } : {}) }));
   pi.registerTool({
     name: "pisec_create_workstream",
     label: "Create Pisec workstream",
-    description: "Apply one previously prepared immutable Pisec workstream scope. This is the only semantic tool that creates external resources and always requires exact user approval.",
+    description: "Apply one previously prepared immutable Pisec workstream scope. This is the only semantic tool that creates external resources and always requires exact user approval. Imported work is snapshotted into the Pisec worker; the original checkout is never attached or modified.",
     approval: scope => ({ tier: "exec", policy: "prompt", reason: renderExactScope(scope) }),
     parameters: z.object({ approval_scope: z.any() }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -551,7 +576,7 @@ function workerTools(pi: ExtensionAPI): void {
 }
 
 export default function pisec(pi: ExtensionAPI): void {
-  if (!isPisecRole(ROLE) || !RUNTIME_SOCKET || !RUNTIME_TOKEN || !WORKSTREAM_ID || !INSTANCE_ID || !SURFACE_ID) return;
+  if (!isPisecRole(ROLE) || !RUNTIME_SOCKET || !RUNTIME_TOKEN || !RUNTIME_GENERATION || !WORKSTREAM_ID || !INSTANCE_ID || !SURFACE_ID) return;
   if ((ROLE === "secretary" && !SECRETARY_SOCKET) || (ROLE === "first_mate" && !FLEET_SOCKET)) return;
   pi.setLabel(ROLE === "secretary" ? "Pisec Secretary" : ROLE === "first_mate" ? "Pisec First Mate" : "Pisec Worker");
   registerRuntime(pi);

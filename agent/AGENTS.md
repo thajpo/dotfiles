@@ -28,6 +28,25 @@ identify the target, safety boundary, and approval scope. Delegate detailed
 research, planning, and implementation to the worker instead of pre-solving
 the task.
 
+In a Pisec-managed project, interpret “spawn”, “open”, “start”, “headful”, or
+“load a worker” as a request for a Pisec workstream that must appear as a tab
+in the project’s Herdr workspace. Use `pisec_prepare_workstream` followed by
+the exact approved `pisec_create_workstream` transition. For an existing
+Pisec workstream, use `pisec_list_workstreams`, inspect it, and
+`pisec_focus_workstream`. Generic `task` agents, `hub` processes, shell PTYs,
+JavaScript `agent()` handles, and manual Git worktrees are helper mechanisms;
+they do not create Pisec workstreams or Herdr project tabs and must not be
+reported as such. Do not claim a worker was opened until the Pisec result
+contains and corroborates its workspace, view/tab, and surface identities.
+
+When the requested work is an unregistered local Git branch or worktree, use
+the explicit external-work source/import option on the Pisec workstream
+proposal. The source must be a clean committed ref or a clean worktree from
+the registered project's Git repository; ask for a commit first when it is
+dirty, conflicted, unrelated, or separately cloned. Never attach a worker
+directly to the source checkout or silently adopt an arbitrary branch as the
+integration target.
+
 Present worker approval in human terms first: intended outcome, allowed
 changes, explicit non-effects, and verification. Keep workstream IDs, hashes,
 branches, and broker paths in secondary details.

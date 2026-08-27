@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
@@ -32,6 +33,11 @@ TASK_PACKET_KEYS = frozenset({"schemaVersion", "outcome", "boundaries", "accepta
 EXECUTION_PACKET_KEYS = frozenset({
     "projectId", "workstreamId", "title", "purpose", "brief", "targetRef", "baseCommitOid",
     "branchName", "executionProfile", "workMode", "learningOverlay", "learningSeam", "harnessId", "workspaceAdapterId", "implementationModel", "harnessModel", "reasoningEffort", "nonEffects", "approvalScopeSha256",
+})
+EXECUTION_PACKET_OPTIONAL_KEYS = frozenset({"importSource"})
+IMPORT_SOURCE_PACKET_FIELDS = frozenset({
+    "kind", "ref", "path", "sourceCommitOid", "sourceTreeOid", "mergeBaseOid",
+    "patchSha256", "changedPaths",
 })
 RESEARCH_REQUEST_KEYS = frozenset({"kind", "summary", "question", "context", "attempted", "candidateSources", "blocking"})
 RESEARCH_RESULT_KEYS = frozenset({"schemaVersion", "findings", "sources", "uncertainties"})
@@ -76,6 +82,30 @@ def _packet_json(value: Mapping[str, Any]) -> str:
     return canonical_json(value, max_bytes=PACKET_MAX_BYTES, max_text=PACKET_TEXT_LIMIT)
 
 
+def _import_source_packet(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise InvalidRequestError("taskPacket.execution.importSource must be an object")
+    if set(value) - IMPORT_SOURCE_PACKET_FIELDS:
+        raise InvalidRequestError("taskPacket.execution.importSource contains unsupported fields")
+    compact = {key: value[key] for key in IMPORT_SOURCE_PACKET_FIELDS if key in value}
+    if compact.get("kind") not in {"project_ref", "git_worktree"}:
+        raise InvalidRequestError("taskPacket.execution.importSource.kind is invalid")
+    if ("ref" in compact) == ("path" in compact):
+        raise InvalidRequestError("taskPacket.execution.importSource must contain exactly one of ref or path")
+    for key in ("ref", "path"):
+        if key in compact:
+            bounded_text(compact[key], name=f"taskPacket.execution.importSource.{key}", limit=4096)
+    for key in ("sourceCommitOid", "sourceTreeOid", "mergeBaseOid"):
+        validate_git_oid(compact.get(key), f"taskPacket.execution.importSource.{key}")
+    validate_sha256(compact.get("patchSha256"), "taskPacket.execution.importSource.patchSha256")
+    paths = compact.get("changedPaths")
+    if not isinstance(paths, list) or any(not isinstance(path, str) or not path for path in paths) or paths != sorted(set(paths)):
+        raise InvalidRequestError("taskPacket.execution.importSource.changedPaths is invalid")
+    for path in paths:
+        bounded_text(path, name="taskPacket.execution.importSource.changedPaths[]", limit=4096)
+    return json.loads(_packet_json(compact))
+
+
 def validate_task_packet(value: Any) -> dict[str, Any]:
     packet = _require_object(value, name="taskPacket")
     if set(packet) != TASK_PACKET_KEYS:
@@ -97,7 +127,7 @@ def validate_task_packet(value: Any) -> dict[str, Any]:
 
 def _execution_packet(value: Any) -> dict[str, Any]:
     execution = _require_object(value, name="taskPacket.execution")
-    if set(execution) != EXECUTION_PACKET_KEYS:
+    if not EXECUTION_PACKET_KEYS.issubset(execution) or set(execution) - EXECUTION_PACKET_KEYS - EXECUTION_PACKET_OPTIONAL_KEYS:
         raise InvalidRequestError("broker execution identity fields are invalid")
     for key, prefix in (("projectId", "prj"), ("workstreamId", "ws")):
         validate_id(execution[key], prefix=prefix)
@@ -118,6 +148,8 @@ def _execution_packet(value: Any) -> dict[str, Any]:
     normalized = dict(execution)
     normalized["nonEffects"] = _bounded_list(execution["nonEffects"], name="taskPacket.execution.nonEffects")
     validate_sha256(execution["approvalScopeSha256"], "taskPacket.execution.approvalScopeSha256")
+    if "importSource" in execution:
+        normalized["importSource"] = _import_source_packet(execution["importSource"])
     return normalized
 
 
@@ -289,7 +321,7 @@ def get_task_packet(store: Any, project_id: str, workstream_id: str) -> dict[str
 
 
 def issue_task_packet_in_transaction(connection: Any, *, scope: Mapping[str, Any]) -> dict[str, Any]:
-    packet = build_committed_task_packet(scope["taskPacket"], {
+    execution = {
         "projectId": scope["projectId"],
         "workstreamId": scope["workstreamId"],
         "title": scope["title"],
@@ -309,7 +341,10 @@ def issue_task_packet_in_transaction(connection: Any, *, scope: Mapping[str, Any
         "reasoningEffort": scope.get("reasoningEffort"),
         "nonEffects": scope["nonEffects"],
         "approvalScopeSha256": json_digest(scope),
-    })
+    }
+    if "importSource" in scope:
+        execution["importSource"] = scope["importSource"]
+    packet = build_committed_task_packet(scope["taskPacket"], execution)
     packet_json = _packet_json(packet)
     packet_sha = json_digest(packet)
     existing = connection.execute("SELECT * FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()

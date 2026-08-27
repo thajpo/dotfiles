@@ -18,7 +18,7 @@ from .models import AuthorizationError, ConflictError, InvalidRequestError, Need
 from .models import utc_now
 
 RUNTIME_FIELDS = frozenset({"workstreamId", "runtimeInstanceId", "seq", "event", "reason", "state", "nativeSessionKind", "nativeSessionValue", "startSource", "surfaceId", "token", "generation"})
-RUNTIME_AUTH_FIELDS = frozenset({"workstreamId", "runtimeInstanceId", "surfaceId", "token"})
+RUNTIME_AUTH_FIELDS = frozenset({"workstreamId", "runtimeInstanceId", "surfaceId", "token", "generation"})
 SESSION_SWITCH_REASONS = frozenset({"new", "resume", "fork", "handoff"})
 OBSERVED_STATES = frozenset({"unknown", "starting", "working", "blocked", "idle", "stopped", "missing", "error"})
 

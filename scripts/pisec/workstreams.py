@@ -21,6 +21,7 @@ from .project_workspaces import ensure_project_workspace
 from .research import issue_task_packet_in_transaction, validate_task_packet
 from .runtime_surface import capture_runtime_surface, materialize_current_surface, verify_surface
 from .runtime import start_bound_agent, usable_runtime_binding
+from .source_import import inspect_import_source, materialize_import
 from .worker_repo import create_worker_repository, project_git_lock, project_permissions_lock, project_target_state, validate_worker_repository
 APPLY_LOCK = threading.RLock()
 CHECKPOINTS = (
@@ -39,11 +40,11 @@ _FULL_SCOPE_FIELDS = frozenset({
     "harnessId", "workspaceAdapterId", "executionProfile", "workMode", "learningOverlay", "learningSeam", "decisionIds",
     "targetRef", "targetBranchRef", "baseCommitOid", "branchName",
     "worktreePath", "agentName",
-    "dataDirs", "externalDomains", "pythonEnv", "implementationModel", "harnessModel", "reasoningEffort", "effects", "nonEffects", "taskPacket",
+    "dataDirs", "externalDomains", "pythonEnv", "implementationModel", "harnessModel", "reasoningEffort", "effects", "nonEffects", "taskPacket", "importSource",
     "runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest",
 })
 _PUBLIC_SCOPE_FIELDS = _FULL_SCOPE_FIELDS
-_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "learningSeam", "decisionIds", "implementationModel", "harnessModel", "reasoningEffort", "runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest"})
+_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "learningSeam", "decisionIds", "implementationModel", "harnessModel", "reasoningEffort", "runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest", "importSource"})
 _SCOPE_REQUIRED = _FULL_SCOPE_FIELDS - _OPTIONAL_SCOPE_FIELDS
 _SURFACE_SCOPE_FIELDS = frozenset({"runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest"})
 
@@ -159,6 +160,7 @@ def prepare_workstream(
     implementation_model: str | None = None,
     harness_model: str | None = None,
     reasoning_effort: str | None = None,
+    source: Mapping[str, Any] | None = None,
     work_root: Path | None = None,
     failpoint: Failpoint | None = None,
 ) -> dict[str, Any]:
@@ -192,6 +194,9 @@ def prepare_workstream(
         raise InvalidRequestError("target_ref contains unsafe characters")
     target_branch, target_branch_ref, base_oid = project_target_state(Path(project["repository_path"]), selected_ref)
     selected_ref = target_branch_ref
+    import_source = None
+    if source is not None:
+        import_source = inspect_import_source(Path(project["repository_path"]), base_oid, source)
     if work_mode not in {"FAST", "RIP", "BUILD", "MAJOR"} or learning_overlay not in {"OFF", "LIGHT", "DEEP"}:
         raise InvalidRequestError("work mode or learning overlay is invalid")
     if learning_overlay == "DEEP" and learning_seam is None:
@@ -219,6 +224,8 @@ def prepare_workstream(
         "targetRef": selected_ref,
         "pythonEnv": normalized_python_env,
     }
+    if import_source is not None:
+        caller_request["source"] = import_source
     if implementation_model is not None:
         caller_request["implementationModel"] = implementation_model
     if harness_model is not None:
@@ -275,6 +282,10 @@ def prepare_workstream(
         "nonEffects": ["no push", "no merge", "no cleanup", "no branch deletion"],
         "taskPacket": normalized_task_packet,
     }
+    if import_source is not None:
+        scope["importSource"] = dict(import_source)
+        scope["effects"] = [*scope["effects"], "pin and normalize the approved external Git snapshot inside the worker repository"]
+        scope["nonEffects"] = [*scope["nonEffects"], "no writes to the external source checkout or source ref"]
     if implementation_model is not None:
         scope["implementationModel"] = implementation_model
     if harness_model is not None:
@@ -401,6 +412,13 @@ def _ensure_worker_repository(store: Any, project: Mapping[str, Any], scope: Map
             base_oid=str(scope["baseCommitOid"]),
             target_branch=target_branch,
         )
+        if "importSource" in scope:
+            materialize_import(
+                project_root=project_root,
+                target_oid=str(scope["baseCommitOid"]),
+                worker=Path(str(scope["worktreePath"])),
+                source=scope["importSource"],
+            )
         validate_worker_repository(
             Path(str(scope["worktreePath"])),
             branch_name=str(scope["branchName"]),
