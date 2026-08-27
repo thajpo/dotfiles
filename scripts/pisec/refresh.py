@@ -351,6 +351,7 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
     request = {"workstreamId": workstream_id, "desiredGenerationSha256": desired}
     now = utc_now()
     observation = None
+    pre_stop_recovery = False
     if workspace is not None:
         observation = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
         if observation.state == "unknown":
@@ -438,6 +439,11 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
                 expected_binding = binding
         else:
             operation_id = new_id("op")
+            prior = store.conn.execute(
+                "SELECT operation_id FROM operations WHERE workstream_id=? AND kind='runtime.refresh' AND state='needs_attention' AND step='pre_stop_attention' ORDER BY created_at DESC,operation_id DESC LIMIT 1",
+                (workstream_id,),
+            ).fetchone()
+            pre_stop_recovery = prior is not None and _has_recorded_pre_stop_failure(store, str(prior["operation_id"]))
             store.conn.execute(
                 "INSERT INTO operations(operation_id,kind,project_id,workstream_id,idempotency_key,request_json,request_sha256,state,step,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'applying','reserved',?,?)",
                 (operation_id, "runtime.refresh", binding["project_id"], workstream_id, key, canonical_json(request), json_digest(request), now, now),
@@ -449,9 +455,11 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
         for field in ("runtime_instance_id", "report_seq", "observed_state", "desired_generation_sha256", "applied_generation_sha256", "launch_generation_sha256"):
             if current[field] != expected_binding.get(field):
                 raise ConflictError("runtime binding changed before refresh reservation", detail={"field": field})
-        pre_stop_retry = pre_stop_retry and (
-            current["attention_reason"] == pre_stop_error_message
-            or _has_recorded_pre_stop_failure(store, str(operation_id))
+        pre_stop_retry = pre_stop_recovery or (
+            pre_stop_retry and (
+                current["attention_reason"] == pre_stop_error_message
+                or _has_recorded_pre_stop_failure(store, str(operation_id))
+            )
         )
         lifecycle_ready = (
             int(current["project_active"]) == 1
