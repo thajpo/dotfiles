@@ -48,6 +48,35 @@ def make_config(root: Path) -> dict:
     }
 
 
+def make_model_catalog(home: Path, provider_ids: list[str]) -> Path:
+    catalog = home / ".omp" / "agent" / "models.db"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(catalog)
+    connection.executescript(
+        """
+        CREATE TABLE model_cache (
+            provider_id TEXT PRIMARY KEY,
+            version INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            authoritative INTEGER NOT NULL DEFAULT 0,
+            static_fingerprint TEXT NOT NULL DEFAULT '',
+            header_omitted_model_ids TEXT NOT NULL DEFAULT '[]',
+            unrestorable_header_model_ids TEXT NOT NULL DEFAULT '[]',
+            header_restore_version INTEGER NOT NULL DEFAULT 0,
+            models TEXT NOT NULL
+        )
+        """
+    )
+    connection.executemany(
+        "INSERT INTO model_cache (provider_id, version, updated_at, models) VALUES (?, ?, ?, ?)",
+        [(provider_id, 1, index, "[]") for index, provider_id in enumerate(provider_ids, start=1)],
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(catalog, 0o644)
+    return catalog
+
+
 def render(scope: dict, root: Path, agent: Path, config: dict, *, baseline=()):
     return render_policy(root / "state", scope, agent, config, harness_home=agent, adapter_replacements={"HARNESS_EXECUTABLE": "/usr/bin/false"}, baseline_domains=baseline)
 
@@ -207,6 +236,50 @@ class RuntimeMaterializationTests(unittest.TestCase):
                 second_surface = adapter.current_runtime_surface()
             self.assertEqual((Path(artifacts.adapter_data["agentRoot"]) / "rules" / "custom.md").read_text(), "first\n")
             self.assertEqual(first_surface.content_sha256, second_surface.content_sha256)
+
+    def test_host_model_catalog_is_snapshotted_into_binding_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            catalog = make_model_catalog(home, ["deepseek", "openai-codex"])
+            adapter = OmpHarnessAdapter(state_root=root / "state", config=make_config(root))
+            assigned = root / "assigned"
+            assigned.mkdir()
+            workstream_id = new_id("ws")
+            scope = {
+                "projectId": new_id("prj"),
+                "workstreamId": workstream_id,
+                "executionProfile": "worker-default",
+                "worktreePath": str(assigned),
+                "branchName": f"pisec/{workstream_id}/work",
+                "externalDomains": list(WEB_SEARCH_DOMAINS),
+            }
+            with patch("scripts.pisec.harnesses.omp.Path.home", return_value=home):
+                surface = adapter.prepare_runtime_surface()
+                surface_catalog = Path(surface.root_path) / "agent" / "models.db"
+                self.assertEqual(surface_catalog.stat().st_mode & 0o777, 0o400)
+                connection = sqlite3.connect(catalog)
+                connection.execute(
+                    "INSERT INTO model_cache (provider_id, version, updated_at, models) VALUES (?, ?, ?, ?)",
+                    ("late-provider", 1, 3, "[]"),
+                )
+                connection.commit()
+                connection.close()
+                artifacts = stage_and_activate(
+                    adapter,
+                    {
+                        **scope,
+                        "runtimeSurfaceId": "surface_" + surface.content_sha256[:32],
+                        "runtimeSurfaceSha256": surface.content_sha256,
+                        "runtimeSurfaceRoot": surface.root_path,
+                    },
+                )
+            state_catalog = Path(artifacts.harness_home) / "models.db"
+            connection = sqlite3.connect(state_catalog)
+            providers = [row[0] for row in connection.execute("SELECT provider_id FROM model_cache ORDER BY provider_id")]
+            connection.close()
+            self.assertEqual(providers, ["deepseek", "openai-codex"])
+            self.assertNotEqual(surface_catalog.read_bytes(), catalog.read_bytes())
 
     def test_config_validation_and_gateway_only_models(self):
         with tempfile.TemporaryDirectory() as tmp:

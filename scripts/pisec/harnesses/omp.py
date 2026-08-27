@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 from pathlib import Path
 import re
@@ -32,9 +33,35 @@ def _profile_role(profile: str) -> str:
     return "worker"
 COPY_NAMES = ("skills", "rules", "commands", "themes", "agents")
 COPY_FILES = ("AGENTS.md",)
+SURFACE_FILES = ("models.db",)
 SURFACE_NAMES = ("extensions", *COPY_NAMES)
 USER_CONTEXT_MAX_FILE_BYTES = 256 * 1024
 USER_CONTEXT_MAX_TOTAL_BYTES = 8 * 1024 * 1024
+MODEL_CATALOG_MAX_BYTES = 64 * 1024 * 1024
+MODEL_CACHE_COLUMNS = (
+    "provider_id",
+    "version",
+    "updated_at",
+    "authoritative",
+    "static_fingerprint",
+    "header_omitted_model_ids",
+    "unrestorable_header_model_ids",
+    "header_restore_version",
+    "models",
+)
+MODEL_CACHE_SCHEMA = """
+CREATE TABLE model_cache (
+    provider_id TEXT PRIMARY KEY,
+    version INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    authoritative INTEGER NOT NULL DEFAULT 0,
+    static_fingerprint TEXT NOT NULL DEFAULT '',
+    header_omitted_model_ids TEXT NOT NULL DEFAULT '[]',
+    unrestorable_header_model_ids TEXT NOT NULL DEFAULT '[]',
+    header_restore_version INTEGER NOT NULL DEFAULT 0,
+    models TEXT NOT NULL
+)
+"""
 _CREDENTIAL_BASENAMES = frozenset({
     ".aws",
     ".gnupg",
@@ -360,6 +387,62 @@ def _copy_user_surface(destination: Path, *, forbidden_values: Sequence[bytes] =
     return manifest
 
 
+def _snapshot_model_catalog(destination: Path) -> dict[str, str] | None:
+    """Copy OMP's model metadata without importing its provider credentials."""
+    source = Path.home() / ".omp" / "agent" / "models.db"
+    if not source.exists() and not source.is_symlink():
+        return None
+    try:
+        source_info = source.lstat()
+    except OSError as error:
+        raise PisecError("OMP model catalog source is unavailable") from error
+    if (
+        stat.S_ISLNK(source_info.st_mode)
+        or not stat.S_ISREG(source_info.st_mode)
+        or source_info.st_uid != os.geteuid()
+        or source_info.st_mode & 0o022
+        or source_info.st_size > MODEL_CATALOG_MAX_BYTES
+    ):
+        raise PisecError("OMP model catalog source is unsafe")
+
+    target = destination / "models.db"
+    staged = target.with_name(f".{target.name}.staged-{secrets.token_hex(8)}")
+    placeholders = ", ".join("?" for _ in MODEL_CACHE_COLUMNS)
+    select_columns = ", ".join(MODEL_CACHE_COLUMNS)
+    try:
+        with sqlite3.connect(source.as_uri() + "?mode=ro", uri=True) as source_db:
+            objects = source_db.execute(
+                "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            ).fetchall()
+            if objects != [("table", "model_cache")]:
+                raise PisecError("OMP model catalog contains unexpected data")
+            columns = tuple(row[1] for row in source_db.execute("PRAGMA table_info(model_cache)"))
+            if columns != MODEL_CACHE_COLUMNS:
+                raise PisecError("OMP model catalog schema is unsupported")
+            rows = source_db.execute(
+                f"SELECT {select_columns} FROM model_cache ORDER BY provider_id"
+            ).fetchall()
+        with sqlite3.connect(staged) as target_db:
+            target_db.executescript(MODEL_CACHE_SCHEMA)
+            target_db.executemany(
+                f"INSERT INTO model_cache ({select_columns}) VALUES ({placeholders})",
+                rows,
+            )
+            target_db.commit()
+        os.chmod(staged, 0o600)
+        os.replace(staged, target)
+    except PisecError:
+        raise
+    except (OSError, sqlite3.Error) as error:
+        raise PisecError("OMP model catalog could not be snapshotted") from error
+    finally:
+        if staged.exists() or staged.is_symlink():
+            if staged.is_symlink() or not staged.is_file():
+                raise PisecError("OMP model catalog snapshot is unsafe")
+            staged.unlink()
+    return {"path": "agent/models.db", "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
+
+
 def _configured_secret_values(gateway_token_file: Path) -> tuple[bytes, ...]:
     values: list[bytes] = []
     for name in (
@@ -492,6 +575,17 @@ def _copy_surface(source: Path, destination: Path) -> None:
             _copy_safe_entry(origin, target)
         elif target.exists() and not target.is_symlink():
             target.unlink()
+    for name in SURFACE_FILES:
+        origin = source / name
+        target = destination / name
+        if origin.exists():
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                raise PisecError("isolated OMP model catalog target is unsafe")
+            if target.exists():
+                target.unlink()
+            _copy_safe_entry(origin, target)
+        elif target.exists() and not target.is_symlink():
+            target.unlink()
 
 
 def _copy_plugins(surface_root: Path, destination: Path) -> dict[str, str]:
@@ -615,6 +709,7 @@ class OmpHarnessAdapter:
             surface = staged / "agent"
             surface.mkdir(mode=0o700)
             user_context = _copy_user_surface(surface, forbidden_values=_configured_secret_values(Path(self.harness_config["gateway"]["tokenFile"])))
+            model_catalog = _snapshot_model_catalog(surface)
             extensions = surface / "extensions"
             agents = surface / "agents"
             extensions.mkdir(mode=0o700, exist_ok=True)
@@ -637,6 +732,7 @@ class OmpHarnessAdapter:
                 "interfaceVersion": 1,
                 "config": self.config,
                 "userContext": user_context,
+                "modelCatalog": model_catalog,
                 "harnessExecutableSha256": _file_digest(Path(self.harness_config["executablePath"])),
                 "fenceExecutableSha256": _file_digest(Path(str(self.config["fencePath"]))),
             }
@@ -765,6 +861,16 @@ class OmpHarnessAdapter:
         surface_agent = surface_binding / "agent"
         _secure_tree(surface_binding, surface_agent)
         _copy_surface(surface_root / "agent", surface_agent)
+        model_catalog = surface_agent / "models.db"
+        state_catalog = state_binding / "models.db"
+        if model_catalog.exists():
+            if state_catalog.is_symlink() or (state_catalog.exists() and not state_catalog.is_file()):
+                raise PisecError("OMP binding model catalog target is unsafe")
+            if state_catalog.exists():
+                state_catalog.unlink()
+            _copy_safe_entry(model_catalog, state_catalog)
+        elif state_catalog.exists() and not state_catalog.is_symlink():
+            state_catalog.unlink()
         secret_path = state_root / "secrets" / f"{workstream_id}.token"
         _secure_tree(state_root, secret_path.parent)
         if preserved_token is not None:
