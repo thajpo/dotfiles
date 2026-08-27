@@ -264,6 +264,78 @@ class RuntimeRefreshTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(tuple(operation), ("needs_attention", "attention"))
 
+    def test_stopped_ambiguous_refresh_is_compensated_before_retry(self):
+        with PiStore(self.root / "state") as store:
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            desired = str(binding["desired_generation_sha256"])
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                idempotency_key=f"runtime.refresh:{self.workstream_id}:{desired}",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": desired},
+                state="needs_attention",
+                step="attention",
+            )
+            store.conn.execute(
+                "UPDATE operations SET error_code='runtime_refresh_failed',error_message='runtime process identity became ambiguous during refresh' WHERE operation_id=?",
+                (operation.operation_id,),
+            )
+            store.conn.execute(
+                "UPDATE runtime_bindings SET refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-27T00:00:00Z',launch_generation_sha256=?,runtime_instance_id='old-runtime',report_seq=1,observed_state='error',applied_generation_sha256=? WHERE workstream_id=?",
+                (operation.operation_id, desired, desired, self.workstream_id),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='runtime process identity became ambiguous during refresh' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+        self.workspace.stop_runtime(self.identity[2])
+
+        def launch_without_attestation(surface_id, name, agent_kind):
+            self.workspace.calls.append(("start", (surface_id, name, agent_kind)))
+            self.workspace.agents[name] = AgentObservation(name, surface_id, True, "working")
+            self.workspace.runtime_states.pop(surface_id, None)
+            return {"started": True, "name": name, "surfaceId": surface_id}
+
+        with patch.object(self.workspace, "start_agent", side_effect=launch_without_attestation):
+            result = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["upgraded"], [])
+        self.assertEqual([item["workstreamId"] for item in result["pending"]], [self.workstream_id])
+        with PiStore(self.root / "state") as store:
+            binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            operation_id = binding["refresh_operation_id"]
+            generation = str(binding["launch_generation_sha256"])
+            self.assertEqual(binding["refresh_pending"], 1)
+            self.assertEqual(binding["observed_state"], "starting")
+        report = self.dispatcher.dispatch(
+            "runtime",
+            "runtime.report",
+            {
+                "workstreamId": self.workstream_id,
+                "runtimeInstanceId": "recovered-refresh-runtime",
+                "seq": 1,
+                "event": "session_start",
+                "reason": None,
+                "state": "idle",
+                "nativeSessionKind": "path",
+                "nativeSessionValue": self.identity[3],
+                "startSource": "startup",
+                "surfaceId": self.identity[2],
+                "token": self.secretary_token,
+                "generation": generation,
+            },
+        )
+        self.assertTrue(report["accepted"])
+        with PiStore(self.root / "state") as store:
+            binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            operation = store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
+            self.assertEqual(binding["applied_generation_sha256"], binding["desired_generation_sha256"])
+            self.assertEqual(binding["refresh_pending"], 0)
+            self.assertEqual(operation["state"], "succeeded")
+
     def test_targeted_runtime_ensure_is_idempotent_and_starts_only_one_binding(self):
         with PiStore(self.root / "state") as store:
             store.conn.execute(
