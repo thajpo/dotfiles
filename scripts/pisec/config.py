@@ -9,6 +9,9 @@ from typing import Any, Mapping
 from .adapters import validate_adapter_id
 from .models import InvalidRequestError, parse_json_strict
 
+DEFAULT_WORKER_MODEL = "openai-codex/gpt-5.6-luna:high"
+DEFAULT_WORKER_ROUTE = {"harness": "codex", "model": "gpt-5.6-luna", "reasoningEffort": "high"}
+
 
 class PisecConfig(dict[str, Any]):
     """Validated configuration for orchestrators and optional worker routes."""
@@ -82,6 +85,10 @@ def _validate_worker_routing(value: Any) -> dict[str, Any]:
         if effort not in {"low", "medium", "high", "xhigh"}:
             raise InvalidRequestError("worker routing reasoningEffort is invalid")
         normalized[model] = {"harness": harness, "model": native_model, "reasoningEffort": effort}
+    if default_model not in normalized:
+        raise InvalidRequestError("worker routing defaultModel is not a configured route")
+    if normalized[default_model] != DEFAULT_WORKER_ROUTE:
+        raise InvalidRequestError("worker routing defaultModel must resolve to Codex GPT-5.6 Luna with high reasoning")
     return {"defaultModel": default_model, "fallbackHarness": fallback, "routes": normalized}
 
 

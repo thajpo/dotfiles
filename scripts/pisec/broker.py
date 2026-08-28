@@ -219,14 +219,25 @@ class BrokerDispatcher:
 
     def _worker_route(self, model: str | None) -> tuple[HarnessAdapter, str | None, str | None, str]:
         routing = self.config.get("workerRouting")
-        requested = model or (routing.get("defaultModel") if isinstance(routing, Mapping) else None)
-        if not isinstance(requested, str) or not requested:
+        if model is not None:
+            if not isinstance(model, str) or not model:
+                raise InvalidRequestError("implementationModel must be a configured worker route")
+            requested = model
+        elif isinstance(routing, Mapping):
+            requested = routing.get("defaultModel")
+        else:
             return self.harness, None, None, self.harness.manifest.adapter_id
+        if not isinstance(requested, str) or not requested:
+            raise InvalidRequestError("worker routing defaultModel is missing")
         route = routing.get("routes", {}).get(requested) if isinstance(routing, Mapping) and isinstance(routing.get("routes"), Mapping) else None
         if not isinstance(route, Mapping):
-            fallback = routing.get("fallbackHarness", self.harness.manifest.adapter_id) if isinstance(routing, Mapping) else self.harness.manifest.adapter_id
-            adapter = self.registry.resolve_harness(str(fallback))
-            return adapter, None, None, adapter.manifest.adapter_id
+            raise InvalidRequestError(f"implementationModel is not a configured worker route: {requested}")
+        if not isinstance(route.get("harness"), str) or not isinstance(route.get("model"), str) or not isinstance(route.get("reasoningEffort"), str):
+            raise InvalidRequestError(f"configured worker route is invalid: {requested}")
+        if model is None:
+            from .config import DEFAULT_WORKER_MODEL, DEFAULT_WORKER_ROUTE
+            if requested != DEFAULT_WORKER_MODEL or {key: route.get(key) for key in DEFAULT_WORKER_ROUTE} != DEFAULT_WORKER_ROUTE:
+                raise InvalidRequestError("worker routing defaultModel must resolve to Codex GPT-5.6 Luna with high reasoning")
         adapter = self.registry.resolve_harness(str(route["harness"]))
         return adapter, str(route["model"]), str(route["reasoningEffort"]), adapter.manifest.adapter_id
 

@@ -190,7 +190,9 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
 
 test("checkpoint schema contains only the v1 semantic phases and fields", async () => {
   const source = await Bun.file(new URL("./pisec.ts", import.meta.url)).text();
-  assert.match(source, /phase: z\.enum\(\["investigating", "implementing", "verifying", "ready_review"\]\)/);
+  assert.match(source, /phase: z\.enum\(\["investigating", "implementing", "verifying"\]\)/);
+  assert.doesNotMatch(source, /phase: z\.enum\(\["investigating", "implementing", "verifying", "ready_review"\]\)/);
+  assert.match(source, /Submit the sole immutable completion packet/);
   assert.doesNotMatch(source, /needs_input|blocker_code|blockerCode/);
   assert.doesNotMatch(source, /nextAction: params\.next_action, \(\.\.\.params\.blocker/);
 });

@@ -229,7 +229,7 @@ class WorkstreamTests(unittest.TestCase):
             self.apply(prepared, store, harness, workspace, git_objects)
         self.assertEqual(harness.surface_calls, 2)
 
-    def test_ready_checkpoint_submits_completion_automatically(self):
+    def test_completion_submission_derives_ready_review_atomically(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
         self.addCleanup(temp.cleanup)
         self.addCleanup(store.close)
@@ -256,6 +256,27 @@ class WorkstreamTests(unittest.TestCase):
         changed_packet["residualRisk"] = "changed"
         submit_completion(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], packet=changed_packet)
         self.assertEqual(store.conn.execute("SELECT count(*) FROM completion_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()[0], 2)
+
+    def test_progress_checkpoint_rejects_ready_review(self):
+        temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
+        self.addCleanup(temp.cleanup)
+        self.addCleanup(store.close)
+        prepared = self.prepare(root, store, project, harness, workspace)
+        result = self.apply(prepared, store, harness, workspace, git_objects)
+        workstream = result["workstream"]
+        binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()
+        with self.assertRaises(InvalidRequestError):
+            checkpoint(
+                store,
+                workstream_id=workstream["workstream_id"],
+                runtime_instance_id=binding["runtime_instance_id"],
+                phase="ready_review",
+                summary="Invalid combined completion",
+                next_action="Use the completion operation",
+                evidence=[],
+                idempotency_key="invalid-ready-review",
+            )
+        self.assertEqual(store.conn.execute("SELECT count(*) FROM completion_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()[0], 0)
 
     def test_ready_checkpoint_rolls_back_when_completion_submission_fails(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()

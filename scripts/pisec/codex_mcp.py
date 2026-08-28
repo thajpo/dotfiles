@@ -18,6 +18,56 @@ except ImportError:
 TOOLS = {
     "pisec_show_task_packet": ("task.get", {}),
     "pisec_checkpoint_workstream": ("workstream.checkpoint", {"type": "object"}),
+    "pisec_submit_completion": (
+        "workstream.completion.submit",
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["completion"],
+            "properties": {
+                "completion": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["acceptance", "verification", "source_commit", "task_packet_sha256", "changed_surfaces", "residual_risk"],
+                    "properties": {
+                        "acceptance": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["criterion", "status", "evidence"],
+                                "properties": {
+                                    "criterion": {"type": "string", "minLength": 1, "maxLength": 4096},
+                                    "status": {"const": "passed"},
+                                    "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
+                                },
+                            },
+                        },
+                        "verification": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["command", "result"],
+                                "properties": {
+                                    "command": {"type": "string", "minLength": 1, "maxLength": 4096},
+                                    "result": {"type": "string", "minLength": 1, "maxLength": 8192},
+                                },
+                            },
+                        },
+                        "source_commit": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+                        "task_packet_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        "changed_surfaces": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
+                        "residual_risk": {"type": "string", "maxLength": 4096},
+                    },
+                },
+            },
+        },
+    ),
     "pisec_request_help": ("help.request", {"type": "object"}),
     "pisec_list_coordination": ("coordination.list", {"type": "object"}),
     "pisec_inspect_coordination": ("coordination.inspect", {"type": "object"}),
@@ -37,7 +87,8 @@ TOOLS = {
 
 TOOL_DESCRIPTIONS = {
     "pisec_show_task_packet": "Use when you need the immutable assigned outcome and boundaries; reads the authoritative task packet.",
-    "pisec_checkpoint_workstream": "Use to record typed progress or the final ready_review evidence; creates the durable checkpoint transition.",
+    "pisec_checkpoint_workstream": "Use to record typed progress only. Use investigating, implementing, or verifying; submit final acceptance evidence with pisec_submit_completion.",
+    "pisec_submit_completion": "Use once, after implementation and verification, to submit the immutable completion packet. The broker creates the matching ready_review checkpoint atomically.",
     "pisec_request_help": "Use when blocked, clarifying, reviewing, or needing access; creates the single typed upward-help source.",
     "pisec_list_attention": "Use at turn start and before ending a turn; lists current authorized attention references without acknowledging them.",
     "pisec_inspect_attention": "Use after attention.list to identify the typed source and its existing inspector; read-only.",

@@ -103,6 +103,12 @@ class OmpExtensionTests(unittest.TestCase):
         self.assertIn("ctx.hasUI", source)
         self.assertIn("session_shutdown", source)
 
+    def test_checkpoint_and_completion_are_separate_model_surfaces(self):
+        source = EXTENSION.read_text()
+        self.assertIn('phase: z.enum(["investigating", "implementing", "verifying"])', source)
+        self.assertNotIn('phase: z.enum(["investigating", "implementing", "verifying", "ready_review"])', source)
+        self.assertIn("Submit the sole immutable completion packet", source)
+
     def test_bun_load_registers_nothing_without_pisec_role(self):
         script = f"""
 const records = {{tools: [], events: []}};
