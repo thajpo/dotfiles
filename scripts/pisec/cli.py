@@ -209,6 +209,7 @@ def parser() -> argparse.ArgumentParser:
     _add_json_argument(ensure_runtime)
     ensure_runtime.add_argument("workstream", metavar="WORKSTREAM")
     ensure_runtime.add_argument("--wait-seconds", type=float, default=30.0, metavar="SECONDS")
+    ensure_runtime.add_argument("--reset-session", action="store_true", help="forget one stopped Codex session before restarting")
     return root
 
 
@@ -554,7 +555,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "workstream" and args.workstream_command == "cleanup":
             result = _call("workstream.cleanup", {"workstreamId": args.workstream, "confirm": args.confirm, "forceDirty": bool(args.force_dirty)})
         elif args.command == "workstream" and args.workstream_command == "ensure-runtime":
-            result = _call("runtime.ensure", {"workstreamId": args.workstream, "waitSeconds": args.wait_seconds}, timeout=max(30.0, args.wait_seconds + 30.0))
+            result = _call("runtime.ensure", {"workstreamId": args.workstream, "waitSeconds": args.wait_seconds, "resetSession": bool(args.reset_session)}, timeout=max(30.0, args.wait_seconds + 30.0))
         else:
             raise AssertionError("unhandled command")
         print(format_result(_command_path(args), result, as_json=bool(args.json_output)))

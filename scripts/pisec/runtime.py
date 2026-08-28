@@ -26,6 +26,34 @@ WORKSPACE_RUNTIME_MISSING = "workspace runtime is missing"
 RUNTIME_STARTUP_MAX_SECONDS = 5.0
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:/-]+$")
 TOOL_FAILURE_CODES = frozenset({"tool_error", "tool_timeout", "tool_cancelled", "tool_unknown"})
+
+
+def reset_codex_session_in_transaction(connection: Any, binding: Mapping[str, Any]) -> None:
+    """Forget one stopped Codex session without deleting its durable state."""
+    if binding.get("kind") != "worker" or binding.get("harness_id") != "codex":
+        raise InvalidRequestError("session reset is limited to a Codex worker")
+    completion = connection.execute(
+        "SELECT 1 FROM completion_packets WHERE workstream_id=? LIMIT 1",
+        (str(binding["workstream_id"]),),
+    ).fetchone()
+    if completion is not None:
+        raise ConflictError("session reset is not allowed after completion evidence")
+    if binding.get("native_session_kind") is None and binding.get("native_session_value") is None:
+        return
+    now = utc_now()
+    cursor = connection.execute(
+        "UPDATE runtime_bindings SET native_session_kind=NULL,native_session_value=NULL,updated_at=? WHERE workstream_id=? AND observed_state IN ('stopped','error')",
+        (now, str(binding["workstream_id"])),
+    )
+    if cursor.rowcount != 1:
+        raise ConflictError("session reset requires a stopped runtime")
+    append_event_in_transaction(
+        connection,
+        kind="runtime.session_reset",
+        project_id=str(binding["project_id"]),
+        workstream_id=str(binding["workstream_id"]),
+        payload={"workstreamId": str(binding["workstream_id"]), "reason": "explicit stopped-worker recovery"},
+    )
 def start_bound_agent(
     store: Any,
     workspace: WorkspaceAdapter,

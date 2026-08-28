@@ -870,7 +870,7 @@ class BrokerDispatcher:
                 "reused": bool(result.get("reused", False)),
             }
         if operation == "runtime.ensure":
-            _exact(payload, {"workstreamId"}, {"waitSeconds"})
+            _exact(payload, {"workstreamId"}, {"waitSeconds", "resetSession"})
             workstream_id = str(payload["workstreamId"])
             row = store.conn.execute(
                 "SELECT project_id FROM workstreams WHERE workstream_id=? AND desired_state='active'",
@@ -886,6 +886,7 @@ class BrokerDispatcher:
                     self.workspace,
                     workstream_id=workstream_id,
                     wait_seconds=payload.get("waitSeconds", 30.0),
+                    reset_session=bool(payload.get("resetSession")),
                     harness_resolver=lambda value: self._harness_for_workstream(store, value),
                     surface_resolver=self._surface_for_harness,
                 )
@@ -997,7 +998,7 @@ class BrokerDispatcher:
                     workstream_ids=workstream_ids,
                 )
         if operation == "runtime.ensure":
-            _exact(payload, {"workstreamId"}, {"waitSeconds"})
+            _exact(payload, {"workstreamId"}, {"waitSeconds", "resetSession"})
             workstream_id = str(payload["workstreamId"])
             member = store.conn.execute(
                 "SELECT 1 FROM workstreams WHERE workstream_id=? AND project_id=? AND desired_state='active'",
@@ -1013,6 +1014,7 @@ class BrokerDispatcher:
                     self.workspace,
                     workstream_id=workstream_id,
                     wait_seconds=payload.get("waitSeconds", 30.0),
+                    reset_session=bool(payload.get("resetSession")),
                     harness_resolver=lambda value: self._harness_for_workstream(store, value),
                     surface_resolver=self._surface_for_harness,
                 )

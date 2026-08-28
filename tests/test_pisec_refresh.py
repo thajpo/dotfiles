@@ -11,6 +11,7 @@ from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.operations import create_operation
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.refresh import _binding_scope, _recover_stopped_refresh_attention, _reserve_refresh
+from scripts.pisec.runtime import reset_codex_session_in_transaction
 from scripts.pisec.models import ConflictError
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
@@ -523,6 +524,22 @@ class RuntimeRefreshTests(unittest.TestCase):
             self.assertEqual(binding["observed_state"], "idle")
             self.assertEqual(binding["runtime_instance_id"], "ensure-restart-runtime")
             self.assertIsNotNone(binding["session_start_event_sequence"])
+
+    def test_targeted_runtime_ensure_can_reset_a_stopped_codex_session(self):
+        with PiStore(self.root / "state") as store:
+            store.conn.execute("UPDATE runtime_bindings SET applied_generation_sha256=desired_generation_sha256,launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,observed_state='stopped' WHERE workstream_id=?", (self.workstream_id,))
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            session = Path(binding["harness_home"]) / "sessions" / "retained.jsonl"
+            session.write_text("retained\n")
+            session.chmod(0o600)
+            store.conn.execute("UPDATE runtime_bindings SET native_session_kind='path',native_session_value=? WHERE workstream_id=?", (str(session), self.workstream_id))
+            binding.update(kind="worker", harness_id="codex", project_id=self.project_id)
+            with store.transaction():
+                reset_codex_session_in_transaction(store.conn, binding)
+            binding = store.conn.execute("SELECT native_session_kind,native_session_value FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            self.assertIsNone(binding["native_session_kind"])
+            self.assertIsNone(binding["native_session_value"])
+            self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE workstream_id=? AND kind='runtime.session_reset'", (self.workstream_id,)).fetchone()[0], 1)
 
     def test_binding_scope_injects_project_data_dirs(self):
         data = self.repo / "data"

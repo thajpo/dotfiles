@@ -12,7 +12,7 @@ from .adapters import HarnessAdapter, WorkspaceAdapter, RuntimeSurfaceArtifacts,
 from .worker_repo import validate_worker_resume_git
 from .worker_repo import project_permissions_lock
 from .models import ConflictError, NeedsAttentionError, NotFoundError, PisecError, canonical_json, json_digest, new_id, utc_now, validate_sha256
-from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent, usable_runtime_binding
+from .runtime import WORKSPACE_RUNTIME_MISSING, reset_codex_session_in_transaction, start_bound_agent, usable_runtime_binding
 from .runtime_surface import capture_runtime_surface, verify_surface
 from .events import append_event_in_transaction
 from .operations import update_operation_in_transaction
@@ -231,7 +231,7 @@ def _stage_profile(store: Any, harness: HarnessAdapter, binding: Mapping[str, An
     return staged
 
 
-def _materialize_and_launch(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, binding: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, desired: str, *, staged: Any | None = None) -> dict[str, Any]:
+def _materialize_and_launch(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, binding: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, desired: str, *, staged: Any | None = None, reset_session: bool = False) -> dict[str, Any]:
     validate_worker_resume_git(store, binding)
     scope = _scope(store, binding, harness)
     verify_surface(surface)
@@ -244,6 +244,8 @@ def _materialize_and_launch(store: Any, harness: HarnessAdapter, workspace: Work
     harness.commit_launch_binding(scope, artifacts, workspace_session_name=str(binding["workspace_session_name"]), workspace_id=str(binding["workspace_id"]), workspace_view_id=str(binding["workspace_view_id"]), workspace_surface_id=str(binding["workspace_surface_id"]), replace=True)
     now = utc_now()
     with store.transaction():
+        if reset_session:
+            reset_codex_session_in_transaction(store.conn, binding)
         store.conn.execute("UPDATE runtime_bindings SET harness_home=?,adapter_artifacts_json=?,launch_secret_path=?,policy_path=?,policy_sha256=?,runtime_token_sha256=?,desired_generation_sha256=?,launch_generation_sha256=?,runtime_instance_id=NULL,report_seq=0,observed_state='starting',refresh_pending=1,last_observed_at=?,updated_at=? WHERE workstream_id=?", (artifacts.harness_home, artifact_document(harness.manifest, artifacts), artifacts.launch_secret_path, artifacts.policy_path, artifacts.policy_sha256, artifacts.runtime_token_sha256, desired, desired, now, now, binding["workstream_id"]))
         store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, binding["workstream_id"]))
     current = _state(store, str(binding["workstream_id"]))
@@ -504,7 +506,7 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
     return operation_id
 
 
-def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, binding: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, desired: str, *, wait_seconds: float) -> dict[str, Any]:
+def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, binding: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, desired: str, *, wait_seconds: float, reset_session: bool = False) -> dict[str, Any]:
     runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
     if runtime.state == "unknown":
         raise NeedsAttentionError("runtime process identity is ambiguous")
@@ -521,7 +523,9 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
             return {"pending": True, "state": str(binding["observed_state"]), "reason": f"runtime is {binding['observed_state']}"}
         workspace.stop_runtime(str(binding["workspace_surface_id"]))
         _wait_for_exit(workspace, binding)
-    current = _materialize_and_launch(store, harness, workspace, binding, surface, desired, staged=staged)
+    if reset_session and workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"])).state != "stopped":
+        raise ConflictError("session reset requires a stopped runtime")
+    current = _materialize_and_launch(store, harness, workspace, binding, surface, desired, staged=staged, reset_session=reset_session)
     attested = _startup_attested(store, workspace, str(binding["workstream_id"]), old_instance, desired)
     if attested is not None:
         return {"pending": False, "binding": attested}
@@ -532,7 +536,7 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
     return {"pending": True, "binding": current, "state": "startup_in_progress", "reason": "startup attestation is still pending"}
 
 
-def _refresh_runtimes_unlocked(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, wait_seconds: float = 300.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None, project_ids: Sequence[str] = (), harness_ids: Sequence[str] = (), workstream_ids: Sequence[str] = ()) -> dict[str, Any]:
+def _refresh_runtimes_unlocked(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, wait_seconds: float = 300.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None, project_ids: Sequence[str] = (), harness_ids: Sequence[str] = (), workstream_ids: Sequence[str] = (), reset_session: bool = False) -> dict[str, Any]:
     if not isinstance(wait_seconds, (int, float)) or isinstance(wait_seconds, bool) or not 0 <= wait_seconds <= 3600:
         raise PisecError("refresh wait must be between 0 and 3600 seconds")
     selected = _active_bindings(store, project_ids=project_ids, harness_ids=harness_ids, workstream_ids=workstream_ids)
@@ -573,7 +577,7 @@ def _refresh_runtimes_unlocked(store: Any, harness: HarnessAdapter, workspace: W
                     result["pending"].append(_item(binding, desired, state=str(binding["observed_state"])))
                     next_remaining.append(workstream_id)
                     continue
-                refreshed = _refresh_one(store, selected_harness, workspace, binding, surface, desired, wait_seconds=max(0.0, deadline - time.monotonic()))
+                refreshed = _refresh_one(store, selected_harness, workspace, binding, surface, desired, wait_seconds=max(0.0, deadline - time.monotonic()), reset_session=reset_session)
                 if refreshed.get("pending"):
                     result["pending"].append(
                         _item(
@@ -600,7 +604,7 @@ def _refresh_runtimes_unlocked(store: Any, harness: HarnessAdapter, workspace: W
 
 
 @control_plane_mutation
-def refresh_runtimes(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, wait_seconds: float = 300.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None, project_ids: Sequence[str] = (), harness_ids: Sequence[str] = (), workstream_ids: Sequence[str] = ()) -> dict[str, Any]:
+def refresh_runtimes(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, wait_seconds: float = 300.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None, project_ids: Sequence[str] = (), harness_ids: Sequence[str] = (), workstream_ids: Sequence[str] = (), reset_session: bool = False) -> dict[str, Any]:
     selected = _active_bindings(store, project_ids=project_ids, harness_ids=harness_ids, workstream_ids=workstream_ids)
     selected_projects = sorted({str(row["project_id"]) for row in selected})
     with ExitStack() as locks:
@@ -616,6 +620,7 @@ def refresh_runtimes(store: Any, harness: HarnessAdapter, workspace: WorkspaceAd
             project_ids=project_ids,
             harness_ids=harness_ids,
             workstream_ids=workstream_ids,
+            reset_session=reset_session,
         )
 
 
@@ -628,7 +633,7 @@ def refresh_bindings(store: Any, harness: HarnessAdapter, workspace: WorkspaceAd
 
 
 @control_plane_mutation
-def ensure_runtime(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, workstream_id: str, wait_seconds: float = 30.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None) -> dict[str, Any]:
+def ensure_runtime(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, workstream_id: str, wait_seconds: float = 30.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None, reset_session: bool = False) -> dict[str, Any]:
     if not isinstance(wait_seconds, (int, float)) or isinstance(wait_seconds, bool) or not 0 <= wait_seconds <= 3600:
         raise PisecError("ensure wait must be between 0 and 3600 seconds")
     binding = _binding(store, workstream_id)
@@ -642,6 +647,11 @@ def ensure_runtime(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdap
                 store.conn.execute("UPDATE runtime_bindings SET desired_generation_sha256=?,updated_at=? WHERE workstream_id=?", (desired, utc_now(), workstream_id))
             binding = _state(store, workstream_id)
         runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+        if reset_session:
+            if runtime.state != "stopped":
+                raise ConflictError("session reset requires a stopped runtime")
+            reset_codex_session_in_transaction(store.conn, binding)
+            binding = _state(store, workstream_id)
         if runtime.state == "unknown":
             raise NeedsAttentionError("runtime process identity is ambiguous")
         current = bool(
@@ -697,7 +707,7 @@ def ensure_runtime(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdap
                     return {"workstreamId": workstream_id, "action": "started", "state": "live", "generation": desired, "reason": None}
                 return {"workstreamId": workstream_id, "action": "startup_in_progress", "state": "starting", "generation": desired, "reason": "startup attestation is still pending"}
             return {"workstreamId": workstream_id, "action": "startup_in_progress", "state": "starting", "generation": desired, "reason": "startup attestation is still pending"}
-        refreshed = refresh_runtimes(store, harness, workspace, wait_seconds=wait_seconds, harness_resolver=harness_resolver, surface_resolver=lambda harness_id: surface_cache.get(str(harness_id), surface), workstream_ids=(workstream_id,))
+        refreshed = refresh_runtimes(store, harness, workspace, wait_seconds=wait_seconds, harness_resolver=harness_resolver, surface_resolver=lambda harness_id: surface_cache.get(str(harness_id), surface), workstream_ids=(workstream_id,), reset_session=reset_session)
         if refreshed["upgraded"]:
             return {"workstreamId": workstream_id, "action": "refreshed_started" if wait_seconds else "startup_in_progress", "state": "live" if wait_seconds else "starting", "generation": desired, "reason": None}
         if refreshed["pending"]:
