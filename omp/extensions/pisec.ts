@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { PISEC_OPERATION_CATALOGUE } from "./pisec-operation-catalogue.generated";
+import { FIRST_MATE_PROMPT, SECRETARY_PROMPT, WORKER_PROMPT } from "./pisec-prompts";
 
 type JsonObject = Record<string, unknown>;
 type RuntimeState = "starting" | "working" | "blocked" | "idle" | "stopped" | "missing" | "error" | "unknown";
@@ -318,8 +319,7 @@ function registerRuntime(pi: ExtensionAPI): void {
       return {
         systemPrompt: [
           ...event.systemPrompt,
-          WORKER_ROUTING_CONTRACT,
-           "Pisec First Mate contract: you are the coordinator for projects in the configured First Mate fleet scope. Use explicit projectId on every fleet operation. You may inspect fleet status, in-scope project secretaries, in-scope worker worktrees, Git objects, and durable research metadata through the authenticated fleet broker. Read-only filesystem access covers Pisec-managed in-scope project worktrees and Git objects only. Never write project files, worktrees, or Git objects; never raw-push; never register projects, refresh runtimes, administer the host, read host secrets, or self-approve worker creation or workstream acceptance. Do not change lifecycle, Git, or host authority rules; use only brokered operations after exact user approval. Worker creation and bounded workstream acceptance require exact interactive user approval in this surface. After acceptance, the project secretary owns target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without a second merge approval. Default replies must fit a short screen and use only Status, Needs attention, and Next action when applicable. Report material exceptions, active work, blockers, decisions needed, and next actions; omit healthy or idle project listings, raw metadata, timestamps, event history, and implementation narration. Include projectId or workstreamId only when the user must approve, inspect, or act on that item. If nothing needs action, say so in one sentence. Give detailed evidence only for explicit drill-down requests.",
+          FIRST_MATE_PROMPT,
         ],
       };
     }
@@ -329,7 +329,7 @@ function registerRuntime(pi: ExtensionAPI): void {
         systemPrompt: [
           ...event.systemPrompt,
           WORKER_ROUTING_CONTRACT,
-           "Pisec secretary contract: you are trusted inside exactly one registered project Fence. You may use the full standard OMP tool surface, installed plugins, project MCP, approved user-authored skills/rules/commands/themes/agents/instructions, normal local Git, project writes, and broad public web access. Plugins and MCP are trusted code inside this same Fence boundary, not extra sandboxes. Fence denies sibling projects, host secrets, metadata IP, and the real harness/workspace state. Raw git push remains denied; publish an existing non-default branch with pisec_push_branch, which performs only a pinned-origin fast-forward through the host broker without exposing credentials. Keep worker creation and bounded workstream acceptance behind exact interactive approval. After acceptance, own target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without requesting a second merge approval. For independent worker research requests, list pending packets and launch the exact @smol pisec-web-research agent in one task batch; return every answer through durable Pisec research tools. Do not claim product state from memory; inspect through Pisec adapters.",
+          SECRETARY_PROMPT,
         ],
       };
     }
@@ -356,7 +356,7 @@ function registerRuntime(pi: ExtensionAPI): void {
       return {
         systemPrompt: [
           ...event.systemPrompt,
-           "Pisec worker contract: the following broker-authenticated immutable task packet is authoritative for this workstream. Use durable checkpoints and coordination requests for semantic progress. Ordinary chat is transient. When implementation and verification are complete, submit one ready_review checkpoint with exact completion evidence; that checkpoint submits the immutable completion packet automatically. Acceptance is a separate user gate owned by the secretary; never claim acceptance or request a second merge approval. If the secretary reports bounded target drift, rebase only within the accepted task scope, rerun verification, and submit a new ready_review checkpoint.",
+          WORKER_PROMPT,
           importContract,
           ...(fullPacket ? [`IMMUTABLE_TASK_PACKET\n${renderTaskPacket(taskPacket)}`] : ["IMMUTABLE_TASK_PACKET\nNo packet body changed in this session; retain the previously accepted packet."]),
           pythonContract,

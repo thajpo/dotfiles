@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "bun:test";
+import { FIRST_MATE_PROMPT, SECRETARY_PROMPT, WORKER_PROMPT } from "./pisec-prompts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const EXTENSION = new URL("./pisec.ts", import.meta.url).href;
@@ -192,6 +193,22 @@ test("checkpoint schema contains only the v1 semantic phases and fields", async 
   assert.match(source, /phase: z\.enum\(\["investigating", "implementing", "verifying", "ready_review"\]\)/);
   assert.doesNotMatch(source, /needs_input|blocker_code|blockerCode/);
   assert.doesNotMatch(source, /nextAction: params\.next_action, \(\.\.\.params\.blocker/);
+});
+
+test("role prompt snapshots match their available tools and reporting contract", async () => {
+  const source = await Bun.file(new URL("./pisec.ts", import.meta.url)).text();
+  assert.match(FIRST_MATE_PROMPT, /medium-detail senior-engineering briefing/);
+  assert.match(FIRST_MATE_PROMPT, /Goal and current position/);
+  assert.doesNotMatch(FIRST_MATE_PROMPT, /pisec_prepare_workstream|pisec_create_workstream/);
+  assert.match(SECRETARY_PROMPT, /Every worker proposal must describe the engineering outcome/);
+  assert.match(WORKER_PROMPT, /Start the assigned engineering task immediately/);
+  assert.match(WORKER_PROMPT, /pisec_submit_completion/);
+  assert.match(WORKER_PROMPT, /Remaining work, risks, and next action/);
+  for (const tool of ["pisec_prepare_workstream", "pisec_create_workstream", "pisec_submit_completion"]) {
+    assert.match(source, new RegExp(`(?:name: )?"${tool}"`), tool);
+  }
+  assert.doesNotMatch(source, /Default replies must fit a short screen/);
+  assert.doesNotMatch(source, /use only Status, Needs attention, and Next action/);
 });
 
 test("first mate exposes the exact fleet surface", () => {

@@ -11,6 +11,7 @@ from .access import compose_runtime_domains
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now, validate_sha256
+from .prompt_contract import SECRETARY_RESPONSE_CONTRACT
 from .projects import resolve_project
 from .project_workspaces import ensure_project_workspace
 from .runtime_surface import capture_runtime_surface, materialize_current_surface
@@ -32,15 +33,6 @@ SECRETARY_CHECKPOINTS = (
     "brief_delivered",
     "observed",
     "committed",
-)
-
-SECRETARY_RESPONSE_CONTRACT = (
-    "Default user-facing replies must fit a short screen and be action-oriented. "
-    "Use only the headings Status, Needs attention, and Next action when applicable. "
-    "Report material exceptions, active work, blockers, decisions needed, and next actions; "
-    "suppress healthy or idle listings, raw metadata, timestamps, event history, and implementation narration. "
-    "Include a projectId or workstreamId only when the user must approve, inspect, or act on that item. "
-    "If nothing needs action, say so in one sentence. Provide detailed evidence only when the user explicitly asks for a drill-down."
 )
 
 _SCOPE_IDENTITY_FIELDS = frozenset(

@@ -11,6 +11,7 @@ from .access import compose_runtime_domains
 from .events import append_event_in_transaction
 from .fence import resolve_data_dirs
 from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical_json, json_digest, new_id, utc_now, validate_sha256
+from .prompt_contract import FIRST_MATE_BRIEF, FIRST_MATE_RESPONSE_CONTRACT
 from .projects import observe_project, resolve_project
 from .runtime_surface import capture_runtime_surface, materialize_current_surface
 from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent, usable_runtime_binding
@@ -33,29 +34,6 @@ FIRST_MATE_CHECKPOINTS = (
     "committed",
 )
 _SURFACE_SCOPE_FIELDS = frozenset({"runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest"})
-
-FIRST_MATE_RESPONSE_CONTRACT = (
-    "Default user-facing replies must fit a short screen and be action-oriented. "
-    "Use only the headings Status, Needs attention, and Next action when applicable. "
-    "Report material exceptions, active work, blockers, decisions needed, and next actions; "
-    "suppress healthy or idle project listings, raw metadata, timestamps, event history, "
-    "and implementation narration. Include a projectId or workstreamId only when the user "
-    "must approve, inspect, or act on that item. If nothing needs action, say so in one sentence. "
-    "Provide detailed evidence only when the user explicitly asks for a drill-down."
-)
-
-FIRST_MATE_BRIEF = (
-    "You are the Pisec First Mate. Monitor every project secretary in the configured First Mate fleet scope and every unresolved remediation issue within that scope. "
-    "Inspect and acknowledge issue cards, obtain exact user approval before any external effect, and keep issues open until reporter verification "
-    "or an explicit declined, duplicate, or not_reproducible disposition backed by a matching resolved decision. "
-    "Delegate detailed work to the correct in-scope secretary, review in-scope worker worktrees read-only, and use explicit project IDs for every cross-project action. "
-    "Never self-approve worker creation or workstream acceptance; never self-approve access grants, revokes, or deployments; never write project files, push raw Git, register projects, refresh runtimes, administer the host, or read host secrets. "
-    "After a user accepts a bounded workstream candidate, the project secretary owns target refresh, bounded worker reconciliation, verification, fast-forward integration, completion, retirement, and cleanup without another user merge decision. "
-    "Do not change lifecycle, Git, or host authority rules; use only brokered operations after exact user approval. "
-    f"{FIRST_MATE_RESPONSE_CONTRACT}"
-)
-
-
 
 def _first_mate(store: Any) -> dict[str, Any] | None:
     row = store.conn.execute(
