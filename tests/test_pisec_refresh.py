@@ -9,7 +9,7 @@ from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.operations import create_operation
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.refresh import _binding_scope, _reserve_refresh
+from scripts.pisec.refresh import _binding_scope, _recover_stopped_refresh_attention, _reserve_refresh
 from scripts.pisec.models import ConflictError
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
@@ -359,6 +359,46 @@ class RuntimeRefreshTests(unittest.TestCase):
             self.assertEqual(binding["applied_generation_sha256"], binding["desired_generation_sha256"])
             self.assertEqual(binding["refresh_pending"], 0)
             self.assertEqual(operation["state"], "succeeded")
+
+    def test_stopped_refresh_with_materialized_launch_artifact_is_compensated(self):
+        with PiStore(self.root / "state") as store:
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            desired = str(binding["desired_generation_sha256"])
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                idempotency_key=f"runtime.refresh:{self.workstream_id}:{desired}",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": desired},
+                state="needs_attention",
+                step="attention",
+            )
+            artifacts = __import__("json").loads(str(binding["adapter_artifacts_json"]))
+            artifacts["generationSha256"] = desired
+            store.conn.execute(
+                "UPDATE operations SET error_code='runtime_refresh_failed',error_message='isolated OMP surface contains a symlink' WHERE operation_id=?",
+                (operation.operation_id,),
+            )
+            store.conn.execute(
+                "UPDATE runtime_bindings SET adapter_artifacts_json=?,refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-27T00:00:00Z',launch_generation_sha256=?,runtime_instance_id=NULL,report_seq=0,observed_state='error',applied_generation_sha256=? WHERE workstream_id=?",
+                (__import__("json").dumps(artifacts, sort_keys=True, separators=(",", ":")), operation.operation_id, desired, "a" * 64, self.workstream_id),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='isolated OMP surface contains a symlink' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+            current = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            recovered = _recover_stopped_refresh_attention(store, current, dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()), runtime_state="stopped")
+
+            self.assertTrue(recovered)
+            binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            operation = store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()
+            self.assertEqual(binding["applied_generation_sha256"], "a" * 64)
+            self.assertIsNone(binding["launch_generation_sha256"])
+            self.assertEqual(binding["refresh_pending"], 0)
+            self.assertEqual(operation["state"], "applying")
+            self.assertEqual(operation["step"], "reserved")
 
     def test_targeted_runtime_ensure_is_idempotent_and_starts_only_one_binding(self):
         with PiStore(self.root / "state") as store:

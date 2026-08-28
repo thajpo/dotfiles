@@ -317,11 +317,18 @@ def _recover_stopped_refresh_attention(
         artifacts = json.loads(str(current["adapter_artifacts_json"]))
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
-    if (
-        not isinstance(artifacts, dict)
-        or not current.get("applied_generation_sha256")
-        or artifacts.get("generationSha256") != current.get("applied_generation_sha256")
-    ):
+    if not isinstance(artifacts, dict):
+        return False
+    artifact_generation = artifacts.get("generationSha256")
+    applied_generation = current.get("applied_generation_sha256")
+    launch_generation = current.get("launch_generation_sha256")
+    if not applied_generation or artifact_generation not in {applied_generation, launch_generation}:
+        return False
+    # A refresh records the new launch artifact before startup attestation. If
+    # the failure happened after that durable write, the applied generation is
+    # intentionally still old; the normal refresh path can safely retry once
+    # the stopped runtime has been proved above.
+    if artifact_generation == launch_generation and launch_generation != current.get("desired_generation_sha256"):
         return False
     now = utc_now()
     workstream_id = str(current["workstream_id"])
