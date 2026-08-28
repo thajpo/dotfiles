@@ -161,10 +161,16 @@ def _wait_for_exit(workspace: WorkspaceAdapter, binding: Mapping[str, Any], time
         observation = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
         if observation.state == "stopped":
             return
-        if observation.state == "unknown":
-            raise NeedsAttentionError("runtime process identity became ambiguous during refresh")
         if time.monotonic() >= deadline:
+            if observation.state == "unknown":
+                raise NeedsAttentionError("runtime process identity became ambiguous during refresh")
             raise NeedsAttentionError("runtime did not stop gracefully")
+        # Herdr reports a transitional process tree as unknown while the
+        # launcher exits and the pane returns to its shell.  This is safe to
+        # settle only after refresh has reserved the binding and explicitly
+        # requested shutdown: never treat it as stopped, just re-observe until
+        # the pane proves that only its shell remains or the bounded timeout
+        # expires.
         time.sleep(0.05)
 
 

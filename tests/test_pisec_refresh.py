@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.pisec.adapters import AdapterRegistry, AgentObservation
+from scripts.pisec.adapters import AdapterRegistry, AgentObservation, RuntimeProcessObservation
 from scripts.pisec.access import authorize_apply_project_permissions, prepare_project_permissions
 from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.events import append_event_in_transaction
@@ -267,6 +267,26 @@ class RuntimeRefreshTests(unittest.TestCase):
                 (self.workstream_id,),
             ).fetchone()
             self.assertEqual(tuple(operation), ("needs_attention", "attention"))
+
+    def test_refresh_waits_through_transient_shutdown_identity_ambiguity(self):
+        original_observe_runtime = self.workspace.observe_runtime
+        transient_unknowns = 1
+
+        def observe_runtime(surface_id, process_identity):
+            nonlocal transient_unknowns
+            observation = original_observe_runtime(surface_id, process_identity)
+            if observation.state == "stopped" and transient_unknowns:
+                transient_unknowns -= 1
+                return RuntimeProcessObservation("unknown", "launcher is still exiting")
+            return observation
+
+        with patch.object(self.workspace, "observe_runtime", side_effect=observe_runtime):
+            result = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["upgraded"]), 1)
+        self.assertEqual(result["failed"], [])
+        self.assertEqual(transient_unknowns, 0)
 
     def test_stopped_ambiguous_refresh_is_compensated_before_retry(self):
         with PiStore(self.root / "state") as store:
