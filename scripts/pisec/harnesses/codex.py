@@ -452,6 +452,7 @@ class CodexHarnessAdapter:
                     f'model_catalog_json = {json.dumps(str(model_catalog_path))}',
                     "[features]",
                     "hooks = true",
+                    "code_mode = true",
                     "[mcp_servers.pisec]",
                     f'command = {json.dumps(str(mcp_path))}',
                     "args = []",
