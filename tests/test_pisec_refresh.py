@@ -10,7 +10,7 @@ from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.operations import create_operation
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.refresh import _binding_scope, _recover_stopped_refresh_attention, _reserve_refresh
+from scripts.pisec.refresh import _binding_scope, _recover_stopped_refresh_attention, _reset_stale_refresh_for_new_session, _reserve_refresh
 from scripts.pisec.runtime import reset_codex_session_in_transaction
 from scripts.pisec.models import ConflictError
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
@@ -540,6 +540,37 @@ class RuntimeRefreshTests(unittest.TestCase):
             self.assertIsNone(binding["native_session_kind"])
             self.assertIsNone(binding["native_session_value"])
             self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE workstream_id=? AND kind='runtime.session_reset'", (self.workstream_id,)).fetchone()[0], 1)
+
+    def test_session_reset_compensates_only_a_stopped_materialized_refresh(self):
+        with PiStore(self.root / "state") as store:
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            desired = str(binding["desired_generation_sha256"])
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                idempotency_key=f"runtime.refresh:{self.workstream_id}:{desired}:reset",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": desired},
+                state="needs_attention",
+                step="attention",
+            )
+            artifacts = json.loads(str(binding["adapter_artifacts_json"]))
+            artifacts["generationSha256"] = desired
+            store.conn.execute(
+                "UPDATE runtime_bindings SET adapter_artifacts_json=?,refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-27T00:00:00Z',launch_generation_sha256=?,observed_state='error' WHERE workstream_id=?",
+                (json.dumps(artifacts, sort_keys=True, separators=(",", ":")), operation.operation_id, desired, self.workstream_id),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET kind='worker',execution_profile='worker-default',provisioning_state='needs_attention',attention_reason='runtime binding is already reserved by another refresh' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            binding.update(kind="worker", harness_id="codex", project_id=self.project_id)
+            _reset_stale_refresh_for_new_session(store, binding)
+            current = store.conn.execute("SELECT refresh_pending,refresh_operation_id,launch_generation_sha256,observed_state FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            self.assertEqual(tuple(current), (0, None, None, "stopped"))
+            self.assertEqual(tuple(store.conn.execute("SELECT state,step,error_code FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()), ("failed", "superseded", "runtime_session_reset"))
 
     def test_binding_scope_injects_project_data_dirs(self):
         data = self.repo / "data"

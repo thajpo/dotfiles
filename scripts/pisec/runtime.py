@@ -38,15 +38,14 @@ def reset_codex_session_in_transaction(connection: Any, binding: Mapping[str, An
     ).fetchone()
     if completion is not None:
         raise ConflictError("session reset is not allowed after completion evidence")
-    if binding.get("native_session_kind") is None and binding.get("native_session_value") is None:
-        return
     now = utc_now()
-    cursor = connection.execute(
-        "UPDATE runtime_bindings SET native_session_kind=NULL,native_session_value=NULL,updated_at=? WHERE workstream_id=? AND observed_state IN ('stopped','error')",
-        (now, str(binding["workstream_id"])),
-    )
-    if cursor.rowcount != 1:
-        raise ConflictError("session reset requires a stopped runtime")
+    if binding.get("native_session_kind") is not None or binding.get("native_session_value") is not None:
+        cursor = connection.execute(
+            "UPDATE runtime_bindings SET native_session_kind=NULL,native_session_value=NULL,updated_at=? WHERE workstream_id=? AND observed_state IN ('stopped','error')",
+            (now, str(binding["workstream_id"])),
+        )
+        if cursor.rowcount != 1:
+            raise ConflictError("session reset requires a stopped runtime")
     append_event_in_transaction(
         connection,
         kind="runtime.session_reset",
