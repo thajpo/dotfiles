@@ -43,6 +43,17 @@ def _crash_with_lock(root: str, ready) -> None:
         os._exit(17)
 
 
+class CrashOnce:
+    def __init__(self, target: str):
+        self.target = target
+        self.hit_target = False
+
+    def hit(self, name: str, _context) -> None:
+        if name == self.target and not self.hit_target:
+            self.hit_target = True
+            raise RuntimeError(f"crash at {name}")
+
+
 class Phase11AtomicityTests(unittest.TestCase):
     def test_provisioning_journal_confirms_every_external_step(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -78,6 +89,7 @@ class Phase11AtomicityTests(unittest.TestCase):
                 entries = journal_entries(store, applied["operation"]["operation_id"])
                 self.assertEqual([entry["step"] for entry in entries], list(EFFECT_STEPS))
                 self.assertTrue(all(entry["state"] == "confirmed" for entry in entries))
+                self.assertFalse((root / "state" / "profile-staging" / applied["operation"]["operation_id"]).exists())
                 confirmed_steps = [
                     json.loads(row["payload_json"])["step"]
                     for row in store.conn.execute(
@@ -96,6 +108,65 @@ class Phase11AtomicityTests(unittest.TestCase):
                     ).fetchone()[0],
                     len(EFFECT_STEPS),
                 )
+
+    def test_restart_after_every_journal_step_has_one_bound_worker(self):
+        for step in EFFECT_STEPS:
+            with self.subTest(step=step), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                repo = root / "repo"
+                make_repo(repo)
+                with PiStore(root / "state") as store:
+                    project = register_project(store, repo, default_ref="main")
+                    harness = FixtureHarness(root)
+                    workspace = FixtureWorkspace(root, store)
+                    ensure_secretary(store, project["project_id"], harness, workspace)
+                    packet = {
+                        "schemaVersion": 1,
+                        "outcome": "Complete the bounded fixture engineering task.",
+                        "boundaries": ["Change only the approved fixture paths."],
+                        "acceptance": ["The fixture verification passes."],
+                        "openQuestions": [],
+                        "evidence": ["The focused test output."],
+                    }
+                    prepared = prepare_workstream(
+                        store,
+                        project_id=project["project_id"],
+                        title="Replay fixture task",
+                        purpose="Exercise restart-safe provisioning",
+                        brief="Inspect, implement, verify, and report the bounded engineering task.",
+                        task_packet=packet,
+                        idempotency_key=f"phase11-replay-{step}",
+                        harness=harness,
+                        workspace=workspace,
+                        work_root=root / "worktrees",
+                    )
+                    with self.assertRaises(RuntimeError):
+                        authorize_apply_workstream(
+                            store,
+                            scope=prepared["approvalScope"],
+                            harness=harness,
+                            workspace=workspace,
+                            failpoint=CrashOnce(f"after_journal_{step}"),
+                        )
+                    result = authorize_apply_workstream(
+                        store,
+                        scope=prepared["approvalScope"],
+                        harness=harness,
+                        workspace=workspace,
+                    )
+                    self.assertEqual(result["operation"]["state"], "succeeded")
+                    entries = journal_entries(store, result["operation"]["operation_id"])
+                    self.assertEqual([entry["step"] for entry in entries], list(EFFECT_STEPS))
+                    self.assertTrue(all(entry["state"] == "confirmed" for entry in entries))
+                    self.assertEqual(len(workspace.worktrees), 2)
+                    self.assertEqual(len(workspace.agents), 2)
+                    self.assertEqual(
+                        store.conn.execute(
+                            "SELECT COUNT(*) FROM events WHERE workstream_id=? AND kind='runtime.bootstrap'",
+                            (result["workstream"]["workstream_id"],),
+                        ).fetchone()[0],
+                        1,
+                    )
 
     def test_journal_compensation_is_idempotent_and_identity_bound(self):
         with tempfile.TemporaryDirectory() as tmp:

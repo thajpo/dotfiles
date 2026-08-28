@@ -567,6 +567,7 @@ def _authorize_apply_workstream(
         except Exception as error:
             _mark_attention(store, operation_id, workstream_id, f"worker repository could not be prepared: {error}")
             raise NeedsAttentionError("worker repository could not be prepared") from error
+        _hit(failpoint, "after_journal_worker_repository", scope)
         with store.transaction():
             _checkpoint(store, operation_id, "worker_repo_created")
         _hit(failpoint, "after_worker_repo_creation", scope)
@@ -660,6 +661,7 @@ def _authorize_apply_workstream(
             "surfaceId": observation.surface_id,
         },
     )
+    _hit(failpoint, "after_journal_herdr_tab", scope)
     surface_identity = {
         "harnessId": harness.manifest.adapter_id,
         "surfaceGenerationSha256": surface.content_sha256,
@@ -674,6 +676,7 @@ def _authorize_apply_workstream(
         step="runtime_surface",
         identity=surface_identity,
     )
+    _hit(failpoint, "after_journal_runtime_surface", scope)
     if surface_effect["state"] == "compensated":
         raise NeedsAttentionError("runtime surface effect was already compensated")
     journal_confirm(
@@ -744,6 +747,7 @@ def _authorize_apply_workstream(
                 "stagingRoot": staging_root,
             },
         )
+        _hit(failpoint, "after_journal_runtime_profile_staged", scope)
         journal_confirm(
             store,
             operation_id=operation_id,
@@ -759,6 +763,7 @@ def _authorize_apply_workstream(
                 "policySha256": artifacts.policy_sha256,
             },
         )
+        _hit(failpoint, "after_journal_runtime_profile_activated", scope)
         binding_identity = {
             "workstreamId": workstream_id,
             "workspaceId": observation.workspace_id,
@@ -857,6 +862,7 @@ def _authorize_apply_workstream(
                 "policySha256": str(binding["policy_sha256"]),
             },
         )
+        _hit(failpoint, "after_journal_runtime_binding", scope)
         journal_confirm(
             store,
             operation_id=operation_id,
@@ -870,6 +876,7 @@ def _authorize_apply_workstream(
                 "agentState": str(started_observation.agent.state if started_observation.agent is not None else "unknown"),
             },
         )
+        _hit(failpoint, "after_journal_agent_started", scope)
         with store.transaction():
             _checkpoint(store, operation_id, "agent_started")
         _hit(failpoint, "after_agent_start", scope)
@@ -955,6 +962,7 @@ def _authorize_apply_workstream(
                 event = store.conn.execute("SELECT kind,workstream_id FROM events WHERE sequence=? AND operation_id=?", (event_sequence, operation_id)).fetchone()
                 if event is None or event["kind"] != "runtime.bootstrap" or event["workstream_id"] != workstream_id:
                     raise NeedsAttentionError("confirmed bootstrap effect has no matching durable event")
+        _hit(failpoint, "after_journal_bootstrap_delivered", scope)
 
         exact = workspace.observe_workstream(path=scope["worktreePath"], agent_name=scope["agentName"])
         agent_mismatch = exact is not None and exact.agent is not None and exact.agent.surface_id != binding["workspace_surface_id"]
@@ -983,6 +991,7 @@ def _authorize_apply_workstream(
                 "agentName": str(exact.agent.name if exact.agent is not None else scope["agentName"]),
             },
         )
+        _hit(failpoint, "after_journal_final_identity", scope)
         now = utc_now()
         with store.transaction():
             _checkpoint(store, operation_id, "observed")

@@ -133,7 +133,13 @@ class FixtureHarness:
         )
 
     def stage_profile(self, scope: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, staging_root: Path) -> StagedHarnessArtifacts:
-        candidate_root = Path(staging_root).resolve() / "candidate-harness"
+        root = Path(staging_root).resolve()
+        if root.exists() or root.is_symlink():
+            if root.is_symlink() or not root.is_dir():
+                raise RuntimeError("fixture staging root is unsafe")
+            shutil.rmtree(root)
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        candidate_root = root / "candidate-harness"
         prior_home = self.root / "harness" / str(scope["workstreamId"])
         candidate_home = candidate_root / str(scope["workstreamId"])
         if prior_home.is_dir():
@@ -156,7 +162,7 @@ class FixtureHarness:
         return StagedHarnessArtifacts(
             operation_id=str(scope.get("operationId", "op_fixture")),
             workstream_id=str(scope["workstreamId"]),
-            staging_root=str(Path(staging_root).resolve()),
+            staging_root=str(root),
             candidate_manifest_json="{}",
             candidate_content_sha256=surface.content_sha256,
             candidate=candidate,

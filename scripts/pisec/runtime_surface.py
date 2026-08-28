@@ -92,4 +92,5 @@ def materialize_current_surface(
     if artifacts.generation_sha256 != desired:
         raise NeedsAttentionError("activated runtime generation does not match the captured surface")
     verify_surface(surface)
+    harness.discard_staged_profile(staged)
     return artifacts, surface, materialized_scope
