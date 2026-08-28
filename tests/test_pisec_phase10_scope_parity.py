@@ -267,7 +267,22 @@ class Phase10ScopeParityTests(unittest.TestCase):
         self.assertEqual(model["input_modalities"], ["text", "image"])
         self.assertEqual(model["default_reasoning_summary"], "none")
         self.assertEqual(model["model_messages"]["instructions_template"], "You are Codex, an agent based on GPT-5.")
-        self.assertEqual(model["model_messages"]["token_budget"]["reminder_threshold_tokens"], 6144)
+        token_budget = model["model_messages"]["token_budget"]
+        self.assertEqual(token_budget["reminder_threshold_tokens"], 6144)
+        self.assertEqual(
+            set(token_budget),
+            {
+                "reminder_threshold_tokens",
+                "reminder_message_template",
+                "guidance_message",
+                "auto_compact_fallback_prompt",
+                "auto_compact_fallback_buffer_tokens",
+            },
+        )
+        self.assertIn("{n_remaining}", token_budget["reminder_message_template"])
+        self.assertIn("notes", token_budget["guidance_message"])
+        self.assertIn("exhausted", token_budget["auto_compact_fallback_prompt"])
+        self.assertEqual(token_budget["auto_compact_fallback_buffer_tokens"], 16384)
         self.assertNotIn("base_instructions", model)
 
     def test_codex_refresh_discards_only_volatile_temp_symlinks(self):
