@@ -255,6 +255,7 @@ class Phase10ScopeParityTests(unittest.TestCase):
             self.assertIn(f'projects.{json.dumps(str(worktree))}.trust_level="trusted"', config_values)
             self.assertIn("features.hooks=true", config_values)
             self.assertIn("features.code_mode=true", config_values)
+            self.assertIn("features.code_mode_host=true", config_values)
             self.assertTrue(any(value.startswith("hooks.SessionStart=") for value in config_values))
             self.assertTrue(any(value.startswith("mcp_servers.pisec.command=") for value in config_values))
 
