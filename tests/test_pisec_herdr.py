@@ -182,6 +182,14 @@ class HerdrTests(unittest.TestCase):
         self.assertEqual(created.surface_id, "w1:p3")
         self.assertEqual(self.state.ready_reads, 3)
 
+    def test_create_allows_pane_readiness_to_exceed_five_seconds(self):
+        self.state.ready_after_reads = 6
+        monotonic = iter((0, 0, 1, 2, 3, 4, 5, 6))
+        with patch("scripts.pisec.workspaces.herdr.time.monotonic", side_effect=monotonic), patch("scripts.pisec.workspaces.herdr.time.sleep"):
+            created = self.adapter.create_tab(workspace_id="w1", cwd="/tmp/work", label="Task: slow shell", focus=False)
+        self.assertEqual(created.surface_id, "w1:p3")
+        self.assertEqual(self.state.ready_reads, 7)
+
     def test_observe_tab_requires_exact_workspace_and_cwd(self):
         self.adapter.snapshot = lambda: {
             "version": "0.8.0",

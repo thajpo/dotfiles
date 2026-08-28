@@ -18,6 +18,7 @@ from ..runtime import WORKSPACE_RUNTIME_MISSING
 
 HERDR_PROTOCOL = 19
 HERDR_MIN_VERSION = (0, 8, 0)
+PANE_READY_MAX_SECONDS = 30.0
 MAX_RESPONSE = 2 * 1024 * 1024
 MAX_SNAPSHOT_ITEMS = MAX_JSON_ITEMS * 4
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -177,7 +178,7 @@ class HerdrWorkspaceAdapter:
         return identity, result
 
     def _wait_for_pane_ready(self, surface_id: str) -> None:
-        deadline = time.monotonic() + min(max(float(self.timeout), 0.1), 5.0)
+        deadline = time.monotonic() + min(max(float(self.timeout), 0.1), PANE_READY_MAX_SECONDS)
         while True:
             try:
                 result = self._request(
