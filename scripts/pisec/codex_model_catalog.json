@@ -12,7 +12,7 @@
         {"effort": "xhigh", "description": "Extra reasoning depth for complex problems"},
         {"effort": "max", "description": "Maximum reasoning depth for the hardest problems"}
       ],
-      "shell_type": "unified_exec",
+      "shell_type": "shell_command",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 3,
@@ -24,13 +24,22 @@
       "supports_image_detail_original": true,
       "context_window": 272000,
       "max_context_window": 872000,
+      "auto_compact_token_limit": null,
       "comp_hash": "3000",
       "experimental_supported_tools": [],
       "supports_search_tool": true,
       "use_responses_lite": true,
       "tool_mode": "code_mode_only",
       "multi_agent_version": "v1",
-      "base_instructions": "You are Codex, an agent based on GPT-5."
+      "model_messages": {
+        "instructions_template": "You are Codex, an agent based on GPT-5.",
+        "instructions_variables": null,
+        "approvals": null,
+        "collaboration_modes": null,
+        "auto_review": null,
+        "permissions": null,
+        "token_budget": null
+      }
     }
   ]
 }

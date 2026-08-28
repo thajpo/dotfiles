@@ -249,6 +249,14 @@ class Phase10ScopeParityTests(unittest.TestCase):
             self.assertTrue(any(value.startswith("hooks.SessionStart=") for value in config_values))
             self.assertTrue(any(value.startswith("mcp_servers.pisec.command=") for value in config_values))
 
+    def test_codex_model_catalog_preserves_native_worker_tool_contract(self):
+        catalog = json.loads((Path(__file__).resolve().parents[1] / "scripts" / "pisec" / "codex_model_catalog.json").read_text())
+        model = next(item for item in catalog["models"] if item["slug"] == "gpt-5.6-luna")
+        self.assertEqual(model["shell_type"], "shell_command")
+        self.assertEqual(model["tool_mode"], "code_mode_only")
+        self.assertEqual(model["model_messages"]["instructions_template"], "You are Codex, an agent based on GPT-5.")
+        self.assertNotIn("base_instructions", model)
+
     def test_codex_hook_classifies_native_session_start_as_working(self):
         class RecordingSocket:
             def __init__(self):
