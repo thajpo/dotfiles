@@ -95,6 +95,28 @@ def _copy_durable_codex_state(source: Path, target: Path) -> None:
         _copy_safe_entry(child, target / child.name)
 
 
+def _remove_owned_tree(path: Path) -> None:
+    """Remove an owner-controlled temporary tree without following links."""
+    if not path.exists() and not path.is_symlink():
+        return
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        if info.st_uid != os.geteuid():
+            raise NeedsAttentionError("Codex temporary backup is unsafe")
+        path.unlink()
+        return
+    if info.st_uid != os.geteuid() or info.st_mode & 0o002 or (info.st_mode & 0o020 and info.st_gid != os.getgid()):
+        raise NeedsAttentionError("Codex temporary backup is unsafe")
+    if stat.S_ISDIR(info.st_mode):
+        for child in sorted(path.iterdir(), key=lambda item: item.name):
+            _remove_owned_tree(child)
+        path.rmdir()
+    elif stat.S_ISREG(info.st_mode):
+        path.unlink()
+    else:
+        raise NeedsAttentionError("Codex temporary backup contains an unsupported file")
+
+
 def _activate_directory(staged: Path, target: Path, retained_backup: Path | None = None) -> None:
     backup = retained_backup or target.with_name(f".{target.name}.previous-{secrets.token_hex(8)}")
     replaced = False
@@ -127,9 +149,7 @@ def _activate_directory(staged: Path, target: Path, retained_backup: Path | None
                 _normalize_owner_tree(staged, readonly=False)
             shutil.rmtree(staged)
         if backup.exists() and retained_backup is None:
-            if backup.is_dir() and not backup.is_symlink():
-                _normalize_owner_tree(backup, readonly=False)
-            shutil.rmtree(backup)
+            _remove_owned_tree(backup)
 
 
 def _permission_backup_root(value: Any) -> Path | None:

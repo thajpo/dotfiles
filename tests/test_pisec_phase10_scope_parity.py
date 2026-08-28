@@ -24,7 +24,7 @@ from scripts.pisec.refresh import mark_stale_bindings
 from scripts.pisec.runtime import report_runtime, usable_runtime_binding
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import prepare_workstream
-from scripts.pisec.harnesses.codex import CodexHarnessAdapter
+from scripts.pisec.harnesses.codex import CodexHarnessAdapter, _activate_directory
 from scripts.pisec.harnesses.omp import OmpHarnessAdapter
 from tests.test_pisec_fence import make_config
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
@@ -293,6 +293,23 @@ class Phase10ScopeParityTests(unittest.TestCase):
             candidate_home = Path(artifacts.harness_home)
             self.assertEqual((candidate_home / "sessions" / "resume.jsonl").read_text(), "durable\n")
             self.assertFalse((candidate_home / "tmp").exists())
+
+    def test_codex_refresh_removes_volatile_links_from_replaced_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "active"
+            staged = root / "staged"
+            (target / "tmp" / "arg0").mkdir(parents=True)
+            (target / "tmp" / "arg0" / "codex").symlink_to("/usr/bin/node")
+            (target / "durable.txt").write_text("keep only in the replaced tree\n")
+            staged.mkdir()
+            (staged / "new.txt").write_text("new\n")
+
+            _activate_directory(staged, target)
+
+            self.assertEqual((target / "new.txt").read_text(), "new\n")
+            self.assertFalse((target / "tmp").exists())
+            self.assertFalse(any(root.glob(".active.previous-*")))
 
     def test_codex_refresh_rejects_nonvolatile_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
