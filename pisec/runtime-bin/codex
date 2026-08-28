@@ -221,7 +221,7 @@ def main() -> None:
     if resume is None:
         fence.append(Path(str(descriptor["promptPath"])).read_text())
     else:
-        fence.extend(["resume", resume])
+        fence.extend(["resume", resume, Path(str(descriptor["promptPath"])).read_text()])
     os.execve(str(descriptor["fencePath"]), fence, environment)
 
 

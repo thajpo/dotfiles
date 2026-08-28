@@ -166,6 +166,14 @@ class Phase10ScopeParityTests(unittest.TestCase):
             codex_argv = argv[argv.index("--") + 1 :]
             self.assertIn("--dangerously-bypass-hook-trust", codex_argv)
 
+            result = subprocess.run([str(launcher), "--resume=session-1"], cwd=worktree, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            resumed_argv = json.loads(capture.read_text())
+            resumed_codex_argv = resumed_argv[resumed_argv.index("--") + 1 :]
+            resume_index = resumed_codex_argv.index("resume")
+            self.assertEqual(resumed_codex_argv[resume_index : resume_index + 2], ["resume", "session-1"])
+            self.assertEqual(resumed_codex_argv[resume_index + 2], Path(activated.adapter_data["promptPath"]).read_text())
+
     def test_codex_launch_separates_writable_state_and_trusted_provider_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
