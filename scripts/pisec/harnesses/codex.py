@@ -79,6 +79,22 @@ def _safe_owned_tree(root: Path, *, readonly: bool = False) -> None:
             raise NeedsAttentionError("current Codex runtime surface contains an unsafe entry")
 
 
+def _copy_durable_codex_state(source: Path, target: Path) -> None:
+    """Copy resumable Codex state and omit only its volatile temp tree."""
+    if source.is_symlink() or not source.is_dir():
+        raise PisecError("existing Codex binding state is unsafe")
+    volatile = source / "tmp"
+    for path in source.rglob("*"):
+        if path.is_symlink() and not path.is_relative_to(volatile):
+            raise PisecError("existing Codex binding state contains a symlink")
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(target, 0o700)
+    for child in sorted(source.iterdir(), key=lambda item: item.name):
+        if child == volatile:
+            continue
+        _copy_safe_entry(child, target / child.name)
+
+
 def _activate_directory(staged: Path, target: Path, retained_backup: Path | None = None) -> None:
     backup = retained_backup or target.with_name(f".{target.name}.previous-{secrets.token_hex(8)}")
     replaced = False
@@ -357,10 +373,8 @@ class CodexHarnessAdapter:
         surface_binding = state_root / "binding-surfaces" / "codex" / workstream_id
         prior_home = self.state_root / "binding-state" / "codex" / workstream_id
         if state_root != self.state_root and prior_home.exists():
-            if prior_home.is_symlink() or any(path.is_symlink() for path in prior_home.rglob("*")):
-                raise PisecError("existing Codex binding state contains a symlink")
             _secure_tree(state_root, home.parent)
-            _copy_safe_entry(prior_home, home)
+            _copy_durable_codex_state(prior_home, home)
             _normalize_owner_tree(home)
         else:
             _secure_tree(state_root, home)

@@ -257,6 +257,64 @@ class Phase10ScopeParityTests(unittest.TestCase):
         self.assertEqual(model["model_messages"]["instructions_template"], "You are Codex, an agent based on GPT-5.")
         self.assertNotIn("base_instructions", model)
 
+    def test_codex_refresh_discards_only_volatile_temp_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktree = root / "worker"
+            worktree.mkdir()
+            codex = dict(self._production_worker_adapters(root))['codex']
+            surface = codex.prepare_runtime_surface()
+            workstream_id = "ws_" + "2" * 32
+            prior_home = root / "codex-state" / "binding-state" / "codex" / workstream_id
+            (prior_home / "sessions").mkdir(parents=True)
+            (prior_home / "sessions" / "resume.jsonl").write_text("durable\n")
+            (prior_home / "tmp" / "arg0").mkdir(parents=True)
+            (prior_home / "tmp" / "arg0" / "codex").symlink_to("/usr/bin/node")
+            scope = {
+                "projectId": "prj_" + "3" * 32,
+                "workstreamId": workstream_id,
+                "executionProfile": "worker-default",
+                "worktreePath": str(worktree),
+                "branchName": "pisec/" + workstream_id + "/work",
+                "externalDomains": sorted(codex.profile_domains("worker-default", ("example.com",))),
+                "runtimeSurfaceSha256": surface.content_sha256,
+                "runtimeSurfaceRoot": surface.root_path,
+                "runtimeSurfaceId": "surface_" + surface.content_sha256[:32],
+                "implementationModel": "openai-codex/gpt-5.6-luna:high",
+                "harnessModel": "gpt-5.6-luna",
+                "reasoningEffort": "high",
+            }
+            candidate_root = root / "candidate"
+            artifacts = codex._build_profile(scope, surface, state_root=candidate_root)
+            candidate_home = Path(artifacts.harness_home)
+            self.assertEqual((candidate_home / "sessions" / "resume.jsonl").read_text(), "durable\n")
+            self.assertFalse((candidate_home / "tmp").exists())
+
+    def test_codex_refresh_rejects_nonvolatile_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktree = root / "worker"
+            worktree.mkdir()
+            codex = dict(self._production_worker_adapters(root))['codex']
+            surface = codex.prepare_runtime_surface()
+            workstream_id = "ws_" + "4" * 32
+            prior_home = root / "codex-state" / "binding-state" / "codex" / workstream_id
+            (prior_home / "sessions").mkdir(parents=True)
+            (prior_home / "sessions" / "unsafe").symlink_to("/usr/bin/node")
+            scope = {
+                "projectId": "prj_" + "5" * 32,
+                "workstreamId": workstream_id,
+                "executionProfile": "worker-default",
+                "worktreePath": str(worktree),
+                "branchName": "pisec/" + workstream_id + "/work",
+                "externalDomains": sorted(codex.profile_domains("worker-default", ("example.com",))),
+                "runtimeSurfaceSha256": surface.content_sha256,
+                "runtimeSurfaceRoot": surface.root_path,
+                "runtimeSurfaceId": "surface_" + surface.content_sha256[:32],
+            }
+            with self.assertRaisesRegex(Exception, "existing Codex binding state contains a symlink"):
+                codex._build_profile(scope, surface, state_root=root / "candidate")
+
     def test_codex_hook_classifies_native_session_start_as_working(self):
         class RecordingSocket:
             def __init__(self):
