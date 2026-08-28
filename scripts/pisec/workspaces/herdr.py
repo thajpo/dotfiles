@@ -183,7 +183,7 @@ class HerdrWorkspaceAdapter:
             try:
                 result = self._request(
                     "pane.read",
-                    {"pane_id": surface_id, "source": "recent", "lines": 1, "format": "text"},
+                    {"pane_id": surface_id, "source": "visible", "lines": 1, "format": "text"},
                 )
                 read = result.get("read")
                 if result.get("type") == "pane_read" and isinstance(read, dict) and isinstance(read.get("text"), str) and read["text"]:

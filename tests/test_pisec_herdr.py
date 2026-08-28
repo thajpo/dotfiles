@@ -159,6 +159,8 @@ class HerdrTests(unittest.TestCase):
         self.adapter.close_tab("t3")
         methods = [item[0] for item in self.state.requests]
         self.assertIn("workspace.create", methods)
+        readiness = next(params for method, params in self.state.requests if method == "pane.read")
+        self.assertEqual(readiness["source"], "visible")
         self.assertIn("tab.create", methods)
         self.assertIn("tab.rename", methods)
         self.assertIn("pane.send_text", methods)
