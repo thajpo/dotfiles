@@ -254,7 +254,11 @@ class Phase10ScopeParityTests(unittest.TestCase):
         model = next(item for item in catalog["models"] if item["slug"] == "gpt-5.6-luna")
         self.assertEqual(model["shell_type"], "shell_command")
         self.assertEqual(model["tool_mode"], "code_mode_only")
+        self.assertTrue(model["supports_parallel_tool_calls"])
+        self.assertEqual(model["input_modalities"], ["text", "image"])
+        self.assertEqual(model["default_reasoning_summary"], "none")
         self.assertEqual(model["model_messages"]["instructions_template"], "You are Codex, an agent based on GPT-5.")
+        self.assertEqual(model["model_messages"]["token_budget"]["reminder_threshold_tokens"], 6144)
         self.assertNotIn("base_instructions", model)
 
     def test_codex_refresh_discards_only_volatile_temp_symlinks(self):
