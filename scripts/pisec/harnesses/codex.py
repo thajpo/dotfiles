@@ -108,6 +108,7 @@ def _remove_owned_tree(path: Path) -> None:
     if info.st_uid != os.geteuid() or info.st_mode & 0o002 or (info.st_mode & 0o020 and info.st_gid != os.getgid()):
         raise NeedsAttentionError("Codex temporary backup is unsafe")
     if stat.S_ISDIR(info.st_mode):
+        os.chmod(path, 0o700)
         for child in sorted(path.iterdir(), key=lambda item: item.name):
             _remove_owned_tree(child)
         path.rmdir()

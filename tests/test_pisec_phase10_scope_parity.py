@@ -302,6 +302,9 @@ class Phase10ScopeParityTests(unittest.TestCase):
             (target / "tmp" / "arg0").mkdir(parents=True)
             (target / "tmp" / "arg0" / "codex").symlink_to("/usr/bin/node")
             (target / "durable.txt").write_text("keep only in the replaced tree\n")
+            for directory in (target, target / "tmp", target / "tmp" / "arg0"):
+                directory.chmod(0o500)
+            (target / "durable.txt").chmod(0o400)
             staged.mkdir()
             (staged / "new.txt").write_text("new\n")
 
