@@ -327,15 +327,10 @@ def _recover_stopped_refresh_attention(
         return False
     # A refresh records the new launch artifact before startup attestation. If
     # the failure happened after that durable write, the applied generation is
-    # intentionally still old; the normal refresh path can safely retry once
-    # the stopped runtime has been proved above.
-    if artifact_generation == launch_generation:
-        try:
-            request = json.loads(str(operation["request_json"]))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return False
-        if not isinstance(request, dict) or request.get("desiredGenerationSha256") != launch_generation:
-            return False
+    # intentionally still old. The artifact and launch generations are the
+    # binding-owned proof of that attempt. A later deployment may supersede
+    # the operation request before recovery runs, so the retry uses the
+    # current desired generation after the stopped runtime is proved above.
     now = utc_now()
     workstream_id = str(current["workstream_id"])
     operation_id = str(operation["operation_id"])

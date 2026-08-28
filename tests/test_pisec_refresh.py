@@ -404,14 +404,15 @@ class RuntimeRefreshTests(unittest.TestCase):
     def test_stopped_refresh_retries_materialized_launch_after_newer_generation(self):
         with PiStore(self.root / "state") as store:
             binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            requested_generation = "f" * 64
             old_generation = "b" * 64
             operation, _ = create_operation(
                 store,
                 kind="runtime.refresh",
                 project_id=self.project_id,
                 workstream_id=self.workstream_id,
-                idempotency_key=f"runtime.refresh:{self.workstream_id}:{old_generation}",
-                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": old_generation},
+                idempotency_key=f"runtime.refresh:{self.workstream_id}:{requested_generation}",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": requested_generation},
                 state="needs_attention",
                 step="attention",
             )
