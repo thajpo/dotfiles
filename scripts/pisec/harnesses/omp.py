@@ -742,6 +742,7 @@ class OmpHarnessAdapter:
             repository = _repo_root()
             _copy_safe_entry(repository / "omp" / "extensions" / "pisec.ts", extensions / "pisec.ts")
             _copy_safe_entry(repository / "omp" / "extensions" / "pisec-operation-catalogue.generated.ts", extensions / "pisec-operation-catalogue.generated.ts")
+            _copy_safe_entry(repository / "omp" / "extensions" / "pisec-prompts.ts", extensions / "pisec-prompts.ts")
             managed_agent = repository / "omp" / "agents" / "pisec-web-research.md"
             if managed_agent.exists():
                 _copy_safe_entry(managed_agent, agents / managed_agent.name)
