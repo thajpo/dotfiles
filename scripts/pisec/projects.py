@@ -345,6 +345,41 @@ def fleet_project_ids(store: Any) -> list[str]:
     return [str(row["project_id"]) for row in store.conn.execute("SELECT project_id FROM projects WHERE active=1 AND coordination_mode=? ORDER BY display_name,project_id", (FLEET_COORDINATION_MODE,))]
 
 
+def platform_project_id(store: Any) -> str | None:
+    """Return the active registered project that owns Pisec platform remediation.
+
+    Platform issues are intentionally routed to the repository that contains
+    this broker.  The display-name fallback keeps test and development
+    checkouts usable when the source tree is imported through a symlink or
+    packaged path; callers still require the project to be explicitly
+    registered and active.
+    """
+    source_root = Path(__file__).resolve().parents[2]
+    rows = store.conn.execute("SELECT * FROM projects WHERE active=1 ORDER BY project_id").fetchall()
+    for row in rows:
+        if Path(str(row["repository_path"])).resolve(strict=False) == source_root:
+            return str(row["project_id"])
+    for row in rows:
+        display_name = str(row["display_name"]).strip().lower()
+        repository_name = Path(str(row["repository_path"])).name.lower()
+        if display_name in {"dotfiles", "pisec"} or repository_name == "dotfiles":
+            return str(row["project_id"])
+    return None
+
+
+def first_mate_issue_project_ids(store: Any) -> list[str]:
+    """Return project IDs whose issue records are visible to the First Mate."""
+    ids = fleet_project_ids(store)
+    platform_id = platform_project_id(store)
+    if platform_id is not None and platform_id not in ids:
+        ids.append(platform_id)
+    return ids
+
+
+def is_first_mate_issue_project(store: Any, project_id: str) -> bool:
+    return project_id in first_mate_issue_project_ids(store)
+
+
 def require_fleet_project(store: Any, project_id: str) -> dict[str, Any]:
     project = get_project(store, project_id)
     if not project.get("active") or project.get("coordination_mode") != FLEET_COORDINATION_MODE:

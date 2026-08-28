@@ -21,7 +21,7 @@ from .decisions import list_decisions, record_decision, resolve_decision
 from .events import append_event_in_transaction, list_events
 from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, PisecError, ScopeMismatchError, UnsafeStateError, bounded_text, canonical_json, utc_now, validate_id
 from .pi_store import PiStore
-from .projects import assert_project_writable, fleet_activity, fleet_project_ids, get_project, list_fleet_projects, list_projects, project_activity, project_status, register_project, require_fleet_project, resolve_project
+from .projects import assert_project_writable, fleet_activity, first_mate_issue_project_ids, fleet_project_ids, get_project, is_first_mate_issue_project, list_fleet_projects, list_projects, project_activity, project_status, register_project, require_fleet_project, resolve_project
 from .protocol import MAX_MESSAGE_BYTES, decode_request, error_response, success_response
 from .research import (
     acknowledge_research,
@@ -40,7 +40,7 @@ from .runtime import WORKSPACE_RUNTIME_MISSING, prepare_runtime_turn, prepare_se
 from .first_mate import ensure_first_mate, focus_first_mate
 from .secretary_git import git_status, inspect_workstream_changes, push_branch
 from .integration import apply_workstream_acceptance, inspect_integration, list_integrations, prepare_workstream_acceptance, reconcile_integrations
-from .workflow import acknowledge_coordination, acknowledge_issue, add_issue_context, answer_coordination, checkpoint, inspect_issue, link_issue_remediation, list_issues, request_help, request_issue_remediation, request_issue_verification, report_issue, resolve_issue, submit_completion, verify_issue
+from .workflow import acknowledge_coordination, acknowledge_issue, add_issue_context, answer_coordination, checkpoint, escalate_issue, inspect_issue, link_issue_remediation, list_issues, request_help, request_issue_remediation, request_issue_verification, report_issue, resolve_issue, submit_completion, verify_issue
 from .workstreams import authorize_apply_workstream, focus_workstream, inspect_workstream, list_workstreams, prepare_workstream, retire_workstream
 from .operation_contracts import SOCKET_OPERATIONS
 ADMIN_OPERATIONS = SOCKET_OPERATIONS["admin"]
@@ -1040,6 +1040,9 @@ class BrokerDispatcher:
         if operation == "issue.report":
             _exact(payload, {"category", "severity", "summary", "details", "requestedAction", "evidence", "idempotencyKey"}, {"escalatedFromIssueId"})
             return report_issue(store, project_id=project_id, reporter_workstream_id=secretary_workstream_id, category=payload["category"], severity=payload["severity"], summary=payload["summary"], details=payload["details"], requested_action=payload["requestedAction"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"], escalated_from_issue_id=payload.get("escalatedFromIssueId"))
+        if operation == "issue.escalate":
+            _exact(payload, {"sourceIssueId", "category", "severity", "summary", "details", "requestedAction", "evidence", "idempotencyKey"})
+            return escalate_issue(store, project_id=project_id, reporter_workstream_id=secretary_workstream_id, source_issue_id=payload["sourceIssueId"], category=payload["category"], severity=payload["severity"], summary=payload["summary"], details=payload["details"], requested_action=payload["requestedAction"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
         if operation == "issue.list":
             _exact(payload, set(), {"state", "limit"})
             return {"issues": list_issues(store, project_id=project_id, state=payload.get("state"), limit=int(payload.get("limit", 100)))}
@@ -1156,6 +1159,14 @@ class BrokerDispatcher:
             raise InvalidRequestError("fleet projectId is required")
         return str(require_fleet_project(store, project_id)["project_id"])
 
+    def _fleet_issue_project(self, store: PiStore, payload: Mapping[str, Any]) -> str:
+        project_id = payload.get("projectId")
+        if not isinstance(project_id, str):
+            raise InvalidRequestError("fleet projectId is required")
+        if not is_first_mate_issue_project(store, project_id):
+            raise AuthorizationError("project is outside the First Mate issue scope")
+        return str(get_project(store, project_id)["project_id"])
+
     def _fleet(self, store: PiStore, operation: str, first_mate_workstream_id: str, payload: dict[str, Any]) -> Any:
         if operation == "attention.list":
             _exact(payload, set(), {"limit", "projectId"})
@@ -1184,40 +1195,41 @@ class BrokerDispatcher:
             _exact(payload, set(), {"projectId", "state", "limit"})
             project_id = payload.get("projectId")
             if project_id is not None:
-                project_id = self._fleet_project(store, payload)
-            return {"issues": list_issues(store, project_id=project_id, project_ids=None if project_id is not None else fleet_project_ids(store), state=payload.get("state"), limit=int(payload.get("limit", 100)))}
+                project_id = self._fleet_issue_project(store, payload)
+            return {"issues": list_issues(store, project_id=project_id, project_ids=None if project_id is not None else first_mate_issue_project_ids(store), state=payload.get("state"), limit=int(payload.get("limit", 100)))}
         if operation == "fleet.issue.inspect":
             _exact(payload, {"issueId"}, {"projectId"})
             project_id = payload.get("projectId")
             if project_id is not None:
-                project_id = self._fleet_project(store, payload)
+                project_id = self._fleet_issue_project(store, payload)
             issue = inspect_issue(store, issue_id=payload["issueId"], project_id=project_id)
             if project_id is None:
-                require_fleet_project(store, str(issue["project_id"]))
+                if not is_first_mate_issue_project(store, str(issue["project_id"])):
+                    raise AuthorizationError("issue is outside the First Mate issue scope")
             return issue
         if operation == "fleet.issue.add_context":
             _exact(payload, {"projectId", "issueId", "context", "idempotencyKey"})
-            project_id = self._fleet_project(store, payload)
+            project_id = self._fleet_issue_project(store, payload)
             return add_issue_context(store, project_id=project_id, issue_id=payload["issueId"], actor_id=first_mate_workstream_id, context=payload["context"], idempotency_key=payload["idempotencyKey"])
         if operation == "fleet.issue.acknowledge":
             _exact(payload, {"projectId", "issueId"})
-            project_id = self._fleet_project(store, payload)
+            project_id = self._fleet_issue_project(store, payload)
             return acknowledge_issue(store, project_id=project_id, issue_id=payload["issueId"], actor_id=first_mate_workstream_id)
         if operation == "fleet.issue.request_remediation":
             _exact(payload, {"projectId", "issueId", "outcome", "allowedPaths", "verification", "nonEffects", "idempotencyKey"})
-            project_id = self._fleet_project(store, payload)
+            project_id = self._fleet_issue_project(store, payload)
             return request_issue_remediation(store, project_id=project_id, issue_id=payload["issueId"], actor_id=first_mate_workstream_id, outcome=payload["outcome"], allowed_paths=payload["allowedPaths"], verification=payload["verification"], non_effects=payload["nonEffects"], idempotency_key=payload["idempotencyKey"])
         if operation == "fleet.issue.request_verification":
             _exact(payload, {"projectId", "issueId", "evidence", "idempotencyKey"})
-            project_id = self._fleet_project(store, payload)
+            project_id = self._fleet_issue_project(store, payload)
             return request_issue_verification(store, project_id=project_id, issue_id=payload["issueId"], actor_id=first_mate_workstream_id, evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
         if operation == "fleet.issue.resolve":
             _exact(payload, {"projectId", "issueId", "disposition", "reason", "decisionId"})
-            project_id = self._fleet_project(store, payload)
+            project_id = self._fleet_issue_project(store, payload)
             return resolve_issue(store, project_id=project_id, issue_id=payload["issueId"], actor_id=first_mate_workstream_id, disposition=payload["disposition"], reason=payload["reason"], decision_id=payload["decisionId"])
         if operation == "fleet.events":
             _exact(payload, set(), {"after", "limit"})
-            rows = list_events(store, after=int(payload.get("after", 0)), limit=int(payload.get("limit", 256)), project_ids=fleet_project_ids(store))
+            rows = list_events(store, after=int(payload.get("after", 0)), limit=int(payload.get("limit", 256)), project_ids=first_mate_issue_project_ids(store))
             return {"events": [{"sequence": row["sequence"], "eventId": row["event_id"], "kind": row["kind"], "projectId": row["project_id"], "workstreamId": row["workstream_id"], "operationId": row["operation_id"], "createdAt": row["created_at"]} for row in rows]}
         if operation == "fleet.workstream.list":
             _exact(payload, {"projectId"})

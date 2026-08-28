@@ -7,8 +7,10 @@ import threading
 from contextlib import nullcontext
 from collections.abc import Mapping
 from typing import Any
+from types import SimpleNamespace
 
 from .models import ConflictError, InvalidRequestError, NotFoundError, new_id, utc_now
+from .projects import first_mate_issue_project_ids
 
 
 SOURCE_KINDS = frozenset({"coordination", "research", "issue", "completion", "integration"})
@@ -91,7 +93,7 @@ def _project_secretary(connection: Any, project_id: str) -> tuple[str, ...]:
 
 
 def _fleet_first_mates(connection: Any, project_id: str) -> tuple[str, ...]:
-    if connection.execute("SELECT 1 FROM projects WHERE project_id=? AND active=1 AND coordination_mode='fleet'", (project_id,)).fetchone() is None:
+    if project_id not in first_mate_issue_project_ids(SimpleNamespace(conn=connection)):
         return ()
     rows = connection.execute(
         "SELECT workstream_id FROM workstreams WHERE kind='first_mate' AND desired_state='active' AND provisioning_state='bound'"
@@ -138,12 +140,15 @@ def index_event_in_transaction(connection: Any, event: Mapping[str, Any]) -> Non
         elif kind == "issue.remediation_requested":
             recipients.extend((rid, str(project_id), 0) for rid in _project_secretary(connection, str(project_id)))
         elif kind == "issue.remediation_linked":
-            if source.get("escalated_from_issue_id") is None:
-                row = connection.execute("SELECT workstream_id FROM issue_remediations WHERE issue_id=? ORDER BY created_at DESC LIMIT 1", (source_id,)).fetchone()
-                if row is not None:
-                    recipients.append((str(row["workstream_id"]), str(project_id), 1))
+            row = connection.execute("SELECT workstream_id FROM issue_remediations WHERE issue_id=? ORDER BY created_at DESC LIMIT 1", (source_id,)).fetchone()
+            if row is not None:
+                recipients.append((str(row["workstream_id"]), str(project_id), 1))
         elif kind == "issue.verification_requested":
-            recipients.append((str(source["reporter_workstream_id"]), str(project_id), 1))
+            if source.get("escalated_from_issue_id") is not None:
+                underlying = _source(connection, "issue", str(source["escalated_from_issue_id"]))
+                recipients.append((str(underlying["reporter_workstream_id"]), str(underlying["project_id"]), 1))
+            else:
+                recipients.append((str(source["reporter_workstream_id"]), str(project_id), 1))
         elif kind in {"issue.verification_failed", "issue.remediation_failed"}:
             recipients.extend((rid, str(project_id), 0) for rid in supervisor_recipients)
         elif kind == "issue.remediation_completed":
@@ -194,18 +199,18 @@ def list_open_attention(store: Any, *, recipient_workstream_id: str, limit: int 
         LEFT JOIN integration_jobs j ON a.source_kind='integration' AND j.integration_id=a.source_id
         WHERE a.recipient_workstream_id=? AND recipient.desired_state='active' AND recipient.provisioning_state='bound'
           AND ((recipient.kind='secretary' AND p.active=1 AND p.secretary_workstream_id=recipient.workstream_id)
-            OR (recipient.kind='first_mate' AND p.active=1 AND p.coordination_mode='fleet')
+            OR (recipient.kind='first_mate' AND p.active=1 AND (p.coordination_mode='fleet' OR (i.reporter_kind='secretary' AND i.escalated_from_issue_id IS NOT NULL)))
             OR recipient.kind='worker')
           AND ((a.source_kind='coordination' AND ((recipient.kind='secretary' AND c.state='open') OR (recipient.kind='worker' AND c.state='answered')))
             OR (a.source_kind='research' AND ((recipient.kind='secretary' AND r.state='pending') OR (recipient.kind='worker' AND r.state IN ('needs_context','answered','declined'))))
             OR (a.source_kind='issue' AND (
                 (recipient.kind='secretary' AND (
-                    (i.reporter_kind='worker' AND i.state IN ('open','acknowledged'))
+                    (i.reporter_kind='worker' AND (i.state='open' OR (i.state='acknowledged' AND EXISTS (SELECT 1 FROM issue_updates u WHERE u.issue_id=i.issue_id AND u.update_kind='remediation_completed'))))
                     OR (i.reporter_kind='secretary' AND i.state='remediating'
                         AND EXISTS (SELECT 1 FROM issue_updates u WHERE u.issue_id=i.issue_id AND u.update_kind='remediation_requested')
                         AND NOT EXISTS (SELECT 1 FROM issue_updates u WHERE u.issue_id=i.issue_id AND u.update_kind IN ('remediation_linked','remediation_failed','resolved')))
                 ))
-                OR (recipient.kind='first_mate' AND i.reporter_kind='secretary' AND i.state IN ('open','acknowledged'))
+                OR (recipient.kind='first_mate' AND i.reporter_kind='secretary' AND (i.state='open' OR (i.state='acknowledged' AND EXISTS (SELECT 1 FROM issue_updates u WHERE u.issue_id=i.issue_id AND u.update_kind='remediation_completed'))))
                 OR (recipient.kind='secretary' AND i.reporter_kind='secretary' AND i.reporter_workstream_id=recipient.workstream_id AND i.state='verifying')
                 OR (recipient.kind='worker' AND i.reporter_workstream_id=recipient.workstream_id AND i.state='verifying')
                 OR (recipient.kind='worker' AND i.state='remediating'
@@ -268,11 +273,11 @@ def backfill_attention(store: Any, *, recipient_workstream_id: str | None = None
         params: tuple[Any, ...] = () if project_id is None else (project_id,)
         add_rows(store.conn.execute(f"SELECT request_id AS source_id,project_id FROM coordination_requests WHERE state='open'{project_filter}", params), "coordination")
         add_rows(store.conn.execute(f"SELECT request_id AS source_id,project_id FROM research_requests WHERE state='pending'{project_filter}", params), "research")
-        add_rows(store.conn.execute(f"SELECT issue_id AS source_id,project_id FROM issues WHERE ((reporter_kind='worker' AND state IN ('open','acknowledged')) OR (reporter_kind='secretary' AND state='remediating' AND EXISTS (SELECT 1 FROM issue_updates u WHERE u.issue_id=issues.issue_id AND u.update_kind='remediation_requested') AND NOT EXISTS (SELECT 1 FROM issue_updates u WHERE u.issue_id=issues.issue_id AND u.update_kind IN ('remediation_linked','remediation_failed','resolved'))) OR (reporter_kind='secretary' AND reporter_workstream_id=? AND state='verifying')){project_filter}", ((str(recipient["workstream_id"]),) + params) if project_id is not None else (str(recipient["workstream_id"]),)), "issue")
+        add_rows(store.conn.execute(f"SELECT issue_id AS source_id,project_id FROM issues WHERE ((reporter_kind='worker' AND (state='open' OR (state='acknowledged' AND EXISTS (SELECT 1 FROM issue_updates u WHERE u.issue_id=issues.issue_id AND u.update_kind='remediation_completed')))) OR (reporter_kind='secretary' AND state='remediating' AND EXISTS (SELECT 1 FROM issue_updates u WHERE u.issue_id=issues.issue_id AND u.update_kind='remediation_requested') AND NOT EXISTS (SELECT 1 FROM issue_updates u WHERE u.issue_id=issues.issue_id AND u.update_kind IN ('remediation_linked','remediation_failed','resolved'))) OR (reporter_kind='secretary' AND reporter_workstream_id=? AND state='verifying')){project_filter}", ((str(recipient["workstream_id"]),) + params) if project_id is not None else (str(recipient["workstream_id"]),)), "issue")
         add_rows(store.conn.execute(f"SELECT cp.completion_packet_id AS source_id,ws.project_id FROM completion_packets cp JOIN workstreams ws USING(workstream_id) WHERE cp.sequence=(SELECT MAX(sequence) FROM completion_packets WHERE workstream_id=cp.workstream_id) AND cp.completion_packet_id NOT IN (SELECT completion_packet_id FROM workstream_acceptances){'' if project_id is None else ' AND ws.project_id=?'}", (() if project_id is None else (project_id,))), "completion")
         add_rows(store.conn.execute(f"SELECT integration_id AS source_id,project_id FROM integration_jobs WHERE state='needs_attention'{project_filter}", params), "integration")
     elif recipient["kind"] == "first_mate":
-        add_rows(store.conn.execute("SELECT i.issue_id AS source_id,i.project_id FROM issues i JOIN projects p ON p.project_id=i.project_id WHERE p.active=1 AND p.coordination_mode='fleet' AND i.reporter_kind='secretary' AND i.escalated_from_issue_id IS NOT NULL AND i.state IN ('open','acknowledged')"), "issue")
+        add_rows(store.conn.execute("SELECT i.issue_id AS source_id,i.project_id FROM issues i WHERE i.project_id IN (" + ",".join("?" for _ in first_mate_issue_project_ids(store)) + ") AND i.reporter_kind='secretary' AND i.escalated_from_issue_id IS NOT NULL AND (i.state='open' OR (i.state='acknowledged' AND EXISTS (SELECT 1 FROM issue_updates u WHERE u.issue_id=i.issue_id AND u.update_kind='remediation_completed')))" , first_mate_issue_project_ids(store)), "issue")
     else:
         workstream_id = str(recipient["workstream_id"])
         add_rows(store.conn.execute("SELECT request_id AS source_id,project_id FROM coordination_requests WHERE workstream_id=? AND state='answered'", (workstream_id,)), "coordination")

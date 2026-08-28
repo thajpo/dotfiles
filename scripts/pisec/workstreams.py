@@ -864,6 +864,12 @@ def retire_workstream(store: Any, project_id: str, workstream_id: str, workspace
     row = inspected["workstream"]
     if row["kind"] != "worker":
         raise ConflictError("secretary workstreams cannot be retired through the semantic tool")
+    unresolved = store.conn.execute(
+        "SELECT issue_id FROM issues WHERE reporter_workstream_id=? AND state <> 'resolved' ORDER BY created_at,issue_id LIMIT 1",
+        (workstream_id,),
+    ).fetchone()
+    if unresolved is not None:
+        raise ConflictError("worker is the only authorized verifier for an unresolved issue; resolve it or retain the binding")
     failure_form = any(value is not None for value in (remediation_issue_id, failure_reason, idempotency_key))
     if failure_form and not all(isinstance(value, str) and value for value in (remediation_issue_id, failure_reason, idempotency_key)):
         raise InvalidRequestError("remediation-failure retirement requires all exact fields")

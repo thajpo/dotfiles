@@ -15,6 +15,7 @@ SECRETARY_TOOL_OPERATIONS = [
     ("pisec_list_issues", "issue.list"),
     ("pisec_inspect_issue", "issue.inspect"),
     ("pisec_add_issue_context", "issue.add_context"),
+    ("pisec_escalate_issue", "issue.escalate"),
     ("pisec_verify_issue", "issue.verify"),
     ("pisec_acknowledge_issue", "issue.acknowledge"),
     ("pisec_link_issue_remediation", "issue.link_remediation"),

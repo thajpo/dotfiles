@@ -246,6 +246,13 @@
       "tool": null
     },
     {
+      "operation": "issue.escalate",
+      "purpose": "Create a linked Pisec platform issue for a project worker report.",
+      "role": "secretary",
+      "socket": "secretary",
+      "tool": "pisec_escalate_issue"
+    },
+    {
       "operation": "issue.verify",
       "purpose": "Use the typed issue.verify operation.",
       "role": "secretary",

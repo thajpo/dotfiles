@@ -130,6 +130,7 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
     "pisec_list_issues",
     "pisec_inspect_issue",
     "pisec_add_issue_context",
+    "pisec_escalate_issue",
     "pisec_verify_issue",
     "pisec_acknowledge_issue",
     "pisec_link_issue_remediation",
