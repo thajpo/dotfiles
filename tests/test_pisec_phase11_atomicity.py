@@ -54,6 +54,24 @@ class CrashOnce:
             raise RuntimeError(f"crash at {name}")
 
 
+class HarnessNamedWorkspace(FixtureWorkspace):
+    def observe_workstream(self, *, path: str, agent_name: str):
+        observed = super().observe_workstream(path=path, agent_name=agent_name)
+        if observed is None:
+            return None
+        agent = next((item for item in self.agents.values() if item.surface_id == observed.surface_id), None)
+        return type(observed)(observed.workspace_id, observed.view_id, observed.surface_id, observed.worktree_path, observed.branch_name, agent)
+
+    def start_agent(self, surface_id: str, name: str, agent_kind: str):
+        row = self.store.conn.execute(
+            "SELECT w.kind FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workspace_surface_id=?",
+            (surface_id,),
+        ).fetchone()
+        if row is not None and row["kind"] == "secretary":
+            return super().start_agent(surface_id, name, agent_kind)
+        return super().start_agent(surface_id, "fixture-agent", agent_kind)
+
+
 class Phase11AtomicityTests(unittest.TestCase):
     def test_provisioning_journal_confirms_every_external_step(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,6 +126,49 @@ class Phase11AtomicityTests(unittest.TestCase):
                     ).fetchone()[0],
                     len(EFFECT_STEPS),
                 )
+
+    def test_journal_accepts_adapter_agent_name_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo, default_ref="main")
+                harness = FixtureHarness(root)
+                workspace = HarnessNamedWorkspace(root, store)
+                ensure_secretary(store, project["project_id"], harness, workspace)
+                packet = {
+                    "schemaVersion": 1,
+                    "outcome": "Complete the bounded fixture engineering task.",
+                    "boundaries": ["Change only the approved fixture paths."],
+                    "acceptance": ["The fixture verification passes."],
+                    "openQuestions": [],
+                    "evidence": ["The focused test output."],
+                }
+                prepared = prepare_workstream(
+                    store,
+                    project_id=project["project_id"],
+                    title="Accept adapter agent alias",
+                    purpose="Verify harness agent identity compatibility",
+                    brief="Inspect, implement, verify, and report the bounded engineering task.",
+                    task_packet=packet,
+                    idempotency_key="phase11-agent-alias",
+                    harness=harness,
+                    workspace=workspace,
+                    work_root=root / "worktrees",
+                )
+                applied = authorize_apply_workstream(
+                    store,
+                    scope=prepared["approvalScope"],
+                    harness=harness,
+                    workspace=workspace,
+                )
+                self.assertEqual(applied["operation"]["state"], "succeeded")
+                agent_entry = next(
+                    entry for entry in journal_entries(store, applied["operation"]["operation_id"])
+                    if entry["step"] == "agent_started"
+                )
+                self.assertEqual(agent_entry["identity"]["agentName"], "fixture-agent")
 
     def test_restart_after_every_journal_step_has_one_bound_worker(self):
         for step in EFFECT_STEPS:

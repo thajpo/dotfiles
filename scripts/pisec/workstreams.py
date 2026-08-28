@@ -815,7 +815,6 @@ def _authorize_apply_workstream(
             identity={
                 "workspaceId": str(binding["workspace_id"]),
                 "surfaceId": str(binding["workspace_surface_id"]),
-                "agentName": str(scope["agentName"]),
             },
         )
         if agent_effect["state"] == "compensated":
