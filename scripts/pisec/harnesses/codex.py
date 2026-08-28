@@ -454,6 +454,7 @@ class CodexHarnessAdapter:
                     "hooks = true",
                     "code_mode = true",
                     "code_mode_host = true",
+                    "code_mode_only = true",
                     "[mcp_servers.pisec]",
                     f'command = {json.dumps(str(mcp_path))}',
                     "args = []",
