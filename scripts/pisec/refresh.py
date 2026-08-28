@@ -24,6 +24,7 @@ _RECOVERABLE_STOPPED_REFRESH_ERRORS = frozenset(
         "runtime process identity became ambiguous during refresh",
         "workstream changed before refresh reservation",
         "isolated OMP surface contains a symlink",
+        "runtime binding is already reserved by another refresh",
     }
 )
 
@@ -328,8 +329,13 @@ def _recover_stopped_refresh_attention(
     # the failure happened after that durable write, the applied generation is
     # intentionally still old; the normal refresh path can safely retry once
     # the stopped runtime has been proved above.
-    if artifact_generation == launch_generation and launch_generation != current.get("desired_generation_sha256"):
-        return False
+    if artifact_generation == launch_generation:
+        try:
+            request = json.loads(str(operation["request_json"]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(request, dict) or request.get("desiredGenerationSha256") != launch_generation:
+            return False
     now = utc_now()
     workstream_id = str(current["workstream_id"])
     operation_id = str(operation["operation_id"])

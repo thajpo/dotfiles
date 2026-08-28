@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -399,6 +400,43 @@ class RuntimeRefreshTests(unittest.TestCase):
             self.assertEqual(binding["refresh_pending"], 0)
             self.assertEqual(operation["state"], "applying")
             self.assertEqual(operation["step"], "reserved")
+
+    def test_stopped_refresh_retries_materialized_launch_after_newer_generation(self):
+        with PiStore(self.root / "state") as store:
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            old_generation = "b" * 64
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                idempotency_key=f"runtime.refresh:{self.workstream_id}:{old_generation}",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": old_generation},
+                state="needs_attention",
+                step="attention",
+            )
+            artifacts = json.loads(str(binding["adapter_artifacts_json"]))
+            artifacts["generationSha256"] = old_generation
+            store.conn.execute(
+                "UPDATE operations SET error_code='runtime_refresh_failed',error_message='runtime binding is already reserved by another refresh' WHERE operation_id=?",
+                (operation.operation_id,),
+            )
+            store.conn.execute(
+                "UPDATE runtime_bindings SET adapter_artifacts_json=?,refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-27T00:00:00Z',launch_generation_sha256=?,runtime_instance_id=NULL,report_seq=0,observed_state='error',applied_generation_sha256=? WHERE workstream_id=?",
+                (json.dumps(artifacts, sort_keys=True, separators=(",", ":")), operation.operation_id, old_generation, "a" * 64, self.workstream_id),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='runtime binding is already reserved by another refresh' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+            current = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            recovered = _recover_stopped_refresh_attention(store, current, dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()), runtime_state="stopped")
+
+            self.assertTrue(recovered)
+            self.assertEqual(
+                tuple(store.conn.execute("SELECT desired_generation_sha256,applied_generation_sha256,refresh_pending,refresh_operation_id,launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()),
+                (binding["desired_generation_sha256"], "a" * 64, 0, None, None),
+            )
 
     def test_targeted_runtime_ensure_is_idempotent_and_starts_only_one_binding(self):
         with PiStore(self.root / "state") as store:
