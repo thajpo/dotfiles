@@ -24,6 +24,7 @@ class FakeHerdrState:
         self.large_snapshot = False
         self.ready_reads = 0
         self.ready_after_reads = 0
+        self.long_process_argv = False
 
     def result(self, method, params):
         self.requests.append((method, params))
@@ -55,6 +56,9 @@ class FakeHerdrState:
                 }
             return {"type": "session_snapshot", "snapshot": snapshot}
         if method == "pane.process_info":
+            argv = ["/usr/bin/fence", "--settings", "/tmp/policy", "--", "/usr/bin/omp"]
+            if self.long_process_argv:
+                argv.append("x" * 8192)
             return {
                 "type": "pane_process_info",
                 "process_info": {
@@ -63,7 +67,7 @@ class FakeHerdrState:
                     "foreground_processes": [
                         {
                             "pid": 11,
-                            "argv": ["/usr/bin/fence", "--settings", "/tmp/policy", "--", "/usr/bin/omp"],
+                            "argv": argv,
                         }
                     ],
                 },
@@ -350,6 +354,11 @@ class HerdrTests(unittest.TestCase):
         ):
             transient = self.adapter.observe_runtime("w1:p1", "/tmp/policy")
         self.assertEqual(transient.state, "unknown")
+
+    def test_runtime_liveness_accepts_long_process_argv(self):
+        self.state.long_process_argv = True
+        live = self.adapter.observe_runtime("w1:p1", "/tmp/policy")
+        self.assertEqual(live.state, "live")
 
     def test_reconcile_counts_updates_and_marks_missing_runtime(self):
         class Store:

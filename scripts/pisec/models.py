@@ -201,7 +201,7 @@ def canonical_json(value: Any, *, max_bytes: int = MAX_JSON_BYTES, max_text: int
     return text
 
 
-def parse_json_strict(value: str | bytes, *, max_bytes: int = MAX_JSON_BYTES, max_items: int = MAX_JSON_ITEMS) -> Any:
+def parse_json_strict(value: str | bytes, *, max_bytes: int = MAX_JSON_BYTES, max_items: int = MAX_JSON_ITEMS, max_text: int = MAX_TEXT) -> Any:
     raw = value.encode("utf-8") if isinstance(value, str) else value
     if len(raw) > max_bytes:
         raise InvalidRequestError("JSON value is too large")
@@ -220,7 +220,7 @@ def parse_json_strict(value: str | bytes, *, max_bytes: int = MAX_JSON_BYTES, ma
         raise InvalidRequestError("request is not UTF-8") from error
     except json.JSONDecodeError as error:
         raise InvalidRequestError("malformed JSON") from error
-    _check_json(parsed, max_items=max_items)
+    _check_json(parsed, max_items=max_items, max_text=max_text)
     return parsed
 
 
