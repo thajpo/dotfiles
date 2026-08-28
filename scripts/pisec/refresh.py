@@ -234,7 +234,8 @@ def _stage_profile(store: Any, harness: HarnessAdapter, binding: Mapping[str, An
 def _reset_stale_refresh_for_new_session(store: Any, binding: Mapping[str, Any]) -> None:
     if not int(binding.get("refresh_pending", 0)):
         return
-    if binding.get("launch_generation_sha256") != binding.get("desired_generation_sha256"):
+    launch_generation = binding.get("launch_generation_sha256")
+    if not isinstance(launch_generation, str) or not launch_generation:
         raise NeedsAttentionError("session reset requires a fully materialized current runtime")
     try:
         artifacts = json.loads(str(binding["adapter_artifacts_json"]))
@@ -244,7 +245,14 @@ def _reset_stale_refresh_for_new_session(store: Any, binding: Mapping[str, Any])
         raise NeedsAttentionError("session reset requires a matching runtime artifact")
     operation_id = binding.get("refresh_operation_id")
     operation = store.conn.execute("SELECT * FROM operations WHERE operation_id=? AND kind='runtime.refresh'", (operation_id,)).fetchone()
-    if operation is None or operation["state"] != "needs_attention" or operation["step"] != "attention":
+    recoverable_attention = bool(operation is not None and operation["state"] == "needs_attention" and operation["step"] == "attention")
+    recoverable_reset_residue = bool(
+        operation is not None
+        and operation["state"] == "failed"
+        and operation["step"] == "superseded"
+        and operation["error_code"] == "runtime_session_reset"
+    )
+    if operation is None or not (recoverable_attention or recoverable_reset_residue):
         raise NeedsAttentionError("session reset cannot interrupt an active refresh")
     now = utc_now()
     with store.transaction():
@@ -256,23 +264,24 @@ def _reset_stale_refresh_for_new_session(store: Any, binding: Mapping[str, Any])
             "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=? AND provisioning_state='needs_attention'",
             (now, str(binding["workstream_id"])),
         )
-        update_operation_in_transaction(
-            store.conn,
-            str(operation_id),
-            state="failed",
-            step="superseded",
-            expected_states=("needs_attention",),
-            error_code="runtime_session_reset",
-            error_message="refresh reservation was compensated by an explicit stopped-worker session reset",
-        )
-        append_event_in_transaction(
-            store.conn,
-            kind="runtime.refresh_compensated",
-            project_id=str(operation["project_id"]),
-            workstream_id=str(binding["workstream_id"]),
-            operation_id=str(operation_id),
-            payload={"workstreamId": str(binding["workstream_id"]), "reason": "explicit stopped-worker session reset"},
-        )
+        if recoverable_attention:
+            update_operation_in_transaction(
+                store.conn,
+                str(operation_id),
+                state="failed",
+                step="superseded",
+                expected_states=("needs_attention",),
+                error_code="runtime_session_reset",
+                error_message="refresh reservation was compensated by an explicit stopped-worker session reset",
+            )
+            append_event_in_transaction(
+                store.conn,
+                kind="runtime.refresh_compensated",
+                project_id=str(operation["project_id"]),
+                workstream_id=str(binding["workstream_id"]),
+                operation_id=str(operation_id),
+                payload={"workstreamId": str(binding["workstream_id"]), "reason": "explicit stopped-worker session reset"},
+            )
 
 
 def _materialize_and_launch(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, binding: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, desired: str, *, staged: Any | None = None) -> dict[str, Any]:
@@ -441,6 +450,12 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
                 # Defer the guard until the durable binding row is loaded so a
                 # stopped pane can prove that the old profile is still active.
                 pass
+            elif operation["state"] == "failed" and operation["step"] == "superseded" and operation["error_code"] == "runtime_session_reset":
+                store.conn.execute(
+                    "UPDATE operations SET state='applying',step='reserved',result_json=NULL,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?",
+                    (now, operation_id),
+                )
+                operation = store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
         current = store.conn.execute(
             "SELECT r.*,w.desired_state,w.provisioning_state,w.attention_reason,p.active AS project_active,p.lifecycle_attention_reason "
             "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) JOIN projects p USING(project_id) WHERE r.workstream_id=?",

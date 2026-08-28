@@ -572,6 +572,42 @@ class RuntimeRefreshTests(unittest.TestCase):
             self.assertEqual(tuple(current), (0, None, None, "stopped"))
             self.assertEqual(tuple(store.conn.execute("SELECT state,step,error_code FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()), ("failed", "superseded", "runtime_session_reset"))
 
+    def test_session_reset_compensates_reset_residue_after_generation_changes(self):
+        with PiStore(self.root / "state") as store:
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            old_generation = "a" * 64
+            desired = str(binding["desired_generation_sha256"])
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                idempotency_key=f"runtime.refresh:{self.workstream_id}:{old_generation}:reset-residue",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": old_generation},
+                state="failed",
+                step="superseded",
+            )
+            store.conn.execute(
+                "UPDATE operations SET error_code='runtime_session_reset',error_message='refresh reservation was compensated by an explicit stopped-worker session reset' WHERE operation_id=?",
+                (operation.operation_id,),
+            )
+            artifacts = json.loads(str(binding["adapter_artifacts_json"]))
+            artifacts["generationSha256"] = old_generation
+            store.conn.execute(
+                "UPDATE runtime_bindings SET adapter_artifacts_json=?,refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-27T00:00:00Z',launch_generation_sha256=?,desired_generation_sha256=?,observed_state='error' WHERE workstream_id=?",
+                (json.dumps(artifacts, sort_keys=True, separators=(",", ":")), operation.operation_id, old_generation, desired, self.workstream_id),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET kind='worker',execution_profile='worker-default',provisioning_state='bound',attention_reason=NULL WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            binding.update(kind="worker", harness_id="codex", project_id=self.project_id)
+            _reset_stale_refresh_for_new_session(store, binding)
+            current = store.conn.execute("SELECT refresh_pending,refresh_operation_id,launch_generation_sha256,observed_state FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
+            self.assertEqual(tuple(current), (0, None, None, "stopped"))
+            self.assertEqual(tuple(store.conn.execute("SELECT state,step,error_code FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()), ("failed", "superseded", "runtime_session_reset"))
+
     def test_binding_scope_injects_project_data_dirs(self):
         data = self.repo / "data"
         data.mkdir()
