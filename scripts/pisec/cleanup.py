@@ -14,6 +14,7 @@ from .models import ConflictError, NeedsAttentionError, NotFoundError, canonical
 from .projects import get_project, resolve_project
 from .workstreams import inspect_workstream
 from .worker_repo import validate_worker_repository
+from .control_plane import control_plane_mutation
 
 
 def _safe_owned_tree(path: Path) -> None:
@@ -55,6 +56,7 @@ def _validate_retained_session_root(binding: Mapping[str, Any], harness: Harness
     harness.validate_native_session(binding, binding.get("native_session_kind"), binding.get("native_session_value"))
     return session_root
 
+@control_plane_mutation
 def cleanup_workstream(store: Any, payload: Mapping[str, Any], workspace: WorkspaceAdapter, harness: HarnessAdapter) -> dict[str, Any]:
     required = {"workstreamId", "confirm"}
     optional = {"project", "forceDirty"}

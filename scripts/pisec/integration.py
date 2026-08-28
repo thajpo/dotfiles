@@ -14,6 +14,7 @@ from .projects import get_project
 from .secretary_git import _oid, _primary_state, _repository, _run_git
 from .worker_repo import project_git_lock, validate_worker_repository
 from .workstreams import complete_workstream, inspect_workstream, retire_workstream
+from .control_plane import control_plane_mutation
 
 
 _HASH_FIELDS = frozenset({"completionPacketSha256", "taskPacketSha256", "candidatePatchSha256", "scopeSha256"})
@@ -278,6 +279,7 @@ def _integration_row(store: Any, acceptance_id: str) -> dict[str, Any] | None:
     return None if row is None else dict(row)
 
 
+@control_plane_mutation
 def apply_workstream_acceptance(store: Any, project_id: str, scope_value: Mapping[str, Any]) -> dict[str, Any]:
     scope = _validate_scope(scope_value)
     if scope["projectId"] != project_id:
@@ -596,6 +598,7 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
         return {"integrationId": integration_id, "state": "needs_attention"}
 
 
+@control_plane_mutation
 def reconcile_integrations(store: Any, workspace: Any | None = None, harness: Any | None = None, *, limit: int = 32, harness_resolver: Any | None = None) -> dict[str, Any]:
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 256:
         raise InvalidRequestError("integration limit is invalid")

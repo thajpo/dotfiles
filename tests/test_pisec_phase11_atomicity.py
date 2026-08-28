@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+from multiprocessing import get_context
+import json
+from pathlib import Path
+import queue
+import tempfile
+import time
+import unittest
+
+from scripts.pisec.control_plane import control_plane_lock
+from scripts.pisec.effects import EFFECT_STEPS, effect_state, journal_compensate, journal_confirm, journal_entries, journal_intent
+from scripts.pisec.models import NeedsAttentionError
+from scripts.pisec.pi_store import PiStore
+from scripts.pisec.projects import register_project
+from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
+from scripts.pisec.secretary import ensure_secretary
+from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
+
+
+def _hold_lock(root: str, label: str, ready, release, result) -> None:
+    with control_plane_lock(Path(root), timeout=5):
+        result.put((label, "entered"))
+        ready.set()
+        release.wait(5)
+        result.put((label, "released"))
+
+
+def _take_lock(root: str, label: str, result) -> None:
+    started = time.monotonic()
+    def announce_wait() -> None:
+        result.put((label, "waiting", "Pisec update is waiting for one worker creation to finish."))
+
+    with control_plane_lock(Path(root), timeout=5, on_wait=announce_wait):
+        result.put((label, "entered", time.monotonic() - started))
+
+
+def _crash_with_lock(root: str, ready) -> None:
+    with control_plane_lock(Path(root), timeout=5):
+        ready.set()
+        time.sleep(0.1)
+        import os
+        os._exit(17)
+
+
+class Phase11AtomicityTests(unittest.TestCase):
+    def test_provisioning_journal_confirms_every_external_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo, default_ref="main")
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                ensure_secretary(store, project["project_id"], harness, workspace)
+                packet = {
+                    "schemaVersion": 1,
+                    "outcome": "Complete the bounded fixture engineering task.",
+                    "boundaries": ["Change only the approved fixture paths."],
+                    "acceptance": ["The fixture verification passes."],
+                    "openQuestions": [],
+                    "evidence": ["The focused test output."],
+                }
+                prepared = prepare_workstream(
+                    store,
+                    project_id=project["project_id"],
+                    title="Complete fixture task",
+                    purpose="Exercise durable provisioning recovery",
+                    brief="Inspect, implement, verify, and report the bounded engineering task.",
+                    task_packet=packet,
+                    idempotency_key="phase11-worker",
+                    harness=harness,
+                    workspace=workspace,
+                    work_root=root / "worktrees",
+                )
+                applied = authorize_apply_workstream(store, scope=prepared["approvalScope"], harness=harness, workspace=workspace)
+                entries = journal_entries(store, applied["operation"]["operation_id"])
+                self.assertEqual([entry["step"] for entry in entries], list(EFFECT_STEPS))
+                self.assertTrue(all(entry["state"] == "confirmed" for entry in entries))
+                confirmed_steps = [
+                    json.loads(row["payload_json"])["step"]
+                    for row in store.conn.execute(
+                        "SELECT payload_json FROM events WHERE operation_id=? AND kind='provisioning.effect.confirmed' ORDER BY sequence",
+                        (applied["operation"]["operation_id"],),
+                    )
+                ]
+                self.assertEqual(confirmed_steps, list(EFFECT_STEPS))
+                binding_entry = next(entry for entry in entries if entry["step"] == "runtime_binding")
+                self.assertTrue(binding_entry["identity"].get("runtimeInstanceId"))
+                self.assertEqual(len({entry["identitySha256"] for entry in entries}), len(EFFECT_STEPS))
+                self.assertEqual(
+                    store.conn.execute(
+                        "SELECT COUNT(*) FROM events WHERE operation_id=? AND kind='provisioning.effect.confirmed'",
+                        (applied["operation"]["operation_id"],),
+                    ).fetchone()[0],
+                    len(EFFECT_STEPS),
+                )
+
+    def test_journal_compensation_is_idempotent_and_identity_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            make_repo(repo)
+            with PiStore(root / "state") as store:
+                project = register_project(store, repo)
+                harness = FixtureHarness(root)
+                workspace = FixtureWorkspace(root, store)
+                ensure_secretary(store, project["project_id"], harness, workspace)
+                packet = {
+                    "schemaVersion": 1,
+                    "outcome": "Complete the bounded fixture engineering task.",
+                    "boundaries": ["Change only the approved fixture paths."],
+                    "acceptance": ["The fixture verification passes."],
+                    "openQuestions": [],
+                    "evidence": ["The focused test output."],
+                }
+                prepared = prepare_workstream(
+                    store,
+                    project_id=project["project_id"],
+                    title="Prepare compensation fixture",
+                    purpose="Exercise durable journal compensation",
+                    brief="Prepare the bounded fixture and verify the journal behavior.",
+                    task_packet=packet,
+                    idempotency_key="phase11-compensation",
+                    harness=harness,
+                    workspace=workspace,
+                    work_root=root / "worktrees",
+                )
+                operation_id = prepared["approvalScope"]["operationId"]
+                workstream_id = prepared["approvalScope"]["workstreamId"]
+                identity = {"path": str(root / "owned"), "branch": "pisec/ws_test/work", "baseCommitOid": "0" * 40}
+                journal_intent(store, operation_id=operation_id, project_id=project["project_id"], workstream_id=workstream_id, step="worker_repository", identity=identity)
+                journal_confirm(store, operation_id=operation_id, project_id=project["project_id"], workstream_id=workstream_id, step="worker_repository", identity={**identity, "observed": True})
+                with self.assertRaises(NeedsAttentionError):
+                    journal_compensate(store, operation_id=operation_id, project_id=project["project_id"], workstream_id=workstream_id, step="worker_repository", identity={**identity, "path": str(root / "not-owned")}, reason="wrong identity")
+                first = journal_compensate(store, operation_id=operation_id, project_id=project["project_id"], workstream_id=workstream_id, step="worker_repository", identity=identity, reason="fixture rollback")
+                second = journal_compensate(store, operation_id=operation_id, project_id=project["project_id"], workstream_id=workstream_id, step="worker_repository", identity=identity, reason="fixture rollback")
+                self.assertEqual(first["state"], "compensated")
+                self.assertEqual(second["state"], "compensated")
+                self.assertEqual(effect_state(store, operation_id, "worker_repository")["state"], "compensated")
+
+    def test_update_waits_for_provisioning_and_crashed_owner_releases_lock(self):
+        context = get_context("fork")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            result = context.Queue()
+            ready = context.Event()
+            release = context.Event()
+            creator = context.Process(target=_hold_lock, args=(str(root), "create", ready, release, result))
+            creator.start()
+            self.assertTrue(ready.wait(5))
+            updater = context.Process(target=_take_lock, args=(str(root), "update", result))
+            updater.start()
+            time.sleep(0.2)
+            self.assertTrue(updater.is_alive(), "update must wait for provisioning")
+            release.set()
+            creator.join(5)
+            updater.join(5)
+            self.assertEqual(creator.exitcode, 0)
+            self.assertEqual(updater.exitcode, 0)
+            messages = []
+            while True:
+                try:
+                    messages.append(result.get_nowait())
+                except queue.Empty:
+                    break
+            self.assertIn(("create", "entered"), messages)
+            self.assertIn(("create", "released"), messages)
+            self.assertIn(("update", "waiting", "Pisec update is waiting for one worker creation to finish."), messages)
+            update_entry = next(item for item in messages if item[0] == "update" and item[1] == "entered")
+            self.assertGreaterEqual(update_entry[2], 0.15)
+
+            crashed_ready = context.Event()
+            crashed = context.Process(target=_crash_with_lock, args=(str(root), crashed_ready))
+            crashed.start()
+            self.assertTrue(crashed_ready.wait(5))
+            crashed.join(5)
+            self.assertNotEqual(crashed.exitcode, 0)
+            recovered = context.Process(target=_take_lock, args=(str(root), "recovered", result))
+            recovered.start()
+            recovered.join(5)
+            self.assertEqual(recovered.exitcode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

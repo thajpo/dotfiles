@@ -49,6 +49,7 @@ FLEET_OPERATIONS = SOCKET_OPERATIONS["fleet"]
 RUNTIME_OPERATIONS = SOCKET_OPERATIONS["runtime"]
 from .operation_contracts import operation_manifest
 from .runtime_surface import capture_runtime_surface
+from .control_plane import control_plane_lock
 WORKSPACE_RECONCILE_INTERVAL_SECONDS = 5.0
 WORKSPACE_STARTUP_GRACE_SECONDS = 2.0
 RUNTIME_RESTART_BACKOFF_SECONDS = 30.0
@@ -633,7 +634,8 @@ class BrokerDispatcher:
         raise InvalidRequestError("unsupported runtime operation")
     def _reconcile(self, store: PiStore, payload: Mapping[str, Any]) -> dict[str, Any]:
         with self._reconcile_lock:
-            return self._reconcile_locked(store, payload)
+            with control_plane_lock(store.state_root):
+                return self._reconcile_locked(store, payload)
 
     def _recover_completed_refresh_operations(self, store: PiStore) -> list[dict[str, Any]]:
         recovered: list[dict[str, Any]] = []

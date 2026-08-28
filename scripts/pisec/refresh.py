@@ -16,6 +16,7 @@ from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent, usable_runtim
 from .runtime_surface import capture_runtime_surface, verify_surface
 from .events import append_event_in_transaction
 from .operations import update_operation_in_transaction
+from .control_plane import control_plane_mutation
 
 
 _RECOVERABLE_STOPPED_REFRESH_ERRORS = frozenset(
@@ -590,6 +591,7 @@ def _refresh_runtimes_unlocked(store: Any, harness: HarnessAdapter, workspace: W
     return result
 
 
+@control_plane_mutation
 def refresh_runtimes(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, wait_seconds: float = 300.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None, project_ids: Sequence[str] = (), harness_ids: Sequence[str] = (), workstream_ids: Sequence[str] = ()) -> dict[str, Any]:
     selected = _active_bindings(store, project_ids=project_ids, harness_ids=harness_ids, workstream_ids=workstream_ids)
     selected_projects = sorted({str(row["project_id"]) for row in selected})
@@ -617,6 +619,7 @@ def refresh_bindings(store: Any, harness: HarnessAdapter, workspace: WorkspaceAd
     return refresh_runtimes(store, harness, workspace, wait_seconds=wait_seconds, harness_resolver=harness_resolver, surface_resolver=surface_resolver, workstream_ids=workstream_ids)
 
 
+@control_plane_mutation
 def ensure_runtime(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, *, workstream_id: str, wait_seconds: float = 30.0, harness_resolver: Any | None = None, surface_resolver: Any | None = None) -> dict[str, Any]:
     if not isinstance(wait_seconds, (int, float)) or isinstance(wait_seconds, bool) or not 0 <= wait_seconds <= 3600:
         raise PisecError("ensure wait must be between 0 and 3600 seconds")

@@ -12,6 +12,7 @@ from .fence import resolve_data_dirs
 from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, PisecError, bounded_text, canonical_json, new_id, utc_now, validate_git_oid, validate_id, validate_remote_url
 from .research import research_counts
 from .git_runner import git_text
+from .control_plane import control_plane_mutation
 
 COORDINATION_MODES = frozenset({"fleet", "project"})
 FLEET_COORDINATION_MODE = "fleet"
@@ -213,6 +214,7 @@ def _move_secretary_surface(
     return {"workspace_id": observed.workspace_id, "workspace_view_id": observed.view_id, "workspace_surface_id": observed.surface_id}
 
 
+@control_plane_mutation
 def change_project_mode(store: Any, selector: str, coordination_mode: str, *, workspace: Any, harness: Any | None = None) -> dict[str, Any]:
     if coordination_mode not in COORDINATION_MODES:
         raise InvalidRequestError("coordination_mode must be project or fleet")
@@ -274,6 +276,7 @@ def change_project_mode(store: Any, selector: str, coordination_mode: str, *, wo
     return get_project(store, project["project_id"])
 
 
+@control_plane_mutation
 def register_project(store: Any, path: str | Path, *, display_name: str | None = None, default_ref: str | None = None, data_dirs: Any = None, external_domains: Any = None, coordination_mode: str | None = None, workspace: Any = None, harness: Any | None = None) -> dict[str, Any]:
     if coordination_mode is not None and coordination_mode not in COORDINATION_MODES:
         raise InvalidRequestError("coordination_mode must be project or fleet")
@@ -405,6 +408,7 @@ def assert_project_writable(store: Any, project_id: str) -> None:
     if operation is not None and operation["state"] in {"planned", "applying", "needs_attention"}:
         raise ConflictError("project deactivation is in progress")
 
+@control_plane_mutation
 def deactivate_project(store: Any, selector: str, workspace: Any, harness: Any) -> dict[str, Any]:
     from .cleanup import _validate_retained_session_root
 

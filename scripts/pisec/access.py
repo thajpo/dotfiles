@@ -17,6 +17,7 @@ from .runtime_surface import capture_runtime_surface, verify_surface
 from .platform import runtime_root
 from .runtime import start_bound_agent, usable_runtime_binding
 from .worker_repo import project_permissions_lock
+from .control_plane import control_plane_mutation
 
 _VIRTUAL_ROOTS = tuple(Path(value) for value in ("/proc", "/sys", "/dev", "/run"))
 _CREDENTIAL_ROOTS = tuple(Path.home() / value for value in (".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".config/gh"))
@@ -519,6 +520,7 @@ def _authorize_apply_project_permissions_locked(store: Any, *, approval_scope: M
                 selected_harness.discard_staged_profile(staged)
 
 
+@control_plane_mutation
 def authorize_apply_project_permissions(store: Any, *, approval_scope: Mapping[str, Any], harness_resolver: Any, surface_resolver: Any, workspace: Any, actor: str) -> dict[str, Any]:
     project_id = str(approval_scope.get("projectId"))
     with project_permissions_lock(store.state_root, project_id):

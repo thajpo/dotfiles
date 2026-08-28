@@ -655,6 +655,44 @@ def _update_lock(install_root: Path):
         yield
 
 
+@contextlib.contextmanager
+def _control_plane_lock(state_root: Path, *, timeout: float = 30.0, on_wait: Callable[[], None] | None = None):
+    """Use the same host-level lock as broker control-plane mutations."""
+    _owner_dir(state_root, create=True)
+    locks = state_root / "locks"
+    _owner_dir(locks, create=True)
+    lock_path = locks / "control-plane.lock"
+    try:
+        info = lock_path.lstat()
+    except FileNotFoundError:
+        info = None
+    if info is not None and (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600):
+        raise RuntimeError("Pisec control-plane lock is unsafe")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        deadline = time.monotonic() + max(0.0, timeout)
+        announced_wait = False
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                if on_wait is not None and not announced_wait:
+                    on_wait()
+                    announced_wait = True
+                if time.monotonic() >= deadline:
+                    raise LockedError("Pisec control-plane lock is busy") from error
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
 def _failure(code: int, status_path: Path, status: dict, error: Exception, *, switched: bool = False, current: dict | None = None, candidate: dict | None = None, stable: dict | None = None, marker: dict | None = None, refresh: object = None) -> tuple[int, dict]:
     status.update(_status(state="needs_attention" if switched else "failed", step=str(status.get("currentStep", "unknown")), current=current, candidate=candidate, stable=stable, marker=marker, error=str(error)[:2048], refresh=refresh))
     _json_write(status_path, status)
@@ -674,7 +712,13 @@ def update(repo: Path, ref: str, wait_seconds: float, state_root: Path, install_
     stable: dict | None = None
     marker: dict | None = None
     try:
-        with _update_lock(install_root):
+        def announce_control_plane_wait() -> None:
+            message = "Pisec update is waiting for one worker creation to finish."
+            status.update(currentStep="lock", message=message)
+            _json_write(status_path, status)
+            print(message, file=sys.stderr, flush=True)
+
+        with _control_plane_lock(state_root, on_wait=announce_control_plane_wait), _update_lock(install_root):
             if reject_dirty:
                 _assert_clean(repo)
             commit = _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
@@ -794,11 +838,11 @@ def _atomic_install_stable(install_root: Path, source: Path, fields: dict) -> di
     return manifest
 
 
-def install_updater_only(repo: Path, ref: str, install_root: Path) -> tuple[int, dict]:
+def install_updater_only(repo: Path, ref: str, install_root: Path, state_root: Path | None = None) -> tuple[int, dict]:
     _ensure_install_root(install_root)
     status_path = install_root / "stable-updater.json"
     try:
-        with _update_lock(install_root):
+        with _control_plane_lock(state_root or _paths_from_environment()[0]), _update_lock(install_root):
             _assert_clean(repo)
             _stable_updater(install_root)
             with tempfile.TemporaryDirectory(prefix="pisec-updater-") as tmp:
@@ -898,7 +942,7 @@ def archive_reset_state(repo: Path, ref: str, wait_seconds: float, state_root: P
     switched = False
     archive: Path | None = None
     try:
-        with _update_lock(install_root):
+        with _control_plane_lock(state_root), _update_lock(install_root):
             _assert_clean(repo)
             if not _broker_quiescent():
                 raise RuntimeError("Pisec broker is not quiescent; stop it before archive/reset")
@@ -964,7 +1008,7 @@ def recover_previous(state_root: Path, install_root: Path, wait_seconds: float) 
     _json_write(status_path, status)
     switched = False
     try:
-        with _update_lock(install_root):
+        with _control_plane_lock(state_root), _update_lock(install_root):
             current = _current_target(install_root)
             current_identity = None if current is None else _deployment_identity(current)
             marker = _marker(install_root, current=current)
@@ -1026,7 +1070,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.install_updater_only:
         if args.repo is None or args.ref is None:
             parser.error("--install-updater-only requires --repo and --ref")
-        code, result = install_updater_only(repo, args.ref, install_root)
+        code, result = install_updater_only(repo, args.ref, install_root, state_root)
     elif args.archive_reset_state:
         if args.repo is None or args.ref is None:
             parser.error("--archive-reset-state requires --repo and --ref")

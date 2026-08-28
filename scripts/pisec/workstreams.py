@@ -23,6 +23,8 @@ from .runtime_surface import capture_runtime_surface, materialize_current_surfac
 from .runtime import start_bound_agent, usable_runtime_binding
 from .source_import import inspect_import_source, materialize_import
 from .worker_repo import create_worker_repository, project_git_lock, project_permissions_lock, project_target_state, validate_worker_repository
+from .control_plane import control_plane_mutation
+from .effects import journal_confirm, journal_confirm_in_transaction, journal_intent
 APPLY_LOCK = threading.RLock()
 CHECKPOINTS = (
     "authorized",
@@ -531,8 +533,37 @@ def _authorize_apply_workstream(
 
     observation = observe_worker()
     if _rank(operation["step"]) < _rank("worker_repo_created"):
+        repository_identity = {
+            "path": str(Path(str(scope["worktreePath"])).resolve(strict=False)),
+            "branch": str(scope["branchName"]),
+            "baseCommitOid": str(scope["baseCommitOid"]),
+        }
+        repository_effect = journal_intent(
+            store,
+            operation_id=operation_id,
+            project_id=str(scope["projectId"]),
+            workstream_id=workstream_id,
+            step="worker_repository",
+            identity=repository_identity,
+        )
+        if repository_effect["state"] == "compensated":
+            raise NeedsAttentionError("worker repository effect was already compensated")
         try:
             _ensure_worker_repository(store, project, scope)
+            validate_worker_repository(
+                Path(str(scope["worktreePath"])),
+                branch_name=str(scope["branchName"]),
+                base_oid=str(scope["baseCommitOid"]),
+                target_branch=str(scope["targetBranchRef"]).removeprefix("refs/heads/"),
+            )
+            journal_confirm(
+                store,
+                operation_id=operation_id,
+                project_id=str(scope["projectId"]),
+                workstream_id=workstream_id,
+                step="worker_repository",
+                identity={**repository_identity, "observed": True},
+            )
         except Exception as error:
             _mark_attention(store, operation_id, workstream_id, f"worker repository could not be prepared: {error}")
             raise NeedsAttentionError("worker repository could not be prepared") from error
@@ -555,6 +586,21 @@ def _authorize_apply_workstream(
             _checkpoint(store, operation_id, "worker_repo_verified")
         _hit(failpoint, "after_worker_repo_verification", scope)
         operation = _operation(store, operation_id)
+    tab_identity = {
+        "workspaceId": coordinator_workspace_id,
+        "worktreePath": str(Path(str(scope["worktreePath"])).resolve(strict=False)),
+        "label": tab_label,
+    }
+    tab_effect = journal_intent(
+        store,
+        operation_id=operation_id,
+        project_id=str(scope["projectId"]),
+        workstream_id=workstream_id,
+        step="herdr_tab",
+        identity=tab_identity,
+    )
+    if tab_effect["state"] == "compensated":
+        raise NeedsAttentionError("Herdr tab effect was already compensated")
     if _rank(operation["step"]) < _rank("workspace_tab_observed_or_created"):
         if observation is None:
             try:
@@ -602,11 +648,134 @@ def _authorize_apply_workstream(
     if not observation.view_id or not observation.surface_id:
         _mark_attention(store, operation_id, workstream_id, "worker tab observation is incomplete")
         raise NeedsAttentionError("worker tab observation is incomplete")
+    journal_confirm(
+        store,
+        operation_id=operation_id,
+        project_id=str(scope["projectId"]),
+        workstream_id=workstream_id,
+        step="herdr_tab",
+        identity={
+            **tab_identity,
+            "viewId": observation.view_id,
+            "surfaceId": observation.surface_id,
+        },
+    )
+    surface_identity = {
+        "harnessId": harness.manifest.adapter_id,
+        "surfaceGenerationSha256": surface.content_sha256,
+        "surfaceId": "surface_" + surface.content_sha256[:32],
+        "surfaceRoot": surface.root_path,
+    }
+    surface_effect = journal_intent(
+        store,
+        operation_id=operation_id,
+        project_id=str(scope["projectId"]),
+        workstream_id=workstream_id,
+        step="runtime_surface",
+        identity=surface_identity,
+    )
+    if surface_effect["state"] == "compensated":
+        raise NeedsAttentionError("runtime surface effect was already compensated")
+    journal_confirm(
+        store,
+        operation_id=operation_id,
+        project_id=str(scope["projectId"]),
+        workstream_id=workstream_id,
+        step="runtime_surface",
+        identity=surface_identity,
+    )
 
     if _rank(operation["step"]) < _rank("profile_materialized"):
         scope, surface = _ensure_surface_snapshot(store, operation, scope, harness)
-        artifacts, _surface, materialized_scope = materialize_current_surface(store, harness, scope, surface=surface)
+        desired_generation = harness.desired_generation(
+            {
+                **scope,
+                "runtimeSurfaceSha256": surface.content_sha256,
+                "runtimeSurfaceRoot": surface.root_path,
+                "runtimeSurfaceId": "surface_" + surface.content_sha256[:32],
+            },
+            surface,
+        )
+        staging_root = str((Path(store.state_root) / "profile-staging" / operation_id).resolve(strict=False))
+        staged_effect = journal_intent(
+            store,
+            operation_id=operation_id,
+            project_id=str(scope["projectId"]),
+            workstream_id=workstream_id,
+            step="runtime_profile_staged",
+            identity={
+                "harnessId": harness.manifest.adapter_id,
+                "surfaceGenerationSha256": surface.content_sha256,
+                "generationSha256": desired_generation,
+                "stagingRoot": staging_root,
+            },
+        )
+        activated_effect = journal_intent(
+            store,
+            operation_id=operation_id,
+            project_id=str(scope["projectId"]),
+            workstream_id=workstream_id,
+            step="runtime_profile_activated",
+            identity={
+                "harnessId": harness.manifest.adapter_id,
+                "surfaceGenerationSha256": surface.content_sha256,
+                "generationSha256": desired_generation,
+            },
+        )
+        if staged_effect["state"] == "compensated" or activated_effect["state"] == "compensated":
+            raise NeedsAttentionError("runtime profile effect was already compensated")
+        artifacts, _surface, materialized_scope = materialize_current_surface(
+            store,
+            harness,
+            {**scope, "stagingRoot": staging_root},
+            surface=surface,
+        )
         artifact_json = artifact_document(harness.manifest, artifacts)
+        journal_confirm(
+            store,
+            operation_id=operation_id,
+            project_id=str(scope["projectId"]),
+            workstream_id=workstream_id,
+            step="runtime_profile_staged",
+            identity={
+                "harnessId": harness.manifest.adapter_id,
+                "surfaceGenerationSha256": surface.content_sha256,
+                "generationSha256": desired_generation,
+                "stagingRoot": staging_root,
+            },
+        )
+        journal_confirm(
+            store,
+            operation_id=operation_id,
+            project_id=str(scope["projectId"]),
+            workstream_id=workstream_id,
+            step="runtime_profile_activated",
+            identity={
+                "harnessId": harness.manifest.adapter_id,
+                "surfaceGenerationSha256": surface.content_sha256,
+                "generationSha256": artifacts.generation_sha256,
+                "harnessHome": artifacts.harness_home,
+                "policyPath": artifacts.policy_path,
+                "policySha256": artifacts.policy_sha256,
+            },
+        )
+        binding_identity = {
+            "workstreamId": workstream_id,
+            "workspaceId": observation.workspace_id,
+            "viewId": observation.view_id,
+            "surfaceId": observation.surface_id,
+            "generationSha256": artifacts.generation_sha256,
+        }
+        binding_effect = journal_intent(
+            store,
+            operation_id=operation_id,
+            project_id=str(scope["projectId"]),
+            workstream_id=workstream_id,
+            step="runtime_binding",
+            identity=binding_identity,
+        )
+        if binding_effect["state"] == "compensated":
+            raise NeedsAttentionError("runtime binding effect was already compensated")
         now = utc_now()
         with store.transaction():
             store.conn.execute(
@@ -632,6 +801,20 @@ def _authorize_apply_workstream(
         raise NeedsAttentionError("runtime binding is missing")
     binding = dict(binding_row)
     if _rank(operation["step"]) < _rank("agent_started"):
+        agent_effect = journal_intent(
+            store,
+            operation_id=operation_id,
+            project_id=str(scope["projectId"]),
+            workstream_id=workstream_id,
+            step="agent_started",
+            identity={
+                "workspaceId": str(binding["workspace_id"]),
+                "surfaceId": str(binding["workspace_surface_id"]),
+                "agentName": str(scope["agentName"]),
+            },
+        )
+        if agent_effect["state"] == "compensated":
+            raise NeedsAttentionError("agent-start effect was already compensated")
         start_error: Exception | None = None
         try:
             start_bound_agent(
@@ -646,12 +829,47 @@ def _authorize_apply_workstream(
         except Exception as error:
             start_error = error
         try:
-            _wait_for_agent(store, workspace, workstream_id=workstream_id, path=scope["worktreePath"], agent_name=scope["agentName"], workspace_id=binding["workspace_id"], view_id=binding["workspace_view_id"], surface_id=binding["workspace_surface_id"], allow_unidentified_agent=bool(getattr(harness, "allow_unidentified_agent", False)))
+            started_observation = _wait_for_agent(store, workspace, workstream_id=workstream_id, path=scope["worktreePath"], agent_name=scope["agentName"], workspace_id=binding["workspace_id"], view_id=binding["workspace_view_id"], surface_id=binding["workspace_surface_id"], allow_unidentified_agent=bool(getattr(harness, "allow_unidentified_agent", False)))
         except NeedsAttentionError as wait_error:
             _mark_attention(store, operation_id, workstream_id, str(wait_error))
             if start_error is not None:
                 raise wait_error from start_error
             raise
+        binding_row = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone()
+        if binding_row is None or not binding_row["runtime_instance_id"]:
+            _mark_attention(store, operation_id, workstream_id, "started runtime did not report an instance identity")
+            raise NeedsAttentionError("started runtime did not report an instance identity")
+        binding = dict(binding_row)
+        journal_confirm(
+            store,
+            operation_id=operation_id,
+            project_id=str(scope["projectId"]),
+            workstream_id=workstream_id,
+            step="runtime_binding",
+            identity={
+                "workstreamId": workstream_id,
+                "workspaceId": str(binding["workspace_id"]),
+                "viewId": str(binding["workspace_view_id"]),
+                "surfaceId": str(binding["workspace_surface_id"]),
+                "generationSha256": str(binding["applied_generation_sha256"]),
+                "runtimeInstanceId": str(binding["runtime_instance_id"]),
+                "runtimeTokenSha256": str(binding["runtime_token_sha256"]),
+                "policySha256": str(binding["policy_sha256"]),
+            },
+        )
+        journal_confirm(
+            store,
+            operation_id=operation_id,
+            project_id=str(scope["projectId"]),
+            workstream_id=workstream_id,
+            step="agent_started",
+            identity={
+                "workspaceId": str(started_observation.workspace_id),
+                "surfaceId": str(started_observation.surface_id),
+                "agentName": str(started_observation.agent.name if started_observation.agent is not None else scope["agentName"]),
+                "agentState": str(started_observation.agent.state if started_observation.agent is not None else "unknown"),
+            },
+        )
         with store.transaction():
             _checkpoint(store, operation_id, "agent_started")
         _hit(failpoint, "after_agent_start", scope)
@@ -665,18 +883,44 @@ def _authorize_apply_workstream(
         _hit(failpoint, "after_brief_delivery", scope)
         operation = _operation(store, operation_id)
 
-    if _rank(operation["step"]) < _rank("observed"):
-        exact = workspace.observe_workstream(path=scope["worktreePath"], agent_name=scope["agentName"])
-        agent_mismatch = exact is not None and exact.agent is not None and exact.agent.surface_id != binding["workspace_surface_id"]
-        if exact is None or exact.workspace_id != binding["workspace_id"] or exact.surface_id != binding["workspace_surface_id"] or agent_mismatch:
-            _mark_attention(store, operation_id, workstream_id, "workspace identity does not match the durable binding")
-            raise NeedsAttentionError("workspace identity does not match the durable binding")
-        with store.transaction():
-            _checkpoint(store, operation_id, "observed")
-        operation = _operation(store, operation_id)
-
+    final_identity = {
+        "repositoryPath": str(Path(str(scope["worktreePath"])).resolve(strict=False)),
+        "branchName": str(scope["branchName"]),
+        "baseCommitOid": str(scope["baseCommitOid"]),
+        "workspaceId": str(binding["workspace_id"]),
+        "viewId": str(binding["workspace_view_id"]),
+        "surfaceId": str(binding["workspace_surface_id"]),
+        "runtimeInstanceId": str(binding.get("runtime_instance_id") or ""),
+        "generationSha256": str(binding.get("applied_generation_sha256") or ""),
+    }
+    final_effect = journal_intent(
+        store,
+        operation_id=operation_id,
+        project_id=str(scope["projectId"]),
+        workstream_id=workstream_id,
+        step="final_identity",
+        identity=final_identity,
+    )
+    if final_effect["state"] == "compensated":
+        raise NeedsAttentionError("final identity effect was already compensated")
     _hit(failpoint, "before_final_event_commit", scope)
     if _rank(operation["step"]) < _rank("committed"):
+        packet = issue_task_packet_in_transaction(store.conn, scope=scope)
+        bootstrap_identity = {
+            "workstreamId": workstream_id,
+            "taskPacketId": str(packet["task_packet_id"]),
+            "taskPacketSha256": str(packet["packet_sha256"]),
+        }
+        bootstrap_effect = journal_intent(
+            store,
+            operation_id=operation_id,
+            project_id=str(scope["projectId"]),
+            workstream_id=workstream_id,
+            step="bootstrap_delivered",
+            identity=bootstrap_identity,
+        )
+        if bootstrap_effect["state"] == "compensated":
+            raise NeedsAttentionError("bootstrap effect was already compensated")
         now = utc_now()
         with store.transaction():
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',updated_at=? WHERE workstream_id=? AND provisioning_state='creating'", (now, workstream_id))
@@ -696,11 +940,55 @@ def _authorize_apply_workstream(
                 allowed_states=frozenset({"idle", "working", "blocked"}),
             ):
                 raise NeedsAttentionError("worker runtime identity changed before finalization")
-            packet = issue_task_packet_in_transaction(store.conn, scope=scope)
+            if bootstrap_effect["state"] == "intended":
+                bootstrap_event = append_event_in_transaction(store.conn, kind="runtime.bootstrap", project_id=scope["projectId"], workstream_id=workstream_id, operation_id=operation_id, payload={"eventType": "worker.bootstrap", "role": "worker", "taskPacketId": packet["task_packet_id"], "taskPacketSha256": packet["packet_sha256"]})
+                journal_confirm_in_transaction(
+                    store.conn,
+                    operation_id=operation_id,
+                    project_id=str(scope["projectId"]),
+                    workstream_id=workstream_id,
+                    step="bootstrap_delivered",
+                    identity={**bootstrap_identity, "eventSequence": int(bootstrap_event["sequence"])},
+                )
+            else:
+                event_sequence = bootstrap_effect["identity"].get("eventSequence")
+                event = store.conn.execute("SELECT kind,workstream_id FROM events WHERE sequence=? AND operation_id=?", (event_sequence, operation_id)).fetchone()
+                if event is None or event["kind"] != "runtime.bootstrap" or event["workstream_id"] != workstream_id:
+                    raise NeedsAttentionError("confirmed bootstrap effect has no matching durable event")
+
+        exact = workspace.observe_workstream(path=scope["worktreePath"], agent_name=scope["agentName"])
+        agent_mismatch = exact is not None and exact.agent is not None and exact.agent.surface_id != binding["workspace_surface_id"]
+        if exact is None or exact.workspace_id != binding["workspace_id"] or exact.surface_id != binding["workspace_surface_id"] or agent_mismatch:
+            _mark_attention(store, operation_id, workstream_id, "workspace identity does not match the durable binding")
+            raise NeedsAttentionError("workspace identity does not match the durable binding")
+        try:
+            head_oid = validate_worker_repository(
+                Path(str(scope["worktreePath"])),
+                branch_name=str(scope["branchName"]),
+                base_oid=str(scope["baseCommitOid"]),
+                target_branch=str(scope["targetBranchRef"]).removeprefix("refs/heads/"),
+            )
+        except Exception as error:
+            _mark_attention(store, operation_id, workstream_id, "worker repository identity does not match the durable binding")
+            raise NeedsAttentionError("worker repository identity does not match the durable binding") from error
+        journal_confirm(
+            store,
+            operation_id=operation_id,
+            project_id=str(scope["projectId"]),
+            workstream_id=workstream_id,
+            step="final_identity",
+            identity={
+                **final_identity,
+                "headCommitOid": head_oid,
+                "agentName": str(exact.agent.name if exact.agent is not None else scope["agentName"]),
+            },
+        )
+        now = utc_now()
+        with store.transaction():
+            _checkpoint(store, operation_id, "observed")
             result = {"workstreamId": workstream_id, "projectId": scope["projectId"], "workspaceId": binding["workspace_id"], "viewId": binding["workspace_view_id"], "surfaceId": binding["workspace_surface_id"], "agentName": scope["agentName"], "taskPacketId": packet["task_packet_id"], "taskPacketSha256": packet["packet_sha256"]}
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, workstream_id))
             store.conn.execute("UPDATE operations SET state='succeeded',step='committed',updated_at=? WHERE operation_id=?", (now, operation_id))
-            append_event_in_transaction(store.conn, kind="runtime.bootstrap", project_id=scope["projectId"], workstream_id=workstream_id, operation_id=operation_id, payload={"eventType": "worker.bootstrap", "role": "worker", "taskPacketId": packet["task_packet_id"], "taskPacketSha256": packet["packet_sha256"]})
             append_event_in_transaction(store.conn, kind="workstream.created", project_id=scope["projectId"], workstream_id=workstream_id, operation_id=operation_id, payload=result)
         _hit(failpoint, "after_final_event_commit", scope)
     else:
@@ -709,6 +997,7 @@ def _authorize_apply_workstream(
             _mark_attention(store, operation_id, workstream_id, "committed workstream has no immutable task packet")
             raise NeedsAttentionError("committed workstream has no immutable task packet")
     return {"operation": _operation(store, operation_id), "workstream": _workstream(store, workstream_id)}
+@control_plane_mutation
 def authorize_apply_workstream(
     store: Any,
     *,
@@ -791,6 +1080,7 @@ def focus_workstream(store: Any, project_id: str, workstream_id: str, workspace:
     return {"workstreamId": workstream_id, "focused": True}
 
 
+@control_plane_mutation
 def complete_workstream(
     store: Any,
     project_id: str,
@@ -859,6 +1149,7 @@ def complete_workstream(
         raise NeedsAttentionError("workstream completion requires attention") from error
 
 
+@control_plane_mutation
 def retire_workstream(store: Any, project_id: str, workstream_id: str, workspace: WorkspaceAdapter, *, actor_workstream_id: str | None = None, remediation_issue_id: str | None = None, failure_reason: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
     inspected = inspect_workstream(store, project_id, workstream_id)
     row = inspected["workstream"]

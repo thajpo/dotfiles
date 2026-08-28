@@ -78,7 +78,11 @@ def materialize_current_surface(
     staging = materialized_scope.get("stagingRoot")
     if not isinstance(staging, str) or not staging:
         staging = tempfile.mkdtemp(prefix="pisec-profile-stage-")
-    materialized_scope = {**materialized_scope, "operationId": str(materialized_scope.get("operationId", "op_surface"))}
+    materialized_scope = {
+        **materialized_scope,
+        "operationId": str(materialized_scope.get("operationId", "op_surface")),
+        "stagingRoot": str(Path(staging).resolve(strict=False)),
+    }
     staged = harness.stage_profile(materialized_scope, surface, Path(staging))
     verify_surface(surface)
     artifacts = harness.activate_profile(materialized_scope, staged)

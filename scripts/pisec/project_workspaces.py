@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from .adapters import WorkspaceAdapter, WorkspaceObservation
 from .models import ConflictError, NeedsAttentionError, PisecError, utc_now
+from .control_plane import control_plane_mutation
 
 
 def _validate_observation(observed: WorkspaceObservation, workspace_id: str | None = None) -> WorkspaceObservation:
@@ -41,6 +42,7 @@ def _first_mate_workspace(store: Any, workspace: WorkspaceAdapter) -> str:
     return str(rows[0]["workspace_id"])
 
 
+@control_plane_mutation
 def ensure_project_workspace(
     store: Any,
     project: Mapping[str, Any],

@@ -17,6 +17,7 @@ from .runtime_surface import capture_runtime_surface, materialize_current_surfac
 from .runtime import WORKSPACE_RUNTIME_MISSING, start_bound_agent, usable_runtime_binding
 from .workstreams import APPLY_LOCK, _session_attestation_matches, _wait_for_agent
 from .worker_repo import project_permissions_lock
+from .control_plane import control_plane_mutation
 
 
 def _project_active(project: Mapping[str, Any]) -> bool:
@@ -464,6 +465,7 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
     return {"project": resolve_project(store, project["project_id"]), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (existing["workstream_id"],)).fetchone()), "binding": _binding(store, existing["workstream_id"]), "reused": False}
 
 
+@control_plane_mutation
 def ensure_first_mate(store: Any, control_project_selector: str, harness: HarnessAdapter, workspace: WorkspaceAdapter, failpoint: Any = None) -> dict[str, Any]:
     project = resolve_project(store, control_project_selector)
     with project_permissions_lock(store.state_root, str(project["project_id"])), APPLY_LOCK:
