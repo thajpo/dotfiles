@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import socket
 import sys
@@ -96,11 +97,34 @@ TOOL_DESCRIPTIONS = {
     "pisec_verify_issue": "Use when the Secretary asks you to verify a remediation; closes the reporter revision or reopens supervisor attention.",
 }
 
+IDEMPOTENT_OPERATIONS = frozenset({
+    "help.request",
+    "issue.add_context",
+    "issue.report",
+    "issue.verify",
+    "research.add_context",
+    "research.request",
+    "workstream.checkpoint",
+})
+
 if any(operation not in SOCKET_OPERATIONS["runtime"] for operation, _schema in TOOLS.values()):
     raise RuntimeError("Codex Pisec MCP tools are absent from the generated operation catalogue")
 
 
-def _request(operation: str, params: dict[str, Any]) -> Any:
+def _canonical(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _canonical(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_canonical(item) for item in value]
+    return value
+
+
+def _adapter_idempotency_key(operation: str, params: dict[str, Any], native_tool_id: str) -> str:
+    canonical = json.dumps(_canonical({"operation": operation, "nativeToolId": native_tool_id, "params": params}), separators=(",", ":"), ensure_ascii=True)
+    return "adapter:codex:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _request(operation: str, params: dict[str, Any], native_tool_id: str = "") -> Any:
     socket_path = os.environ.get("PISEC_RUNTIME_SOCKET")
     token = os.environ.get("PISEC_RUNTIME_TOKEN")
     workstream = os.environ.get("PISEC_WORKSTREAM_ID")
@@ -108,7 +132,12 @@ def _request(operation: str, params: dict[str, Any]) -> Any:
     surface = os.environ.get("PISEC_SURFACE_ID")
     if not all(isinstance(value, str) and value for value in (socket_path, token, workstream, instance, surface)):
         raise RuntimeError("Pisec runtime binding is incomplete")
-    payload = {"workstreamId": workstream, "runtimeInstanceId": instance, "surfaceId": surface, "token": token, **params}
+    model_payload = dict(params)
+    model_payload.pop("idempotencyKey", None)
+    model_payload.pop("idempotency_key", None)
+    if operation in IDEMPOTENT_OPERATIONS:
+        model_payload["idempotencyKey"] = _adapter_idempotency_key(operation, model_payload, native_tool_id)
+    payload = {"workstreamId": workstream, "runtimeInstanceId": instance, "surfaceId": surface, "token": token, **model_payload}
     request = {"protocolVersion": 1, "requestId": "codex-mcp", "operation": operation, "payload": payload}
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(30)
@@ -162,7 +191,7 @@ def main() -> int:
                     raise RuntimeError("unknown Pisec tool")
                 arguments = params.get("arguments") or {}
                 operation, _schema = TOOLS[name]
-                result = {"content": [{"type": "text", "text": json.dumps(_request(operation, arguments), sort_keys=True)}]}
+                result = {"content": [{"type": "text", "text": json.dumps(_request(operation, arguments, str(request_id or "")), sort_keys=True)}]}
             else:
                 raise RuntimeError(f"unsupported MCP method: {method}")
             _reply(request_id, result=result)

@@ -462,22 +462,6 @@ def _recreate_missing_inactive_binding(
         )
     return True
 
-def _recover_prompt(workspace: WorkspaceAdapter, project: Mapping[str, Any], scope: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
-    try:
-        workspace.prompt_agent_nowait(binding["workspace_surface_id"], scope["brief"])
-    except Exception as error:
-        try:
-            _observe(workspace, project, scope, binding)
-        except Exception as observe_error:
-            raise RuntimeError("secretary brief delivery is ambiguous") from observe_error
-        try:
-            workspace.prompt_agent_nowait(binding["workspace_surface_id"], scope["brief"])
-        except Exception:
-            raise RuntimeError("secretary brief delivery failed after retry") from error
-
-
-
-
 def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, workspace: WorkspaceAdapter, failpoint: Any = None) -> dict[str, Any]:
     project = resolve_project(store, project_selector)
     harness.validate_execution_profile("secretary-project", "secretary")
@@ -696,7 +680,8 @@ def _ensure_locked(store: Any, project_selector: str, harness: HarnessAdapter, w
         _hit(failpoint, "after_secretary_agent_start", scope)
         operation = _operation(store, existing["workstream_id"])
     if _rank(operation["step"]) < _rank("brief_delivered"):
-        _recover_prompt(workspace, project, scope, binding)
+        # The extension consumes the durable bootstrap after the binding is
+        # committed; broker-authored control messages never use agent.prompt.
         with store.transaction():
             _checkpoint(store, operation["operation_id"], "brief_delivered")
         _hit(failpoint, "after_secretary_brief_delivery", scope)

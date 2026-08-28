@@ -292,30 +292,84 @@ def prepare_runtime_turn(store: Any, payload: Mapping[str, Any], workspace: Work
     binding = verify_runtime_binding(store, payload, worker_only=False)
     if not usable_runtime_binding(store, str(binding["workstream_id"]), workspace, harness, allowed_states={"idle"}, require_prompt_eligible=True):
         raise ConflictError("runtime is not a usable idle attested binding")
-    session_key = bounded_text(payload.get("sessionKey"), name="sessionKey", limit=256)
     if binding["refresh_pending"] or binding["launch_generation_sha256"] is not None:
         raise ConflictError("runtime is reserved for a generation refresh")
     if binding["applied_generation_sha256"] is None or binding["applied_generation_sha256"] != binding["desired_generation_sha256"]:
         raise ConflictError("runtime generation is not usable")
     workstream_id = str(binding["workstream_id"])
     with store.transaction():
-        now = utc_now()
-        session = store.conn.execute("SELECT * FROM runtime_sessions WHERE workstream_id=? AND session_key=?", (workstream_id, session_key)).fetchone()
-        if session is None:
-            store.conn.execute("INSERT INTO runtime_sessions(workstream_id,session_key,last_turn_started_at,updated_at) VALUES(?,?,?,?)", (workstream_id, session_key, now, now))
-            session = store.conn.execute("SELECT * FROM runtime_sessions WHERE workstream_id=? AND session_key=?", (workstream_id, session_key)).fetchone()
-        else:
-            store.conn.execute("UPDATE runtime_sessions SET last_turn_started_at=?,updated_at=? WHERE workstream_id=? AND session_key=?", (now, now, workstream_id, session_key))
         packet = store.conn.execute("SELECT * FROM task_packets WHERE workstream_id=?", (workstream_id,)).fetchone()
         packet_value = None
-        if packet is not None and session["task_packet_presented_at"] is None:
-            store.conn.execute("UPDATE runtime_sessions SET task_packet_presented_at=?,updated_at=? WHERE workstream_id=? AND session_key=?", (now, now, workstream_id, session_key))
+        if packet is not None:
             packet_value = {"taskPacketId": packet["task_packet_id"], "projectId": packet["project_id"], "workstreamId": packet["workstream_id"], "scopeSha256": packet["scope_sha256"], "packetSha256": packet["packet_sha256"], "issuedAt": packet["issued_at"], "packet": __import__("json").loads(packet["packet_json"])}
+        bootstrap = store.conn.execute(
+            "SELECT e.sequence,e.event_id,e.kind,e.payload_json FROM events e "
+            "WHERE e.workstream_id=? AND e.kind='runtime.bootstrap' ORDER BY e.sequence DESC LIMIT 1",
+            (workstream_id,),
+        ).fetchone()
+        acknowledged_bootstraps = store.conn.execute(
+            "SELECT payload_json FROM events WHERE workstream_id=? AND kind='runtime.bootstrap.acknowledged'",
+            (workstream_id,),
+        ).fetchall()
+        acknowledged = {
+            (str(payload.get("bootstrapEventId")), int(payload["bootstrapRevision"]))
+            for row in acknowledged_bootstraps
+            if isinstance((payload := json.loads(str(row["payload_json"]))), dict)
+            and isinstance(payload.get("bootstrapEventId"), str)
+            and isinstance(payload.get("bootstrapRevision"), int)
+            and not isinstance(payload.get("bootstrapRevision"), bool)
+        }
+        bootstrap_value = None
+        if bootstrap is not None and (str(bootstrap["event_id"]), int(bootstrap["sequence"])) not in acknowledged:
+            bootstrap_payload = __import__("json").loads(str(bootstrap["payload_json"]))
+            bootstrap_value = {
+                "eventType": str(bootstrap_payload.get("eventType", "worker.bootstrap")),
+                "sourceRecordId": str(bootstrap["event_id"]),
+                "sourceRevision": int(bootstrap["sequence"]),
+                "workstreamId": workstream_id,
+                "role": str(bootstrap_payload.get("role", "worker")),
+            }
         attention = list_open_attention(store, recipient_workstream_id=workstream_id)
         presented = []
         for item in attention:
             presented.append(compact_attention(present_attention_in_transaction(store.conn, recipient_workstream_id=workstream_id, attention_id=item["attention_id"], revision=int(item["source_event_sequence"]))))
-    return {"prepared": True, "sessionKey": session_key, "taskPacket": packet_value, "attention": presented}
+    return {"prepared": True, "taskPacket": packet_value, "bootstrap": bootstrap_value, "attention": presented}
+
+
+def acknowledge_runtime_bootstrap(store: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Atomically consume the authenticated bootstrap event after extension delivery."""
+    binding = verify_runtime_binding(store, payload, worker_only=False)
+    event_id = bounded_text(payload.get("bootstrapEventId"), name="bootstrapEventId", limit=256)
+    revision = payload.get("bootstrapRevision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise InvalidRequestError("bootstrapRevision is invalid")
+    workstream_id = str(binding["workstream_id"])
+    event = store.conn.execute(
+        "SELECT sequence,event_id,kind,workstream_id FROM events WHERE event_id=? AND sequence=?",
+        (event_id, revision),
+    ).fetchone()
+    if event is None or event["kind"] != "runtime.bootstrap" or event["workstream_id"] != workstream_id:
+        raise ConflictError("bootstrap event is stale or does not match the runtime binding")
+    with store.transaction():
+        existing = store.conn.execute(
+            "SELECT payload_json FROM events WHERE workstream_id=? AND kind='runtime.bootstrap.acknowledged'",
+            (workstream_id,),
+        ).fetchall()
+        already_acknowledged = any(
+            isinstance((ack_payload := json.loads(str(row["payload_json"]))), dict)
+            and ack_payload.get("bootstrapEventId") == event_id
+            and ack_payload.get("bootstrapRevision") == revision
+            for row in existing
+        )
+        if not already_acknowledged:
+            append_event_in_transaction(
+                store.conn,
+                kind="runtime.bootstrap.acknowledged",
+                project_id=str(binding["project_id"]),
+                workstream_id=workstream_id,
+                payload={"bootstrapEventId": event_id, "bootstrapRevision": revision},
+            )
+    return {"acknowledged": True, "bootstrapEventId": event_id, "bootstrapRevision": revision, "workstreamId": workstream_id}
 
 
 def report_runtime(store: Any, payload_value: Mapping[str, Any], harness: HarnessAdapter, workspace: WorkspaceAdapter) -> dict[str, Any]:

@@ -525,11 +525,15 @@ class BrokerDispatcher:
     def _runtime(self, store: PiStore, operation: str, payload: dict[str, Any]) -> Any:
         auth_fields = {"workstreamId", "runtimeInstanceId", "surfaceId", "token", "generation"}
         if operation == "runtime.turn.prepare":
-            _exact(payload, auth_fields | {"sessionKey"})
+            _exact(payload, auth_fields)
             binding = verify_runtime_binding(store, payload, worker_only=False)
             result = prepare_runtime_turn(store, payload, self.workspace, self.registry.resolve_harness(str(binding["harness_id"])))
             self._clear_attention_wake(str(payload["workstreamId"]))
             return result
+        if operation == "runtime.bootstrap.ack":
+            _exact(payload, auth_fields | {"bootstrapEventId", "bootstrapRevision"})
+            from .runtime import acknowledge_runtime_bootstrap
+            return acknowledge_runtime_bootstrap(store, payload)
         if operation == "session.switch.prepare":
             _exact(payload, auth_fields | {"reason", "targetSessionFile"})
             return prepare_session_switch(store, payload, self._harness_for_workstream(store, str(payload["workstreamId"])))

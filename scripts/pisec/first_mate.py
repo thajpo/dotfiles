@@ -402,7 +402,8 @@ def _ensure_locked(store: Any, control_project_selector: str, harness: HarnessAd
         _hit(failpoint, "after_first_mate_agent_start", scope)
         operation = _operation(store, existing["workstream_id"])
     if _rank(operation["step"]) < _rank("brief_delivered"):
-        workspace.prompt_agent_nowait(binding["workspace_surface_id"], scope["brief"])
+        # The extension consumes the durable bootstrap after the binding is
+        # committed; broker-authored control messages never use agent.prompt.
         with store.transaction():
             store.conn.execute("UPDATE operations SET state='applying',step=?,updated_at=? WHERE operation_id=?", ("brief_delivered", utc_now(), operation["operation_id"]))
         _hit(failpoint, "after_first_mate_brief_delivery", scope)

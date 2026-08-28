@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 
 from scripts.pisec.broker import BrokerDispatcher
-from scripts.pisec.codex_mcp import TOOLS, TOOL_DESCRIPTIONS
+from scripts.pisec.codex_mcp import TOOLS, TOOL_DESCRIPTIONS, _adapter_idempotency_key
 from scripts.pisec.config import DEFAULT_WORKER_MODEL, DEFAULT_WORKER_ROUTE, _validate_worker_routing
 from scripts.pisec.models import InvalidRequestError
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace
@@ -59,6 +59,14 @@ class PisecRoutingCompletionTests(unittest.TestCase):
         )
         self.assertEqual(completion["properties"]["source_commit"]["pattern"], "^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
         self.assertIn("creates the matching ready_review checkpoint atomically", TOOL_DESCRIPTIONS["pisec_submit_completion"])
+
+    def test_codex_adapter_owns_stable_retry_keys(self):
+        first = _adapter_idempotency_key("issue.report", {"summary": "blocked", "evidence": ["fixture"]}, "call-1")
+        reordered = _adapter_idempotency_key("issue.report", {"evidence": ["fixture"], "summary": "blocked"}, "call-1")
+        different_call = _adapter_idempotency_key("issue.report", {"summary": "blocked", "evidence": ["fixture"]}, "call-2")
+        self.assertEqual(first, reordered)
+        self.assertNotEqual(first, different_call)
+        self.assertRegex(first, r"^adapter:codex:[0-9a-f]{64}$")
 
 
 if __name__ == "__main__":

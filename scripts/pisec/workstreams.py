@@ -657,21 +657,9 @@ def _authorize_apply_workstream(
         _hit(failpoint, "after_agent_start", scope)
         operation = _operation(store, operation_id)
     if _rank(operation["step"]) < _rank("brief_delivered"):
-        if not bool(getattr(harness, "launches_with_brief", False)):
-            try:
-                _prompt_agent(workspace, binding["workspace_surface_id"], scope["brief"])
-            except Exception as error:
-                try:
-                    after_prompt = workspace.observe_workstream(path=scope["worktreePath"], agent_name=scope["agentName"])
-                except Exception as observe_error:
-                    raise RuntimeError("brief delivery is ambiguous") from observe_error
-                if after_prompt is not None and (after_prompt.workspace_id != binding["workspace_id"] or after_prompt.surface_id != binding["workspace_surface_id"] or (after_prompt.agent is not None and after_prompt.agent.surface_id != binding["workspace_surface_id"])):
-                    _mark_attention(store, operation_id, workstream_id, "brief target identity does not match the binding")
-                    raise NeedsAttentionError("brief target identity does not match the binding")
-                try:
-                    _prompt_agent(workspace, binding["workspace_surface_id"], scope["brief"])
-                except Exception:
-                    raise RuntimeError("brief delivery remained ambiguous") from error
+        # Retain the legacy saga step for recovery ordering.  The broker no
+        # longer injects the brief through Herdr agent.prompt; the final
+        # binding event queues a typed bootstrap for the extension.
         with store.transaction():
             _checkpoint(store, operation_id, "brief_delivered")
         _hit(failpoint, "after_brief_delivery", scope)
@@ -712,6 +700,7 @@ def _authorize_apply_workstream(
             result = {"workstreamId": workstream_id, "projectId": scope["projectId"], "workspaceId": binding["workspace_id"], "viewId": binding["workspace_view_id"], "surfaceId": binding["workspace_surface_id"], "agentName": scope["agentName"], "taskPacketId": packet["task_packet_id"], "taskPacketSha256": packet["packet_sha256"]}
             store.conn.execute("UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?", (now, workstream_id))
             store.conn.execute("UPDATE operations SET state='succeeded',step='committed',updated_at=? WHERE operation_id=?", (now, operation_id))
+            append_event_in_transaction(store.conn, kind="runtime.bootstrap", project_id=scope["projectId"], workstream_id=workstream_id, operation_id=operation_id, payload={"eventType": "worker.bootstrap", "role": "worker", "taskPacketId": packet["task_packet_id"], "taskPacketSha256": packet["packet_sha256"]})
             append_event_in_transaction(store.conn, kind="workstream.created", project_id=scope["projectId"], workstream_id=workstream_id, operation_id=operation_id, payload=result)
         _hit(failpoint, "after_final_event_commit", scope)
     else:

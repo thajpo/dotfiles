@@ -98,7 +98,9 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
         applied = self.dispatcher.dispatch("secretary", "workstream.authorize_apply", {"authToken": secretary_token, "approvalScope": scope})
         worker_id = str(applied["workstream"]["workstream_id"])
         self.assertIn(worker_id, self.harness.launched)
-        self.assertTrue(self.workspace.prompts)
+        self.assertEqual(self.workspace.prompts, [])
+        with PiStore(self.root / "state") as store:
+            self.assertEqual(store.conn.execute("SELECT count(*) FROM events WHERE workstream_id=? AND kind='runtime.bootstrap'", (worker_id,)).fetchone()[0], 1)
         self.assertNotIn("harness_home", json.dumps(applied))
 
         worker_auth = self._binding_auth(worker_id, instance="fixture-runtime-next")

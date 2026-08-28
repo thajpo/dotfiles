@@ -680,6 +680,13 @@
       "tool": null
     },
     {
+      "operation": "runtime.bootstrap.ack",
+      "purpose": "Acknowledge one delivered typed Pisec bootstrap event.",
+      "role": "worker",
+      "socket": "runtime",
+      "tool": null
+    },
+    {
       "operation": "session.switch.prepare",
       "purpose": "Use the typed session.switch.prepare operation.",
       "role": "worker",

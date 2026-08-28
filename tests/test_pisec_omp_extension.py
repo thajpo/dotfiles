@@ -109,6 +109,14 @@ class OmpExtensionTests(unittest.TestCase):
         self.assertNotIn('phase: z.enum(["investigating", "implementing", "verifying", "ready_review"])', source)
         self.assertIn("Submit the sole immutable completion packet", source)
 
+    def test_phase_c_uses_typed_runtime_events_and_adapter_owned_protocol_fields(self):
+        source = EXTENSION.read_text()
+        self.assertNotIn("sessionKey", source)
+        self.assertNotIn("idempotency_key:", source)
+        self.assertIn('runtime.bootstrap.ack', source)
+        self.assertIn('customType: "pisec"', source)
+        self.assertIn("setActiveTools(WORKER_DIAGNOSTIC_TOOLS)", source)
+
     def test_bun_load_registers_nothing_without_pisec_role(self):
         script = f"""
 const records = {{tools: [], events: []}};

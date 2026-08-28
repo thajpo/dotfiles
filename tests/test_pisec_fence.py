@@ -17,12 +17,12 @@ from scripts.pisec.models import AuthorizationError, ConflictError, InvalidReque
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.operations import create_operation
 from scripts.pisec.projects import register_project
-from scripts.pisec.runtime import prepare_runtime_turn, report_runtime, usable_runtime_binding
+from scripts.pisec.runtime import acknowledge_runtime_bootstrap, prepare_runtime_turn, report_runtime, usable_runtime_binding
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
 from scripts.pisec.harnesses.omp import OmpHarnessAdapter, _activate_directory, _copy_user_surface
 WEB_SEARCH_DOMAINS = ("html.duckduckgo.com",)
-from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
+from tests.pisec_fixture import AgentObservation, FixtureHarness, FixtureWorkspace, make_repo
 
 
 def make_config(root: Path) -> dict:
@@ -1123,7 +1123,6 @@ class RuntimeReportTests(unittest.TestCase):
             "surfaceId": self.binding["workspace_surface_id"],
             "token": self.token,
             "generation": self.binding["desired_generation_sha256"],
-            "sessionKey": "runtime-contract-test",
         }
         self.assertTrue(usable_runtime_binding(self.store, self.workstream_id, self.workspace, self.harness))
         project_id = self.store.conn.execute("SELECT project_id FROM workstreams WHERE workstream_id=?", (self.workstream_id,)).fetchone()[0]
@@ -1137,7 +1136,28 @@ class RuntimeReportTests(unittest.TestCase):
         report_runtime(self.store, self.payload(state="idle"), self.harness, self.workspace)
         report_runtime(self.store, self.payload(seq=2, event="lifecycle", state="working", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
         with self.assertRaises(ConflictError):
-            prepare_runtime_turn(self.store, {"workstreamId": self.workstream_id, "runtimeInstanceId": "instance-1", "surfaceId": self.binding["workspace_surface_id"], "token": self.token, "generation": self.binding["desired_generation_sha256"], "sessionKey": "working-runtime-contract-test"}, self.workspace, self.harness)
+            prepare_runtime_turn(self.store, {"workstreamId": self.workstream_id, "runtimeInstanceId": "instance-1", "surfaceId": self.binding["workspace_surface_id"], "token": self.token, "generation": self.binding["desired_generation_sha256"]}, self.workspace, self.harness)
+
+    def test_runtime_turn_returns_full_packet_and_consumes_one_durable_bootstrap(self):
+        report_runtime(self.store, self.payload(state="idle"), self.harness, self.workspace)
+        for name, agent in list(self.workspace.agents.items()):
+            if agent.surface_id == self.binding["workspace_surface_id"]:
+                self.workspace.agents[name] = AgentObservation(agent.name, agent.surface_id, agent.identity_usable, "idle")
+        auth = {"workstreamId": self.workstream_id, "runtimeInstanceId": "instance-1", "surfaceId": self.binding["workspace_surface_id"], "token": self.token, "generation": self.binding["desired_generation_sha256"]}
+        first = prepare_runtime_turn(self.store, auth, self.workspace, self.harness)
+        self.assertIsNotNone(first["taskPacket"])
+        self.assertIsNotNone(first["bootstrap"])
+        self.assertNotIn("sessionKey", first)
+        bootstrap = first["bootstrap"]
+        acknowledged = acknowledge_runtime_bootstrap(self.store, {**auth, "bootstrapEventId": bootstrap["sourceRecordId"], "bootstrapRevision": bootstrap["sourceRevision"]})
+        self.assertTrue(acknowledged["acknowledged"])
+        replay_ack = acknowledge_runtime_bootstrap(self.store, {**auth, "bootstrapEventId": bootstrap["sourceRecordId"], "bootstrapRevision": bootstrap["sourceRevision"]})
+        self.assertTrue(replay_ack["acknowledged"])
+        second = prepare_runtime_turn(self.store, auth, self.workspace, self.harness)
+        self.assertIsNotNone(second["taskPacket"])
+        self.assertIsNone(second["bootstrap"])
+        self.assertEqual(self.store.conn.execute("SELECT count(*) FROM events WHERE workstream_id=? AND kind='runtime.bootstrap.acknowledged'", (self.workstream_id,)).fetchone()[0], 1)
+        self.assertEqual(self.store.conn.execute("SELECT count(*) FROM runtime_sessions WHERE workstream_id=?", (self.workstream_id,)).fetchone()[0], 0)
 
     def test_done_is_not_an_authenticated_pisec_runtime_state(self):
         report_runtime(self.store, self.payload(), self.harness, self.workspace)

@@ -317,6 +317,139 @@ test("worker registers runtime handling without secretary tools", () => {
   assert.ok(events.includes("session_shutdown"));
 });
 
+test("worker consumes one typed bootstrap and receives the full packet on later turns", () => {
+  const output = runProbe(`
+    const { rm } = await import("node:fs/promises");
+    const socketPath = "/tmp/pisec-extension-bootstrap-" + process.pid + "-" + Date.now() + ".sock";
+    await rm(socketPath, { force: true });
+    const requests = [];
+    const messages = [];
+    const activeTools = [];
+    let prepared = 0;
+    const taskPacket = { taskPacketId: "tp_1", packetSha256: "d".repeat(64), packet: { schemaVersion: 1, outcome: "Implement the assigned parser change.", boundaries: ["src/parser.ts"], acceptance: ["bun test"], openQuestions: [], evidence: [] } };
+    const server = Bun.listen({
+      unix: socketPath,
+      socket: {
+        data(socket, data) {
+          const request = JSON.parse(data.toString().trim());
+          requests.push(request);
+          let result = { accepted: true };
+          if (request.operation === "runtime.turn.prepare") {
+            prepared += 1;
+            result = { prepared: true, taskPacket, attention: [], bootstrap: prepared === 1 ? { eventType: "worker.bootstrap", sourceRecordId: "evt_boot", sourceRevision: 7, role: "worker" } : null };
+          }
+          socket.write(JSON.stringify({ requestId: request.requestId, ok: true, result }) + "\\n");
+          socket.end();
+        },
+      },
+    });
+    const handlers = {};
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain, regex: chain });
+    const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
+    Object.assign(process.env, {
+      PISEC_ROLE: "worker",
+      PISEC_RUNTIME_SOCKET: socketPath,
+      PISEC_RUNTIME_TOKEN: "t".repeat(48),
+      PISEC_RUNTIME_GENERATION: "g".repeat(64),
+      PISEC_WORKSTREAM_ID: "ws_" + "a".repeat(32),
+      PISEC_RUNTIME_INSTANCE_ID: "instance",
+      PISEC_SURFACE_ID: "w1:p1",
+    });
+    const pi = {
+      zod,
+      registerTool(value) { (records.tools ??= []).push(value); },
+      on(name, handler) { (handlers[name] ??= []).push(handler); },
+      setLabel() {},
+      sendMessage(message, options) { messages.push({ message, options }); },
+      getActiveTools() { return ["read", "write", "shell"]; },
+      setActiveTools(value) { activeTools.push(value); return Promise.resolve(); },
+    };
+    const records = { tools: [] };
+    const module = await import(${JSON.stringify(EXTENSION)} + "?bootstrap=" + Date.now());
+    module.default(pi);
+    const root = { hasUI: false, sessionManager: { getSessionFile() {} }, ui: { notify() {} } };
+    await handlers.session_start[0]({}, root);
+    const preparedTurn = await handlers.before_agent_start[0]({ systemPrompt: ["base"] }, root);
+    const checkpoint = records.tools.find(tool => tool.name === "pisec_checkpoint_workstream");
+    await checkpoint.execute("call-1", { phase: "investigating", summary: "Inspected the assigned parser.", next_action: "Implement the bounded change.", evidence: [] });
+    server.stop(true);
+    await rm(socketPath, { force: true });
+    console.log(JSON.stringify({ operations: requests.map(request => request.operation), checkpoint: requests.find(request => request.operation === "workstream.checkpoint")?.payload, messages, activeTools, prompt: preparedTurn.systemPrompt.join("\\n") }));
+  `);
+  assert.deepEqual(output.operations, ["runtime.report", "runtime.turn.prepare", "runtime.bootstrap.ack", "runtime.turn.prepare", "workstream.checkpoint"]);
+  assert.match(output.checkpoint.idempotencyKey, /^adapter:omp:[0-9a-f]{64}$/);
+  assert.equal("idempotency_key" in output.checkpoint, false);
+  assert.equal(output.messages.length, 1);
+  assert.equal(output.messages[0].message.customType, "pisec");
+  assert.equal(output.messages[0].message.details.source, "pisec");
+  assert.equal(output.messages[0].message.details.sourceRecordId, "evt_boot");
+  assert.equal(output.messages[0].message.details.sourceRevision, 7);
+  assert.equal(output.messages[0].options.triggerTurn, true);
+  assert.doesNotMatch(output.messages[0].message.content, /Implement the assigned parser/);
+  assert.match(output.prompt, /IMMUTABLE_TASK_PACKET/);
+  assert.match(output.prompt, /Implement the assigned parser change/);
+});
+
+test("worker blocks mutation when turn preparation fails even if the model continues", () => {
+  const output = runProbe(`
+    const { rm } = await import("node:fs/promises");
+    const socketPath = "/tmp/pisec-extension-blocked-" + process.pid + "-" + Date.now() + ".sock";
+    await rm(socketPath, { force: true });
+    const requests = [];
+    const messages = [];
+    const activeTools = [];
+    const server = Bun.listen({
+      unix: socketPath,
+      socket: {
+        data(socket, data) {
+          const request = JSON.parse(data.toString().trim());
+          requests.push(request);
+          socket.write(JSON.stringify({ requestId: request.requestId, ok: false, error: { message: "broker unavailable" } }) + "\\n");
+          socket.end();
+        },
+      },
+    });
+    const handlers = {};
+    const tools = [];
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain, regex: chain });
+    const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
+    Object.assign(process.env, {
+      PISEC_ROLE: "worker",
+      PISEC_RUNTIME_SOCKET: socketPath,
+      PISEC_RUNTIME_TOKEN: "t".repeat(48),
+      PISEC_RUNTIME_GENERATION: "g".repeat(64),
+      PISEC_WORKSTREAM_ID: "ws_" + "a".repeat(32),
+      PISEC_RUNTIME_INSTANCE_ID: "instance",
+      PISEC_SURFACE_ID: "w1:p1",
+    });
+    const pi = {
+      zod,
+      registerTool(value) { tools.push(value); },
+      on(name, handler) { (handlers[name] ??= []).push(handler); },
+      setLabel() {},
+      sendMessage(message, options) { messages.push({ message, options }); },
+      getActiveTools() { return ["read", "write", "shell", "pisec_checkpoint_workstream"]; },
+      setActiveTools(value) { activeTools.push(value); return Promise.resolve(); },
+    };
+    const module = await import(${JSON.stringify(EXTENSION)} + "?blocked=" + Date.now());
+    module.default(pi);
+    const root = { hasUI: false, sessionManager: { getSessionFile() {} }, ui: { notify() {} } };
+    const result = await handlers.before_agent_start[0]({ systemPrompt: ["base"] }, root);
+    const checkpoint = tools.find(tool => tool.name === "pisec_checkpoint_workstream");
+    const blockedCheckpoint = await checkpoint.execute("call", { phase: "investigating", summary: "x", next_action: "x", evidence: [] });
+    server.stop(true);
+    await rm(socketPath, { force: true });
+    console.log(JSON.stringify({ operations: requests.map(request => request.operation), messages, activeTools, prompt: result.systemPrompt.join("\\n"), checkpoint: blockedCheckpoint }));
+  `);
+  assert.deepEqual(output.operations, ["runtime.turn.prepare", "runtime.report"]);
+  assert.deepEqual(output.activeTools, [["pisec_list_attention", "pisec_inspect_attention", "pisec_show_task_packet", "pisec_list_coordination", "pisec_inspect_coordination", "pisec_list_issues", "pisec_inspect_issue", "pisec_check_secretary_research", "pisec_inspect_secretary_research", "pisec_request_help", "pisec_report_issue"]]);
+  assert.equal(output.messages.length, 1);
+  assert.equal(output.messages[0].message.details.sourceRecordId, "runtime.turn.prepare:ws_" + "a".repeat(32));
+  assert.match(output.prompt, /PISEC_RUNTIME_BLOCKED/);
+  assert.equal(output.checkpoint.isError, true);
+  assert.match(output.checkpoint.content[0].text, /runtime is blocked/);
+});
+
 test("only the root UI session reports idle-working-idle lifecycle", () => {
   const output = runProbe(`
     // The extension must load after the probe-specific environment is installed.
@@ -369,8 +502,8 @@ test("only the root UI session reports idle-working-idle lifecycle", () => {
     await rm(socketPath, { force: true });
     console.log(JSON.stringify({ states: reports.map(report => report.state), events: reports.map(report => report.event) }));
   `);
-  assert.deepEqual(output.states, ["idle", "working", "idle"]);
-  assert.deepEqual(output.events, ["session_start", "lifecycle", "lifecycle"]);
+  assert.deepEqual(output.states, ["idle", null, "working", "idle"]);
+  assert.deepEqual(output.events, ["session_start", null, "lifecycle", "lifecycle"]);
 });
 
 test("worker non-UI root session reports authenticated startup", () => {
@@ -417,8 +550,8 @@ test("worker non-UI root session reports authenticated startup", () => {
     await rm(socketPath, { force: true });
     console.log(JSON.stringify({ states: reports.map(report => report.state), events: reports.map(report => report.event), report: reports[0] }));
   `);
-  assert.deepEqual(output.states, ["idle"]);
-  assert.deepEqual(output.events, ["session_start"]);
+  assert.deepEqual(output.states, ["idle", null]);
+  assert.deepEqual(output.events, ["session_start", null]);
   const report = asRecord(output.report);
   assert.equal(stringValue(report, "workstreamId"), "ws_" + "a".repeat(32));
   assert.equal(stringValue(report, "runtimeInstanceId"), "instance");
@@ -471,9 +604,9 @@ test("failed tool telemetry is bounded and excludes tool output", () => {
     await handlers.tool_execution_end[0]({ toolName: "bad tool name", isError: true }, root);
     server.stop(true);
     await rm(socketPath, { force: true });
-    console.log(JSON.stringify({ operations: requests.map(request => request.operation), failure: requests[1]?.payload }));
+    console.log(JSON.stringify({ operations: requests.map(request => request.operation), failure: requests[2]?.payload }));
   `);
-  assert.deepEqual(output.operations, ["runtime.report", "runtime.tool_failure"]);
+  assert.deepEqual(output.operations, ["runtime.report", "runtime.turn.prepare", "runtime.tool_failure"]);
   const failure = asRecord(output.failure);
   assert.equal(failure.toolName, "pisec_request_help");
   assert.equal(failure.failureCode, "tool_error");

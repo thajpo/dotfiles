@@ -154,8 +154,8 @@ class WorkstreamTests(unittest.TestCase):
         prepared = self.prepare(root, store, project, harness, workspace, key="launch-pending-agent")
         result = self.apply(prepared, store, harness, workspace, git_objects)
         self.assertEqual(result["operation"]["state"], "succeeded")
-        self.assertEqual(len(workspace.prompts), 2)
-        self.assertEqual(workspace.prompts[1][0], "fixture-surface-2")
+        self.assertEqual(workspace.prompts, [])
+        self.assertEqual(store.conn.execute("SELECT count(*) FROM events WHERE workstream_id=? AND kind='runtime.bootstrap'", (result["workstream"]["workstream_id"],)).fetchone()[0], 1)
 
     def test_secretary_recovery_uses_binding_when_repository_path_is_ambiguous(self):
         temp, _root, _repo, store, _project, _harness, _workspace, _git_objects = self.fixture(AmbiguousWorkspace)
@@ -172,7 +172,7 @@ class WorkstreamTests(unittest.TestCase):
         result = self.apply(prepared, store, harness, workspace, git_objects)
         self.assertEqual(result["operation"]["state"], "succeeded")
         self.assertGreaterEqual(workspace.observations, 2)
-        self.assertEqual(len(workspace.prompts), 2)
+        self.assertEqual(workspace.prompts, [])
 
     def test_rejects_agent_without_pisec_runtime_attestation(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture(UnattestedFixtureWorkspace)
@@ -182,7 +182,7 @@ class WorkstreamTests(unittest.TestCase):
         with patch("scripts.pisec.workstreams._wait_for_agent", side_effect=NeedsAttentionError("agent started without Pisec runtime attestation")):
             with self.assertRaisesRegex(NeedsAttentionError, "runtime attestation"):
                 self.apply(prepared, store, harness, workspace, git_objects)
-        self.assertEqual(len(workspace.prompts), 1)
+        self.assertEqual(workspace.prompts, [])
 
     def test_scope_mismatch_creates_no_effect(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
@@ -209,7 +209,8 @@ class WorkstreamTests(unittest.TestCase):
                     self.assertEqual(result["operation"]["state"], "succeeded")
                     self.assertEqual(len(workspace.worktrees), 2)
                     self.assertEqual(len(workspace.agents), 2)
-                    self.assertEqual(len(workspace.prompts), 2)
+                    self.assertEqual(workspace.prompts, [])
+                    self.assertEqual(store.conn.execute("SELECT count(*) FROM events WHERE workstream_id=? AND kind='runtime.bootstrap'", (result["workstream"]["workstream_id"],)).fetchone()[0], 1)
                     self.assertEqual(store.conn.execute("SELECT count(*) FROM authorizations").fetchone()[0], 1)
                     self.assertEqual(store.conn.execute("SELECT count(*) FROM events WHERE kind='workstream.created'").fetchone()[0], 1)
                 finally:
