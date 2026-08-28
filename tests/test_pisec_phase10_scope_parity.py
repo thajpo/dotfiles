@@ -75,6 +75,8 @@ class Phase10ScopeParityTests(unittest.TestCase):
                                 self.assertNotIn(str(adapter.harness_config["nodePath"]), policy["command"]["deny"])
                                 self.assertNotIn(str(adapter.harness_config["executablePath"]), policy["command"]["deny"])
                             self.assertEqual(staged.candidate.generation_sha256, adapter.desired_generation(scope, surface))
+                            if adapter_id == "codex":
+                                self.assertTrue(Path(surface.root_path, "managed", "codex_model_catalog.json").is_file())
                             activated = adapter.activate_profile(scope, staged)
                             active_policy = Path(activated.policy_path)
                             self.assertEqual(json.loads(active_policy.read_text())["network"]["allowedDomains"], scope["externalDomains"])
@@ -216,6 +218,10 @@ class Phase10ScopeParityTests(unittest.TestCase):
             self.assertIn('model_providers.openai-codex.base_url = "http://127.0.0.1:4000/v1"', config_text)
             self.assertIn('model_providers.openai-codex.wire_api = "responses"', config_text)
             self.assertIn('model_providers.openai-codex.env_key = "OPENAI_API_KEY"', config_text)
+            self.assertIn(
+                f'model_catalog_json = {json.dumps(str(Path(activated.adapter_data["surfaceRoot"]) / "managed" / "codex_model_catalog.json"))}',
+                config_text,
+            )
 
             result = subprocess.run([str(launcher)], cwd=worktree, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -234,6 +240,10 @@ class Phase10ScopeParityTests(unittest.TestCase):
             self.assertIn('model_providers.openai-codex.wire_api="responses"', config_values)
             self.assertIn('model_providers.openai-codex.env_key="OPENAI_API_KEY"', config_values)
             self.assertIn('model_providers.openai-codex.requires_openai_auth=false', config_values)
+            self.assertIn(
+                f'model_catalog_json={json.dumps(str(Path(activated.adapter_data["surfaceRoot"]) / "managed" / "codex_model_catalog.json"))}',
+                config_values,
+            )
             self.assertIn(f'projects.{json.dumps(str(worktree))}.trust_level="trusted"', config_values)
             self.assertIn("features.hooks=true", config_values)
             self.assertTrue(any(value.startswith("hooks.SessionStart=") for value in config_values))

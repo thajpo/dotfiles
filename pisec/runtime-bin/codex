@@ -133,6 +133,8 @@ def main() -> None:
         if key in {"configPath", "promptPath", "mcpPath", "hookPath", "hooksPath", "policyPath"} and not path.is_relative_to(surface):
             fail(f"{key} is outside the immutable surface")
         secure_file(path)
+    model_catalog_path = surface / "managed" / "codex_model_catalog.json"
+    secure_file(model_catalog_path)
     secure_file(Path(str(descriptor["launchSecretPath"])))
     secure_file(Path(str(descriptor["harnessExecutablePath"])), executable=True, allow_system_owner=True)
     secure_file(Path(str(descriptor["nodeExecutablePath"])), executable=True, allow_system_owner=True)
@@ -210,6 +212,7 @@ def main() -> None:
         f"model_reasoning_effort={toml_string(str(descriptor['reasoningEffort']))}",
         'approval_policy="never"',
         'sandbox_mode="danger-full-access"',
+        f"model_catalog_json={toml_string(str(model_catalog_path))}",
     )
     fence = [str(descriptor["fencePath"]), "--settings", str(descriptor["policyPath"]), "--", str(descriptor["nodeExecutablePath"]), str(descriptor["harnessExecutablePath"]), "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--no-alt-screen", "--cd", str(root), "--model", str(descriptor["model"])]
     for override in codex_config:

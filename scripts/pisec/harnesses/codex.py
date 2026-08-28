@@ -27,6 +27,7 @@ from .omp import _copy_safe_entry, _file_digest, _normalize_owner_tree, _tree_di
 
 CODEX_PROFILE_IDS = frozenset({"worker-default"})
 CODEX_BASELINE_DOMAINS = ("html.duckduckgo.com",)
+CODEX_MODEL_CATALOG_NAME = "codex_model_catalog.json"
 
 
 def _repo_root() -> Path:
@@ -273,6 +274,7 @@ class CodexHarnessAdapter:
             managed.mkdir(mode=0o700)
             _copy_safe_entry(_repo_root() / "pisec" / "runtime-bin" / "codex", managed / "codex")
             _copy_safe_entry(_repo_root() / "scripts" / "pisec" / "codex_mcp.py", managed / "codex_mcp.py")
+            _copy_safe_entry(_repo_root() / "scripts" / "pisec" / CODEX_MODEL_CATALOG_NAME, managed / CODEX_MODEL_CATALOG_NAME)
             _copy_safe_entry(_repo_root() / "scripts" / "pisec" / "operation_catalogue_generated.py", managed / "operation_catalogue_generated.py")
             _copy_safe_entry(_repo_root() / "scripts" / "pisec" / "codex_hook.py", managed / "codex_hook.py")
             fence = managed / "fence"
@@ -387,6 +389,9 @@ class CodexHarnessAdapter:
         effort = str(scope.get("reasoningEffort") or "high")
         runtime_root = surface_binding / "runtime"
         _secure_tree(surface_binding, runtime_root)
+        model_catalog_path = surface_binding / "managed" / CODEX_MODEL_CATALOG_NAME
+        if model_catalog_path.is_symlink() or not model_catalog_path.is_file():
+            raise NeedsAttentionError("Codex model catalog is missing from the immutable runtime surface")
         mcp_path = runtime_root / "codex_mcp.py"
         hook_path = runtime_root / "codex_hook.py"
         _copy_safe_entry(surface_root / "managed" / "codex_mcp.py", mcp_path)
@@ -409,6 +414,7 @@ class CodexHarnessAdapter:
                     f'openai_base_url = {json.dumps(str(self.harness_config["gateway"]["baseUrl"]).rstrip("/") + "/v1")}',
                     'approval_policy = "never"',
                     'sandbox_mode = "danger-full-access"',
+                    f'model_catalog_json = {json.dumps(str(model_catalog_path))}',
                     "[features]",
                     "hooks = true",
                     "[mcp_servers.pisec]",
