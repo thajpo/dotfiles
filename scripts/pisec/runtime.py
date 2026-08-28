@@ -23,6 +23,7 @@ SESSION_SWITCH_REASONS = frozenset({"new", "resume", "fork", "handoff"})
 OBSERVED_STATES = frozenset({"unknown", "starting", "working", "blocked", "idle", "stopped", "missing", "error"})
 
 WORKSPACE_RUNTIME_MISSING = "workspace runtime is missing"
+RUNTIME_STARTUP_MAX_SECONDS = 5.0
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:/-]+$")
 TOOL_FAILURE_CODES = frozenset({"tool_error", "tool_timeout", "tool_cancelled", "tool_unknown"})
 def start_bound_agent(
@@ -78,11 +79,16 @@ def start_bound_agent(
         expected_names = {str(row["agent_name"]), harness.manifest.agent_kind}
         if observation.agent.name not in expected_names or observation.agent.surface_id != row["workspace_surface_id"]:
             raise NeedsAttentionError("runtime binding agent identity does not match")
-    runtime = workspace.observe_runtime(str(row["workspace_surface_id"]), str(row["policy_path"]))
-    if runtime.state == "live":
-        return {"launched": False, "observation": observation}
-    if runtime.state != "stopped":
-        raise NeedsAttentionError("runtime binding pane process identity is ambiguous")
+    runtime_deadline = time.monotonic() + RUNTIME_STARTUP_MAX_SECONDS
+    while True:
+        runtime = workspace.observe_runtime(str(row["workspace_surface_id"]), str(row["policy_path"]))
+        if runtime.state == "live":
+            return {"launched": False, "observation": observation}
+        if runtime.state == "stopped":
+            break
+        if time.monotonic() >= runtime_deadline:
+            raise NeedsAttentionError("runtime binding pane process identity is ambiguous")
+        time.sleep(0.1)
     launcher = harness.launch_binding_path(workstream_id)
     argv = [str(launcher)]
     if row["native_session_kind"] is not None:

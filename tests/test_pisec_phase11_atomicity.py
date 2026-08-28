@@ -7,6 +7,7 @@ import queue
 import tempfile
 import time
 import unittest
+from typing import Any
 
 from scripts.pisec.control_plane import control_plane_lock
 from scripts.pisec.effects import EFFECT_STEPS, effect_state, journal_compensate, journal_confirm, journal_entries, journal_intent
@@ -72,6 +73,23 @@ class HarnessNamedWorkspace(FixtureWorkspace):
         return super().start_agent(surface_id, "fixture-agent", agent_kind)
 
 
+class SettlingHarnessNamedWorkspace(HarnessNamedWorkspace):
+    def __init__(self, root: Path, store: Any):
+        super().__init__(root, store)
+        self.runtime_observations = 0
+
+    def observe_runtime(self, surface_id: str, process_identity: str):
+        row = self.store.conn.execute(
+            "SELECT w.kind FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workspace_surface_id=?",
+            (surface_id,),
+        ).fetchone()
+        if row is not None and row["kind"] == "worker" and self.runtime_observations < 2:
+            self.runtime_observations += 1
+            observed = super().observe_runtime(surface_id, process_identity)
+            return type(observed)("unknown", "pane process information is still settling")
+        return super().observe_runtime(surface_id, process_identity)
+
+
 class Phase11AtomicityTests(unittest.TestCase):
     def test_provisioning_journal_confirms_every_external_step(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -135,7 +153,7 @@ class Phase11AtomicityTests(unittest.TestCase):
             with PiStore(root / "state") as store:
                 project = register_project(store, repo, default_ref="main")
                 harness = FixtureHarness(root)
-                workspace = HarnessNamedWorkspace(root, store)
+                workspace = SettlingHarnessNamedWorkspace(root, store)
                 ensure_secretary(store, project["project_id"], harness, workspace)
                 packet = {
                     "schemaVersion": 1,
