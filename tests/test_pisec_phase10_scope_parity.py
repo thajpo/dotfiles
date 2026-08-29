@@ -98,9 +98,17 @@ class Phase10ScopeParityTests(unittest.TestCase):
         omp_home = root / "omp-home"
         (omp_home / ".omp" / "agent").mkdir(parents=True)
         omp = OmpHarnessAdapter(state_root=root / "omp-state", config=make_config(root))
-        codex_exec = root / "codex-fixture"
+        codex_bin = root / "codex-bin"
+        codex_bin.mkdir(exist_ok=True)
+        codex_exec = codex_bin / "codex"
         codex_exec.write_text("#!/bin/sh\nexit 0\n")
         codex_exec.chmod(0o700)
+        node_exec = codex_bin / "node"
+        if codex_node_path is None:
+            node_exec.write_text("#!/bin/sh\nexit 0\n")
+            node_exec.chmod(0o700)
+        else:
+            node_exec.symlink_to(codex_node_path)
         token = root / "codex-gateway.token"
         token.write_text("g" * 48 + "\n")
         token.chmod(0o600)
@@ -109,10 +117,16 @@ class Phase10ScopeParityTests(unittest.TestCase):
             "harness": {"config": {"executablePath": str(codex_exec), "gateway": {"baseUrl": "http://127.0.0.1:4000", "tokenFile": str(token)}}},
             "workerHarnesses": {"codex": {"id": "codex", "config": {"executablePath": str(codex_exec), "versionPrefix": "0.150.1"}}},
         }
-        node_lookup = patch("scripts.pisec.harnesses.codex.shutil.which", return_value=codex_node_path) if codex_node_path is not None else contextlib.nullcontext()
-        with node_lookup:
-            codex = CodexHarnessAdapter(state_root=root / "codex-state", config=codex_config)
+        codex = CodexHarnessAdapter(state_root=root / "codex-state", config=codex_config)
         return (("omp", omp), ("codex", codex))
+
+    def test_codex_node_resolution_is_independent_of_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.dict(os.environ, {"PATH": "/usr/bin"}):
+                codex = dict(self._production_worker_adapters(root))["codex"]
+
+            self.assertEqual(Path(codex.harness_config["nodePath"]), root / "codex-bin" / "node")
 
     def test_production_codex_launcher_accepts_immutable_surface(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -228,9 +228,15 @@ def _validate_config(config: Mapping[str, Any], root_config: Mapping[str, Any]) 
         raise InvalidRequestError("Codex gateway URL has an invalid port") from error
     if parsed is None or parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.username or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or port is None or not 1 <= port <= 65535:
         raise InvalidRequestError("Codex gateway must use loopback HTTP")
+    executable_path = _expand_executable(value["executablePath"], "Codex executablePath")
+    # The pinned Codex installation is a Node distribution: its launcher and
+    # Node runtime share one bin directory.  Resolve that sibling explicitly
+    # so interactive shells and the systemd broker cannot select different
+    # runtimes from PATH and produce different capability identities.
+    node_path = _expand_executable(str(Path(executable_path).parent / "node"), "Node executable")
     return {
-        "executablePath": _expand_executable(value["executablePath"], "Codex executablePath"),
-        "nodePath": _expand_executable(shutil.which("node"), "Node executable"),
+        "executablePath": executable_path,
+        "nodePath": node_path,
         "versionPrefix": version_prefix,
         "gateway": {"baseUrl": str(gateway["baseUrl"]), "tokenFile": _expand_path(gateway["tokenFile"], "Codex gateway tokenFile")},
     }
