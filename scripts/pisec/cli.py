@@ -61,7 +61,7 @@ def parser() -> argparse.ArgumentParser:
         dest="command",
         required=True,
         title="commands",
-        metavar="{update,project,status,reconcile,board,broker,doctor,workstream}",
+        metavar="{update,project,first-mate,status,reconcile,board,broker,doctor,workstream}",
     )
 
     update = commands.add_parser("update", help="install a committed Pisec bundle and refresh workers")
@@ -134,6 +134,21 @@ def parser() -> argparse.ArgumentParser:
     _add_json_argument(project_deactivate)
     project_deactivate.add_argument("project", metavar="PROJECT", help="repository path, display name, or project id")
     project_deactivate.add_argument("--confirm", required=True, metavar="PROJECT", help="repeat the exact PROJECT selector")
+    first_mate = commands.add_parser(
+        "first-mate",
+        **_parser_kwargs(
+            help="create or focus the global Pisec fleet coordinator",
+            description="Manage the global First Mate that owns fleet and Pisec platform issue triage.",
+            epilog="Examples:\n  pisec first-mate ensure dotfiles\n  pisec first-mate focus",
+        ),
+    )
+    _add_json_argument(first_mate)
+    first_mate_commands = first_mate.add_subparsers(dest="first_mate_command", required=True, title="first-mate commands")
+    first_mate_ensure = first_mate_commands.add_parser("ensure", help="create or recover the global First Mate")
+    _add_json_argument(first_mate_ensure)
+    first_mate_ensure.add_argument("project", metavar="PROJECT", help="active registered project that owns the First Mate runtime")
+    first_mate_focus = first_mate_commands.add_parser("focus", help="focus the existing First Mate workspace")
+    _add_json_argument(first_mate_focus)
     status = commands.add_parser(
         "status",
         **_parser_kwargs(
@@ -215,7 +230,7 @@ def parser() -> argparse.ArgumentParser:
 
 def _command_path(args: argparse.Namespace) -> tuple[str, ...]:
     path = [str(args.command)]
-    for name in ("project_command", "workstream_command"):
+    for name in ("project_command", "first_mate_command", "workstream_command"):
         value = getattr(args, name, None)
         if value:
             path.append(str(value))
@@ -340,7 +355,7 @@ def _first_mate_lines(first_mate: Any) -> list[str]:
     if not isinstance(first_mate, Mapping):
         return [f"First Mate: {_scalar_text(first_mate)}"]
     if not first_mate.get("present"):
-        return ["First Mate: not provisioned (`pisec` admin first_mate.ensure can create it)"]
+        return ["First Mate: not provisioned (`pisec first-mate ensure PROJECT` can create it)"]
     return [
         "First Mate: present",
         f"  State: {_scalar_text(first_mate.get('provisioningState'))} / {_scalar_text(first_mate.get('observedState'))}",
@@ -456,6 +471,17 @@ def _human_result(command: tuple[str, ...], result: Any) -> str:
                 rows = [(item.get("project", "-"), item.get("reason", item.get("state", "-"))) for item in values if isinstance(item, Mapping)]
                 lines.extend(_table(("PROJECT", "RESULT"), rows))
         return "\n".join(lines)
+    if command == ("first-mate", "ensure") and isinstance(result, Mapping):
+        lines = ["First Mate already available" if result.get("reused") else "First Mate ready"]
+        workstream = result.get("workstream")
+        if isinstance(workstream, Mapping):
+            lines.append(f"State: {_scalar_text(workstream.get('desired_state'))} / {_scalar_text(workstream.get('provisioning_state'))}")
+        binding = result.get("binding")
+        if isinstance(binding, Mapping):
+            lines.append(f"Runtime: {_scalar_text(binding.get('observed_state'))}")
+        return "\n".join(lines)
+    if command == ("first-mate", "focus") and isinstance(result, Mapping):
+        return "First Mate focused"
     if command == ("reconcile",) and isinstance(result, Mapping):
         lines = ["Reconcile complete" if result.get("reconciled") else "Reconcile incomplete"]
         workspace = result.get("workspace")
@@ -544,6 +570,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _call("project.deactivate", {"project": args.project, "confirm": args.confirm})
         elif args.command == "project" and args.project_command == "refresh":
             result = _call("project.refresh", {"all": bool(args.all), "waitSeconds": args.wait_seconds}, timeout=max(30.0, args.wait_seconds + 120.0))
+        elif args.command == "first-mate" and args.first_mate_command == "ensure":
+            result = _call("first_mate.ensure", {"project": args.project}, timeout=60.0)
+        elif args.command == "first-mate" and args.first_mate_command == "focus":
+            result = _call("first_mate.focus", {})
         elif args.command == "status":
             result = _call("system.status", {} if args.project is None else {"project": args.project})
         elif args.command == "reconcile":

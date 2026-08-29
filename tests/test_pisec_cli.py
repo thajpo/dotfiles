@@ -24,6 +24,8 @@ class PisecCliTests(unittest.TestCase):
             ["project", "list", "--json"],
             ["project", "open", "demo", "--json"],
             ["project", "refresh", "--all", "--wait-seconds", "0", "--json"],
+            ["first-mate", "ensure", "dotfiles", "--json"],
+            ["first-mate", "focus", "--json"],
         ):
             with self.subTest(arguments=arguments):
                 self.assertTrue(parser().parse_args(arguments).json_output)
@@ -43,6 +45,27 @@ class PisecCliTests(unittest.TestCase):
             result = main(["reconcile", "--json"])
         self.assertEqual(result, 0)
         call.assert_called_once_with("system.reconcile", {}, timeout=300.0)
+
+    def test_first_mate_lifecycle_is_available_through_the_public_cli(self):
+        value = {
+            "reused": False,
+            "workstream": {"desired_state": "active", "provisioning_state": "bound"},
+            "binding": {"observed_state": "idle"},
+        }
+        output = StringIO()
+        with patch("scripts.pisec.cli._call", return_value=value) as call, redirect_stdout(output):
+            result = main(["first-mate", "ensure", "dotfiles"])
+        self.assertEqual(result, 0)
+        call.assert_called_once_with("first_mate.ensure", {"project": "dotfiles"}, timeout=60.0)
+        self.assertIn("First Mate ready", output.getvalue())
+        self.assertIn("Runtime: idle", output.getvalue())
+
+        output = StringIO()
+        with patch("scripts.pisec.cli._call", return_value={"focused": True}) as call, redirect_stdout(output):
+            result = main(["first-mate", "focus"])
+        self.assertEqual(result, 0)
+        call.assert_called_once_with("first_mate.focus", {})
+        self.assertIn("First Mate focused", output.getvalue())
 
     def test_status_has_human_readable_default(self):
         output = format_result(
