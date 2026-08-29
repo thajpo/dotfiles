@@ -247,7 +247,14 @@ def main() -> int:
     sequence_path = _sequence_path(harness_home, instance)
 
     if event_name == "SessionStart":
-        if not _report(socket_path, event, state="idle", report_event="session_start", sequence_path=sequence_path):
+        source = event.get("source")
+        if source is None:
+            source = os.environ.get("PISEC_SESSION_START_SOURCE", "startup")
+        if source not in {"startup", "resume", "clear", "compact"}:
+            _emit_block(event_name, "Pisec received an unsupported Codex session-start source; do not change the project.")
+            return 0
+        report_event = "session_start" if source in {"startup", "resume"} else "lifecycle"
+        if not _report(socket_path, event, state="idle", report_event=report_event, sequence_path=sequence_path):
             _emit_block(event_name, "Pisec session attestation failed; do not change the project.")
             return 0
         turn = _prepare_turn(socket_path)
@@ -257,7 +264,11 @@ def main() -> int:
         _emit_hook_context(
             "SessionStart",
             _typed_context(turn, trigger=False),
-            system_message="Pisec delivered broker-authenticated startup context.",
+            system_message=(
+                "Pisec delivered broker-authenticated startup context."
+                if report_event == "session_start"
+                else "Pisec refreshed broker-authenticated context after a Codex session transition."
+            ),
         )
         bootstrap = turn.get("bootstrap")
         if isinstance(bootstrap, Mapping):

@@ -253,7 +253,7 @@ def _permission_failure(store: Any, workspace: Any, operation_id: str, prepared:
         if current is None or current["refresh_operation_id"] != operation_id:
             continue
         try:
-            workspace.stop_runtime(str(current["workspace_surface_id"]))
+            workspace.stop_runtime(str(current["workspace_surface_id"]), selected_harness.manifest.adapter_id)
         except Exception:
             pass
         try:
@@ -487,7 +487,7 @@ def _authorize_apply_project_permissions_locked(store: Any, *, approval_scope: M
             if runtime.state == "unknown":
                 raise NeedsAttentionError("permission batch runtime identity is ambiguous before activation")
             if runtime.state == "live":
-                workspace.stop_runtime(str(binding["workspace_surface_id"]))
+                workspace.stop_runtime(str(binding["workspace_surface_id"]), selected_harness.manifest.adapter_id)
                 deadline = time.monotonic() + 20.0
                 while workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"])).state != "stopped":
                     if time.monotonic() >= deadline:

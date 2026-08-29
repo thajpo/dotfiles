@@ -1123,16 +1123,22 @@ def complete_workstream(
         raise ConflictError("retired workstream cannot be completed")
     if row["desired_state"] == "completed":
         return row
-    operation_id, existing = _lifecycle_operation(store, kind="workstream.complete", project_id=project_id, workstream_id=workstream_id)
-    if existing is not None and existing["state"] == "succeeded":
-        return _workstream(store, workstream_id)
     binding = inspected["binding"]
     if binding is None or workspace is None:
         raise ConflictError("completion requires a bound runtime workspace")
+    operation_id, existing = _lifecycle_operation(store, kind="workstream.complete", project_id=project_id, workstream_id=workstream_id)
+    if existing is not None and existing["state"] == "succeeded":
+        return _workstream(store, workstream_id)
+    if existing is not None and existing["state"] in {"failed", "needs_attention"}:
+        with store.transaction():
+            store.conn.execute(
+                "UPDATE operations SET state='applying',step='planned',error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=? AND state IN ('failed','needs_attention')",
+                (utc_now(), operation_id),
+            )
     try:
         observed = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
         if observed.state != "stopped":
-            workspace.stop_runtime(str(binding["workspace_surface_id"]))
+            workspace.stop_runtime(str(binding["workspace_surface_id"]), str(binding["harness_id"]))
             deadline = time.monotonic() + 10.0
             while time.monotonic() < deadline:
                 observed = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
@@ -1146,10 +1152,22 @@ def complete_workstream(
             store.conn.execute("UPDATE runtime_bindings SET observed_state='stopped',updated_at=? WHERE workstream_id=?", (now, workstream_id))
             store.conn.execute("UPDATE workstreams SET desired_state='completed',completed_at=?,updated_at=? WHERE workstream_id=?", (now, now, workstream_id))
             result = {"workstreamId": workstream_id, "completionPacketSha256": completion_packet_sha256, "sourceCommit": packet["source_commit_oid"]}
-            store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(result), now, operation_id))
+            store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?", (canonical_json(result), now, operation_id))
             append_event_in_transaction(store.conn, kind="workstream.completed", project_id=project_id, workstream_id=workstream_id, operation_id=operation_id, payload=result)
         return _workstream(store, workstream_id)
-    except (ConflictError, InvalidRequestError, NeedsAttentionError):
+    except NeedsAttentionError as error:
+        with store.transaction():
+            store.conn.execute(
+                "UPDATE operations SET state='needs_attention',error_code='completion_ambiguous',error_message=?,updated_at=? WHERE operation_id=? AND state IN ('planned','applying')",
+                (str(error)[:512], utc_now(), operation_id),
+            )
+        raise
+    except (ConflictError, InvalidRequestError) as error:
+        with store.transaction():
+            store.conn.execute(
+                "UPDATE operations SET state='failed',error_code='completion_rejected',error_message=?,updated_at=? WHERE operation_id=? AND state IN ('planned','applying')",
+                (str(error)[:512], utc_now(), operation_id),
+            )
         raise
     except Exception as error:
         with store.transaction():
@@ -1205,7 +1223,7 @@ def retire_workstream(store: Any, project_id: str, workstream_id: str, workspace
         try:
             runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
             if runtime.state != "stopped":
-                workspace.stop_runtime(str(binding["workspace_surface_id"]))
+                workspace.stop_runtime(str(binding["workspace_surface_id"]), str(binding["harness_id"]))
                 runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
             if runtime.state != "stopped":
                 raise NeedsAttentionError("remediation-failure retirement runtime stop is ambiguous")

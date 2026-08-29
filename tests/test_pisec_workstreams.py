@@ -19,6 +19,17 @@ class AmbiguousWorkspace(FixtureWorkspace):
         return None
 
 
+class RecoveringStopWorkspace(FixtureWorkspace):
+    def __init__(self, root, store=None):
+        super().__init__(root, store)
+        self.fail_stop = True
+
+    def stop_runtime(self, surface_id, harness_id=None):
+        if self.fail_stop:
+            raise NeedsAttentionError("injected runtime stop ambiguity")
+        return super().stop_runtime(surface_id, harness_id)
+
+
 class CrashOnce:
     def __init__(self, target):
         self.target = target
@@ -320,6 +331,52 @@ class WorkstreamTests(unittest.TestCase):
         self.assertEqual(retired["branch_name"], branch)
         self.assertEqual(retired["worktree_path"], checkout)
         self.assertEqual(len(workspace.closed), 1)
+
+    def test_completion_stop_attention_is_terminal_and_exact_retry_recovers(self):
+        temp, root, repo, store, project, harness, workspace, git_objects = self.fixture(RecoveringStopWorkspace)
+        self.addCleanup(temp.cleanup)
+        self.addCleanup(store.close)
+        prepared = self.prepare(root, store, project, harness, workspace, key="completion-stop-retry")
+        workstream = self.apply(prepared, store, harness, workspace, git_objects)["workstream"]
+        completion = self.submit_completion(store, workstream)
+        acceptance = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+        apply_workstream_acceptance(store, project["project_id"], acceptance["approvalScope"])
+
+        with self.assertRaisesRegex(NeedsAttentionError, "injected runtime stop ambiguity"):
+            complete_workstream(store, project["project_id"], workstream["workstream_id"], completion["packet_sha256"], workspace)
+        operation = store.conn.execute(
+            "SELECT state,step,error_code,error_message FROM operations WHERE kind='workstream.complete' AND workstream_id=?",
+            (workstream["workstream_id"],),
+        ).fetchone()
+        self.assertEqual(tuple(operation), ("needs_attention", "planned", "completion_ambiguous", "injected runtime stop ambiguity"))
+
+        workspace.fail_stop = False
+        completed = complete_workstream(store, project["project_id"], workstream["workstream_id"], completion["packet_sha256"], workspace)
+        self.assertEqual(completed["desired_state"], "completed")
+        operation = store.conn.execute(
+            "SELECT state,step,error_code,error_message FROM operations WHERE kind='workstream.complete' AND workstream_id=?",
+            (workstream["workstream_id"],),
+        ).fetchone()
+        self.assertEqual(tuple(operation), ("succeeded", "committed", None, None))
+
+    def test_completion_without_runtime_adapter_creates_no_lifecycle_operation(self):
+        temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
+        self.addCleanup(temp.cleanup)
+        self.addCleanup(store.close)
+        prepared = self.prepare(root, store, project, harness, workspace, key="completion-no-adapter")
+        workstream = self.apply(prepared, store, harness, workspace, git_objects)["workstream"]
+        completion = self.submit_completion(store, workstream)
+        acceptance = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+        apply_workstream_acceptance(store, project["project_id"], acceptance["approvalScope"])
+
+        with self.assertRaisesRegex(ConflictError, "bound runtime workspace"):
+            complete_workstream(store, project["project_id"], workstream["workstream_id"], completion["packet_sha256"], None)
+        self.assertIsNone(
+            store.conn.execute(
+                "SELECT 1 FROM operations WHERE kind='workstream.complete' AND workstream_id=?",
+                (workstream["workstream_id"],),
+            ).fetchone()
+        )
 
     def test_mismatched_observation_stops_at_attention(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()

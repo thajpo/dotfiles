@@ -171,6 +171,66 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(closed["processed"][0]["closeout"]["state"], "retired")
             self.assertFalse(worktree.exists())
 
+    def test_target_drift_closeout_restarts_integrated_reporter_from_receipt_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store, project, harness, workspace, workstream, scope, repo, worktree, _private_objects, _source = self.fixture(root)
+            self.addCleanup(store.close)
+            issue = report_issue(
+                store,
+                project_id=project["project_id"],
+                reporter_workstream_id=workstream["workstream_id"],
+                category="lifecycle",
+                severity="blocking",
+                summary="The target-drift repair needs original reporter verification.",
+                details="Retain and restart the integrated worker from its accepted review base.",
+                requested_action="Request verification after integration.",
+                evidence=["fixture"],
+                idempotency_key="target-drift-retained-reporter",
+            )
+            prepared = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            accepted = apply_workstream_acceptance(store, project["project_id"], prepared["approvalScope"])
+            (repo / "target.txt").write_text("advanced\n")
+            _git(repo, "add", "target.txt")
+            _git(repo, "commit", "-qm", "advance target")
+            drift = reconcile_integrations(store, workspace, harness)
+            self.assertEqual(drift["processed"][0]["state"], "awaiting_worker")
+
+            target_ref = f"refs/pisec/target/{accepted['integration']['integration_id']}"
+            git_worker(worktree, "rebase", target_ref)
+            source = git_worker(worktree, "rev-parse", "HEAD").lower()
+            binding = store.conn.execute(
+                "SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?",
+                (scope["workstreamId"],),
+            ).fetchone()
+            task = store.conn.execute(
+                "SELECT packet_sha256 FROM task_packets WHERE workstream_id=?",
+                (scope["workstreamId"],),
+            ).fetchone()
+            submit_completion(
+                store,
+                workstream_id=scope["workstreamId"],
+                runtime_instance_id=binding["runtime_instance_id"],
+                packet={
+                    "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Rebased fixture output."]}],
+                    "verification": [{"command": "fixture verification", "result": "passed"}],
+                    "sourceCommit": source,
+                    "taskPacketSha256": task["packet_sha256"],
+                    "changedSurfaces": ["fixture"],
+                    "residualRisk": "none",
+                },
+            )
+
+            integrated = reconcile_integrations(store, workspace, harness)
+
+            self.assertEqual(integrated["errors"], [], integrated)
+            closeout = integrated["processed"][0]["closeout"]
+            self.assertEqual(closeout["state"], "completed")
+            self.assertTrue(closeout["retainedForVerification"])
+            self.assertEqual(closeout["issueId"], issue["issue_id"])
+            self.assertIn(closeout["runtime"]["action"], {"already_live", "started"})
+            self.assertEqual(validate_worker_resume_git(store, {"workstream_id": scope["workstreamId"]}), source)
+
     def test_target_drift_is_reconciled_by_the_worker_without_a_second_acceptance(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

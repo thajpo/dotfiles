@@ -483,6 +483,68 @@ class Phase10ScopeParityTests(unittest.TestCase):
         acknowledgement = recording.payloads[-1]["payload"]
         self.assertEqual((acknowledgement["bootstrapEventId"], acknowledgement["bootstrapRevision"]), ("evt_" + "7" * 32, 9))
 
+    def test_codex_compaction_refreshes_context_without_restarting_runtime_instance(self):
+        class RecordingSocket:
+            def __init__(self):
+                self.payload = None
+                self.payloads = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                return None
+
+            def connect(self, _path):
+                return None
+
+            def sendall(self, data):
+                self.payload = json.loads(data.decode())
+                self.payloads.append(self.payload)
+
+            def recv(self, _size):
+                if self.payload["operation"] == "runtime.turn.prepare":
+                    result = {"prepared": True, "taskPacket": {"packet": {"outcome": "continue"}}, "bootstrap": None, "attention": []}
+                else:
+                    result = {"accepted": True, "seq": self.payload["payload"]["seq"]}
+                return json.dumps({"requestId": self.payload["requestId"], "ok": True, "result": result}).encode()
+
+        recording = RecordingSocket()
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = Path(tmp) / "sessions"
+            sessions.mkdir()
+            instance = "3" * 32
+            codex_hook._sequence_path(tmp, instance).write_text("2")
+            with patch.dict(
+                os.environ,
+                {
+                    "PISEC_RUNTIME_SOCKET": str(Path(tmp) / "runtime.sock"),
+                    "PISEC_RUNTIME_TOKEN": "t" * 48,
+                    "PISEC_WORKSTREAM_ID": "ws_" + "2" * 32,
+                    "PISEC_RUNTIME_INSTANCE_ID": instance,
+                    "PISEC_SURFACE_ID": "surface_" + "4" * 32,
+                    "PISEC_HARNESS_HOME": tmp,
+                    "PISEC_RUNTIME_GENERATION": "5" * 64,
+                    "PISEC_SESSION_START_SOURCE": "resume",
+                },
+            ), patch("scripts.pisec.codex_hook.socket.socket", return_value=recording), patch(
+                "sys.stdin", io.StringIO(json.dumps({"hook_event_name": "SessionStart", "source": "compact", "session_id": "native-session"}))
+            ), patch("sys.stdout", output):
+                self.assertEqual(codex_hook.main(), 0)
+
+            self.assertEqual([payload["operation"] for payload in recording.payloads], ["runtime.report", "runtime.turn.prepare"])
+            report = recording.payloads[0]["payload"]
+            self.assertEqual((report["event"], report["seq"], report["nativeSessionValue"]), ("lifecycle", 3, "native-session"))
+            self.assertEqual(codex_hook._sequence_path(tmp, instance).read_text(), "3")
+            rendered = json.loads(output.getvalue())
+            self.assertNotIn("continue", rendered)
+            self.assertIn("session transition", rendered["systemMessage"])
+            self.assertIn("PISEC_AUTHENTICATED_RUNTIME_CONTEXT", rendered["hookSpecificOutput"]["additionalContext"])
+
     def test_codex_attention_trigger_injects_only_authenticated_typed_records(self):
         turn = {
             "prepared": True,

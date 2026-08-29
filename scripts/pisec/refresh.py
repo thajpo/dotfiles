@@ -667,7 +667,7 @@ def _refresh_one(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapte
     if runtime.state == "live":
         if binding["observed_state"] not in {"idle", "stopped"}:
             return {"pending": True, "state": str(binding["observed_state"]), "reason": f"runtime is {binding['observed_state']}"}
-        workspace.stop_runtime(str(binding["workspace_surface_id"]))
+        workspace.stop_runtime(str(binding["workspace_surface_id"]), harness.manifest.adapter_id)
         _wait_for_exit(workspace, binding)
     current = _materialize_and_launch(store, harness, workspace, binding, surface, desired, staged=staged)
     attested = _startup_attested(store, workspace, str(binding["workstream_id"]), old_instance, desired)

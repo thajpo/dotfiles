@@ -398,8 +398,17 @@ def validate_worker_resume_git(store: Any, binding: Mapping[str, Any]) -> str | 
         (workstream_id,),
     ).fetchone()
     private_ref = integration_private_target_ref(job)
-    history_base_oid = str(job["target_oid"]) if job is not None and job["target_oid"] else None
-    review_base_oid = history_base_oid if private_ref is not None else None
+    history_base_oid = str(job["target_oid"]) if private_ref is not None and job["target_oid"] else None
+    review_base_oid = history_base_oid
+    if job is not None and job["state"] == "integrated":
+        receipt = store.conn.execute(
+            "SELECT previous_target_oid FROM merge_receipts WHERE integration_id=?",
+            (job["integration_id"],),
+        ).fetchone()
+        if receipt is None:
+            raise NeedsAttentionError("integrated worker resume requires its integration receipt")
+        history_base_oid = str(receipt["previous_target_oid"])
+        review_base_oid = history_base_oid
     return validate_worker_repository(
         Path(str(row["worktree_path"])),
         branch_name=str(row["branch_name"]),

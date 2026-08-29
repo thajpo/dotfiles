@@ -290,9 +290,17 @@ class HerdrWorkspaceAdapter:
             raise PisecError("workspace did not accept the runtime command submission")
         return entered
 
-    def stop_runtime(self, surface_id: str) -> dict[str, Any]:
+    def stop_runtime(self, surface_id: str, harness_id: str | None = None) -> dict[str, Any]:
         if not isinstance(surface_id, str) or not surface_id or "\x00" in surface_id:
             raise InvalidRequestError("workspace surface id is invalid")
+        if harness_id == "codex":
+            sent = self._request("pane.send_text", {"pane_id": surface_id, "text": "/exit"})
+            if sent.get("type") not in {"ok", "pane_text_sent"}:
+                raise PisecError("workspace did not accept the Codex runtime exit command")
+            entered = self._request("pane.send_keys", {"pane_id": surface_id, "keys": ["Enter"]})
+            if entered.get("type") != "ok":
+                raise PisecError("workspace did not accept the Codex runtime exit submission")
+            return entered
         result = self._request("pane.send_keys", {"pane_id": surface_id, "keys": ["ctrl+d"]})
         if result.get("type") != "ok":
             raise PisecError("workspace did not accept the runtime stop request")

@@ -389,7 +389,7 @@ class FixtureWorkspace:
             state = "live" if any(agent.surface_id == surface_id for agent in self.agents.values()) else "stopped"
         return RuntimeProcessObservation(state, "fixture")
 
-    def stop_runtime(self, surface_id: str) -> Mapping[str, Any]:
+    def stop_runtime(self, surface_id: str, harness_id: str | None = None) -> Mapping[str, Any]:
         self.calls.append(("stop", surface_id))
         self.runtime_states[surface_id] = "stopped"
         for name, agent in list(self.agents.items()):
