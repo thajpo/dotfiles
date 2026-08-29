@@ -133,7 +133,23 @@ class CleanupTests(unittest.TestCase):
             )
 
             self.assertEqual(recovered["operation"]["state"], "succeeded")
+            self.assertEqual(recovered["workstream"]["provisioning_state"], "bound")
+            self.assertIsNone(recovered["workstream"]["attention_reason"])
             self.assertFalse(Path(workstream["worktree_path"]).exists())
+
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='stale cleanup warning' WHERE workstream_id=?",
+                (workstream["workstream_id"],),
+            )
+            replay = cleanup_workstream(
+                store,
+                {"workstreamId": workstream["workstream_id"], "confirm": workstream["workstream_id"]},
+                workspace,
+                harness,
+            )
+            self.assertTrue(replay["reused"])
+            self.assertEqual(replay["workstream"]["provisioning_state"], "bound")
+            self.assertIsNone(replay["workstream"]["attention_reason"])
 
 
 if __name__ == "__main__":

@@ -98,6 +98,11 @@ def cleanup_workstream(store: Any, payload: Mapping[str, Any], workspace: Worksp
         if existing["request_sha256"] != request_sha:
             raise ConflictError("cleanup idempotency key is bound to another request")
         if existing["state"] == "succeeded":
+            with store.transaction():
+                store.conn.execute(
+                    "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=? AND desired_state='retired'",
+                    (utc_now(), workstream_id),
+                )
             return {"operation": dict(existing), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone()), "reused": True}
         if existing["state"] == "needs_attention":
             with store.transaction():
@@ -168,6 +173,10 @@ def cleanup_workstream(store: Any, payload: Mapping[str, Any], workspace: Worksp
         now = utc_now()
         with store.transaction():
             store.conn.execute("DELETE FROM runtime_bindings WHERE workstream_id=?", (workstream_id,))
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=?",
+                (now, workstream_id),
+            )
             result = {"workstreamId": workstream_id, "branchRetained": True, "retainedSessionRoot": None if retained_root is None else str(retained_root)}
             store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=?", (canonical_json(result), now, operation_id))
             append_event_in_transaction(store.conn, kind="workstream.cleaned", project_id=project["project_id"], workstream_id=workstream_id, operation_id=operation_id, payload=result)

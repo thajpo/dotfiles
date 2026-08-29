@@ -149,6 +149,38 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(list_open_attention(store, recipient_workstream_id=secretary_id), [])
             self.assertEqual(backfill_attention(store, recipient_workstream_id=secretary_id), 0)
 
+    def test_integrated_target_drift_completion_does_not_reopen_secretary_attention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store, project, _harness, _workspace, workstream, _scope, _repo, _worktree, _private_objects, _source = self.fixture(root)
+            self.addCleanup(store.close)
+            completion = dict(store.conn.execute("SELECT * FROM completion_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone())
+            prepared = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            accepted = apply_workstream_acceptance(store, project["project_id"], prepared["approvalScope"])
+            replacement_id = new_id("cmp")
+            replacement_source = "e" * 40
+            with store.transaction():
+                store.conn.execute(
+                    "INSERT INTO completion_packets(completion_packet_id,workstream_id,sequence,source_commit_oid,task_packet_sha256,packet_sha256,packet_json,submitted_at,accepted_at) VALUES(?,?,?,?,?,?,?,?,NULL)",
+                    (replacement_id, workstream["workstream_id"], 2, replacement_source, completion["task_packet_sha256"], "d" * 64, completion["packet_json"], "2026-08-29T00:00:00Z"),
+                )
+                store.conn.execute(
+                    "UPDATE integration_jobs SET state='integrated',candidate_completion_packet_id=?,candidate_source_oid=?,integrated_at='2026-08-29T00:01:00Z' WHERE integration_id=?",
+                    (replacement_id, replacement_source, accepted["integration"]["integration_id"]),
+                )
+                append_event_in_transaction(
+                    store.conn,
+                    kind="workstream.completion_submitted",
+                    project_id=project["project_id"],
+                    workstream_id=workstream["workstream_id"],
+                    payload={"completionPacketId": replacement_id, "completionPacketSha256": "d" * 64, "sourceCommit": replacement_source},
+                )
+
+            secretary_id = store.conn.execute("SELECT secretary_workstream_id FROM projects WHERE project_id=?", (project["project_id"],)).fetchone()[0]
+            self.assertEqual(list_open_attention(store, recipient_workstream_id=secretary_id), [])
+            store.conn.execute("DELETE FROM attention_items WHERE recipient_workstream_id=? AND source_kind='completion'", (secretary_id,))
+            self.assertEqual(backfill_attention(store, recipient_workstream_id=secretary_id), 0)
+
     def test_closeout_compensates_a_stopped_interrupted_refresh_before_retirement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
