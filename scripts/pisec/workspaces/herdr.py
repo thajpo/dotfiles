@@ -317,7 +317,7 @@ class HerdrWorkspaceAdapter:
         if observation.state != "live":
             raise NeedsAttentionError("workspace runtime trigger target is not the live fenced runtime")
         sent = self._request("pane.send_text", {"pane_id": surface_id, "text": trigger})
-        if sent.get("type") != "pane_text_sent":
+        if sent.get("type") not in {"ok", "pane_text_sent"}:
             raise PisecError("workspace did not accept the runtime trigger text")
         entered = self._request("pane.send_keys", {"pane_id": surface_id, "keys": ["Enter"]})
         if entered.get("type") != "ok":

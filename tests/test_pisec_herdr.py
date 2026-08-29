@@ -25,6 +25,7 @@ class FakeHerdrState:
         self.ready_reads = 0
         self.ready_after_reads = 0
         self.long_process_argv = False
+        self.send_text_type = "pane_text_sent"
 
     def result(self, method, params):
         self.requests.append((method, params))
@@ -83,7 +84,7 @@ class FakeHerdrState:
             text = "" if self.ready_reads <= self.ready_after_reads else "$ "
             return {"type": "pane_read", "read": {"text": text, "truncated": False, "revision": self.ready_reads}}
         if method == "pane.send_text":
-            return {"type": "pane_text_sent"}
+            return {"type": self.send_text_type}
         if method == "pane.send_keys":
             return {"type": "ok"}
         if method == "pane.focus":
@@ -199,6 +200,12 @@ class HerdrTests(unittest.TestCase):
                 ("pane.send_keys", {"pane_id": "w1:p1", "keys": ["Enter"]}),
             ],
         )
+
+    def test_runtime_trigger_accepts_protocol_ok_send_text_result(self):
+        self.state.send_text_type = "ok"
+        result = self.adapter.trigger_agent_nowait("w1:p1", "PISEC_ATTENTION_TRIGGER", "/tmp/policy")
+        self.assertTrue(result["verified_runtime"])
+        self.assertEqual(self.state.requests[-1], ("pane.send_keys", {"pane_id": "w1:p1", "keys": ["Enter"]}))
 
     def test_runtime_trigger_rejects_content_and_non_runtime_foreground(self):
         with self.assertRaises(InvalidRequestError):
