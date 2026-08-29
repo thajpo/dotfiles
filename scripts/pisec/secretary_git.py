@@ -17,7 +17,7 @@ from .git_runner import run_git
 from .models import ConflictError, InvalidRequestError, NeedsAttentionError, ScopeMismatchError, bounded_text, new_id, utc_now, validate_git_oid, validate_id, validate_sha256
 from .operations import authoritative_workstream_creation
 from .projects import get_project
-from .worker_repo import project_git_lock, validate_worker_repository
+from .worker_repo import integration_private_target_ref, project_git_lock, validate_worker_repository
 
 _MERGE_SCOPE_FIELDS = frozenset({
     "kind", "projectId", "workstreamId", "targetBranch", "targetCommitOid", "sourceBranch",
@@ -126,8 +126,8 @@ def _worker_repository(store: Any, workstream: Mapping[str, Any]) -> Path:
         "SELECT integration_id,state FROM integration_jobs WHERE workstream_id=? ORDER BY created_at DESC LIMIT 1",
         (workstream["workstream_id"],),
     ).fetchone()
-    if integration is not None and integration["state"] in {"queued", "refreshing", "awaiting_worker", "verifying", "applying", "needs_attention"}:
-        candidate_ref = f"refs/pisec/target/{integration['integration_id']}"
+    candidate_ref = integration_private_target_ref(integration)
+    if candidate_ref is not None:
         code, _output = _run_git(path, "show-ref", "--verify", "--quiet", candidate_ref, accepted=frozenset({0, 1}))
         if code == 0:
             private_ref = candidate_ref

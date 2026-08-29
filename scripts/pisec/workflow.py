@@ -11,7 +11,7 @@ from .events import append_event_in_transaction
 from .runtime_eligibility import runtime_lifecycle_eligible
 from .models import ConflictError, IdempotencyConflictError, InvalidRequestError, NotFoundError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_git_oid, validate_id, validate_sha256
 from .projects import _git, assert_project_writable, get_project, is_first_mate_issue_project, platform_project_id
-from .worker_repo import validate_worker_repository
+from .worker_repo import integration_private_target_ref, validate_worker_repository
 
 PHASES = frozenset({"investigating", "implementing", "verifying"})
 COORDINATION_KINDS = frozenset({"clarification", "blocker", "review_request"})
@@ -632,10 +632,9 @@ def _submit_completion_in_transaction(store: Any, *, workstream_id: str, runtime
         "SELECT integration_id,state,target_oid FROM integration_jobs WHERE workstream_id=? ORDER BY created_at DESC LIMIT 1",
         (workstream_id,),
     ).fetchone()
-    private_ref = None
+    private_ref = integration_private_target_ref(integration)
     history_base_oid = None
-    if integration is not None and integration["state"] in {"awaiting_worker", "queued", "refreshing", "verifying", "applying"}:
-        private_ref = f"refs/pisec/target/{integration['integration_id']}"
+    if private_ref is not None:
         history_base_oid = str(integration["target_oid"]) if integration["target_oid"] else None
     observed_source = validate_worker_repository(
         Path(str(workstream["worktree_path"])),

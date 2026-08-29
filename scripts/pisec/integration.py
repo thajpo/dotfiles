@@ -13,7 +13,7 @@ from .models import ConflictError, IdempotencyConflictError, InvalidRequestError
 from .projects import get_project
 from .secretary_git import _oid, _primary_state, _repository, _run_git
 from .runtime_eligibility import unresolved_reporter_issue
-from .worker_repo import project_git_lock, validate_worker_repository
+from .worker_repo import integration_private_target_ref, project_git_lock, validate_worker_repository
 from .workstreams import complete_workstream, inspect_workstream, retire_workstream
 from .control_plane import control_plane_mutation
 
@@ -141,9 +141,7 @@ def _candidate(
         "SELECT integration_id,state FROM integration_jobs WHERE workstream_id=? ORDER BY created_at DESC LIMIT 1",
         (workstream_id,),
     ).fetchone()
-    private_ref = None
-    if integration_row is not None and integration_row["state"] in {"awaiting_worker", "queued", "refreshing", "verifying", "applying"}:
-        private_ref = f"refs/pisec/target/{integration_row['integration_id']}"
+    private_ref = integration_private_target_ref(integration_row)
     primary = _repository(project)
     source_oid = _oid(repository, f"refs/heads/{workstream['branch_name']}")
     if source_oid != str(packet["source_commit_oid"]).lower():
@@ -536,13 +534,19 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
             or (last_error.startswith("Git ") and " operation failed" in last_error)
             or last_error == "worker Reviewr base ref does not match the approved base"
         )
+        retryable_contract_error = last_error == "replacement completion packet changed paths outside the accepted scope"
         if integrated_closeout:
             _set_job(store, integration_id, state="integrated", next_action="retry integrated workstream closeout")
             job = {**dict(job), "state": "integrated", "last_error": None}
-        elif last_error != "registered project checkout is dirty" and not retryable_git_error:
+        elif last_error != "registered project checkout is dirty" and not retryable_git_error and not retryable_contract_error:
             return {"integrationId": integration_id, "state": "needs_attention", "reused": True}
         else:
-            next_action = "retry after the target checkout was cleaned" if not retryable_git_error else "retry after the reported Git condition was repaired"
+            if last_error == "registered project checkout is dirty":
+                next_action = "retry after the target checkout was cleaned"
+            elif retryable_contract_error:
+                next_action = "retry the accepted target-drift contract with the repaired validator"
+            else:
+                next_action = "retry after the reported Git condition was repaired"
             _set_job(store, integration_id, state="queued", next_action=next_action)
             job = {**dict(job), "state": "queued", "last_error": None}
     if job["state"] != "awaiting_worker":

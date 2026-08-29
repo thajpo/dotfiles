@@ -24,6 +24,14 @@ _CONFIG_KEYS = frozenset({
     "core.hookspath", "core.fsmonitor", "commit.gpgsign", "tag.gpgsign", "gc.auto",
     "maintenance.auto",
 })
+_PRIVATE_TARGET_REF_STATES = frozenset({"queued", "refreshing", "awaiting_worker", "verifying", "applying", "needs_attention"})
+
+
+def integration_private_target_ref(integration: Any) -> str | None:
+    """Return the broker-owned target ref while an accepted integration is unfinished."""
+    if integration is None or integration["state"] not in _PRIVATE_TARGET_REF_STATES:
+        return None
+    return f"refs/pisec/target/{validate_id(integration['integration_id'], prefix='int')}"
 
 
 def _oid(repository: Path, revision: str) -> str:
@@ -389,8 +397,7 @@ def validate_worker_resume_git(store: Any, binding: Mapping[str, Any]) -> str | 
         "SELECT integration_id,state,target_oid FROM integration_jobs WHERE workstream_id=? ORDER BY created_at DESC LIMIT 1",
         (workstream_id,),
     ).fetchone()
-    if job is not None and job["state"] in {"awaiting_worker", "queued", "refreshing", "verifying", "applying"}:
-        private_ref = f"refs/pisec/target/{job['integration_id']}"
+    private_ref = integration_private_target_ref(job)
     history_base_oid = str(job["target_oid"]) if job is not None and job["target_oid"] else None
     review_base_oid = history_base_oid if private_ref is not None else None
     return validate_worker_repository(

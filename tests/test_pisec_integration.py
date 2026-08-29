@@ -13,6 +13,7 @@ from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workflow import report_issue, submit_completion
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
 from scripts.pisec.git_runner import run_git
+from scripts.pisec.worker_repo import validate_worker_resume_git
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 
 
@@ -305,14 +306,15 @@ class IntegrationTests(unittest.TestCase):
                 })
             rejected = reconcile_integrations(store, workspace, harness)
             self.assertEqual(rejected["processed"][0]["state"], "awaiting_worker")
-            submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
-                    "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Rebased fixture output."]}],
-                    "verification": [{"command": "fixture verification", "result": "passed"}],
-                    "sourceCommit": rebased_source,
-                    "taskPacketSha256": task["packet_sha256"],
-                    "changedSurfaces": ["fixture"],
-                    "residualRisk": "none",
-                })
+            replacement_packet = {
+                "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Rebased fixture output."]}],
+                "verification": [{"command": "fixture verification", "result": "passed"}],
+                "sourceCommit": rebased_source,
+                "taskPacketSha256": task["packet_sha256"],
+                "changedSurfaces": ["fixture"],
+                "residualRisk": "none",
+            }
+            submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet=replacement_packet)
 
             result = reconcile_integrations(store, workspace, harness)
 
@@ -338,19 +340,31 @@ class IntegrationTests(unittest.TestCase):
             rebased_source = git_worker(worktree, "rev-parse", "HEAD").lower()
             binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
             task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
-            submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
-                    "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Rebased fixture output."]}],
-                    "verification": [{"command": "fixture verification", "result": "passed"}],
-                    "sourceCommit": rebased_source,
-                    "taskPacketSha256": task["packet_sha256"],
-                    "changedSurfaces": ["fixture"],
-                    "residualRisk": "none",
-                })
+            replacement_packet = {
+                "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Rebased fixture output."]}],
+                "verification": [{"command": "fixture verification", "result": "passed"}],
+                "sourceCommit": rebased_source,
+                "taskPacketSha256": task["packet_sha256"],
+                "changedSurfaces": ["fixture"],
+                "residualRisk": "none",
+            }
+            submitted = submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet=replacement_packet)
             (repo / "second-target.txt").write_text("second\n")
             _git(repo, "add", "second-target.txt")
             _git(repo, "commit", "-qm", "second target advance")
             second_drift = reconcile_integrations(store, workspace, harness)
             self.assertEqual(second_drift["processed"][0]["state"], "awaiting_worker")
+            store.conn.execute(
+                "UPDATE integration_jobs SET state='needs_attention',last_error='replacement completion packet changed paths outside the accepted scope' WHERE integration_id=?",
+                (accepted["integration"]["integration_id"],),
+            )
+            self.assertEqual(validate_worker_resume_git(store, {"workstream_id": scope["workstreamId"]}), rebased_source)
+            replayed_packet = submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet=replacement_packet)
+            self.assertEqual(replayed_packet["completion_packet_id"], submitted["completion_packet_id"])
+
+            recovered = reconcile_integrations(store, workspace, harness)
+
+            self.assertEqual(recovered["processed"][0]["state"], "awaiting_worker", recovered)
 
             replay = reconcile_integrations(store, workspace, harness)
 
