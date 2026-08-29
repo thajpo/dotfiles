@@ -719,7 +719,7 @@ exit 0
                 if name in {
                     "create_workspace", "create_tab", "rename_tab", "move_surface_to_tab", "observe_tab",
                     "observe_workstream", "observe_surface", "observe_runtime", "run_command", "stop_runtime",
-                    "prompt_agent", "prompt_agent_nowait", "prompt_eligible", "focus_pane", "close_tab",
+                    "prompt_agent", "prompt_agent_nowait", "trigger_agent_nowait", "prompt_eligible", "focus_pane", "close_tab",
                     "close_workspace", "report_session", "report_state", "release_agent", "reconcile",
                 }:
                     return lambda *args, **kwargs: None
