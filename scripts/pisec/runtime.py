@@ -428,10 +428,10 @@ def report_runtime(store: Any, payload_value: Mapping[str, Any], harness: Harnes
     instance = str(payload["runtimeInstanceId"])
     kind, value = payload["nativeSessionKind"], payload["nativeSessionValue"]
     current_seq = int(binding["report_seq"])
-    if seq == current_seq and current_seq > 0:
+    if seq == current_seq and current_seq > 0 and not (event == "session_start" and binding["runtime_instance_id"] != instance):
         same_instance = binding["runtime_instance_id"] == instance
         same_generation = binding["applied_generation_sha256"] == generation
-        same_state = binding["observed_state"] == state
+        same_state = event == "session_start" or binding["observed_state"] == state
         same_native = kind is None or (kind == binding["native_session_kind"] and value == binding["native_session_value"])
         same_start = event != "session_start" or (
             seq == 1
