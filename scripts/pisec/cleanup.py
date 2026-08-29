@@ -30,8 +30,10 @@ def _safe_owned_tree(path: Path) -> None:
         for name in [*names, *files]:
             child = Path(directory) / name
             child_info = child.lstat()
-            if child_info.st_uid != os.geteuid() or stat.S_ISLNK(child_info.st_mode):
+            if child_info.st_uid != os.geteuid():
                 raise NeedsAttentionError("cleanup tree contains an unsafe entry")
+            if stat.S_ISLNK(child_info.st_mode):
+                continue
             if child_info.st_dev != device:
                 raise NeedsAttentionError("cleanup tree crosses a filesystem boundary")
 
@@ -96,7 +98,11 @@ def cleanup_workstream(store: Any, payload: Mapping[str, Any], workspace: Worksp
         if existing["state"] == "succeeded":
             return {"operation": dict(existing), "workstream": dict(store.conn.execute("SELECT * FROM workstreams WHERE workstream_id=?", (workstream_id,)).fetchone()), "reused": True}
         if existing["state"] == "needs_attention":
-            raise NeedsAttentionError(existing["error_message"] or "cleanup requires attention")
+            with store.transaction():
+                store.conn.execute(
+                    "UPDATE operations SET state='applying',step='planned',error_code=NULL,error_message=NULL,updated_at=? WHERE operation_id=? AND state='needs_attention'",
+                    (utc_now(), existing["operation_id"]),
+                )
         operation_id = existing["operation_id"]
     else:
         operation_id = new_id("op")

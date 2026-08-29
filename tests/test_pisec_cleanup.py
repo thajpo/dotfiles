@@ -2,8 +2,10 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.pisec.cleanup import cleanup_workstream
+from scripts.pisec.git_runner import run_git
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import _git, register_project
 from scripts.pisec.secretary import ensure_secretary
@@ -62,6 +64,29 @@ class CleanupTests(unittest.TestCase):
             self.assertIsNone(store.conn.execute("SELECT 1 FROM runtime_bindings WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone())
             self.assertEqual(result["processed"][0]["state"], "integrated")
 
+    def test_cleanup_unlinks_a_tracked_symlink_without_following_its_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store, project, harness, workspace, workstream = self.setup_bound_worker(root)
+            self.addCleanup(store.close)
+            worktree = Path(workstream["worktree_path"])
+            outside = root / "outside"
+            outside.mkdir()
+            marker = outside / "preserved.txt"
+            marker.write_text("preserved\n")
+            (worktree / "tracked-link").symlink_to(outside, target_is_directory=True)
+            run_git(worktree, ("add", "tracked-link"), role="worker")
+            run_git(worktree, ("commit", "-m", "add tracked symlink"), role="worker")
+            self.submit_completion(store, workstream)
+            acceptance = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            apply_workstream_acceptance(store, project["project_id"], acceptance["approvalScope"])
+
+            result = reconcile_integrations(store, workspace=workspace, harness=harness)
+
+            self.assertEqual(result["processed"][0]["state"], "integrated")
+            self.assertFalse(worktree.exists())
+            self.assertEqual(marker.read_text(), "preserved\n")
+
     def test_unexpected_cleanup_failure_records_attention(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -70,9 +95,8 @@ class CleanupTests(unittest.TestCase):
             completion = self.submit_completion(store, workstream)
             acceptance = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
             apply_workstream_acceptance(store, project["project_id"], acceptance["approvalScope"])
-            complete_workstream(store, project["project_id"], workstream["workstream_id"], completion["packet_sha256"], workspace)
-            store.conn.execute("UPDATE runtime_bindings SET observed_state='idle' WHERE workstream_id=?", (workstream["workstream_id"],))
-            retire_workstream(store, project["project_id"], workstream["workstream_id"], workspace)
+            with patch("scripts.pisec.integration.cleanup_workstream", side_effect=RuntimeError("defer cleanup")):
+                reconcile_integrations(store, workspace=workspace, harness=harness)
             failing = FailingWorkspace(root, store)
             with self.assertRaisesRegex(Exception, "cleanup"):
                 cleanup_workstream(store, {"workstreamId": workstream["workstream_id"], "confirm": workstream["workstream_id"]}, failing, harness)
@@ -80,6 +104,16 @@ class CleanupTests(unittest.TestCase):
             row = store.conn.execute("SELECT provisioning_state,attention_reason FROM workstreams WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()
             self.assertEqual(tuple(operation), ("needs_attention", "cleanup_failed", "cannot close fixture-view-2"))
             self.assertEqual(tuple(row), ("needs_attention", "cannot close fixture-view-2"))
+
+            recovered = cleanup_workstream(
+                store,
+                {"workstreamId": workstream["workstream_id"], "confirm": workstream["workstream_id"]},
+                workspace,
+                harness,
+            )
+
+            self.assertEqual(recovered["operation"]["state"], "succeeded")
+            self.assertFalse(Path(workstream["worktree_path"]).exists())
 
 
 if __name__ == "__main__":
