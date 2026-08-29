@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 from multiprocessing import get_context
+import fcntl
 import json
+import os
 from pathlib import Path
 import queue
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from scripts.pisec.control_plane import control_plane_lock
 from scripts.pisec.effects import EFFECT_STEPS, effect_state, journal_compensate, journal_confirm, journal_entries, journal_intent
-from scripts.pisec.models import NeedsAttentionError
+from scripts.pisec.models import NeedsAttentionError, PisecError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
@@ -91,6 +96,60 @@ class SettlingHarnessNamedWorkspace(HarnessNamedWorkspace):
 
 
 class Phase11AtomicityTests(unittest.TestCase):
+    def test_updater_lock_descriptor_survives_exec_without_releasing_exclusivity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            locks = root / "locks"
+            locks.mkdir(mode=0o700, parents=True)
+            path = locks / "control-plane.lock"
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            os.fchmod(descriptor, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                environment = dict(os.environ)
+                environment["PYTHONDONTWRITEBYTECODE"] = "1"
+                environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+                environment["PISEC_CONTROL_PLANE_LOCK_FD"] = str(descriptor)
+                source = (
+                    "from pathlib import Path; import sys; "
+                    "from scripts.pisec.control_plane import control_plane_lock; "
+                    "\nwith control_plane_lock(Path(sys.argv[1]), timeout=0): print('entered')"
+                )
+                child = subprocess.run(
+                    [sys.executable, "-c", source, str(root)],
+                    env=environment,
+                    pass_fds=(descriptor,),
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                self.assertEqual(child.returncode, 0, child.stderr)
+                self.assertEqual(child.stdout.strip(), "entered")
+                contender = os.open(path, os.O_RDWR)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(contender)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+    def test_inherited_control_plane_descriptor_must_match_the_lock_inode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            wrong = root / "wrong.lock"
+            root.mkdir(mode=0o700)
+            descriptor = os.open(wrong, os.O_RDWR | os.O_CREAT, 0o600)
+            os.fchmod(descriptor, 0o600)
+            try:
+                with patch.dict(os.environ, {"PISEC_CONTROL_PLANE_LOCK_FD": str(descriptor)}):
+                    with self.assertRaisesRegex(PisecError, "inherited Pisec control-plane lock is invalid"):
+                        with control_plane_lock(root, timeout=0):
+                            self.fail("a mismatched inherited descriptor must not enter")
+            finally:
+                os.close(descriptor)
+
     def test_provisioning_journal_confirms_every_external_step(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

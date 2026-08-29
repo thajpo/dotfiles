@@ -31,6 +31,7 @@ EXIT_FAILED = 1
 EXIT_NEEDS_ATTENTION = 2
 EXIT_UNSUPPORTED_STATE = 3
 EXIT_LOCKED = 75
+INHERITED_LOCK_FD_ENV = "PISEC_CONTROL_PLANE_LOCK_FD"
 
 ALLOWLIST = (
     "bin/pisec",
@@ -519,15 +520,43 @@ def _semantic_state_health(state_root: Path) -> None:
         )
 
 
-def _post_switch(current: Path, wait_seconds: float) -> dict:
+def _refresh_under_lock(current: Path, wait_seconds: float, state_root: Path, lock_descriptor: int) -> dict:
+    environment = dict(os.environ)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONPATH"] = str(current) + (os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else "")
+    environment["PISEC_STATE_ROOT"] = str(state_root)
+    environment[INHERITED_LOCK_FD_ENV] = str(lock_descriptor)
+    command = [
+        sys.executable,
+        "-m",
+        "scripts.pisec.update_refresh",
+        "--state-root",
+        str(state_root),
+        "--wait-seconds",
+        str(wait_seconds),
+    ]
+    result = subprocess.run(command, env=environment, text=True, capture_output=True, pass_fds=(lock_descriptor,))
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        detail = (result.stderr or result.stdout or "candidate runtime refresh returned no result")[-512:]
+        return {"ok": False, "failed": [{"reason": detail}], "pending": []}
+    if not isinstance(value, dict):
+        return {"ok": False, "failed": [{"reason": "candidate runtime refresh returned an invalid result"}], "pending": []}
+    if result.returncode not in {0, 1}:
+        detail = (result.stderr or "candidate runtime refresh process failed")[-512:]
+        value.setdefault("failed", []).append({"reason": detail})
+        value["ok"] = False
+    return value
+
+
+def _post_switch(current: Path, wait_seconds: float, refresh: dict) -> dict:
     environment = dict(os.environ)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     _systemctl("start")
     _wait_for_broker(wait_seconds)
-    refresh = subprocess.run([str(current / "bin" / "pisec"), "project", "refresh", "--all", "--wait-seconds", str(wait_seconds), "--json"], env=environment, text=True, capture_output=True)
-    refresh_value = json.loads(refresh.stdout) if refresh.stdout.strip() else {"ok": False}
-    if refresh.returncode or refresh_value.get("ok") is not True or refresh_value.get("failed") or refresh_value.get("pending"):
-        raise RuntimeError(f"runtime refresh failed: {refresh.stdout[-512:]}{refresh.stderr[-512:]}")
+    if refresh.get("ok") is not True or refresh.get("failed") or refresh.get("pending"):
+        raise RuntimeError(f"runtime refresh failed: {json.dumps(refresh, sort_keys=True)[-1024:]}")
     doctor = subprocess.run([str(current / "bin" / "pisec"), "doctor", "--json"], env=environment, text=True, capture_output=True)
     if doctor.returncode:
         raise RuntimeError(f"doctor failed: {doctor.stdout[-512:]}{doctor.stderr[-512:]}")
@@ -557,14 +586,14 @@ def _post_switch(current: Path, wait_seconds: float) -> dict:
         raise RuntimeError("post-reconcile doctor reported failed checks")
     semantic_state_root = Path(os.environ.get("PISEC_STATE_ROOT", Path.home() / ".local" / "state" / "pisec")).expanduser()
     _semantic_state_health(semantic_state_root)
-    return {"doctor": "ok", "refresh": refresh_value, "reconcile": "ok", "doctorAfter": "ok", "semanticState": "ok"}
+    return {"doctor": "ok", "refresh": refresh, "reconcile": "ok", "doctorAfter": "ok", "semanticState": "ok"}
 
 
-def _post_switch_for_state(current: Path, wait_seconds: float, state_root: Path) -> dict:
+def _post_switch_for_state(current: Path, wait_seconds: float, state_root: Path, refresh: dict) -> dict:
     previous = os.environ.get("PISEC_STATE_ROOT")
     os.environ["PISEC_STATE_ROOT"] = str(state_root)
     try:
-        return _post_switch(current, wait_seconds)
+        return _post_switch(current, wait_seconds, refresh)
     finally:
         if previous is None:
             os.environ.pop("PISEC_STATE_ROOT", None)
@@ -686,7 +715,7 @@ def _control_plane_lock(state_root: Path, *, timeout: float = 30.0, on_wait: Cal
                     raise LockedError("Pisec control-plane lock is busy") from error
                 time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
         try:
-            yield
+            yield descriptor
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:
@@ -718,35 +747,36 @@ def update(repo: Path, ref: str, wait_seconds: float, state_root: Path, install_
             _json_write(status_path, status)
             print(message, file=sys.stderr, flush=True)
 
-        with _control_plane_lock(state_root, on_wait=announce_control_plane_wait), _update_lock(install_root):
-            if reject_dirty:
-                _assert_clean(repo)
-            commit = _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
-            expected_database = _schema_identity(repo, commit)
-            current = _current_target(install_root)
-            current_identity, stable, marker = _preflight_metadata(install_root, expected_database=expected_database, current=current)
-            _preflight_state(state_root, expected_database)
-            if current_identity is not None and marker is None:
-                current_verification = install_root / "verified" / f"{current_identity['deployment']}.json"
-                if current_verification.is_file() and not current_verification.is_symlink():
-                    marker = _write_marker(install_root, _verified_record(install_root, current, expected_database=expected_database))
-            candidate = _stage_candidate(repo, commit, install_root)
-            staging = candidate["staging"]
-            candidate_manifest = candidate["manifest"]
-            status.update(sourceCommit=commit, sourceTree=candidate["tree"], bundleSha256=candidate["digest"], currentStep="switch")
-            _json_write(status_path, status)
-            deployment = install_root / f"deploy-{uuid.uuid4().hex}"
-            os.replace(staging, deployment)
-            staging = None
-            candidate_identity = _deployment_identity(deployment)
-            _systemctl("stop")
-            _switch_current(install_root, deployment)
-            switched = True
-            current = _current_target(install_root)
+        with _update_lock(install_root):
+            with _control_plane_lock(state_root, on_wait=announce_control_plane_wait) as lock_descriptor:
+                if reject_dirty:
+                    _assert_clean(repo)
+                commit = _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
+                expected_database = _schema_identity(repo, commit)
+                current = _current_target(install_root)
+                current_identity, stable, marker = _preflight_metadata(install_root, expected_database=expected_database, current=current)
+                _preflight_state(state_root, expected_database)
+                if current_identity is not None and marker is None:
+                    current_verification = install_root / "verified" / f"{current_identity['deployment']}.json"
+                    if current_verification.is_file() and not current_verification.is_symlink():
+                        marker = _write_marker(install_root, _verified_record(install_root, current, expected_database=expected_database))
+                candidate = _stage_candidate(repo, commit, install_root)
+                staging = candidate["staging"]
+                status.update(sourceCommit=commit, sourceTree=candidate["tree"], bundleSha256=candidate["digest"], currentStep="switch")
+                _json_write(status_path, status)
+                deployment = install_root / f"deploy-{uuid.uuid4().hex}"
+                os.replace(staging, deployment)
+                staging = None
+                candidate_identity = _deployment_identity(deployment)
+                _systemctl("stop")
+                _switch_current(install_root, deployment)
+                switched = True
+                current = _current_target(install_root)
+                refresh = _refresh_under_lock(current, wait_seconds, state_root, lock_descriptor)
             status.update(currentStep="health")
             _json_write(status_path, status)
             try:
-                health = _post_switch_for_state(current, wait_seconds, state_root)
+                health = _post_switch_for_state(current, wait_seconds, state_root, refresh)
             except Exception as error:
                 return _failure(EXIT_FAILED, status_path, status, error, switched=True, current=candidate_identity, candidate=candidate_identity, stable=stable, marker=marker)
             status["refresh"] = health
@@ -848,17 +878,18 @@ def install_updater_only(repo: Path, ref: str, install_root: Path, state_root: P
     _ensure_install_root(install_root)
     status_path = install_root / "stable-updater.json"
     try:
-        with _control_plane_lock(state_root or _paths_from_environment()[0]), _update_lock(install_root):
-            _assert_clean(repo)
-            _stable_updater(install_root)
-            with tempfile.TemporaryDirectory(prefix="pisec-updater-") as tmp:
-                bundle = Path(tmp) / "bundle"
-                commit, tree, digest = _archive(repo, ref, bundle)
-                _validate_bundle(bundle)
-                source = bundle / "scripts" / "pisec-update.py"
-                compile(source.read_text(encoding="utf-8"), str(source), "exec", dont_inherit=True)
-                manifest = _atomic_install_stable(install_root, source, {"sourceCommit": commit, "sourceTree": tree, "bundleSha256": digest})
-                return 0, {"state": "applied", **manifest}
+        with _update_lock(install_root):
+            with _control_plane_lock(state_root or _paths_from_environment()[0]):
+                _assert_clean(repo)
+                _stable_updater(install_root)
+                with tempfile.TemporaryDirectory(prefix="pisec-updater-") as tmp:
+                    bundle = Path(tmp) / "bundle"
+                    commit, tree, digest = _archive(repo, ref, bundle)
+                    _validate_bundle(bundle)
+                    source = bundle / "scripts" / "pisec-update.py"
+                    compile(source.read_text(encoding="utf-8"), str(source), "exec", dont_inherit=True)
+                    manifest = _atomic_install_stable(install_root, source, {"sourceCommit": commit, "sourceTree": tree, "bundleSha256": digest})
+                    return 0, {"state": "applied", **manifest}
     except LockedError as error:
         return EXIT_LOCKED, {"state": "failed", "error": str(error)}
     except Exception as error:
@@ -948,35 +979,37 @@ def archive_reset_state(repo: Path, ref: str, wait_seconds: float, state_root: P
     switched = False
     archive: Path | None = None
     try:
-        with _control_plane_lock(state_root), _update_lock(install_root):
-            _assert_clean(repo)
-            if not _broker_quiescent():
-                raise RuntimeError("Pisec broker is not quiescent; stop it before archive/reset")
-            stable = _stable_updater(install_root)
-            commit = _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
-            expected_database = _schema_identity(repo, commit)
-            if expected_database.get("name") != DATABASE_NAME or expected_database.get("version") != 1:
-                raise RuntimeError("candidate does not declare the exact Pisec v1 database")
-            candidate = _stage_candidate(repo, commit, install_root)
-            staging = candidate["staging"]
-            deployment = install_root / f"deploy-{uuid.uuid4().hex}"
-            os.replace(staging, deployment)
-            staging = None
-            identity = _deployment_identity(deployment)
-            _systemctl("stop")
-            _checkpoint_wal(state_root)
-            archive = _archive_root(state_root)
-            if archive is not None:
-                _write_archive_manifest(install_root, state_root, archive)
-                _quarantine_pre_v1_metadata(install_root, archive.name)
-            _clear_current(install_root)
-            _initialize_candidate_state(deployment, state_root)
-            _switch_current(install_root, deployment)
-            switched = True
+        with _update_lock(install_root):
+            with _control_plane_lock(state_root) as lock_descriptor:
+                _assert_clean(repo)
+                if not _broker_quiescent():
+                    raise RuntimeError("Pisec broker is not quiescent; stop it before archive/reset")
+                stable = _stable_updater(install_root)
+                commit = _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
+                expected_database = _schema_identity(repo, commit)
+                if expected_database.get("name") != DATABASE_NAME or expected_database.get("version") != 1:
+                    raise RuntimeError("candidate does not declare the exact Pisec v1 database")
+                candidate = _stage_candidate(repo, commit, install_root)
+                staging = candidate["staging"]
+                deployment = install_root / f"deploy-{uuid.uuid4().hex}"
+                os.replace(staging, deployment)
+                staging = None
+                identity = _deployment_identity(deployment)
+                _systemctl("stop")
+                _checkpoint_wal(state_root)
+                archive = _archive_root(state_root)
+                if archive is not None:
+                    _write_archive_manifest(install_root, state_root, archive)
+                    _quarantine_pre_v1_metadata(install_root, archive.name)
+                _clear_current(install_root)
+                _initialize_candidate_state(deployment, state_root)
+                _switch_current(install_root, deployment)
+                switched = True
+                refresh = _refresh_under_lock(deployment, wait_seconds, state_root, lock_descriptor)
             status = _status(state="running", step="health", current=identity, candidate=identity, stable=stable, marker=None)
             _json_write(status_path, status)
             try:
-                health = _post_switch_for_state(_current_target(install_root), wait_seconds, state_root)
+                health = _post_switch_for_state(_current_target(install_root), wait_seconds, state_root, refresh)
             except Exception as error:
                 if archive is not None:
                     error = RuntimeError(f"{error}; archive={archive}; partial_state={state_root}")
@@ -1014,25 +1047,27 @@ def recover_previous(state_root: Path, install_root: Path, wait_seconds: float) 
     _json_write(status_path, status)
     switched = False
     try:
-        with _control_plane_lock(state_root), _update_lock(install_root):
-            current = _current_target(install_root)
-            current_identity = None if current is None else _deployment_identity(current)
-            marker = _marker(install_root, current=current)
-            if marker is None:
-                raise RuntimeError("no verified last-known-good deployment is available")
-            selected = _deployment_path(install_root, marker["deployment"])
-            if current is not None and selected.name == current.name:
-                raise RuntimeError("last-known-good deployment is already current")
-            _preflight_state(state_root, marker["database"])
-            stable = _stable_updater(install_root)
-            _systemctl("stop")
-            _switch_current(install_root, selected)
-            switched = True
-            selected_identity = _deployment_identity(selected)
+        with _update_lock(install_root):
+            with _control_plane_lock(state_root) as lock_descriptor:
+                current = _current_target(install_root)
+                current_identity = None if current is None else _deployment_identity(current)
+                marker = _marker(install_root, current=current)
+                if marker is None:
+                    raise RuntimeError("no verified last-known-good deployment is available")
+                selected = _deployment_path(install_root, marker["deployment"])
+                if current is not None and selected.name == current.name:
+                    raise RuntimeError("last-known-good deployment is already current")
+                _preflight_state(state_root, marker["database"])
+                stable = _stable_updater(install_root)
+                _systemctl("stop")
+                _switch_current(install_root, selected)
+                switched = True
+                selected_identity = _deployment_identity(selected)
+                refresh = _refresh_under_lock(selected, wait_seconds, state_root, lock_descriptor)
             status = _status(state="running", step="health", current=selected_identity, candidate=selected_identity, stable=stable, marker=marker)
             _json_write(status_path, status)
             try:
-                health = _post_switch_for_state(selected, wait_seconds, state_root)
+                health = _post_switch_for_state(selected, wait_seconds, state_root, refresh)
             except Exception as error:
                 return _failure(EXIT_FAILED, status_path, status, error, switched=True, current=selected_identity, candidate=selected_identity, stable=stable, marker=marker)
             status = _status(state="applied", step="complete", current=selected_identity, candidate=None, stable=stable, marker=marker, refresh=health)

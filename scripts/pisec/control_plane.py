@@ -17,6 +17,7 @@ from .models import ConflictError, PisecError
 
 
 LOCK_NAME = "control-plane.lock"
+INHERITED_LOCK_FD_ENV = "PISEC_CONTROL_PLANE_LOCK_FD"
 DEFAULT_TIMEOUT = 30.0
 _PROCESS_LOCK = threading.RLock()
 _LOCAL_STATE = threading.local()
@@ -42,6 +43,34 @@ def _lock_path(state_root: Path | str) -> Path:
     return path
 
 
+def _inherited_lock_descriptor(path: Path) -> int | None:
+    """Validate an updater-owned lock descriptor inherited across exec."""
+    raw = os.environ.get(INHERITED_LOCK_FD_ENV)
+    if raw is None:
+        return None
+    try:
+        descriptor = int(raw)
+        inherited = os.fstat(descriptor)
+        current = path.stat()
+    except (OSError, TypeError, ValueError) as error:
+        raise PisecError("inherited Pisec control-plane lock is invalid") from error
+    if (
+        descriptor < 0
+        or not stat.S_ISREG(inherited.st_mode)
+        or inherited.st_uid != os.geteuid()
+        or stat.S_IMODE(inherited.st_mode) != 0o600
+        or (inherited.st_dev, inherited.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise PisecError("inherited Pisec control-plane lock is invalid")
+    try:
+        # An inherited descriptor shares the updater's open file description,
+        # so this succeeds without releasing or replacing the updater's lock.
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        raise PisecError("inherited Pisec control-plane lock is not held") from error
+    return descriptor
+
+
 @contextmanager
 def control_plane_lock(state_root: Path | str, *, timeout: float = DEFAULT_TIMEOUT, on_wait: Callable[[], None] | None = None) -> Iterator[None]:
     """Serialize topology and runtime-generation mutations across processes.
@@ -60,6 +89,14 @@ def control_plane_lock(state_root: Path | str, *, timeout: float = DEFAULT_TIMEO
                 yield
             finally:
                 _LOCAL_STATE.depth = depth
+            return
+        inherited = _inherited_lock_descriptor(path)
+        if inherited is not None:
+            _LOCAL_STATE.depth = 1
+            try:
+                yield
+            finally:
+                _LOCAL_STATE.depth = 0
             return
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags, 0o600)

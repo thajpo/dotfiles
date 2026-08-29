@@ -1,3 +1,4 @@
+import fcntl
 import hashlib
 import json
 import os
@@ -21,6 +22,10 @@ UPDATER_PATH = ROOT / "scripts" / "pisec-update.py"
 class UpdaterContractTests(unittest.TestCase):
     def setUp(self):
         self.updater = runpy.run_path(str(UPDATER_PATH))
+        self.module_globals = self.updater["update"].__globals__
+        self.original_refresh_under_lock = self.module_globals["_refresh_under_lock"]
+        self.module_globals["_refresh_under_lock"] = lambda _current, _wait, _state, _descriptor: {"ok": True, "failed": [], "pending": []}
+        self.addCleanup(self.module_globals.__setitem__, "_refresh_under_lock", self.original_refresh_under_lock)
 
     def _install_verified_current(self, install: Path) -> tuple[Path, dict]:
         install.mkdir(mode=0o700)
@@ -88,14 +93,27 @@ class UpdaterContractTests(unittest.TestCase):
             finally:
                 server.close()
 
-    def test_post_switch_refreshes_stale_bindings_before_strict_doctor(self):
+    def test_locked_refresh_uses_candidate_runtime_and_inherited_control_plane_lock(self):
+        completed = subprocess.CompletedProcess([], 0, stdout=json.dumps({"ok": True, "failed": [], "pending": []}), stderr="")
+        current = Path("/tmp/deployment")
+        state = Path("/tmp/state")
+        with patch.object(self.updater["subprocess"], "run", return_value=completed) as run:
+            result = self.original_refresh_under_lock(current, 7, state, 19)
+        command = run.call_args.args[0]
+        options = run.call_args.kwargs
+        self.assertEqual(command[:3], [os.sys.executable, "-m", "scripts.pisec.update_refresh"])
+        self.assertEqual(options["pass_fds"], (19,))
+        self.assertEqual(options["env"]["PISEC_CONTROL_PLANE_LOCK_FD"], "19")
+        self.assertEqual(options["env"]["PISEC_STATE_ROOT"], str(state))
+        self.assertEqual(options["env"]["PYTHONPATH"].split(os.pathsep)[0], str(current))
+        self.assertTrue(result["ok"])
+
+    def test_post_switch_starts_broker_after_locked_refresh_before_strict_doctor(self):
         calls = []
 
         def fake_run(argv, **_kwargs):
             calls.append(tuple(argv[1:3]))
-            if argv[1:3] == ["project", "refresh"]:
-                payload = {"ok": True, "failed": [], "pending": []}
-            elif argv[1] == "doctor":
+            if argv[1] == "doctor":
                 payload = {"ok": True}
             elif argv[1] == "reconcile":
                 payload = {"reconciled": True, "errors": []}
@@ -112,14 +130,57 @@ class UpdaterContractTests(unittest.TestCase):
         module_globals["_semantic_state_health"] = lambda _state: None
         try:
             with patch.object(self.updater["subprocess"], "run", side_effect=fake_run):
-                result = self.updater["_post_switch"](Path("/tmp/deployment"), 1)
+                result = self.updater["_post_switch"](Path("/tmp/deployment"), 1, {"ok": True, "failed": [], "pending": []})
         finally:
             module_globals["_systemctl"] = old_systemctl
             module_globals["_wait_for_broker"] = old_wait
             module_globals["_semantic_state_health"] = old_semantic_health
 
-        self.assertEqual(calls, [("project", "refresh"), ("doctor", "--json"), ("reconcile", "--json"), ("doctor", "--json")])
+        self.assertEqual(calls, [("doctor", "--json"), ("reconcile", "--json"), ("doctor", "--json")])
         self.assertEqual(result["doctorAfter"], "ok")
+
+    def test_update_refreshes_while_locked_and_runs_health_after_releasing_control_plane(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            install = root / "install"
+            with PiStore(state):
+                pass
+            module_globals = self.updater["update"].__globals__
+            original_refresh = module_globals["_refresh_under_lock"]
+            original_post_switch = module_globals["_post_switch"]
+            original_systemctl = module_globals["_systemctl"]
+            lock_path = state / "locks" / "control-plane.lock"
+
+            def assert_refresh_lock(_current, _wait, _state, descriptor):
+                self.assertEqual(os.fstat(descriptor).st_ino, lock_path.stat().st_ino)
+                contender = os.open(lock_path, os.O_RDWR)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(contender)
+                return {"ok": True, "failed": [], "pending": []}
+
+            def assert_health_unlocked(_current, _wait, refresh):
+                contender = os.open(lock_path, os.O_RDWR)
+                try:
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(contender, fcntl.LOCK_UN)
+                finally:
+                    os.close(contender)
+                return {"doctor": "ok", "refresh": refresh, "reconcile": "ok"}
+
+            module_globals["_refresh_under_lock"] = assert_refresh_lock
+            module_globals["_post_switch"] = assert_health_unlocked
+            module_globals["_systemctl"] = lambda _action: None
+            try:
+                code, result = self.updater["update"](ROOT, "HEAD", 0, state, install)
+            finally:
+                module_globals["_refresh_under_lock"] = original_refresh
+                module_globals["_post_switch"] = original_post_switch
+                module_globals["_systemctl"] = original_systemctl
+            self.assertEqual(code, 0, result)
 
     def test_unsupported_state_writes_status_outside_state_root(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,7 +209,7 @@ class UpdaterContractTests(unittest.TestCase):
             old_systemctl = module_globals["_systemctl"]
             old_post_switch = module_globals["_post_switch"]
             module_globals["_systemctl"] = lambda _action: None
-            module_globals["_post_switch"] = lambda _current, _wait: (_ for _ in ()).throw(RuntimeError("health failed"))
+            module_globals["_post_switch"] = lambda _current, _wait, _refresh: (_ for _ in ()).throw(RuntimeError("health failed"))
             try:
                 code, result = self.updater["update"](ROOT, "HEAD", 0, state, install)
             finally:
@@ -176,7 +237,7 @@ class UpdaterContractTests(unittest.TestCase):
             old_systemctl = module_globals["_systemctl"]
             old_post_switch = module_globals["_post_switch"]
             module_globals["_systemctl"] = lambda _action: None
-            module_globals["_post_switch"] = lambda _current, _wait: (_ for _ in ()).throw(RuntimeError("health failed"))
+            module_globals["_post_switch"] = lambda _current, _wait, _refresh: (_ for _ in ()).throw(RuntimeError("health failed"))
             try:
                 code, result = self.updater["update"](ROOT, "HEAD", 0, state, install)
             finally:
@@ -205,7 +266,7 @@ class UpdaterContractTests(unittest.TestCase):
             old_systemctl = module_globals["_systemctl"]
             old_post_switch = module_globals["_post_switch"]
             module_globals["_systemctl"] = lambda _action: None
-            module_globals["_post_switch"] = lambda _current, _wait: {"doctor": "ok", "refresh": {}, "reconcile": "ok"}
+            module_globals["_post_switch"] = lambda _current, _wait, refresh: {"doctor": "ok", "refresh": refresh, "reconcile": "ok"}
             try:
                 code, result = self.updater["update"](ROOT, "HEAD", 0, state, install)
             finally:
@@ -236,7 +297,7 @@ class UpdaterContractTests(unittest.TestCase):
             old_systemctl = module_globals["_systemctl"]
             old_post_switch = module_globals["_post_switch"]
             module_globals["_systemctl"] = lambda _action: None
-            module_globals["_post_switch"] = lambda _current, _wait: {"doctor": "ok", "refresh": {}, "reconcile": "ok"}
+            module_globals["_post_switch"] = lambda _current, _wait, refresh: {"doctor": "ok", "refresh": refresh, "reconcile": "ok"}
             try:
                 code, result = self.updater["update"](ROOT, "HEAD", 0, state, install)
             finally:
@@ -267,7 +328,7 @@ class UpdaterContractTests(unittest.TestCase):
             old_systemctl = module_globals["_systemctl"]
             old_post_switch = module_globals["_post_switch"]
             module_globals["_systemctl"] = lambda _action: None
-            module_globals["_post_switch"] = lambda _current, _wait: (_ for _ in ()).throw(RuntimeError("recovery health failed"))
+            module_globals["_post_switch"] = lambda _current, _wait, _refresh: (_ for _ in ()).throw(RuntimeError("recovery health failed"))
             try:
                 code, result = self.updater["recover_previous"](state, install, 0)
             finally:
@@ -307,7 +368,7 @@ class UpdaterContractTests(unittest.TestCase):
             old_systemctl = module_globals["_systemctl"]
             old_post_switch = module_globals["_post_switch"]
             module_globals["_systemctl"] = lambda _action: None
-            module_globals["_post_switch"] = lambda _current, _wait: {"doctor": "ok", "refresh": {}, "reconcile": "ok"}
+            module_globals["_post_switch"] = lambda _current, _wait, refresh: {"doctor": "ok", "refresh": refresh, "reconcile": "ok"}
             try:
                 code, result = self.updater["update"](ROOT, "HEAD", 0, state, install)
             finally:
@@ -355,7 +416,7 @@ class UpdaterContractTests(unittest.TestCase):
             install = root / "install"
             repo = root / "repo"
             subprocess.run(["git", "clone", "--no-hardlinks", str(ROOT), str(repo)], check=True, capture_output=True, text=True)
-            code, result = self.updater["install_updater_only"](repo, "HEAD", install)
+            code, result = self.updater["install_updater_only"](repo, "HEAD", install, root / "state")
             self.assertEqual(code, 0)
             stable = install / "bin" / "pisec-update"
             manifest = install / "stable-updater.json"
@@ -391,7 +452,7 @@ class UpdaterContractTests(unittest.TestCase):
             old_systemctl = module_globals["_systemctl"]
             old_post_switch = module_globals["_post_switch"]
             module_globals["_systemctl"] = lambda _action: None
-            module_globals["_post_switch"] = lambda _current, _wait: {"doctor": "ok", "refresh": {}, "reconcile": "ok"}
+            module_globals["_post_switch"] = lambda _current, _wait, refresh: {"doctor": "ok", "refresh": refresh, "reconcile": "ok"}
             previous_quiescent = os.environ.get("PISEC_BROKER_QUIESCENT")
             os.environ["PISEC_BROKER_QUIESCENT"] = "1"
             try:
