@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -30,7 +31,13 @@ def _run_git(path: Path, *args: str, accepted: frozenset[int] = frozenset({0}), 
         try:
             result = run_git(path, args, accepted=accepted, input_text=input_text, timeout=timeout, max_bytes=max_bytes)
         except InvalidRequestError as error:
-            raise ConflictError("Git operation refused", detail=error.detail) from error
+            operation = str(error.detail.get("operation") or (args[0] if args else "operation"))
+            stderr = " ".join(str(error.detail.get("stderr") or "").splitlines())
+            stderr = "".join(char for char in stderr if ord(char) >= 0x20)[:256]
+            message = f"Git {operation} operation failed"
+            if stderr:
+                message = f"{message}: {stderr}"
+            raise ConflictError(message, detail=error.detail) from error
         return result.returncode, result.stdout.rstrip("\n")
     executable = shutil.which("git", path=os.defpath)
     if executable is None:
@@ -113,7 +120,27 @@ def _worker_repository(store: Any, workstream: Mapping[str, Any]) -> Path:
     if not isinstance(scope, dict) or scope.get("workstreamId") != workstream["workstream_id"]:
         raise NeedsAttentionError("worker creation scope does not match the workstream")
     path = Path(str(workstream["worktree_path"])).absolute()
-    validate_worker_repository(path, branch_name=str(workstream["branch_name"]), base_oid=str(workstream["base_commit_oid"]), target_branch=str(workstream["target_ref"]).removeprefix("refs/heads/"))
+    private_ref = None
+    history_base_oid = None
+    integration = store.conn.execute(
+        "SELECT integration_id,state FROM integration_jobs WHERE workstream_id=? ORDER BY created_at DESC LIMIT 1",
+        (workstream["workstream_id"],),
+    ).fetchone()
+    if integration is not None and integration["state"] in {"queued", "refreshing", "awaiting_worker", "verifying", "applying", "needs_attention"}:
+        candidate_ref = f"refs/pisec/target/{integration['integration_id']}"
+        code, _output = _run_git(path, "show-ref", "--verify", "--quiet", candidate_ref, accepted=frozenset({0, 1}))
+        if code == 0:
+            private_ref = candidate_ref
+            history_base_oid = _oid(path, candidate_ref)
+    validate_worker_repository(
+        path,
+        branch_name=str(workstream["branch_name"]),
+        base_oid=str(workstream["base_commit_oid"]),
+        target_branch=str(workstream["target_ref"]).removeprefix("refs/heads/"),
+        allowed_private_ref=private_ref,
+        history_base_oid=history_base_oid,
+        review_base_oid=history_base_oid,
+    )
     return path
 
 
@@ -180,7 +207,7 @@ def push_branch(store: Any, project_id: str, *, branch: Any, expected_local_oid:
     return {"projectId": project_id, "branch": branch_name, "previousRemoteOid": remote_oid, "commitOid": local_oid, "pushed": True, "reused": False}
 
 
-def _comparison(store: Any, project_id: str, workstream_id: str) -> tuple[dict[str, Any], Path, str, str, str, str, bool]:
+def _comparison(store: Any, project_id: str, workstream_id: str) -> tuple[dict[str, Any], Path, Path, str, str, str, str]:
     workstream = _workstream(store, project_id, workstream_id)
     worker = _worker_repository(store, workstream)
     _project, primary, target_branch, target_oid, porcelain = _primary_state(store, project_id)
@@ -192,20 +219,51 @@ def _comparison(store: Any, project_id: str, workstream_id: str) -> tuple[dict[s
         raise ConflictError("registered checkout is not on the workstream target branch")
     source_branch = str(workstream["branch_name"])
     source_oid = _oid(worker, f"refs/heads/{source_branch}")
-    code, _ = _run_git(worker, "merge-base", "--is-ancestor", target_oid, source_oid, accepted=frozenset({0, 1, 128}))
-    return workstream, worker, target_branch, target_oid, source_branch, source_oid, code == 0
+    return workstream, worker, primary, target_branch, target_oid, source_branch, source_oid
+
+
+@contextmanager
+def _review_repository(
+    store: Any,
+    primary: Path,
+    worker: Path,
+    target_branch: str,
+    target_oid: str,
+    source_branch: str,
+    source_oid: str,
+):
+    code, _output = _run_git(worker, "cat-file", "-e", f"{target_oid}^{{commit}}", accepted=frozenset({0, 1, 128}))
+    if code == 0:
+        yield worker, target_oid, source_oid
+        return
+    with tempfile.TemporaryDirectory(prefix="review-", dir=store.state_root) as temporary:
+        staging = Path(temporary)
+        target_ref = "refs/pisec/review/target"
+        source_ref = "refs/pisec/review/source"
+        _run_git(staging, "init", "--bare", "--quiet")
+        _run_git(staging, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--", str(primary), f"refs/heads/{target_branch}:{target_ref}")
+        _run_git(staging, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--", str(worker), f"refs/heads/{source_branch}:{source_ref}")
+        if _oid(staging, target_ref) != target_oid or _oid(staging, source_ref) != source_oid:
+            raise NeedsAttentionError("Git review staging did not reach the recorded commits")
+        yield staging, target_ref, source_ref
 
 
 def inspect_workstream_changes(store: Any, project_id: str, workstream_id: str) -> dict[str, Any]:
-    _workstream_value, worker, target_branch, target_oid, source_branch, source_oid, ff_only_ready = _comparison(store, project_id, workstream_id)
-    _code, commits = _run_git(worker, "log", "--format=%H%x09%aI%x09%s", "--no-decorate", f"{target_oid}..{source_oid}", max_bytes=64 * 1024)
-    _code, stat_text = _run_git(worker, "diff", "--stat", "--no-ext-diff", target_oid, source_oid, max_bytes=64 * 1024)
-    _code, patch = _run_git(worker, "diff", "--no-ext-diff", "--no-color", target_oid, source_oid, max_bytes=128 * 1024)
+    _workstream_value, worker, primary, target_branch, target_oid, source_branch, source_oid = _comparison(store, project_id, workstream_id)
+    with _review_repository(store, primary, worker, target_branch, target_oid, source_branch, source_oid) as (review, target_revision, source_revision):
+        code, _output = _run_git(review, "merge-base", "--is-ancestor", target_revision, source_revision, accepted=frozenset({0, 1}))
+        ff_only_ready = code == 0
+        _code, commits = _run_git(review, "log", "--format=%H%x09%aI%x09%s", "--no-decorate", f"{target_revision}..{source_revision}", max_bytes=64 * 1024)
+        _code, stat_text = _run_git(review, "diff", "--stat", "--no-ext-diff", target_revision, source_revision, max_bytes=64 * 1024)
+        _code, patch = _run_git(review, "diff", "--no-ext-diff", "--no-color", target_revision, source_revision, max_bytes=128 * 1024)
     return {"projectId": project_id, "workstreamId": workstream_id, "targetBranch": target_branch, "targetCommitOid": target_oid, "sourceBranch": source_branch, "sourceCommitOid": source_oid, "fastForwardReady": ff_only_ready, "commits": commits, "diffStat": stat_text, "patch": patch}
 
 
 def prepare_workstream_merge(store: Any, project_id: str, workstream_id: str) -> dict[str, Any]:
-    workstream, worker, target_branch, target_oid, source_branch, source_oid, ff_only_ready = _comparison(store, project_id, workstream_id)
+    workstream, worker, primary, target_branch, target_oid, source_branch, source_oid = _comparison(store, project_id, workstream_id)
+    with _review_repository(store, primary, worker, target_branch, target_oid, source_branch, source_oid) as (review, target_revision, source_revision):
+        code, _output = _run_git(review, "merge-base", "--is-ancestor", target_revision, source_revision, accepted=frozenset({0, 1}))
+        ff_only_ready = code == 0
     if not ff_only_ready:
         raise ConflictError("workstream is not a fast-forward of the target branch")
     if workstream["desired_state"] != "completed":

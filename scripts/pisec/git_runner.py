@@ -72,10 +72,11 @@ def run_git(
     max_bytes: int = 256 * 1024,
 ) -> subprocess.CompletedProcess[str]:
     """Run local Git with no user/system configuration or transport secrets."""
+    arguments = tuple(str(argument) for argument in args)
     command = [_git_executable(), *GIT_CONFIG_ARGS]
     if repository is not None:
         command.extend(("-C", str(Path(repository))))
-    command.extend(str(argument) for argument in args)
+    command.extend(arguments)
     previous_umask = os.umask(0o077)
     try:
         result = subprocess.run(
@@ -95,6 +96,7 @@ def run_git(
             "Git operation failed",
             detail={
                 "command": command[1:],
+                "operation": arguments[0] if arguments else "git",
                 "exitCode": result.returncode,
                 "stderr": result.stderr[:1024],
             },

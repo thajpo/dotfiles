@@ -494,9 +494,12 @@ def _closeout(store: Any, job: Mapping[str, Any], workspace: Any | None, harness
 def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harness: Any | None) -> dict[str, Any]:
     integration_id = str(job["integration_id"])
     if job["state"] == "needs_attention":
-        if job["last_error"] != "registered project checkout is dirty":
+        last_error = str(job["last_error"] or "")
+        retryable_git_error = last_error == "Git operation refused" or (last_error.startswith("Git ") and " operation failed" in last_error)
+        if last_error != "registered project checkout is dirty" and not retryable_git_error:
             return {"integrationId": integration_id, "state": "needs_attention", "reused": True}
-        _set_job(store, integration_id, state="queued", next_action="retry after the target checkout was cleaned")
+        next_action = "retry after the target checkout was cleaned" if not retryable_git_error else "retry after the reported Git condition was repaired"
+        _set_job(store, integration_id, state="queued", next_action=next_action)
         job = {**dict(job), "state": "queued", "last_error": None}
     if job["state"] != "awaiting_worker":
         with store.transaction():

@@ -2,7 +2,9 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
+import scripts.pisec.integration as integration_module
 from scripts.pisec.integration import apply_workstream_acceptance, prepare_workstream_acceptance, reconcile_integrations
 from scripts.pisec.models import ConflictError
 from scripts.pisec.pi_store import PiStore
@@ -138,6 +140,37 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(replay["processed"][0]["state"], "awaiting_worker")
             self.assertEqual(len(workspace.prompts), prompt_count)
             self.assertEqual(store.conn.execute("SELECT attempt FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()["attempt"], attempt)
+
+    def test_repaired_git_failure_retries_under_the_existing_acceptance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store, project, harness, workspace, workstream, _scope, _repo, _worktree, _private_objects, source = self.fixture(root)
+            self.addCleanup(store.close)
+            prepared = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            accepted = apply_workstream_acceptance(store, project["project_id"], prepared["approvalScope"])
+            real_run_git = integration_module._run_git
+            failed = False
+
+            def fail_candidate_import(path, *args, **kwargs):
+                nonlocal failed
+                if not failed and args[0] == "fetch" and path == _repo and "refs/pisec/candidates/" in args[-1]:
+                    failed = True
+                    raise ConflictError("Git operation refused")
+                return real_run_git(path, *args, **kwargs)
+
+            with patch.object(integration_module, "_run_git", side_effect=fail_candidate_import):
+                first = reconcile_integrations(store, workspace, harness)
+            self.assertEqual(first["processed"][0]["state"], "needs_attention")
+
+            retried = reconcile_integrations(store, workspace, harness)
+
+            self.assertEqual(retried["errors"], [], retried)
+            self.assertEqual(retried["processed"][0]["state"], "integrated")
+            self.assertEqual(_git(_repo, "rev-parse", "HEAD"), source)
+            self.assertEqual(
+                store.conn.execute("SELECT acceptance_id FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()[0],
+                accepted["acceptance"]["acceptance_id"],
+            )
 
     def test_rebased_candidate_scopes_changes_against_refreshed_target(self):
         with tempfile.TemporaryDirectory() as tmp:

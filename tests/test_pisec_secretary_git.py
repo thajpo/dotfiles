@@ -153,6 +153,28 @@ class SecretaryGitTests(unittest.TestCase):
             with self.assertRaisesRegex(ConflictError, "fast-forward"):
                 prepare_workstream_merge(store, project["project_id"], scope["workstreamId"])
 
+    def test_inspection_stages_current_target_when_worker_clone_lacks_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, project, scope, repo, _worktree, _private_objects = self.fixture(Path(tmp))
+            (repo / "target.txt").write_text("advanced\n")
+            git(repo, "add", "target.txt")
+            git(repo, "commit", "-qm", "advance target")
+
+            changes = inspect_workstream_changes(store, project["project_id"], scope["workstreamId"])
+
+            self.assertFalse(changes["fastForwardReady"])
+            self.assertIn("feature.txt", changes["diffStat"])
+            self.assertIn("target.txt", changes["diffStat"])
+
+    def test_git_failure_reports_operation_and_safe_stderr_summary(self):
+        error = InvalidRequestError(
+            "Git operation failed",
+            detail={"operation": "fetch", "stderr": "fatal: bad object refs/heads/pisec/stale\nsecond line"},
+        )
+        with patch.object(secretary_git_module, "run_git", side_effect=error):
+            with self.assertRaisesRegex(ConflictError, r"Git fetch operation failed: fatal: bad object refs/heads/pisec/stale second line"):
+                secretary_git_module._run_git(Path("/tmp"), "fetch")
+
     def test_acceptance_uses_the_invariant_candidate_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             store, project, scope, _repo, _worktree, _private_objects = self.fixture(Path(tmp), accept_candidate=False)
