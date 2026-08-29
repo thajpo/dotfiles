@@ -446,6 +446,11 @@ class FixtureWorkspace:
         self.prompts.append((surface_id, text))
         return {"prompted": True}
 
+    def trigger_agent_nowait(self, surface_id: str, trigger: str, process_identity: str) -> Mapping[str, Any]:
+        self.calls.append(("trigger_nowait", (surface_id, trigger, process_identity)))
+        self.prompts.append((surface_id, trigger))
+        return {"triggered": True}
+
     def prompt_eligible(self, agent_observation: AgentObservation) -> bool:
         return bool(agent_observation.identity_usable and agent_observation.state in {"idle", "done"})
 

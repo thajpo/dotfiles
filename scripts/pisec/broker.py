@@ -442,9 +442,19 @@ class BrokerDispatcher:
                 ).fetchone()
                 if binding is None or not self._attention_runtime_ready(store, binding):
                     continue
-                self.workspace.prompt_agent_nowait(str(binding["workspace_surface_id"]), ATTENTION_WAKE_PROMPT)
-                with self._attention_wake_lock:
-                    self._attention_wake_deadlines[recipient_id] = time.monotonic() + 30.0
+                try:
+                    self.workspace.trigger_agent_nowait(
+                        str(binding["workspace_surface_id"]),
+                        ATTENTION_WAKE_PROMPT,
+                        str(binding["policy_path"]),
+                    )
+                except BaseException as error:
+                    # One stale or temporarily unavailable pane must not starve
+                    # later recipients.  The durable attention row remains due.
+                    logger.warning("attention wake failed for %s: %s", recipient_id, error)
+                finally:
+                    with self._attention_wake_lock:
+                        self._attention_wake_deadlines[recipient_id] = time.monotonic() + 30.0
 
     def _defer_reconcile(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         try:

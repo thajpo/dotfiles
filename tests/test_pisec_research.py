@@ -47,6 +47,27 @@ class WakeWorkspace(FixtureWorkspace):
                 raise RuntimeError("workspace unavailable")
             self.called.set()
         return super().prompt_agent_nowait(surface_id, text)
+
+    def trigger_agent_nowait(self, surface_id: str, trigger: str, process_identity: str):
+        if self.fail:
+            raise RuntimeError("workspace unavailable")
+        self.called.set()
+        return super().trigger_agent_nowait(surface_id, trigger, process_identity)
+
+
+class SelectiveWakeWorkspace(FixtureWorkspace):
+    def __init__(self, root: Path, store):
+        super().__init__(root, store)
+        self.failed_surface: str | None = None
+        self.trigger_attempts: list[str] = []
+
+    def trigger_agent_nowait(self, surface_id: str, trigger: str, process_identity: str):
+        self.trigger_attempts.append(surface_id)
+        if surface_id == self.failed_surface:
+            raise RuntimeError("first recipient unavailable")
+        return super().trigger_agent_nowait(surface_id, trigger, process_identity)
+
+
 class ResearchTests(unittest.TestCase):
     def fixture(self, *, workspace_type=WakeWorkspace):
         temp = tempfile.TemporaryDirectory()
@@ -223,6 +244,37 @@ class ResearchTests(unittest.TestCase):
         workspace.runtime_states[str(binding["workspace_surface_id"])] = "live"
         dispatcher._scan_attention()
         self.assertEqual(workspace.prompts[-1][1], ATTENTION_WAKE_PROMPT)
+
+    def test_attention_watcher_isolates_recipient_failure_and_backs_off_both(self):
+        temp, root, store, harness, workspace, project_a, project_b, secretary_a, worker_a, worker_b = self.fixture(workspace_type=SelectiveWakeWorkspace)
+        self.addCleanup(store.close)
+        self.addCleanup(temp.cleanup)
+        dispatcher = self.dispatcher(root, harness, workspace)
+        dispatcher.dispatch("runtime", "help.request", {**self.runtime_auth(store, worker_a), "kind": "access", "summary": "Need A", "details": "A is unavailable.", "requestedAction": "Review A.", "blocking": True, "evidence": ["a"], "idempotencyKey": "wake-a"})
+        dispatcher.dispatch("runtime", "help.request", {**self.runtime_auth(store, worker_b), "kind": "access", "summary": "Need B", "details": "B is unavailable.", "requestedAction": "Review B.", "blocking": True, "evidence": ["b"], "idempotencyKey": "wake-b"})
+        secretary_rows = store.conn.execute(
+            "SELECT r.*,w.project_id FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE w.kind='secretary' ORDER BY w.project_id"
+        ).fetchall()
+        self.assertEqual(len(secretary_rows), 2)
+        for index, binding in enumerate(secretary_rows, start=1):
+            event = append_event_in_transaction(
+                store.conn,
+                kind="runtime.session_started",
+                project_id=str(binding["project_id"]),
+                workstream_id=str(binding["workstream_id"]),
+                payload={"generationSha256": str(binding["desired_generation_sha256"]), "reportSeq": 1, "runtimeInstanceId": f"watcher-{index}"},
+            )
+            store.conn.execute(
+                "UPDATE runtime_bindings SET observed_state='idle',refresh_pending=0,launch_generation_sha256=NULL,applied_generation_sha256=desired_generation_sha256,runtime_instance_id=?,report_seq=1,session_start_event_sequence=?,session_start_report_seq=1,session_started_at='2026-08-25T00:00:00Z' WHERE workstream_id=?",
+                (f"watcher-{index}", event["sequence"], binding["workstream_id"]),
+            )
+            workspace.agents[str(binding["agent_name"])] = AgentObservation(str(binding["agent_name"]), str(binding["workspace_surface_id"]), True, "idle")
+            workspace.runtime_states[str(binding["workspace_surface_id"])] = "live"
+        workspace.failed_surface = str(secretary_rows[0]["workspace_surface_id"])
+        dispatcher._scan_attention()
+        self.assertEqual(set(workspace.trigger_attempts), {str(row["workspace_surface_id"]) for row in secretary_rows})
+        self.assertEqual(set(dispatcher._attention_wake_deadlines), {str(row["workstream_id"]) for row in secretary_rows})
+        self.assertIn((str(secretary_rows[1]["workspace_surface_id"]), ATTENTION_WAKE_PROMPT), workspace.prompts)
 
     def test_supervisor_backfill_is_bounded_and_emits_typed_events(self):
         temp, _root, store, _harness, _workspace, project_a, _project_b, secretary_binding, worker_a, _worker_b = self.fixture(workspace_type=FixtureWorkspace)

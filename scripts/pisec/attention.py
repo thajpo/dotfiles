@@ -15,7 +15,11 @@ from .runtime_eligibility import runtime_eligible_sql
 
 
 SOURCE_KINDS = frozenset({"coordination", "research", "issue", "completion", "integration"})
-ATTENTION_WAKE_PROMPT = "Pisec has pending attention. Review it with the Pisec attention tools before ending this turn."
+# This inert token only starts an idle harness turn.  The harness extension or
+# Codex UserPromptSubmit hook must fetch the authenticated typed source records
+# from runtime.turn.prepare; the terminal trigger carries no authority or task
+# content of its own.
+ATTENTION_WAKE_PROMPT = "PISEC_ATTENTION_TRIGGER"
 _ATTENTION_HINT = threading.Event()
 
 

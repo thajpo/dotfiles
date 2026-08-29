@@ -297,6 +297,8 @@ class WorkspaceAdapter(Protocol):
 
     def prompt_agent_nowait(self, surface_id: str, text: str) -> Mapping[str, Any]: ...
 
+    def trigger_agent_nowait(self, surface_id: str, trigger: str, process_identity: str) -> Mapping[str, Any]: ...
+
     def prompt_eligible(self, agent_observation: AgentObservation) -> bool: ...
 
     def focus_pane(self, surface_id: str) -> Mapping[str, Any]: ...
@@ -395,7 +397,7 @@ HARNESS_METHODS = (
 WORKSPACE_METHODS = (
     "create_workspace", "create_tab", "rename_tab", "move_surface_to_tab", "observe_tab",
     "observe_workstream", "observe_surface", "observe_runtime", "run_command", "stop_runtime",
-    "prompt_agent", "prompt_agent_nowait", "prompt_eligible", "focus_pane", "close_tab", "close_workspace",
+    "prompt_agent", "prompt_agent_nowait", "trigger_agent_nowait", "prompt_eligible", "focus_pane", "close_tab", "close_workspace",
     "report_session", "report_state", "release_agent", "reconcile", "health_checks",
 )
 

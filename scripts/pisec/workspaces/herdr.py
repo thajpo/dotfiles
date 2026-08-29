@@ -23,6 +23,7 @@ MAX_RESPONSE = 2 * 1024 * 1024
 MAX_SNAPSHOT_ITEMS = MAX_JSON_ITEMS * 4
 PROCESS_INFO_MAX_TEXT = 128 * 1024
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_RUNTIME_TRIGGER_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 
 
 def default_socket_path() -> Path:
@@ -307,6 +308,21 @@ class HerdrWorkspaceAdapter:
         if result.get("type") != "agent_prompted":
             raise PisecError("workspace did not deliver the prompt")
         return result
+
+    def trigger_agent_nowait(self, surface_id: str, trigger: str, process_identity: str) -> dict[str, Any]:
+        """Submit an inert turn trigger only to the exact live fenced runtime."""
+        if not isinstance(trigger, str) or _RUNTIME_TRIGGER_RE.fullmatch(trigger) is None:
+            raise InvalidRequestError("workspace runtime trigger is invalid")
+        observation = self.observe_runtime(surface_id, process_identity)
+        if observation.state != "live":
+            raise NeedsAttentionError("workspace runtime trigger target is not the live fenced runtime")
+        sent = self._request("pane.send_text", {"pane_id": surface_id, "text": trigger})
+        if sent.get("type") != "pane_text_sent":
+            raise PisecError("workspace did not accept the runtime trigger text")
+        entered = self._request("pane.send_keys", {"pane_id": surface_id, "keys": ["Enter"]})
+        if entered.get("type") != "ok":
+            raise PisecError("workspace did not accept the runtime trigger submission")
+        return {"type": "runtime_triggered", "pane_id": surface_id, "verified_runtime": True}
 
     def prompt_eligible(self, agent_observation: AgentObservation) -> bool:
         return bool(agent_observation.identity_usable and agent_observation.state in {"idle", "done"})

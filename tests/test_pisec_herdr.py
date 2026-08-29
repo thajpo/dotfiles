@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.pisec.adapters import HarnessManifest
-from scripts.pisec.models import PisecError
+from scripts.pisec.models import InvalidRequestError, NeedsAttentionError, PisecError
 from scripts.pisec.workspaces.herdr import HerdrWorkspaceAdapter
 
 
@@ -187,6 +187,25 @@ class HerdrTests(unittest.TestCase):
         created = self.adapter.create_tab(workspace_id="w1", cwd="/tmp/work", label="Task: delayed", focus=False)
         self.assertEqual(created.surface_id, "w1:p3")
         self.assertEqual(self.state.ready_reads, 3)
+
+    def test_runtime_trigger_revalidates_fence_and_sends_only_inert_token(self):
+        result = self.adapter.trigger_agent_nowait("w1:p1", "PISEC_ATTENTION_TRIGGER", "/tmp/policy")
+        self.assertEqual(result, {"type": "runtime_triggered", "pane_id": "w1:p1", "verified_runtime": True})
+        self.assertEqual(
+            self.state.requests[-3:],
+            [
+                ("pane.process_info", {"pane_id": "w1:p1"}),
+                ("pane.send_text", {"pane_id": "w1:p1", "text": "PISEC_ATTENTION_TRIGGER"}),
+                ("pane.send_keys", {"pane_id": "w1:p1", "keys": ["Enter"]}),
+            ],
+        )
+
+    def test_runtime_trigger_rejects_content_and_non_runtime_foreground(self):
+        with self.assertRaises(InvalidRequestError):
+            self.adapter.trigger_agent_nowait("w1:p1", "review this issue", "/tmp/policy")
+        with patch.object(self.adapter, "observe_runtime", return_value=type("Observation", (), {"state": "unknown"})()):
+            with self.assertRaises(NeedsAttentionError):
+                self.adapter.trigger_agent_nowait("w1:p1", "PISEC_ATTENTION_TRIGGER", "/tmp/policy")
 
     def test_create_allows_pane_readiness_to_exceed_five_seconds(self):
         self.state.ready_after_reads = 6
