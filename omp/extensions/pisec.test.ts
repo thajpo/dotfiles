@@ -189,6 +189,13 @@ test("secretary exposes the exact semantic surface and UI-bound approval", () =>
   assert.ok(events.includes("session_shutdown"));
 });
 
+test("remediation preparation maps typed issue anchors into the broker contract", async () => {
+  const source = await Bun.file(new URL("./pisec.ts", import.meta.url)).text();
+  assert.match(source, /issue_anchors: z\.object\(\{ platform_issue_id: z\.string\(\)\.min\(1\)\.max\(128\), source_issue_id: z\.string\(\)\.min\(1\)\.max\(128\) \}\)\.optional\(\)/);
+  assert.match(source, /issueAnchors: \{ platformIssueId: params\.task_packet\.issue_anchors\.platform_issue_id, sourceIssueId: params\.task_packet\.issue_anchors\.source_issue_id \}/);
+  assert.match(source, /remediationIssueId: params\.remediation_issue_id/);
+});
+
 test("checkpoint schema contains only the v1 semantic phases and fields", async () => {
   const source = await Bun.file(new URL("./pisec.ts", import.meta.url)).text();
   assert.match(source, /phase: z\.enum\(\["investigating", "implementing", "verifying"\]\)/);

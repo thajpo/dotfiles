@@ -13,7 +13,7 @@ from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.models import AuthorizationError, IdempotencyConflictError, InvalidRequestError, NotFoundError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import register_project
-from scripts.pisec.research import inspect_research, list_research_requests, list_unacknowledged_research, research_counts, validate_research_request
+from scripts.pisec.research import validate_task_packet, inspect_research, list_research_requests, list_unacknowledged_research, research_counts, validate_research_request
 from scripts.pisec.secretary import ensure_secretary
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
@@ -295,6 +295,26 @@ class ResearchTests(unittest.TestCase):
         inserted = backfill_attention(store, recipient_workstream_id=secretary_binding["workstream_id"], limit=2)
         self.assertEqual(inserted, 2)
         self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='attention.backfilled' AND workstream_id=?", (secretary_binding["workstream_id"],)).fetchone()[0], 2)
+
+
+    def test_task_packet_validates_exact_issue_anchors_when_present(self):
+        packet = task_packet()
+        packet["issueAnchors"] = {
+            "platformIssueId": "iss_" + "a" * 32,
+            "sourceIssueId": "iss_" + "b" * 32,
+        }
+        normalized = validate_task_packet(packet)
+        self.assertEqual(normalized["issueAnchors"], packet["issueAnchors"])
+        for anchors in (
+            {"platformIssueId": packet["issueAnchors"]["platformIssueId"]},
+            {"platformIssueId": packet["issueAnchors"]["platformIssueId"], "sourceIssueId": "not-an-issue"},
+            {"platformIssueId": packet["issueAnchors"]["platformIssueId"], "sourceIssueId": packet["issueAnchors"]["sourceIssueId"], "extra": "nope"},
+        ):
+            with self.subTest(anchors=anchors):
+                invalid = dict(packet)
+                invalid["issueAnchors"] = anchors
+                with self.assertRaises(InvalidRequestError):
+                    validate_task_packet(invalid)
 
 
 if __name__ == "__main__":

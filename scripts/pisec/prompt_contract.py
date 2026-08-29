@@ -32,7 +32,7 @@ WORKER_COMPLETION_CONTRACT = (
 
 SECRETARY_WORKER_TASK_CONTRACT = (
     "Every worker proposal must describe the engineering outcome. Include the original goal, starting state, required first action, boundaries, acceptance criteria, verification, and reporting expectation. "
-    "For an existing implementation, reconstruct the original change request and acceptance criteria, inspect the implementation against that contract, run the relevant targeted checks, identify complete, partial, and missing requirements, and continue correcting gaps within the approved paths. "
+    "For an existing implementation, reconstruct the original change request and acceptance criteria, inspect the implementation against that contract, run the relevant targeted checks, identify complete, partial, and missing requirements, and continue correcting gaps within the approved paths. For remediation work, include the exact typed platform and source issue anchors in the immutable task packet; never rely on a matching summary or free-form text. "
     "Never use create a worker, prove that a tab exists, report workspace IDs, verify that Pisec bound the worker, or complete the worker provisioning operation as the worker goal, acceptance criterion, or completion evidence."
 )
 

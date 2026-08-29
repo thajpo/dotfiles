@@ -29,12 +29,13 @@ PACKET_MAX_BYTES = 32 * 1024
 PACKET_MAX_ITEMS = 16
 PACKET_TEXT_LIMIT = 4096
 URL_MAX = 2048
-TASK_PACKET_KEYS = frozenset({"schemaVersion", "outcome", "boundaries", "acceptance", "openQuestions", "evidence"})
+TASK_PACKET_KEYS = frozenset({"schemaVersion", "outcome", "boundaries", "acceptance", "openQuestions", "evidence", "issueAnchors"})
+ISSUE_ANCHOR_KEYS = frozenset({"platformIssueId", "sourceIssueId"})
 EXECUTION_PACKET_KEYS = frozenset({
     "projectId", "workstreamId", "title", "purpose", "brief", "targetRef", "baseCommitOid",
     "branchName", "executionProfile", "workMode", "learningOverlay", "learningSeam", "harnessId", "workspaceAdapterId", "implementationModel", "harnessModel", "reasoningEffort", "nonEffects", "approvalScopeSha256",
 })
-EXECUTION_PACKET_OPTIONAL_KEYS = frozenset({"importSource"})
+EXECUTION_PACKET_OPTIONAL_KEYS = frozenset({"importSource", "remediationIssueId"})
 IMPORT_SOURCE_PACKET_FIELDS = frozenset({
     "kind", "ref", "path", "sourceCommitOid", "sourceTreeOid", "mergeBaseOid",
     "patchSha256", "changedPaths",
@@ -108,7 +109,7 @@ def _import_source_packet(value: Any) -> dict[str, Any]:
 
 def validate_task_packet(value: Any) -> dict[str, Any]:
     packet = _require_object(value, name="taskPacket")
-    if set(packet) != TASK_PACKET_KEYS:
+    if not set(packet).issubset(TASK_PACKET_KEYS) or not {"schemaVersion", "outcome", "boundaries", "acceptance", "openQuestions", "evidence"}.issubset(packet):
         raise InvalidRequestError("taskPacket fields do not match the exact contract")
     version = packet["schemaVersion"]
     if not isinstance(version, int) or isinstance(version, bool) or version != 1:
@@ -121,6 +122,13 @@ def validate_task_packet(value: Any) -> dict[str, Any]:
         "openQuestions": _bounded_list(packet["openQuestions"], name="taskPacket.openQuestions"),
         "evidence": _bounded_list(packet["evidence"], name="taskPacket.evidence"),
     }
+    if "issueAnchors" in packet:
+        anchors = _require_object(packet["issueAnchors"], name="taskPacket.issueAnchors")
+        if set(anchors) != ISSUE_ANCHOR_KEYS:
+            raise InvalidRequestError("taskPacket.issueAnchors fields do not match the exact contract")
+        for key in sorted(ISSUE_ANCHOR_KEYS):
+            validate_id(anchors[key], prefix="iss")
+        normalized["issueAnchors"] = {key: anchors[key] for key in sorted(ISSUE_ANCHOR_KEYS)}
     _packet_json(normalized)
     return normalized
 
@@ -145,6 +153,8 @@ def _execution_packet(value: Any) -> dict[str, Any]:
     if execution["reasoningEffort"] is not None and execution["reasoningEffort"] not in {"low", "medium", "high", "xhigh"}:
         raise InvalidRequestError("taskPacket.execution.reasoningEffort is invalid")
     validate_git_oid(execution["baseCommitOid"], "taskPacket.execution.baseCommitOid")
+    if "remediationIssueId" in execution:
+        validate_id(execution["remediationIssueId"], prefix="iss")
     normalized = dict(execution)
     normalized["nonEffects"] = _bounded_list(execution["nonEffects"], name="taskPacket.execution.nonEffects")
     validate_sha256(execution["approvalScopeSha256"], "taskPacket.execution.approvalScopeSha256")
@@ -344,6 +354,8 @@ def issue_task_packet_in_transaction(connection: Any, *, scope: Mapping[str, Any
     }
     if "importSource" in scope:
         execution["importSource"] = scope["importSource"]
+    if "remediationIssueId" in scope:
+        execution["remediationIssueId"] = scope["remediationIssueId"]
     packet = build_committed_task_packet(scope["taskPacket"], execution)
     packet_json = _packet_json(packet)
     packet_sha = json_digest(packet)

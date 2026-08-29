@@ -43,10 +43,10 @@ _FULL_SCOPE_FIELDS = frozenset({
     "targetRef", "targetBranchRef", "baseCommitOid", "branchName",
     "worktreePath", "agentName",
     "dataDirs", "externalDomains", "pythonEnv", "implementationModel", "harnessModel", "reasoningEffort", "effects", "nonEffects", "taskPacket", "importSource",
-    "runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest",
+    "runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest", "remediationIssueId",
 })
 _PUBLIC_SCOPE_FIELDS = _FULL_SCOPE_FIELDS
-_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "learningSeam", "decisionIds", "implementationModel", "harnessModel", "reasoningEffort", "runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest", "importSource"})
+_OPTIONAL_SCOPE_FIELDS = frozenset({"pythonEnv", "learningSeam", "decisionIds", "implementationModel", "harnessModel", "reasoningEffort", "runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest", "importSource", "remediationIssueId"})
 _SCOPE_REQUIRED = _FULL_SCOPE_FIELDS - _OPTIONAL_SCOPE_FIELDS
 _SURFACE_SCOPE_FIELDS = frozenset({"runtimeSurfaceSha256", "runtimeSurfaceRoot", "runtimeSurfaceId", "runtimeSurfaceManifest"})
 
@@ -141,6 +141,39 @@ def _workstream(store: Any, workstream_id: str) -> dict[str, Any]:
     return dict(row)
 
 
+def _validate_remediation_preparation(store: Any, *, project_id: str, issue_id: str, task_packet: Mapping[str, Any]) -> dict[str, str]:
+    """Require a typed issue anchor before a Secretary can prepare remediation work."""
+    validate_id(issue_id, prefix="iss")
+    issue = store.conn.execute("SELECT issue_id,project_id,reporter_kind,escalated_from_issue_id,state FROM issues WHERE issue_id=?", (issue_id,)).fetchone()
+    if issue is None or str(issue["project_id"]) != project_id:
+        raise ConflictError("remediation issue is not in the Secretary project")
+    if issue["reporter_kind"] != "secretary" or issue["escalated_from_issue_id"] is None:
+        raise ConflictError("remediation issue must be a Pisec platform escalation")
+    source_id = str(issue["escalated_from_issue_id"])
+    source = store.conn.execute("SELECT issue_id,reporter_kind,state FROM issues WHERE issue_id=?", (source_id,)).fetchone()
+    if source is None or source["reporter_kind"] != "worker":
+        raise ConflictError("remediation issue source must be a worker issue")
+    if issue["state"] == "resolved" or source["state"] == "resolved":
+        raise ConflictError("resolved issue cannot be prepared for remediation")
+    if store.conn.execute(
+        "SELECT 1 FROM issue_updates WHERE issue_id=? AND actor_kind='first_mate' AND update_kind='remediation_requested' LIMIT 1",
+        (issue_id,),
+    ).fetchone() is None:
+        raise ConflictError("remediation preparation requires a durable First Mate remediation request")
+    # A historical request is not sufficient.  The projected lifecycle must
+    # still show the current authority as remediation_planned.
+    from .workflow import _issue_lifecycle_state
+    if _issue_lifecycle_state(store, issue) != "remediation_planned":
+        raise ConflictError("remediation issue has no current remediation authority")
+    anchors = task_packet.get("issueAnchors") if isinstance(task_packet, Mapping) else None
+    if not isinstance(anchors, Mapping) or set(anchors) != {"platformIssueId", "sourceIssueId"}:
+        raise ConflictError("remediation task packet must contain exact platform and source issue anchors")
+    expected = {"platformIssueId": str(issue["issue_id"]), "sourceIssueId": source_id}
+    if dict(anchors) != expected:
+        raise ConflictError("remediation task packet issue anchors do not match the requested issue")
+    return expected
+
+
 def prepare_workstream(
     store: Any,
     *,
@@ -163,6 +196,7 @@ def prepare_workstream(
     harness_model: str | None = None,
     reasoning_effort: str | None = None,
     source: Mapping[str, Any] | None = None,
+    remediation_issue_id: str | None = None,
     work_root: Path | None = None,
     failpoint: Failpoint | None = None,
 ) -> dict[str, Any]:
@@ -173,6 +207,8 @@ def prepare_workstream(
     purpose = bounded_text(purpose, name="purpose", limit=4096)
     brief = bounded_text(brief, name="brief", limit=4096)
     normalized_task_packet = validate_task_packet(task_packet)
+    if remediation_issue_id is not None:
+        _validate_remediation_preparation(store, project_id=project_id, issue_id=remediation_issue_id, task_packet=normalized_task_packet)
     harness.validate_execution_profile(execution_profile, "worker")
     if execution_profile != "worker-default":
         raise InvalidRequestError("only the worker-default execution profile is supported")
@@ -226,6 +262,8 @@ def prepare_workstream(
         "targetRef": selected_ref,
         "pythonEnv": normalized_python_env,
     }
+    if remediation_issue_id is not None:
+        caller_request["remediationIssueId"] = remediation_issue_id
     if import_source is not None:
         caller_request["source"] = import_source
     if implementation_model is not None:
@@ -284,6 +322,8 @@ def prepare_workstream(
         "nonEffects": ["no push", "no merge", "no cleanup", "no branch deletion"],
         "taskPacket": normalized_task_packet,
     }
+    if remediation_issue_id is not None:
+        scope["remediationIssueId"] = remediation_issue_id
     if import_source is not None:
         scope["importSource"] = dict(import_source)
         scope["effects"] = [*scope["effects"], "pin and normalize the approved external Git snapshot inside the worker repository"]

@@ -19,7 +19,7 @@ class PisecPromptContractTests(unittest.TestCase):
             "secretary_response": "4bcab665533d9b7b1ed4436b715a9f67ac148df0a5c4689f36f39ecbd4b23aea",
             "reporting": "6dc8d42a281e182dc2145c53dfb1d8ea0706079c8ef2b97aaa569fe3d09f8b26",
             "immediate_start": "89be6ade422559aac60d2a5709e3c430a074dc3b2cb58bc1683c70f96dc417c4",
-            "worker_task": "c4c057683f5379c334c5ac31836fc78b4f3f822dc7815faaf42900b4317f276a",
+            "worker_task": "c76f87dca204569b413fc947f094a27801631c41084ff136dd4346d0da5d7e24",
         }
         values = {
             "first_mate_response": FIRST_MATE_RESPONSE_CONTRACT,

@@ -361,14 +361,24 @@ def _task_covers_remediation(store: Any, *, workstream_id: str, issue: Mapping[s
     row = store.conn.execute("SELECT packet_json FROM task_packets WHERE workstream_id=?", (workstream_id,)).fetchone()
     if row is None:
         return False
-    packet = str(row["packet_json"])
-    # The worker's immutable packet is the authority.  Any identity or
-    # bounded action anchor from the linked project/platform issue pair is
-    # sufficient; free-form summaries remain an additional scope marker.
-    for linked in _issue_chain(store, issue):
-        if str(linked["issue_id"]) in packet or str(linked["requested_action"]) in packet or str(linked["summary"]) in packet:
-            return True
-    return False
+    try:
+        document = json.loads(str(row["packet_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    task_packet = document.get("taskPacket") if isinstance(document, dict) else None
+    execution = document.get("execution") if isinstance(document, dict) else None
+    anchors = task_packet.get("issueAnchors") if isinstance(task_packet, dict) else None
+    if not isinstance(anchors, dict) or set(anchors) != {"platformIssueId", "sourceIssueId"}:
+        return False
+    chain = _issue_chain(store, issue)
+    if len(chain) != 2:
+        return False
+    expected = {"platformIssueId": str(chain[1]["issue_id"]), "sourceIssueId": str(chain[0]["issue_id"])}
+    return (
+        isinstance(execution, dict)
+        and execution.get("remediationIssueId") == expected["platformIssueId"]
+        and anchors == expected
+    )
 
 
 def link_issue_remediation(store: Any, *, project_id: str, issue_id: str, actor_id: str, target_id: str, idempotency_key: str) -> dict[str, Any]:
@@ -382,6 +392,8 @@ def link_issue_remediation(store: Any, *, project_id: str, issue_id: str, actor_
     ).fetchone()
     if target is None:
         raise ConflictError("remediation target is not an active bound project worker")
+    if _issue_lifecycle_state(store, issue) != "remediation_planned":
+        raise ConflictError("remediation issue has no current remediation authority")
     underlying = _issue_row(store, str(issue["escalated_from_issue_id"])) if issue["escalated_from_issue_id"] is not None else issue
     if underlying["reporter_kind"] != "worker":
         raise ConflictError("remediation must be rooted in a worker issue")
