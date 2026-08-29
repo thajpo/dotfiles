@@ -742,9 +742,16 @@ class BrokerDispatcher:
                     result["resumed"].append({"operationId": operation["operation_id"], "state": recovered["operation"]["state"], "recovered": True})
             except BaseException as error:
                 result["errors"].append({"operationId": operation["operation_id"], "code": getattr(error, "code", "internal_error")})
-        from .refresh import mark_stale_bindings
+        from .refresh import mark_stale_bindings, reconcile_superseded_pre_stop_refreshes
         result["generations"] = mark_stale_bindings(store, self.harness, harness_resolver=lambda workstream_id: self._harness_for_workstream(store, workstream_id), surface_resolver=self._surface_for_harness)
         result["resumed"].extend(self._recover_completed_refresh_operations(store))
+        result["resumed"].extend(
+            reconcile_superseded_pre_stop_refreshes(
+                store,
+                self.workspace,
+                harness_resolver=lambda workstream_id: self._harness_for_workstream(store, workstream_id),
+            )
+        )
         reconciler_payload = dict(payload)
         reconciler_payload["skipWorkstreams"] = []
         resume_candidates = [

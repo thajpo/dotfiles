@@ -346,6 +346,72 @@ def _has_recorded_pre_stop_failure(store: Any, operation_id: str) -> bool:
     return isinstance(payload, dict) and isinstance(payload.get("reason"), str) and bool(payload["reason"])
 
 
+def reconcile_superseded_pre_stop_refreshes(
+    store: Any,
+    workspace: WorkspaceAdapter,
+    *,
+    harness_resolver: Any,
+) -> list[dict[str, Any]]:
+    """Close historical staging failures after a newer attested refresh."""
+    rows = store.conn.execute(
+        "SELECT o.operation_id,o.project_id,o.workstream_id,r.applied_generation_sha256,"
+        "(SELECT newer.operation_id FROM operations newer WHERE newer.kind='runtime.refresh' "
+        "AND newer.workstream_id=o.workstream_id AND newer.state='succeeded' "
+        "AND (newer.created_at>o.created_at OR (newer.created_at=o.created_at AND newer.operation_id>o.operation_id)) "
+        "ORDER BY newer.created_at DESC,newer.operation_id DESC LIMIT 1) AS superseding_operation_id "
+        "FROM operations o JOIN runtime_bindings r USING(workstream_id) "
+        "WHERE o.kind='runtime.refresh' AND o.state='needs_attention' "
+        "AND o.step='pre_stop_attention' AND o.error_code='runtime_refresh_staging_failed' "
+        "ORDER BY o.created_at,o.operation_id"
+    ).fetchall()
+    recovered: list[dict[str, Any]] = []
+    for row in rows:
+        superseding_operation_id = row["superseding_operation_id"]
+        if superseding_operation_id is None:
+            continue
+        workstream_id = str(row["workstream_id"])
+        try:
+            harness = harness_resolver(workstream_id)
+            current_is_usable = usable_runtime_binding(
+                store,
+                workstream_id,
+                workspace,
+                harness,
+                allowed_states={"idle", "working", "blocked"},
+            )
+        except Exception:
+            current_is_usable = False
+        if not current_is_usable:
+            continue
+        result = {
+            "workstreamId": workstream_id,
+            "generationSha256": str(row["applied_generation_sha256"]),
+            "supersededByOperationId": str(superseding_operation_id),
+            "recovered": True,
+        }
+        with store.transaction():
+            update_operation_in_transaction(
+                store.conn,
+                str(row["operation_id"]),
+                state="failed",
+                step="superseded",
+                expected_states=("needs_attention",),
+                result=result,
+                error_code="superseded_by_successful_refresh",
+                error_message="earlier staging failure was superseded by a newer authenticated refresh",
+            )
+            append_event_in_transaction(
+                store.conn,
+                kind="runtime.refresh_superseded",
+                project_id=str(row["project_id"]),
+                workstream_id=workstream_id,
+                operation_id=str(row["operation_id"]),
+                payload=result,
+            )
+        recovered.append({"operationId": str(row["operation_id"]), "state": "failed", **result})
+    return recovered
+
+
 def _recover_stopped_refresh_attention(
     store: Any,
     current: Mapping[str, Any],

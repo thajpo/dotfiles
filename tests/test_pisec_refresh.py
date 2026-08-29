@@ -69,6 +69,66 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.assertEqual(len(second["skipped"]), 1)
         self.assertEqual(len([call for call in self.workspace.calls if call[0] == "stop"]), stop_count)
 
+    def test_reconcile_closes_pre_stop_failure_after_newer_authenticated_refresh(self):
+        with PiStore(self.root / "state") as store:
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                idempotency_key="legacy-pre-stop-refresh",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": "a" * 64},
+                state="needs_attention",
+                step="pre_stop_attention",
+            )
+            store.conn.execute(
+                "UPDATE operations SET error_code='runtime_refresh_staging_failed',error_message='plugin snapshot contains a device or socket' WHERE operation_id=?",
+                (operation.operation_id,),
+            )
+
+        refreshed = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+        self.assertTrue(refreshed["ok"])
+        reconciled = self.dispatcher.dispatch("admin", "system.reconcile", {})
+
+        recovered = next(item for item in reconciled["resumed"] if item.get("operationId") == operation.operation_id)
+        self.assertEqual(recovered["state"], "failed")
+        self.assertTrue(recovered["recovered"])
+        with PiStore(self.root / "state") as store:
+            row = store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()
+            self.assertEqual((row["state"], row["step"], row["error_code"]), ("failed", "superseded", "superseded_by_successful_refresh"))
+            event = store.conn.execute(
+                "SELECT kind,payload_json FROM events WHERE operation_id=? ORDER BY sequence DESC LIMIT 1",
+                (operation.operation_id,),
+            ).fetchone()
+            self.assertEqual(event["kind"], "runtime.refresh_superseded")
+            self.assertEqual(json.loads(event["payload_json"])["supersededByOperationId"], recovered["supersededByOperationId"])
+
+    def test_reconcile_keeps_pre_stop_failure_without_newer_success(self):
+        refreshed = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+        self.assertTrue(refreshed["ok"])
+        with PiStore(self.root / "state") as store:
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                idempotency_key="latest-pre-stop-refresh",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": "b" * 64},
+                state="needs_attention",
+                step="pre_stop_attention",
+            )
+            store.conn.execute(
+                "UPDATE operations SET error_code='runtime_refresh_staging_failed',error_message='staging failed' WHERE operation_id=?",
+                (operation.operation_id,),
+            )
+
+        reconciled = self.dispatcher.dispatch("admin", "system.reconcile", {})
+
+        self.assertFalse(any(item.get("operationId") == operation.operation_id for item in reconciled["resumed"]))
+        with PiStore(self.root / "state") as store:
+            row = store.conn.execute("SELECT state,step FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()
+            self.assertEqual(tuple(row), ("needs_attention", "pre_stop_attention"))
+
     def test_secretary_refresh_is_limited_to_its_project(self):
         other_repo = self.root / "other-repo"
         make_repo(other_repo)
