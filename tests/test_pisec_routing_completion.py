@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.pisec.broker import BrokerDispatcher
-from scripts.pisec.codex_mcp import TOOLS, TOOL_DESCRIPTIONS, _adapter_idempotency_key, _request
+from scripts.pisec.codex_mcp import PAYLOAD_ADAPTERS, TOOLS, TOOL_DESCRIPTIONS, _adapter_idempotency_key, _request
 from scripts.pisec.config import DEFAULT_WORKER_MODEL, DEFAULT_WORKER_ROUTE, _validate_worker_routing
 from scripts.pisec.models import InvalidRequestError
 from scripts.pisec.protocol import decode_request, success_response
@@ -65,6 +65,50 @@ class PisecRoutingCompletionTests(unittest.TestCase):
         )
         self.assertEqual(completion["properties"]["source_commit"]["pattern"], "^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
         self.assertIn("creates the matching ready_review checkpoint atomically", TOOL_DESCRIPTIONS["pisec_submit_completion"])
+
+    def test_codex_exposes_typed_progress_and_issue_contracts(self):
+        checkpoint = TOOLS["pisec_checkpoint_workstream"][1]
+        self.assertFalse(checkpoint["additionalProperties"])
+        self.assertEqual(checkpoint["required"], ["phase", "summary", "next_action", "evidence"])
+        self.assertEqual(checkpoint["properties"]["phase"]["enum"], ["investigating", "implementing", "verifying"])
+        issue = TOOLS["pisec_report_issue"][1]
+        self.assertEqual(issue["required"], ["category", "severity", "summary", "details", "requested_action", "evidence"])
+        self.assertEqual(issue["properties"]["severity"]["enum"], ["blocking", "degraded", "improvement"])
+
+    def test_codex_completion_adapter_matches_the_broker_contract(self):
+        completion = {
+            "acceptance": [{"criterion": "README updated", "status": "passed", "evidence": ["README.md"]}],
+            "verification": [{"command": "git diff --check", "result": "passed"}],
+            "source_commit": "a" * 40,
+            "task_packet_sha256": "b" * 64,
+            "changed_surfaces": ["README.md"],
+            "residual_risk": "none",
+        }
+        self.assertEqual(
+            PAYLOAD_ADAPTERS["workstream.completion.submit"]({"completion": completion}),
+            {
+                "completionPacket": {
+                    "acceptance": completion["acceptance"],
+                    "verification": completion["verification"],
+                    "sourceCommit": "a" * 40,
+                    "taskPacketSha256": "b" * 64,
+                    "changedSurfaces": ["README.md"],
+                    "residualRisk": "none",
+                }
+            },
+        )
+
+    def test_codex_progress_and_issue_adapters_match_the_broker_contract(self):
+        checkpoint = PAYLOAD_ADAPTERS["workstream.checkpoint"](
+            {"phase": "verifying", "summary": "Checks pass", "next_action": "Submit completion", "evidence": ["git diff --check"]}
+        )
+        self.assertEqual(checkpoint["nextAction"], "Submit completion")
+        self.assertNotIn("next_action", checkpoint)
+        issue = PAYLOAD_ADAPTERS["issue.report"](
+            {"category": "tooling", "severity": "degraded", "summary": "Socket failed", "details": "Connection refused", "requested_action": "Repair update ordering", "evidence": ["errno 111"]}
+        )
+        self.assertEqual(issue["requestedAction"], "Repair update ordering")
+        self.assertNotIn("requested_action", issue)
 
     def test_codex_adapter_owns_stable_retry_keys(self):
         first = _adapter_idempotency_key("issue.report", {"summary": "blocked", "evidence": ["fixture"]}, "call-1")

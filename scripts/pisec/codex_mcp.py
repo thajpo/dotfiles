@@ -8,7 +8,7 @@ import hashlib
 import os
 import socket
 import sys
-from typing import Any
+from typing import Any, Callable
 
 try:
     from .operation_catalogue_generated import SOCKET_OPERATIONS
@@ -16,74 +16,230 @@ except ImportError:
     from operation_catalogue_generated import SOCKET_OPERATIONS
 
 
+def _object(properties: dict[str, Any] | None = None, *, required: tuple[str, ...] = ()) -> dict[str, Any]:
+    schema: dict[str, Any] = {"type": "object", "additionalProperties": False, "properties": properties or {}}
+    if required:
+        schema["required"] = list(required)
+    return schema
+
+
+def _string(*, enum: tuple[str, ...] = (), minimum: int = 0, maximum: int = 0, pattern: str = "") -> dict[str, Any]:
+    schema: dict[str, Any] = {"type": "string"}
+    if enum:
+        schema["enum"] = list(enum)
+    if minimum:
+        schema["minLength"] = minimum
+    if maximum:
+        schema["maxLength"] = maximum
+    if pattern:
+        schema["pattern"] = pattern
+    return schema
+
+
+def _array(items: dict[str, Any], *, minimum: int = 0, maximum: int = 0) -> dict[str, Any]:
+    schema: dict[str, Any] = {"type": "array", "items": items}
+    if minimum:
+        schema["minItems"] = minimum
+    if maximum:
+        schema["maxItems"] = maximum
+    return schema
+
+
+ANY_VALUE: dict[str, Any] = {}
+EVIDENCE = _array(ANY_VALUE, maximum=64)
+ISSUE_STATES = ("open", "acknowledged", "remediating", "verifying", "resolved")
+RESEARCH_STATES = ("pending", "researching", "needs_context", "answered", "declined", "acknowledged")
+
+
+COMPLETION_SCHEMA = _object(
+    {
+        "acceptance": _array(
+            _object(
+                {
+                    "criterion": _string(minimum=1, maximum=4096),
+                    "status": {"const": "passed"},
+                    "evidence": _array(_string(minimum=1, maximum=4096), minimum=1),
+                },
+                required=("criterion", "status", "evidence"),
+            ),
+            minimum=1,
+            maximum=32,
+        ),
+        "verification": _array(
+            _object(
+                {"command": _string(minimum=1, maximum=4096), "result": _string(minimum=1, maximum=8192)},
+                required=("command", "result"),
+            ),
+            minimum=1,
+            maximum=32,
+        ),
+        "source_commit": _string(pattern="^(?:[0-9a-f]{40}|[0-9a-f]{64})$"),
+        "task_packet_sha256": _string(pattern="^[0-9a-f]{64}$"),
+        "changed_surfaces": _array(_string(minimum=1, maximum=4096), maximum=32),
+        "residual_risk": _string(maximum=4096),
+    },
+    required=("acceptance", "verification", "source_commit", "task_packet_sha256", "changed_surfaces", "residual_risk"),
+)
+
+
 TOOLS = {
-    "pisec_show_task_packet": ("task.get", {}),
-    "pisec_checkpoint_workstream": ("workstream.checkpoint", {"type": "object"}),
+    "pisec_show_task_packet": ("task.get", _object()),
+    "pisec_checkpoint_workstream": (
+        "workstream.checkpoint",
+        _object(
+            {
+                "phase": _string(enum=("investigating", "implementing", "verifying")),
+                "summary": _string(minimum=1, maximum=1024),
+                "next_action": _string(minimum=1, maximum=1024),
+                "evidence": EVIDENCE,
+            },
+            required=("phase", "summary", "next_action", "evidence"),
+        ),
+    ),
     "pisec_submit_completion": (
         "workstream.completion.submit",
-        {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["completion"],
-            "properties": {
-                "completion": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["acceptance", "verification", "source_commit", "task_packet_sha256", "changed_surfaces", "residual_risk"],
-                    "properties": {
-                        "acceptance": {
-                            "type": "array",
-                            "minItems": 1,
-                            "maxItems": 32,
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "required": ["criterion", "status", "evidence"],
-                                "properties": {
-                                    "criterion": {"type": "string", "minLength": 1, "maxLength": 4096},
-                                    "status": {"const": "passed"},
-                                    "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
-                                },
-                            },
-                        },
-                        "verification": {
-                            "type": "array",
-                            "minItems": 1,
-                            "maxItems": 32,
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "required": ["command", "result"],
-                                "properties": {
-                                    "command": {"type": "string", "minLength": 1, "maxLength": 4096},
-                                    "result": {"type": "string", "minLength": 1, "maxLength": 8192},
-                                },
-                            },
-                        },
-                        "source_commit": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
-                        "task_packet_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                        "changed_surfaces": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
-                        "residual_risk": {"type": "string", "maxLength": 4096},
-                    },
-                },
-            },
-        },
+        _object({"completion": COMPLETION_SCHEMA}, required=("completion",)),
     ),
-    "pisec_request_help": ("help.request", {"type": "object"}),
-    "pisec_list_coordination": ("coordination.list", {"type": "object"}),
-    "pisec_inspect_coordination": ("coordination.inspect", {"type": "object"}),
-    "pisec_request_secretary_research": ("research.request", {"type": "object"}),
-    "pisec_check_secretary_research": ("research.list", {"type": "object"}),
-    "pisec_inspect_secretary_research": ("research.inspect", {"type": "object"}),
-    "pisec_add_secretary_research_context": ("research.add_context", {"type": "object"}),
-    "pisec_acknowledge_secretary_research": ("research.acknowledge", {"type": "object"}),
-    "pisec_list_attention": ("attention.list", {"type": "object"}),
-    "pisec_inspect_attention": ("attention.inspect", {"type": "object"}),
-    "pisec_report_issue": ("issue.report", {"type": "object"}),
-    "pisec_list_issues": ("issue.list", {"type": "object"}),
-    "pisec_inspect_issue": ("issue.inspect", {"type": "object"}),
-    "pisec_add_issue_context": ("issue.add_context", {"type": "object"}),
-    "pisec_verify_issue": ("issue.verify", {"type": "object"}),
+    "pisec_request_help": (
+        "help.request",
+        _object(
+            {
+                "kind": _string(enum=("clarification", "blocker", "review", "access", "permission", "tooling", "lifecycle")),
+                "summary": _string(minimum=1, maximum=1024),
+                "details": _string(minimum=1, maximum=4096),
+                "requested_action": _string(minimum=1, maximum=4096),
+                "blocking": {"type": "boolean"},
+                "evidence": EVIDENCE,
+            },
+            required=("kind", "summary", "details"),
+        ),
+    ),
+    "pisec_list_coordination": ("coordination.list", _object({"include_resolved": {"type": "boolean"}})),
+    "pisec_inspect_coordination": ("coordination.inspect", _object({"request_id": _string(minimum=1, maximum=128)}, required=("request_id",))),
+    "pisec_report_issue": (
+        "issue.report",
+        _object(
+            {
+                "category": _string(enum=("permission", "access", "lifecycle", "tooling", "other")),
+                "severity": _string(enum=("blocking", "degraded", "improvement")),
+                "summary": _string(minimum=1, maximum=1024),
+                "details": _string(minimum=1, maximum=4096),
+                "requested_action": _string(minimum=1, maximum=4096),
+                "evidence": EVIDENCE,
+            },
+            required=("category", "severity", "summary", "details", "requested_action", "evidence"),
+        ),
+    ),
+    "pisec_list_issues": ("issue.list", _object({"state": _string(enum=ISSUE_STATES), "limit": {"type": "integer", "minimum": 1, "maximum": 1000}})),
+    "pisec_inspect_issue": ("issue.inspect", _object({"issue_id": _string(minimum=1, maximum=128)}, required=("issue_id",))),
+    "pisec_add_issue_context": ("issue.add_context", _object({"issue_id": _string(minimum=1, maximum=128), "context": ANY_VALUE}, required=("issue_id", "context"))),
+    "pisec_verify_issue": (
+        "issue.verify",
+        _object({"issue_id": _string(minimum=1, maximum=128), "status": _string(enum=("fixed", "still_blocked")), "evidence": ANY_VALUE}, required=("issue_id", "status", "evidence")),
+    ),
+    "pisec_request_secretary_research": (
+        "research.request",
+        _object(
+            {
+                "summary": _string(minimum=1, maximum=1024),
+                "question": _string(minimum=1, maximum=4096),
+                "context": _string(maximum=4096),
+                "attempted": _array(_string(minimum=1, maximum=4096), maximum=16),
+                "candidate_sources": _array(_string(minimum=1, maximum=2048), maximum=16),
+                "blocking": {"type": "boolean"},
+            },
+            required=("summary", "question"),
+        ),
+    ),
+    "pisec_check_secretary_research": ("research.list", _object({"state": _string(enum=RESEARCH_STATES), "limit": {"type": "integer", "minimum": 1, "maximum": 100}})),
+    "pisec_inspect_secretary_research": ("research.inspect", _object({"request_id": _string(minimum=1, maximum=128)}, required=("request_id",))),
+    "pisec_add_secretary_research_context": (
+        "research.add_context",
+        _object(
+            {
+                "request_id": _string(minimum=1, maximum=128),
+                "context": _string(minimum=1, maximum=4096),
+                "attempted": _array(_string(minimum=1, maximum=4096), maximum=16),
+                "candidate_sources": _array(_string(minimum=1, maximum=2048), maximum=16),
+            },
+            required=("request_id", "context"),
+        ),
+    ),
+    "pisec_acknowledge_secretary_research": ("research.acknowledge", _object({"request_id": _string(minimum=1, maximum=128)}, required=("request_id",))),
+    "pisec_list_attention": ("attention.list", _object({"limit": {"type": "integer", "minimum": 1, "maximum": 32}})),
+    "pisec_inspect_attention": ("attention.inspect", _object({"attention_id": _string(minimum=1, maximum=128)}, required=("attention_id",))),
+}
+
+
+def _adapt_completion(params: dict[str, Any]) -> dict[str, Any]:
+    completion = params["completion"]
+    return {
+        "completionPacket": {
+            "acceptance": completion["acceptance"],
+            "verification": completion["verification"],
+            "sourceCommit": completion["source_commit"],
+            "taskPacketSha256": completion["task_packet_sha256"],
+            "changedSurfaces": completion["changed_surfaces"],
+            "residualRisk": completion["residual_risk"],
+        }
+    }
+
+
+def _adapt_help(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": params["kind"],
+        "summary": params["summary"],
+        "details": params["details"],
+        "requestedAction": params.get("requested_action", "Provide guidance or remediation."),
+        "blocking": params.get("blocking", params["kind"] == "blocker"),
+        "evidence": params.get("evidence", []),
+    }
+
+
+def _adapt_research_request(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "request": {
+            "kind": "research",
+            "summary": params["summary"],
+            "question": params["question"],
+            "context": params.get("context", ""),
+            "attempted": params.get("attempted", []),
+            "candidateSources": params.get("candidate_sources", []),
+            "blocking": params.get("blocking", True),
+        }
+    }
+
+
+def _adapt_research_context(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "requestId": params["request_id"],
+        "context": {
+            "context": params["context"],
+            "attempted": params.get("attempted", []),
+            "candidateSources": params.get("candidate_sources", []),
+        },
+    }
+
+
+def _rename(params: dict[str, Any], fields: dict[str, str]) -> dict[str, Any]:
+    return {fields.get(key, key): value for key, value in params.items()}
+
+
+PAYLOAD_ADAPTERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    "attention.inspect": lambda value: _rename(value, {"attention_id": "attentionId"}),
+    "coordination.list": lambda value: _rename(value, {"include_resolved": "includeResolved"}),
+    "coordination.inspect": lambda value: _rename(value, {"request_id": "requestId"}),
+    "help.request": _adapt_help,
+    "issue.report": lambda value: _rename(value, {"requested_action": "requestedAction"}),
+    "issue.inspect": lambda value: _rename(value, {"issue_id": "issueId"}),
+    "issue.add_context": lambda value: _rename(value, {"issue_id": "issueId"}),
+    "issue.verify": lambda value: _rename(value, {"issue_id": "issueId"}),
+    "research.request": _adapt_research_request,
+    "research.inspect": lambda value: _rename(value, {"request_id": "requestId"}),
+    "research.add_context": _adapt_research_context,
+    "research.acknowledge": lambda value: _rename(value, {"request_id": "requestId"}),
+    "workstream.checkpoint": lambda value: _rename(value, {"next_action": "nextAction"}),
+    "workstream.completion.submit": _adapt_completion,
 }
 
 TOOL_DESCRIPTIONS = {
@@ -133,11 +289,12 @@ def _request(operation: str, params: dict[str, Any], native_tool_id: str = "") -
     generation = os.environ.get("PISEC_RUNTIME_GENERATION")
     if not all(isinstance(value, str) and value for value in (socket_path, token, workstream, instance, surface, generation)):
         raise RuntimeError("Pisec runtime binding is incomplete")
-    model_payload = dict(params)
-    model_payload.pop("idempotencyKey", None)
-    model_payload.pop("idempotency_key", None)
+    model_params = dict(params)
+    model_params.pop("idempotencyKey", None)
+    model_params.pop("idempotency_key", None)
+    model_payload = PAYLOAD_ADAPTERS.get(operation, dict)(model_params)
     if operation in IDEMPOTENT_OPERATIONS:
-        model_payload["idempotencyKey"] = _adapter_idempotency_key(operation, model_payload, native_tool_id)
+        model_payload["idempotencyKey"] = _adapter_idempotency_key(operation, model_params, native_tool_id)
     payload = {"workstreamId": workstream, "runtimeInstanceId": instance, "surfaceId": surface, "token": token, "generation": generation, **model_payload}
     request_id = "req_" + hashlib.sha256(f"{workstream}:{instance}:{operation}:{native_tool_id}".encode("utf-8")).hexdigest()[:32]
     request = {"protocolVersion": 1, "requestId": request_id, "operation": operation, "payload": payload}
