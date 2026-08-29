@@ -768,11 +768,27 @@ def update(repo: Path, ref: str, wait_seconds: float, state_root: Path, install_
                 os.replace(staging, deployment)
                 staging = None
                 candidate_identity = _deployment_identity(deployment)
+                status.update(currentStep="refresh")
+                _json_write(status_path, status)
+                refresh = _refresh_under_lock(deployment, wait_seconds, state_root, lock_descriptor)
+                if refresh.get("ok") is not True or refresh.get("failed") or refresh.get("pending"):
+                    return _failure(
+                        EXIT_FAILED,
+                        status_path,
+                        status,
+                        RuntimeError(f"runtime refresh failed: {json.dumps(refresh, sort_keys=True)[-1024:]}"),
+                        current=current_identity,
+                        candidate=candidate_identity,
+                        stable=stable,
+                        marker=marker,
+                        refresh=refresh,
+                    )
+                status.update(currentStep="switch")
+                _json_write(status_path, status)
                 _systemctl("stop")
                 _switch_current(install_root, deployment)
                 switched = True
                 current = _current_target(install_root)
-                refresh = _refresh_under_lock(current, wait_seconds, state_root, lock_descriptor)
             status.update(currentStep="health")
             _json_write(status_path, status)
             try:
@@ -1059,11 +1075,23 @@ def recover_previous(state_root: Path, install_root: Path, wait_seconds: float) 
                     raise RuntimeError("last-known-good deployment is already current")
                 _preflight_state(state_root, marker["database"])
                 stable = _stable_updater(install_root)
+                selected_identity = _deployment_identity(selected)
+                refresh = _refresh_under_lock(selected, wait_seconds, state_root, lock_descriptor)
+                if refresh.get("ok") is not True or refresh.get("failed") or refresh.get("pending"):
+                    return _failure(
+                        EXIT_FAILED,
+                        status_path,
+                        status,
+                        RuntimeError(f"runtime refresh failed: {json.dumps(refresh, sort_keys=True)[-1024:]}"),
+                        current=current_identity,
+                        candidate=selected_identity,
+                        stable=stable,
+                        marker=marker,
+                        refresh=refresh,
+                    )
                 _systemctl("stop")
                 _switch_current(install_root, selected)
                 switched = True
-                selected_identity = _deployment_identity(selected)
-                refresh = _refresh_under_lock(selected, wait_seconds, state_root, lock_descriptor)
             status = _status(state="running", step="health", current=selected_identity, candidate=selected_identity, stable=stable, marker=marker)
             _json_write(status_path, status)
             try:

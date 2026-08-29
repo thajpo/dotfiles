@@ -193,6 +193,37 @@ class UpdaterContractTests(unittest.TestCase):
                 module_globals["_systemctl"] = original_systemctl
             self.assertEqual(code, 0, result)
 
+    def test_busy_runtime_aborts_before_broker_stop_or_deployment_switch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            install = root / "install"
+            with PiStore(state):
+                pass
+            old, _identity = self._install_verified_current(install)
+            module_globals = self.updater["update"].__globals__
+            original_refresh = module_globals["_refresh_under_lock"]
+            original_systemctl = module_globals["_systemctl"]
+            systemctl_actions = []
+            module_globals["_refresh_under_lock"] = lambda _candidate, _wait, _state, _descriptor: {
+                "ok": False,
+                "failed": [],
+                "pending": [{"workstreamId": "ws_" + "a" * 32, "state": "working"}],
+            }
+            module_globals["_systemctl"] = systemctl_actions.append
+            try:
+                code, result = self.updater["update"](ROOT, "HEAD", 0, state, install)
+            finally:
+                module_globals["_refresh_under_lock"] = original_refresh
+                module_globals["_systemctl"] = original_systemctl
+
+            self.assertEqual(code, self.updater["EXIT_FAILED"], result)
+            self.assertEqual(result["state"], "failed")
+            self.assertEqual(result["currentStep"], "refresh")
+            self.assertEqual((install / "current").resolve(), old.resolve())
+            self.assertEqual(systemctl_actions, [])
+            self.assertEqual(sorted(path.name for path in install.glob("deploy-*")), [old.name])
+
     def test_unsupported_state_writes_status_outside_state_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
