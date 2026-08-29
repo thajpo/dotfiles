@@ -148,8 +148,8 @@ def _candidate(
     history_base_oid = None
     if private_ref is not None:
         private_code, _ = _run_git(repository, "show-ref", "--verify", "--quiet", private_ref, accepted=frozenset({0, 1}))
-        if private_code == 0 and _oid(repository, private_ref) == target_oid:
-            history_base_oid = target_oid
+        if private_code == 0:
+            history_base_oid = _oid(repository, private_ref)
     validate_worker_repository(
         repository,
         branch_name=str(workstream["branch_name"]),
@@ -518,12 +518,22 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
     integration_id = str(job["integration_id"])
     if job["state"] == "needs_attention":
         last_error = str(job["last_error"] or "")
-        retryable_git_error = last_error == "Git operation refused" or (last_error.startswith("Git ") and " operation failed" in last_error)
-        if last_error != "registered project checkout is dirty" and not retryable_git_error:
+        receipt = store.conn.execute("SELECT 1 FROM merge_receipts WHERE integration_id=?", (integration_id,)).fetchone()
+        integrated_closeout = job["integrated_at"] is not None and receipt is not None
+        retryable_git_error = (
+            last_error == "Git operation refused"
+            or (last_error.startswith("Git ") and " operation failed" in last_error)
+            or last_error == "worker Reviewr base ref does not match the approved base"
+        )
+        if integrated_closeout:
+            _set_job(store, integration_id, state="integrated", next_action="retry integrated workstream closeout")
+            job = {**dict(job), "state": "integrated", "last_error": None}
+        elif last_error != "registered project checkout is dirty" and not retryable_git_error:
             return {"integrationId": integration_id, "state": "needs_attention", "reused": True}
-        next_action = "retry after the target checkout was cleaned" if not retryable_git_error else "retry after the reported Git condition was repaired"
-        _set_job(store, integration_id, state="queued", next_action=next_action)
-        job = {**dict(job), "state": "queued", "last_error": None}
+        else:
+            next_action = "retry after the target checkout was cleaned" if not retryable_git_error else "retry after the reported Git condition was repaired"
+            _set_job(store, integration_id, state="queued", next_action=next_action)
+            job = {**dict(job), "state": "queued", "last_error": None}
     if job["state"] != "awaiting_worker":
         with store.transaction():
             store.conn.execute("UPDATE integration_jobs SET attempt=attempt+1,updated_at=? WHERE integration_id=?", (utc_now(), integration_id))

@@ -153,6 +153,14 @@ class IntegrationTests(unittest.TestCase):
             self.assertTrue(worktree.exists())
 
             store.conn.execute(
+                "UPDATE integration_jobs SET state='needs_attention',last_error='worker is the only authorized verifier for an unresolved issue; resolve it or retain the binding' WHERE integration_id=?",
+                (job["integration_id"],),
+            )
+            replayed_closeout = reconcile_integrations(store, workspace, harness)
+            self.assertEqual(replayed_closeout["processed"][0]["state"], "integrated")
+            self.assertTrue(replayed_closeout["processed"][0]["closeout"]["retainedForVerification"])
+
+            store.conn.execute(
                 "UPDATE issues SET state='resolved',disposition='fixed',resolution='verified',resolved_at='2026-08-29T00:00:00Z' WHERE issue_id=?",
                 (issue["issue_id"],),
             )
@@ -216,6 +224,47 @@ class IntegrationTests(unittest.TestCase):
                 store.conn.execute("SELECT acceptance_id FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()[0],
                 accepted["acceptance"]["acceptance_id"],
             )
+
+    def test_partial_target_refresh_recovers_from_its_private_review_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store, project, harness, workspace, workstream, _scope, repo, worktree, _private_objects, _source = self.fixture(root)
+            self.addCleanup(store.close)
+            prepared = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            accepted = apply_workstream_acceptance(store, project["project_id"], prepared["approvalScope"])
+            (repo / "first-target.txt").write_text("first\n")
+            _git(repo, "add", "first-target.txt")
+            _git(repo, "commit", "-qm", "first target")
+            first_target = _git(repo, "rev-parse", "HEAD")
+            private_ref = f"refs/pisec/target/{accepted['integration']['integration_id']}"
+            integration_module._run_git(
+                worktree,
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                str(repo),
+                f"{first_target}:{private_ref}",
+            )
+            integration_module._run_git(worktree, "update-ref", "refs/remotes/origin/main", first_target)
+            (repo / "second-target.txt").write_text("second\n")
+            _git(repo, "add", "second-target.txt")
+            _git(repo, "commit", "-qm", "second target")
+            store.conn.execute(
+                "UPDATE integration_jobs SET state='needs_attention',target_oid=NULL,last_error='worker Reviewr base ref does not match the approved base' WHERE integration_id=?",
+                (accepted["integration"]["integration_id"],),
+            )
+            refs_before = git_worker(worktree, "for-each-ref", "--format=%(refname)")
+
+            recovered = reconcile_integrations(store, workspace, harness)
+
+            job = store.conn.execute(
+                "SELECT state,target_oid,acceptance_id,last_error FROM integration_jobs WHERE integration_id=?",
+                (accepted["integration"]["integration_id"],),
+            ).fetchone()
+            self.assertEqual(recovered["processed"][0]["state"], "awaiting_worker", {"result": recovered, "job": dict(job), "refs": refs_before})
+            self.assertEqual(job["state"], "awaiting_worker")
+            self.assertEqual(job["target_oid"], _git(repo, "rev-parse", "HEAD"))
+            self.assertEqual(job["acceptance_id"], accepted["acceptance"]["acceptance_id"])
 
     def test_rebased_candidate_scopes_changes_against_refreshed_target(self):
         with tempfile.TemporaryDirectory() as tmp:
