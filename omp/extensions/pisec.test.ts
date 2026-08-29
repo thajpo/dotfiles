@@ -209,6 +209,8 @@ test("role prompt snapshots match their available tools and reporting contract",
   assert.match(WORKER_PROMPT, /pisec_submit_completion/);
   assert.match(WORKER_PROMPT, /accepted target drift/);
   assert.match(WORKER_PROMPT, /existing human acceptance/);
+  assert.match(source, /authorized attention record and its typed source/);
+  assert.match(source, /Do not pass an integration source ID to a coordination inspector/);
   assert.match(WORKER_PROMPT, /Remaining work, risks, and next action/);
   for (const tool of ["pisec_prepare_workstream", "pisec_create_workstream", "pisec_submit_completion"]) {
     assert.match(source, new RegExp(`(?:name: )?"${tool}"`), tool);

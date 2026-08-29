@@ -190,8 +190,9 @@ def _typed_context(turn: Mapping[str, Any], *, trigger: bool) -> str:
         )
         if any(item["sourceKind"] == "integration" for item in valid_attention):
             lines.append(
-                "Integration attention in awaiting_worker state assigns its nextAction to this worker. "
-                "For accepted target drift, rebase or reconcile only within the accepted paths, rerun verification, and submit one replacement completion packet for the current commit under the existing acceptance. "
+                "The attention inspector returns the authorized integration source; do not pass an integration sourceId to a coordination inspector. "
+                "Integration attention in awaiting_worker state assigns source.next_action to this worker. "
+                "For accepted target drift, the worker branch HEAD must descend from source.target_oid even when the accepted diff has no conflict. Rebase the worker branch onto refs/pisec/target/<integration-sourceId>, resolve only accepted paths, rerun verification, and submit one replacement completion packet for the new current commit under the existing acceptance. "
                 "Do not defer this bounded action to the coordinator or request a second approval."
             )
     elif trigger:

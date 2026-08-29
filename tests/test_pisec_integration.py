@@ -187,12 +187,24 @@ class IntegrationTests(unittest.TestCase):
             self.assertFalse(any("rebase" in prompt.lower() for _surface, prompt in workspace.prompts))
             attention = store.conn.execute("SELECT source_kind FROM attention_items WHERE source_kind='integration' AND source_id=?", (accepted["integration"]["integration_id"],)).fetchone()
             self.assertIsNotNone(attention)
+            attention_revision = store.conn.execute(
+                "SELECT source_event_sequence FROM attention_items WHERE source_kind='integration' AND source_id=?",
+                (accepted["integration"]["integration_id"],),
+            ).fetchone()[0]
             prompt_count = len(workspace.prompts)
             attempt = store.conn.execute("SELECT attempt FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()["attempt"]
             replay = reconcile_integrations(store, workspace, harness)
             self.assertEqual(replay["processed"][0]["state"], "awaiting_worker")
+            self.assertTrue(replay["processed"][0]["reused"])
             self.assertEqual(len(workspace.prompts), prompt_count)
             self.assertEqual(store.conn.execute("SELECT attempt FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()["attempt"], attempt)
+            self.assertEqual(
+                store.conn.execute(
+                    "SELECT source_event_sequence FROM attention_items WHERE source_kind='integration' AND source_id=?",
+                    (accepted["integration"]["integration_id"],),
+                ).fetchone()[0],
+                attention_revision,
+            )
 
     def test_repaired_git_failure_retries_under_the_existing_acceptance(self):
         with tempfile.TemporaryDirectory() as tmp:

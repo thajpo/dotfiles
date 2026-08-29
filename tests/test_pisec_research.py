@@ -227,6 +227,13 @@ class ResearchTests(unittest.TestCase):
         listed = dispatcher.dispatch("secretary", "attention.list", {**secretary_auth})["items"]
         self.assertTrue(listed)
         self.assertEqual(set(listed[0]), {"attentionId", "sourceKind", "sourceId", "priority", "revision", "revisionAt"})
+        inspected_attention = dispatcher.dispatch(
+            "secretary",
+            "attention.inspect",
+            {**secretary_auth, "attentionId": listed[0]["attentionId"]},
+        )
+        self.assertEqual(inspected_attention["attention"]["source_id"], listed[0]["sourceId"])
+        self.assertEqual(inspected_attention["source"]["issue_id"], issue_id)
         with self.assertRaises(InvalidRequestError):
             dispatcher.dispatch("secretary", "attention.list", {**secretary_auth, "limit": 33})
         binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (secretary_id,)).fetchone()

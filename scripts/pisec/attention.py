@@ -241,6 +241,18 @@ def compact_attention(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def inspect_attention(store: Any, *, recipient_workstream_id: str, attention_id: str) -> dict[str, Any]:
+    """Return one authorized attention record with its typed source."""
+    row = store.conn.execute(
+        "SELECT * FROM attention_items WHERE attention_id=? AND recipient_workstream_id=?",
+        (attention_id, recipient_workstream_id),
+    ).fetchone()
+    if row is None:
+        raise NotFoundError("attention item was not found")
+    source = _source(store.conn, str(row["source_kind"]), str(row["source_id"]))
+    return {"attention": dict(row), "source": source}
+
+
 def present_attention_in_transaction(connection: Any, *, recipient_workstream_id: str, attention_id: str, revision: int) -> dict[str, Any]:
     row = connection.execute("SELECT * FROM attention_items WHERE attention_id=? AND recipient_workstream_id=?", (attention_id, recipient_workstream_id)).fetchone()
     if row is None:

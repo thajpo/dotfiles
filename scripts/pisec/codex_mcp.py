@@ -248,7 +248,7 @@ TOOL_DESCRIPTIONS = {
     "pisec_submit_completion": "Use as the sole final handoff after implementation and verification. Normally submit one immutable completion packet for the current worker commit; replaying the same packet is safe. If broker-authenticated integration attention reports accepted target drift, submit one replacement completion packet after bounded reconciliation and reverification. The broker creates the matching ready_review checkpoint atomically under the existing acceptance.",
     "pisec_request_help": "Use when blocked, clarifying, reviewing, or needing access; creates the single typed upward-help source.",
     "pisec_list_attention": "Use at turn start and before ending a turn; lists current authorized attention references without acknowledging them.",
-    "pisec_inspect_attention": "Use after attention.list to identify the typed source and its existing inspector; read-only.",
+    "pisec_inspect_attention": "Use after attention.list. Returns the authorized attention record and its typed source, including state and next action when present; read-only. Do not pass an integration source ID to a coordination inspector.",
     "pisec_report_issue": "Use for access, tooling, lifecycle, or permission failures; records a canonical issue for the project Secretary.",
     "pisec_verify_issue": "Use when the Secretary asks you to verify a remediation; closes the reporter revision or reopens supervisor attention.",
 }

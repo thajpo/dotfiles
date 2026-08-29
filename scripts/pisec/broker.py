@@ -15,7 +15,7 @@ import stat
 import threading
 from typing import Any, Callable, Mapping
 from .adapters import AdapterRegistry, HarnessAdapter, WorkspaceAdapter
-from .attention import ATTENTION_WAKE_PROMPT, compact_attention, list_open_attention, wait_for_attention_hint
+from .attention import ATTENTION_WAKE_PROMPT, compact_attention, inspect_attention, list_open_attention, wait_for_attention_hint
 from .cleanup import cleanup_workstream
 from .decisions import list_decisions, record_decision, resolve_decision
 from .events import append_event_in_transaction, list_events
@@ -560,10 +560,7 @@ class BrokerDispatcher:
             return {"items": [compact_attention(item) for item in list_open_attention(store, recipient_workstream_id=workstream_id, limit=int(payload.get("limit", 32)))]}
         if operation == "attention.inspect":
             _exact(payload, auth_fields | {"attentionId"})
-            row = store.conn.execute("SELECT * FROM attention_items WHERE attention_id=? AND recipient_workstream_id=?", (payload["attentionId"], workstream_id)).fetchone()
-            if row is None:
-                raise NotFoundError("attention item was not found")
-            return dict(row)
+            return inspect_attention(store, recipient_workstream_id=workstream_id, attention_id=str(payload["attentionId"]))
         if operation == "issue.report":
             _exact(payload, auth_fields | {"category", "severity", "summary", "details", "requestedAction", "evidence", "idempotencyKey"})
             return report_issue(store, project_id=project_id, reporter_workstream_id=workstream_id, category=payload["category"], severity=payload["severity"], summary=payload["summary"], details=payload["details"], requested_action=payload["requestedAction"], evidence=payload["evidence"], idempotency_key=payload["idempotencyKey"])
@@ -977,10 +974,7 @@ class BrokerDispatcher:
             return {"items": [compact_attention(item) for item in list_open_attention(store, recipient_workstream_id=secretary_workstream_id, limit=int(payload.get("limit", 32)))]}
         if operation == "attention.inspect":
             _exact(payload, {"attentionId"})
-            row = store.conn.execute("SELECT * FROM attention_items WHERE attention_id=? AND recipient_workstream_id=?", (payload["attentionId"], secretary_workstream_id)).fetchone()
-            if row is None:
-                raise NotFoundError("attention item was not found")
-            return dict(row)
+            return inspect_attention(store, recipient_workstream_id=secretary_workstream_id, attention_id=str(payload["attentionId"]))
         if operation not in {"project.status", "project.activity", "issue.list", "issue.inspect", "git.status", "git.workstream_changes", "workstream.list", "workstream.inspect", "workstream.accept.prepare", "integration.list", "integration.inspect", "coordination.list", "coordination.inspect", "decision.list", "research.list", "research.inspect"}:
             assert_project_writable(store, project_id)
         if operation == "project.status":
@@ -1191,10 +1185,7 @@ class BrokerDispatcher:
             return {"items": [compact_attention(item) for item in items]}
         if operation == "attention.inspect":
             _exact(payload, {"attentionId"})
-            row = store.conn.execute("SELECT * FROM attention_items WHERE attention_id=? AND recipient_workstream_id=?", (payload["attentionId"], first_mate_workstream_id)).fetchone()
-            if row is None:
-                raise NotFoundError("attention item was not found")
-            return dict(row)
+            return inspect_attention(store, recipient_workstream_id=first_mate_workstream_id, attention_id=str(payload["attentionId"]))
         if operation == "fleet.activity":
             _exact(payload, set(), {"after"})
             return fleet_activity(store, int(payload.get("after", 0)))

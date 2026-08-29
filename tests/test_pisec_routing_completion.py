@@ -78,6 +78,8 @@ class PisecRoutingCompletionTests(unittest.TestCase):
         self.assertIn("existing human acceptance", prompt)
 
     def test_codex_exposes_typed_progress_and_issue_contracts(self):
+        self.assertIn("authorized attention record and its typed source", TOOL_DESCRIPTIONS["pisec_inspect_attention"])
+        self.assertIn("integration source ID", TOOL_DESCRIPTIONS["pisec_inspect_attention"])
         checkpoint = TOOLS["pisec_checkpoint_workstream"][1]
         self.assertFalse(checkpoint["additionalProperties"])
         self.assertEqual(checkpoint["required"], ["phase", "summary", "next_action", "evidence"])

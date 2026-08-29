@@ -570,6 +570,8 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
             candidate = replacement
             _set_job(store, integration_id, state="queued", candidate_packet=candidate["packet"]["completion_packet_id"], candidate_source=candidate["sourceOid"], next_action="candidate refreshed after worker verification")
             job = {**dict(job), "state": "queued", "candidate_completion_packet_id": candidate["packet"]["completion_packet_id"], "candidate_source_oid": candidate["sourceOid"]}
+        elif job["state"] == "awaiting_worker":
+            return {"integrationId": integration_id, "state": "awaiting_worker", "reused": True}
         _set_job(store, integration_id, state="refreshing", next_action="inspect target and candidate")
         with project_git_lock(store.state_root, str(job["project_id"])):
             _project, repository, target_branch, target_oid, porcelain = _primary_state(store, str(job["project_id"]))

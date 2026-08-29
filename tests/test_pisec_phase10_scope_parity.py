@@ -519,6 +519,8 @@ class Phase10ScopeParityTests(unittest.TestCase):
         self.assertIn("awaiting_worker", context)
         self.assertIn("replacement completion packet", context)
         self.assertIn("existing acceptance", context)
+        self.assertIn("must descend from source.target_oid", context)
+        self.assertIn("refs/pisec/target/<integration-sourceId>", context)
         self.assertNotIn("requires review", context)
 
     def test_codex_user_turn_fails_closed_when_typed_preparation_is_unavailable(self):
