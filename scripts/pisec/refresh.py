@@ -13,6 +13,7 @@ from .worker_repo import validate_worker_resume_git
 from .worker_repo import project_permissions_lock
 from .models import ConflictError, NeedsAttentionError, NotFoundError, PisecError, canonical_json, json_digest, new_id, utc_now, validate_sha256
 from .runtime import WORKSPACE_RUNTIME_MISSING, reset_codex_session_in_transaction, start_bound_agent, usable_runtime_binding
+from .runtime_eligibility import mapping_runtime_lifecycle_eligible, runtime_eligible_sql
 from .runtime_surface import capture_runtime_surface, verify_surface
 from .events import append_event_in_transaction
 from .operations import update_operation_in_transaction
@@ -35,7 +36,7 @@ _RECOVERABLE_STOPPED_REFRESH_ERRORS = frozenset(
 
 
 def _active_bindings(store: Any, *, project_ids: Sequence[str] = (), harness_ids: Sequence[str] = (), workstream_ids: Sequence[str] = ()) -> list[dict[str, Any]]:
-    clauses = ["p.active=1", "w.desired_state='active'"]
+    clauses = ["p.active=1", runtime_eligible_sql("w")]
     params: list[str] = []
     selectors = (("p.project_id", project_ids), ("r.harness_id", harness_ids), ("r.workstream_id", workstream_ids))
     for column, values in selectors:
@@ -530,7 +531,7 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
                 )
                 operation = store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
         current = store.conn.execute(
-            "SELECT r.*,w.desired_state,w.provisioning_state,w.attention_reason,p.active AS project_active,p.lifecycle_attention_reason "
+            "SELECT r.*,w.kind,w.desired_state,w.provisioning_state,w.attention_reason,p.active AS project_active,p.lifecycle_attention_reason "
             "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) JOIN projects p USING(project_id) WHERE r.workstream_id=?",
             (workstream_id,),
         ).fetchone()
@@ -557,7 +558,7 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
                 ).fetchone()
                 operation_id = str(pending_operation["operation_id"])
                 current = store.conn.execute(
-                    "SELECT r.*,w.desired_state,w.provisioning_state,w.attention_reason,p.active AS project_active,p.lifecycle_attention_reason "
+                    "SELECT r.*,w.kind,w.desired_state,w.provisioning_state,w.attention_reason,p.active AS project_active,p.lifecycle_attention_reason "
                     "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) JOIN projects p USING(project_id) WHERE r.workstream_id=?",
                     (workstream_id,),
                 ).fetchone()
@@ -577,7 +578,7 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
             )
             if recovered:
                 current = store.conn.execute(
-                    "SELECT r.*,w.desired_state,w.provisioning_state,w.attention_reason,p.active AS project_active,p.lifecycle_attention_reason "
+                    "SELECT r.*,w.kind,w.desired_state,w.provisioning_state,w.attention_reason,p.active AS project_active,p.lifecycle_attention_reason "
                     "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) JOIN projects p USING(project_id) WHERE r.workstream_id=?",
                     (workstream_id,),
                 ).fetchone()
@@ -612,7 +613,7 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
         lifecycle_ready = (
             int(current["project_active"]) == 1
             and current["lifecycle_attention_reason"] is None
-            and current["desired_state"] == "active"
+            and mapping_runtime_lifecycle_eligible(store, current)
             and (
                 (current["provisioning_state"] == "bound" and current["attention_reason"] is None)
                 or (
@@ -628,7 +629,7 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
         if current["refresh_pending"] and current["refresh_operation_id"] is None:
             raise NeedsAttentionError("runtime binding has an ownerless refresh reservation")
         cursor = store.conn.execute(
-            "UPDATE runtime_bindings SET refresh_pending=1,refresh_operation_id=?,refresh_started_at=?,launch_generation_sha256=?,updated_at=? WHERE workstream_id=? AND refresh_pending=0 AND observed_state IN ('idle','stopped') AND desired_generation_sha256=? AND runtime_instance_id IS ? AND report_seq=? AND applied_generation_sha256 IS ? AND launch_generation_sha256 IS ? AND EXISTS (SELECT 1 FROM workstreams w JOIN projects p USING(project_id) WHERE w.workstream_id=runtime_bindings.workstream_id AND p.active=1 AND p.lifecycle_attention_reason IS NULL AND w.desired_state='active' AND ((w.provisioning_state='bound' AND w.attention_reason IS NULL) OR (w.provisioning_state='needs_attention' AND w.attention_reason=?) OR (w.provisioning_state='needs_attention' AND EXISTS (SELECT 1 FROM operations o WHERE o.operation_id=? AND o.kind='runtime.refresh' AND o.state='applying' AND o.step='reserved'))) )",
+            "UPDATE runtime_bindings SET refresh_pending=1,refresh_operation_id=?,refresh_started_at=?,launch_generation_sha256=?,updated_at=? WHERE workstream_id=? AND refresh_pending=0 AND observed_state IN ('idle','stopped') AND desired_generation_sha256=? AND runtime_instance_id IS ? AND report_seq=? AND applied_generation_sha256 IS ? AND launch_generation_sha256 IS ? AND EXISTS (SELECT 1 FROM workstreams w JOIN projects p USING(project_id) WHERE w.workstream_id=runtime_bindings.workstream_id AND p.active=1 AND p.lifecycle_attention_reason IS NULL AND " + runtime_eligible_sql("w") + " AND ((w.provisioning_state='bound' AND w.attention_reason IS NULL) OR (w.provisioning_state='needs_attention' AND w.attention_reason=?) OR (w.provisioning_state='needs_attention' AND EXISTS (SELECT 1 FROM operations o WHERE o.operation_id=? AND o.kind='runtime.refresh' AND o.state='applying' AND o.step='reserved'))) )",
             (operation_id, now, desired, now, workstream_id, desired, expected_binding.get("runtime_instance_id"), expected_binding.get("report_seq"), expected_binding.get("applied_generation_sha256"), expected_binding.get("launch_generation_sha256"), WORKSPACE_RUNTIME_MISSING, operation_id),
         )
         if cursor.rowcount != 1 and not (int(current["refresh_pending"]) and current["refresh_operation_id"] == operation_id):
@@ -685,11 +686,21 @@ def _refresh_runtimes_unlocked(store: Any, harness: HarnessAdapter, workspace: W
 
     marked = mark_stale_bindings(store, harness, harness_resolver=harness_resolver, surface_resolver=operation_surface, project_ids=project_ids, harness_ids=harness_ids, workstream_ids=workstream_ids)
     result["failed"].extend(marked["failed"])
-    generations = {str(item["generation"]) for item in marked["stale"] if item.get("generation")}
-    result["generation"] = next(iter(generations)) if len(generations) == 1 else ("per-binding" if generations else None)
     stale = {str(item["workstreamId"]): item for item in marked["stale"]}
     for item in marked["current"]:
-        result["skipped"].append({**item, "reason": "current generation"})
+        workstream_id = str(item["workstreamId"])
+        binding = _state(store, workstream_id)
+        runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+        if runtime.state == "stopped":
+            stale[workstream_id] = {**item, "reason": "current runtime is stopped"}
+        elif runtime.state == "live":
+            result["skipped"].append({**item, "reason": "current generation"})
+        else:
+            reason = "runtime process identity is ambiguous"
+            _mark_attention(store, workstream_id, reason)
+            result["failed"].append({**item, "reason": reason})
+    generations = {str(item["generation"]) for item in stale.values() if item.get("generation")}
+    result["generation"] = next(iter(generations)) if len(generations) == 1 else ("per-binding" if generations else None)
     deadline = time.monotonic() + float(wait_seconds)
     remaining = list(stale)
     while remaining:
@@ -783,6 +794,25 @@ def ensure_runtime(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdap
             binding = _state(store, workstream_id)
         if runtime.state == "unknown":
             raise NeedsAttentionError("runtime process identity is ambiguous")
+        recoverable_missing = bool(
+            runtime.state == "stopped"
+            and binding["provisioning_state"] == "needs_attention"
+            and binding.get("attention_reason") == WORKSPACE_RUNTIME_MISSING
+            and binding["applied_generation_sha256"] == desired
+            and not binding["refresh_pending"]
+            and binding["refresh_operation_id"] is None
+            and binding["refresh_started_at"] is None
+            and binding["launch_generation_sha256"] is None
+        )
+        if recoverable_missing:
+            with store.transaction():
+                cursor = store.conn.execute(
+                    "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=? AND provisioning_state='needs_attention' AND attention_reason=?",
+                    (utc_now(), workstream_id, WORKSPACE_RUNTIME_MISSING),
+                )
+                if cursor.rowcount != 1:
+                    raise ConflictError("workstream changed before runtime recovery")
+            binding = _state(store, workstream_id)
         current = bool(
             binding["provisioning_state"] == "bound"
             and binding["applied_generation_sha256"] == desired

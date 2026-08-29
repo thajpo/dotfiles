@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .events import append_event_in_transaction
+from .runtime_eligibility import runtime_lifecycle_eligible
 from .models import ConflictError, IdempotencyConflictError, InvalidRequestError, NotFoundError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_git_oid, validate_id, validate_sha256
 from .projects import _git, assert_project_writable, get_project, is_first_mate_issue_project, platform_project_id
 from .worker_repo import validate_worker_repository
@@ -311,12 +312,16 @@ def _append_issue_update(store: Any, *, issue: Mapping[str, Any], actor_kind: st
     return True
 
 
-def _issue_actor(store: Any, project_id: str, actor_id: str, *, kinds: set[str]) -> dict[str, Any]:
+def _issue_actor(store: Any, project_id: str, actor_id: str, *, kinds: set[str], allow_retained_verifier: bool = False) -> dict[str, Any]:
     row = store.conn.execute(
-        "SELECT w.workstream_id,w.project_id,w.kind,w.desired_state,w.provisioning_state FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=? AND w.desired_state='active' AND w.provisioning_state='bound'",
+        "SELECT w.workstream_id,w.project_id,w.kind,w.desired_state,w.provisioning_state FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=? AND w.provisioning_state='bound'",
         (actor_id,),
     ).fetchone()
-    if row is None or row["kind"] not in kinds or (row["kind"] != "first_mate" and row["project_id"] != project_id):
+    lifecycle_eligible = row is not None and (
+        row["desired_state"] == "active"
+        or (allow_retained_verifier and runtime_lifecycle_eligible(store, actor_id, project_id=project_id))
+    )
+    if not lifecycle_eligible or row["kind"] not in kinds or (row["kind"] != "first_mate" and row["project_id"] != project_id):
         raise ConflictError("issue actor is not authorized")
     return dict(row)
 
@@ -477,7 +482,7 @@ def request_issue_verification(store: Any, *, project_id: str, issue_id: str, ac
 
 def verify_issue(store: Any, *, project_id: str, issue_id: str, actor_id: str, status: str, evidence: Any, idempotency_key: str) -> dict[str, Any]:
     issue = _issue_row(store, issue_id, project_id)
-    actor = _issue_actor(store, project_id, actor_id, kinds={"worker", "secretary"})
+    actor = _issue_actor(store, project_id, actor_id, kinds={"worker", "secretary"}, allow_retained_verifier=True)
     if actor_id != issue["reporter_workstream_id"]:
         raise ConflictError("only the original issue reporter may verify an issue")
     if status not in {"fixed", "still_blocked"}:

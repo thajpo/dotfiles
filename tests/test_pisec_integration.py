@@ -10,7 +10,7 @@ from scripts.pisec.models import ConflictError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import _git, register_project
 from scripts.pisec.secretary import ensure_secretary
-from scripts.pisec.workflow import submit_completion
+from scripts.pisec.workflow import report_issue, submit_completion
 from scripts.pisec.workstreams import authorize_apply_workstream, prepare_workstream
 from scripts.pisec.git_runner import run_git
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
@@ -115,6 +115,51 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='project.git_integrated'").fetchone()[0], 1)
             with self.assertRaises(sqlite3.IntegrityError):
                 store.conn.execute("UPDATE integration_reports SET residual_risk=? WHERE integration_id=?", ("changed", accepted["integration"]["integration_id"]))
+
+    def test_closeout_keeps_an_unresolved_issue_reporter_live_until_verification_finishes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store, project, harness, workspace, workstream, _scope, _repo, worktree, _private_objects, _source = self.fixture(root)
+            self.addCleanup(store.close)
+            issue = report_issue(
+                store,
+                project_id=project["project_id"],
+                reporter_workstream_id=workstream["workstream_id"],
+                category="tooling",
+                severity="degraded",
+                summary="The reporter must verify the integrated repair.",
+                details="Keep its runtime binding usable after task completion.",
+                requested_action="Return verification through the original reporter.",
+                evidence=["fixture"],
+                idempotency_key="retain-reporter",
+            )
+            prepared = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            apply_workstream_acceptance(store, project["project_id"], prepared["approvalScope"])
+
+            integrated = reconcile_integrations(store, workspace, harness)
+
+            job = dict(store.conn.execute("SELECT * FROM integration_jobs").fetchone())
+            self.assertIn("closeout", integrated["processed"][0], {"result": integrated, "job": job})
+            closeout = integrated["processed"][0]["closeout"]
+            self.assertEqual(closeout["state"], "completed")
+            self.assertTrue(closeout["retainedForVerification"])
+            self.assertEqual(closeout["issueId"], issue["issue_id"])
+            self.assertIn(closeout["runtime"]["action"], {"already_live", "started"})
+            retained = store.conn.execute(
+                "SELECT w.desired_state,w.provisioning_state,r.observed_state FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=?",
+                (workstream["workstream_id"],),
+            ).fetchone()
+            self.assertEqual(tuple(retained), ("completed", "bound", "idle"))
+            self.assertTrue(worktree.exists())
+
+            store.conn.execute(
+                "UPDATE issues SET state='resolved',disposition='fixed',resolution='verified',resolved_at='2026-08-29T00:00:00Z' WHERE issue_id=?",
+                (issue["issue_id"],),
+            )
+            closed = reconcile_integrations(store, workspace, harness)
+
+            self.assertEqual(closed["processed"][0]["closeout"]["state"], "retired")
+            self.assertFalse(worktree.exists())
 
     def test_target_drift_is_reconciled_by_the_worker_without_a_second_acceptance(self):
         with tempfile.TemporaryDirectory() as tmp:

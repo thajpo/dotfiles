@@ -18,6 +18,7 @@ from .pi_schema import SCHEMA_NAME, SCHEMA_VERSION, schema_digest
 from .pi_store import default_state_root
 from .operations import authoritative_workstream_creation
 from .runtime import usable_runtime_binding
+from .runtime_eligibility import runtime_eligible_sql, runtime_lifecycle_eligible
 from .runtime_surface import capture_runtime_surface
 
 
@@ -229,10 +230,10 @@ def run_doctor(
                 creation_errors.append(f"{workstream['workstream_id']}: {str(error)[:160]}")
         _check(checks, "Authoritative worker creation records", not creation_errors, canonical_json({"errors": creation_errors}))
         for row in store.conn.execute(
-            "SELECT w.workstream_id,r.workstream_id AS binding_workstream_id FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) WHERE w.desired_state='active' ORDER BY w.workstream_id"
+            "SELECT w.workstream_id,r.workstream_id AS binding_workstream_id FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) WHERE " + runtime_eligible_sql("w") + " ORDER BY w.workstream_id"
         ):
             exists = row["binding_workstream_id"] == row["workstream_id"]
-            _check(checks, f"Active binding {row['workstream_id']}", exists, "present" if exists else "active workstream has no runtime binding")
+            _check(checks, f"Runtime binding {row['workstream_id']}", exists, "present" if exists else "runtime-eligible workstream has no binding")
         for row in store.conn.execute(
             "SELECT p.project_id,p.secretary_workstream_id,w.project_id AS supervisor_project_id,w.kind,w.desired_state,w.provisioning_state,r.workstream_id AS binding_workstream_id "
             "FROM projects p LEFT JOIN workstreams w ON w.workstream_id=p.secretary_workstream_id LEFT JOIN runtime_bindings r ON r.workstream_id=w.workstream_id "
@@ -263,7 +264,7 @@ def run_doctor(
                 )
             _check(checks, f"Binding {row['workstream_id']}", binding_ok, f"harness={row['harness_id']} workspace={row['workspace_adapter_id']} state={row['observed_state']} provisioning={row['workstream_provisioning_state']}")
             generation_ok = (
-                row["workstream_desired_state"] == "active"
+                runtime_lifecycle_eligible(store, str(row["workstream_id"]))
                 and row["workstream_provisioning_state"] == "bound"
                 and isinstance(row["desired_generation_sha256"], str)
                 and row["applied_generation_sha256"] == row["desired_generation_sha256"]

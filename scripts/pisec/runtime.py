@@ -16,6 +16,7 @@ from .attention import compact_attention, list_open_attention, present_attention
 from .worker_repo import validate_worker_resume_git
 from .models import AuthorizationError, ConflictError, InvalidRequestError, NeedsAttentionError, bounded_text, canonical_json, validate_id, validate_sha256
 from .models import utc_now
+from .runtime_eligibility import mapping_runtime_lifecycle_eligible
 
 RUNTIME_FIELDS = frozenset({"workstreamId", "runtimeInstanceId", "seq", "event", "reason", "state", "nativeSessionKind", "nativeSessionValue", "startSource", "surfaceId", "token", "generation"})
 RUNTIME_AUTH_FIELDS = frozenset({"workstreamId", "runtimeInstanceId", "surfaceId", "token", "generation"})
@@ -91,8 +92,8 @@ def start_bound_agent(
                 raise NeedsAttentionError("runtime binding cwd does not match the approved root")
         elif row[key] != value:
             raise NeedsAttentionError("runtime binding identity does not match durable state")
-    if row["desired_state"] != "active" or row["provisioning_state"] not in {"creating", "bound", "needs_attention"}:
-        raise NeedsAttentionError("runtime binding is not active")
+    if not mapping_runtime_lifecycle_eligible(store, row) or row["provisioning_state"] not in {"creating", "bound", "needs_attention"}:
+        raise NeedsAttentionError("runtime binding is not lifecycle eligible")
     harness.validate_native_session(dict(row), row["native_session_kind"], row["native_session_value"])
     observation = workspace.observe_surface(
         workspace_id=str(row["workspace_id"]),
@@ -180,7 +181,8 @@ def verify_runtime_binding(store: Any, payload: Mapping[str, Any], *, worker_onl
         and row["refresh_operation_id"] is not None
         and row["refresh_started_at"] is not None
     ) or initial_session_start_pending
-    if row is None or row["desired_state"] == "retired" or (
+    lifecycle_inactive = row is None or not mapping_runtime_lifecycle_eligible(store, row)
+    if lifecycle_inactive or (
         allow_session_start and row["launch_generation_sha256"] is not None and not session_start_pending
     ) or (
         row["provisioning_state"] not in {"bound", "creating"} and not session_start_pending
@@ -211,11 +213,11 @@ def usable_runtime_binding(
 ) -> bool:
     """Apply the common live, attested, unreserved binding predicate."""
     row = store.conn.execute(
-        "SELECT w.desired_state,w.provisioning_state,w.worktree_path,r.harness_id,r.refresh_pending,r.refresh_operation_id,r.refresh_started_at,r.launch_generation_sha256,r.desired_generation_sha256,r.applied_generation_sha256,r.observed_state,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,r.agent_name,r.policy_path,r.adapter_artifacts_json,r.runtime_instance_id,r.report_seq,r.session_start_event_sequence,r.session_start_report_seq,r.session_started_at "
+        "SELECT w.workstream_id,w.kind,w.desired_state,w.provisioning_state,w.worktree_path,r.harness_id,r.refresh_pending,r.refresh_operation_id,r.refresh_started_at,r.launch_generation_sha256,r.desired_generation_sha256,r.applied_generation_sha256,r.observed_state,r.workspace_id,r.workspace_view_id,r.workspace_surface_id,r.agent_name,r.policy_path,r.adapter_artifacts_json,r.runtime_instance_id,r.report_seq,r.session_start_event_sequence,r.session_start_report_seq,r.session_started_at "
         "FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=?",
         (workstream_id,),
     ).fetchone()
-    if row is None or row["desired_state"] != "active" or row["provisioning_state"] != "bound":
+    if row is None or not mapping_runtime_lifecycle_eligible(store, row) or row["provisioning_state"] != "bound":
         return False
     if harness is None or row["harness_id"] != harness.manifest.adapter_id:
         return False

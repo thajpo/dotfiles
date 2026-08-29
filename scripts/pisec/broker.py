@@ -23,6 +23,7 @@ from .models import AuthorizationError, ConflictError, InvalidRequestError, Need
 from .pi_store import PiStore
 from .projects import assert_project_writable, fleet_activity, first_mate_issue_project_ids, fleet_project_ids, get_project, is_first_mate_issue_project, list_fleet_projects, list_projects, project_activity, project_status, register_project, require_fleet_project, resolve_project
 from .protocol import MAX_MESSAGE_BYTES, decode_request, error_response, success_response
+from .runtime_eligibility import runtime_eligible_sql, runtime_lifecycle_eligible
 from .research import (
     acknowledge_research,
     add_research_context,
@@ -177,7 +178,7 @@ def _presentation_snapshot(store: PiStore) -> dict[str, Any]:
                 r.workspace_view_id
             FROM workstreams AS w
             JOIN runtime_bindings AS r USING(workstream_id)
-            WHERE w.desired_state='active'
+            WHERE """ + runtime_eligible_sql("w") + """
               AND w.provisioning_state='bound'
               AND r.workspace_session_name <> ''
               AND r.workspace_id IS NOT NULL
@@ -293,7 +294,7 @@ class BrokerDispatcher:
                     "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=?",
                     (workstream_id,),
                 ).fetchone()
-                if current_row is None or current_row["refresh_pending"] or current_row["desired_state"] != "active" or current_row["provisioning_state"] not in {"bound", "needs_attention"}:
+                if current_row is None or current_row["refresh_pending"] or not runtime_lifecycle_eligible(store, workstream_id) or current_row["provisioning_state"] not in {"bound", "needs_attention"}:
                     continue
                 current_harness = self.registry.resolve_harness(str(current_row["harness_id"]))
                 selected_generation = current_row["applied_generation_sha256"]
@@ -421,7 +422,7 @@ class BrokerDispatcher:
         now_monotonic = time.monotonic()
         with self.store_factory() as store:
             recipients = store.conn.execute(
-                "SELECT DISTINCT a.recipient_workstream_id FROM attention_items a JOIN workstreams w ON w.workstream_id=a.recipient_workstream_id WHERE w.desired_state='active' AND w.provisioning_state='bound'"
+                "SELECT DISTINCT a.recipient_workstream_id FROM attention_items a JOIN workstreams w ON w.workstream_id=a.recipient_workstream_id WHERE " + runtime_eligible_sql("w") + " AND w.provisioning_state='bound'"
             ).fetchall()
             due: list[tuple[int, str, str]] = []
             for recipient_row in recipients:
@@ -436,7 +437,7 @@ class BrokerDispatcher:
                     if deadline is not None and deadline > now_monotonic:
                         continue
                 binding = store.conn.execute(
-                    "SELECT r.*,w.worktree_path FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=? AND w.desired_state='active' AND w.provisioning_state='bound'",
+                    "SELECT r.*,w.worktree_path FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE r.workstream_id=? AND " + runtime_eligible_sql("w") + " AND w.provisioning_state='bound'",
                     (recipient_id,),
                 ).fetchone()
                 if binding is None or not self._attention_runtime_ready(store, binding):
@@ -759,7 +760,7 @@ class BrokerDispatcher:
             for row in store.conn.execute(
                 "SELECT r.*,w.project_id,w.kind,w.worktree_path,w.desired_state,w.provisioning_state,w.attention_reason "
                 "FROM runtime_bindings r JOIN workstreams w USING(workstream_id) "
-                "WHERE w.desired_state='active' "
+                "WHERE " + runtime_eligible_sql("w") + " "
                 "AND (w.provisioning_state='bound' OR (w.provisioning_state='needs_attention' AND w.attention_reason=?)) "
                 "AND r.workspace_session_name=? AND r.workspace_id IS NOT NULL "
                 "AND r.workspace_view_id IS NOT NULL AND r.workspace_surface_id IS NOT NULL",
@@ -879,12 +880,8 @@ class BrokerDispatcher:
         if operation == "runtime.ensure":
             _exact(payload, {"workstreamId"}, {"waitSeconds", "resetSession"})
             workstream_id = str(payload["workstreamId"])
-            row = store.conn.execute(
-                "SELECT project_id FROM workstreams WHERE workstream_id=? AND desired_state='active'",
-                (workstream_id,),
-            ).fetchone()
-            if row is None:
-                raise NotFoundError("active workstream was not found")
+            if not runtime_lifecycle_eligible(store, workstream_id):
+                raise NotFoundError("runtime-eligible workstream was not found")
             from .refresh import ensure_runtime
             with self._reconcile_lock:
                 return ensure_runtime(
@@ -989,7 +986,7 @@ class BrokerDispatcher:
                 raise InvalidRequestError("refresh wait must be between 0 and 3600 seconds")
             from .refresh import refresh_runtimes
             rows = store.conn.execute(
-                "SELECT workstream_id FROM workstreams WHERE project_id=? AND desired_state='active' AND provisioning_state='bound'",
+                "SELECT workstream_id FROM workstreams w WHERE project_id=? AND " + runtime_eligible_sql("w") + " AND provisioning_state='bound'",
                 (project_id,),
             )
             workstream_ids = [str(row["workstream_id"]) for row in rows]
@@ -1007,12 +1004,8 @@ class BrokerDispatcher:
         if operation == "runtime.ensure":
             _exact(payload, {"workstreamId"}, {"waitSeconds", "resetSession"})
             workstream_id = str(payload["workstreamId"])
-            member = store.conn.execute(
-                "SELECT 1 FROM workstreams WHERE workstream_id=? AND project_id=? AND desired_state='active'",
-                (workstream_id, project_id),
-            ).fetchone()
-            if member is None:
-                raise NotFoundError("active project workstream was not found")
+            if not runtime_lifecycle_eligible(store, workstream_id, project_id=project_id):
+                raise NotFoundError("runtime-eligible project workstream was not found")
             from .refresh import ensure_runtime
             with self._reconcile_lock:
                 return ensure_runtime(

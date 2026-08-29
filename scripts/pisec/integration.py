@@ -12,6 +12,7 @@ from .events import append_event_in_transaction
 from .models import ConflictError, IdempotencyConflictError, InvalidRequestError, NeedsAttentionError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_id, validate_sha256
 from .projects import get_project
 from .secretary_git import _oid, _primary_state, _repository, _run_git
+from .runtime_eligibility import unresolved_reporter_issue
 from .worker_repo import project_git_lock, validate_worker_repository
 from .workstreams import complete_workstream, inspect_workstream, retire_workstream
 from .control_plane import control_plane_mutation
@@ -479,6 +480,28 @@ def _closeout(store: Any, job: Mapping[str, Any], workspace: Any | None, harness
             raise NeedsAttentionError("integrated workstream requires a runtime workspace for closeout")
         complete_workstream(store, project_id, workstream_id, packet_sha256, workspace)
     inspected = inspect_workstream(store, project_id, workstream_id)
+    unresolved = unresolved_reporter_issue(store, workstream_id)
+    if inspected["workstream"]["desired_state"] == "completed" and unresolved is not None:
+        if workspace is None or harness is None:
+            raise NeedsAttentionError("retained issue verifier requires runtime adapters for closeout")
+        from .refresh import ensure_runtime
+
+        runtime = ensure_runtime(
+            store,
+            harness,
+            workspace,
+            workstream_id=workstream_id,
+            wait_seconds=30.0,
+        )
+        if runtime["action"] == "needs_attention":
+            raise NeedsAttentionError(str(runtime.get("reason") or "retained issue verifier runtime requires attention"))
+        return {
+            "workstreamId": workstream_id,
+            "state": "completed",
+            "retainedForVerification": True,
+            "issueId": unresolved["issue_id"],
+            "runtime": runtime,
+        }
     if inspected["workstream"]["desired_state"] == "completed":
         if workspace is None:
             raise NeedsAttentionError("completed workstream requires a runtime workspace for retirement")

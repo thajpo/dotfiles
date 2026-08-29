@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from .models import ConflictError, InvalidRequestError, NotFoundError, new_id, utc_now
 from .projects import first_mate_issue_project_ids
+from .runtime_eligibility import runtime_eligible_sql
 
 
 SOURCE_KINDS = frozenset({"coordination", "research", "issue", "completion", "integration"})
@@ -197,7 +198,7 @@ def list_open_attention(store: Any, *, recipient_workstream_id: str, limit: int 
         LEFT JOIN issues i ON a.source_kind='issue' AND i.issue_id=a.source_id
         LEFT JOIN completion_packets cp ON a.source_kind='completion' AND cp.completion_packet_id=a.source_id
         LEFT JOIN integration_jobs j ON a.source_kind='integration' AND j.integration_id=a.source_id
-        WHERE a.recipient_workstream_id=? AND recipient.desired_state='active' AND recipient.provisioning_state='bound'
+        WHERE a.recipient_workstream_id=? AND {runtime_eligible_sql("recipient")} AND recipient.provisioning_state='bound'
           AND ((recipient.kind='secretary' AND p.active=1 AND p.secretary_workstream_id=recipient.workstream_id)
             OR (recipient.kind='first_mate' AND p.active=1 AND (p.coordination_mode='fleet' OR (i.reporter_kind='secretary' AND i.escalated_from_issue_id IS NOT NULL)))
             OR recipient.kind='worker')
@@ -256,7 +257,7 @@ def backfill_attention(store: Any, *, recipient_workstream_id: str | None = None
     from .events import append_event_in_transaction
 
     recipient = None if recipient_workstream_id is None else store.conn.execute(
-        "SELECT w.*,p.active AS project_active,p.coordination_mode FROM workstreams w LEFT JOIN projects p ON p.project_id=w.project_id WHERE w.workstream_id=? AND w.desired_state='active' AND w.provisioning_state='bound'",
+        "SELECT w.*,p.active AS project_active,p.coordination_mode FROM workstreams w LEFT JOIN projects p ON p.project_id=w.project_id WHERE w.workstream_id=? AND " + runtime_eligible_sql("w") + " AND w.provisioning_state='bound'",
         (recipient_workstream_id,),
     ).fetchone()
     if recipient_workstream_id is not None and recipient is None:

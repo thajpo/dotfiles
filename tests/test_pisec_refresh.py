@@ -74,6 +74,22 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.assertEqual(len(second["skipped"]), 1)
         self.assertEqual(len([call for call in self.workspace.calls if call[0] == "stop"]), stop_count)
 
+    def test_refresh_restarts_a_stopped_current_generation_binding(self):
+        first = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+        self.assertTrue(first["ok"])
+        self.workspace.stop_runtime(self.identity[2])
+        with PiStore(self.root / "state") as store:
+            store.conn.execute(
+                "UPDATE runtime_bindings SET observed_state='stopped' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+
+        restarted = self.dispatcher.dispatch("admin", "project.refresh", {"all": True, "waitSeconds": 0})
+
+        self.assertTrue(restarted["ok"], restarted)
+        self.assertEqual(len(restarted["upgraded"]), 1)
+        self.assertEqual(restarted["skipped"], [])
+
     def test_reconcile_closes_pre_stop_failure_after_newer_authenticated_refresh(self):
         with PiStore(self.root / "state") as store:
             operation, _ = create_operation(
@@ -520,6 +536,28 @@ class RuntimeRefreshTests(unittest.TestCase):
             self.dispatcher.dispatch("admin", "runtime.ensure", {"workstreamId": self.workstream_id})["action"],
             "already_live",
         )
+
+    def test_targeted_runtime_ensure_recovers_a_missing_current_runtime(self):
+        with PiStore(self.root / "state") as store:
+            store.conn.execute(
+                "UPDATE runtime_bindings SET applied_generation_sha256=desired_generation_sha256,launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,observed_state='stopped' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='workspace runtime is missing' WHERE workstream_id=?",
+                (self.workstream_id,),
+            )
+        self.workspace.stop_runtime(self.identity[2])
+
+        started = self.dispatcher.dispatch("admin", "runtime.ensure", {"workstreamId": self.workstream_id})
+
+        self.assertIn(started["action"], {"started", "refreshed_started"})
+        with PiStore(self.root / "state") as store:
+            workstream = store.conn.execute(
+                "SELECT provisioning_state,attention_reason FROM workstreams WHERE workstream_id=?",
+                (self.workstream_id,),
+            ).fetchone()
+            self.assertEqual(tuple(workstream), ("bound", None))
 
     def test_targeted_runtime_ensure_restarts_current_generation_without_refresh_reservation(self):
         with PiStore(self.root / "state") as store:

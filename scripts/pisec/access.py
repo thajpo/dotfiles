@@ -16,6 +16,7 @@ from .operations import authoritative_workstream_creation
 from .runtime_surface import capture_runtime_surface, verify_surface
 from .platform import runtime_root
 from .runtime import start_bound_agent, usable_runtime_binding
+from .runtime_eligibility import runtime_eligible_sql
 from .worker_repo import project_permissions_lock
 from .control_plane import control_plane_mutation
 
@@ -120,7 +121,7 @@ def prepare_project_permissions(store: Any, *, project_id: str, data_dirs: list[
         if isinstance(stored, dict) and isinstance(stored.get("approvalScope"), dict):
             return {"operation": dict(operation), "approvalScope": stored["approvalScope"], "reused": True}
     bindings = [dict(row) for row in store.conn.execute(
-        "SELECT r.*,w.project_id,w.kind,w.execution_profile,w.worktree_path,w.desired_state,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE w.project_id=? AND w.desired_state='active' ORDER BY w.created_at,w.workstream_id",
+        "SELECT r.*,w.project_id,w.kind,w.execution_profile,w.worktree_path,w.desired_state,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE w.project_id=? AND " + runtime_eligible_sql("w") + " ORDER BY w.created_at,w.workstream_id",
         (project_id,),
     )]
     intended: dict[str, str | None] = {str(binding["workstream_id"]): binding["desired_generation_sha256"] for binding in bindings}
@@ -387,7 +388,7 @@ def _authorize_apply_project_permissions_locked(store: Any, *, approval_scope: M
         if recovered is not None:
             return recovered
     bindings = [dict(row) for row in store.conn.execute(
-        "SELECT r.*,w.project_id,w.kind,w.execution_profile,w.worktree_path,w.desired_state,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE w.project_id=? AND w.desired_state='active' ORDER BY w.created_at,w.workstream_id",
+        "SELECT r.*,w.project_id,w.kind,w.execution_profile,w.worktree_path,w.desired_state,w.provisioning_state FROM runtime_bindings r JOIN workstreams w USING(workstream_id) WHERE w.project_id=? AND " + runtime_eligible_sql("w") + " ORDER BY w.created_at,w.workstream_id",
         (project_id,),
     )]
     expected_workstreams = sorted(str(value) for value in approval_scope.get("affectedWorkstreamIds", []))

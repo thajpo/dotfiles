@@ -391,13 +391,14 @@ def validate_worker_resume_git(store: Any, binding: Mapping[str, Any]) -> str | 
     ).fetchone()
     if job is not None and job["state"] in {"awaiting_worker", "queued", "refreshing", "verifying", "applying"}:
         private_ref = f"refs/pisec/target/{job['integration_id']}"
-    review_base_oid = str(job["target_oid"]) if job is not None and job["target_oid"] else None
+    history_base_oid = str(job["target_oid"]) if job is not None and job["target_oid"] else None
+    review_base_oid = history_base_oid if private_ref is not None else None
     return validate_worker_repository(
         Path(str(row["worktree_path"])),
         branch_name=str(row["branch_name"]),
         base_oid=str(row["base_commit_oid"]),
         target_branch=target_branch,
         allowed_private_ref=private_ref,
-        history_base_oid=review_base_oid,
+        history_base_oid=history_base_oid,
         review_base_oid=review_base_oid,
     )

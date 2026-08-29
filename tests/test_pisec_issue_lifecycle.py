@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.pisec.attention import list_open_attention
+from scripts.pisec.attention import backfill_attention, list_open_attention
 from scripts.pisec.git_runner import run_git
 from scripts.pisec.integration import apply_workstream_acceptance, prepare_workstream_acceptance, reconcile_integrations
 from scripts.pisec.models import ConflictError
@@ -175,6 +175,23 @@ class IssueLifecycleTests(unittest.TestCase):
         store.conn.execute("UPDATE workstreams SET desired_state='completed',completed_at='2026-08-27T00:00:00Z' WHERE workstream_id=?", (worker["workstream_id"],))
         with self.assertRaises(ConflictError):
             retire_workstream(store, source["project_id"], worker["workstream_id"], workspace)
+        store.conn.execute("UPDATE issues SET state='verifying' WHERE issue_id=?", (issue["issue_id"],))
+        self.assertEqual(backfill_attention(store, recipient_workstream_id=worker["workstream_id"]), 1)
+        self.assertEqual(len(list_open_attention(store, recipient_workstream_id=worker["workstream_id"])), 1)
+
+        verified = verify_issue(
+            store,
+            project_id=source["project_id"],
+            issue_id=issue["issue_id"],
+            actor_id=worker["workstream_id"],
+            status="fixed",
+            evidence=["completed reporter verified the repair"],
+            idempotency_key="completed-reporter-verification",
+        )
+
+        self.assertEqual(verified["state"], "resolved")
+        retired = retire_workstream(store, source["project_id"], worker["workstream_id"], workspace)
+        self.assertEqual(retired["desired_state"], "retired")
 
 
 if __name__ == "__main__":
