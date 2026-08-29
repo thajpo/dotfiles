@@ -25,6 +25,10 @@ _RECOVERABLE_STOPPED_REFRESH_ERRORS = frozenset(
         "workstream changed before refresh reservation",
         "isolated OMP surface contains a symlink",
         "runtime binding is already reserved by another refresh",
+        # Legacy OMP activation restored the old profile after rejecting an
+        # owned runtime socket in its generated backup.  The exact message is
+        # retained only to reconcile that stopped, still-owned reservation.
+        "OMP generated backup contains an unsupported file",
     }
 )
 

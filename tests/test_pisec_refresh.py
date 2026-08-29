@@ -362,7 +362,7 @@ class RuntimeRefreshTests(unittest.TestCase):
             self.assertEqual(binding["refresh_pending"], 0)
             self.assertEqual(operation["state"], "succeeded")
 
-    def test_stopped_refresh_with_materialized_launch_artifact_is_compensated(self):
+    def test_stopped_legacy_omp_backup_failure_is_compensated(self):
         with PiStore(self.root / "state") as store:
             binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
             desired = str(binding["desired_generation_sha256"])
@@ -379,7 +379,7 @@ class RuntimeRefreshTests(unittest.TestCase):
             artifacts = __import__("json").loads(str(binding["adapter_artifacts_json"]))
             artifacts["generationSha256"] = desired
             store.conn.execute(
-                "UPDATE operations SET error_code='runtime_refresh_failed',error_message='isolated OMP surface contains a symlink' WHERE operation_id=?",
+                "UPDATE operations SET error_code='runtime_refresh_failed',error_message='OMP generated backup contains an unsupported file' WHERE operation_id=?",
                 (operation.operation_id,),
             )
             store.conn.execute(
@@ -387,7 +387,7 @@ class RuntimeRefreshTests(unittest.TestCase):
                 (__import__("json").dumps(artifacts, sort_keys=True, separators=(",", ":")), operation.operation_id, desired, "a" * 64, self.workstream_id),
             )
             store.conn.execute(
-                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='isolated OMP surface contains a symlink' WHERE workstream_id=?",
+                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='OMP generated backup contains an unsupported file' WHERE workstream_id=?",
                 (self.workstream_id,),
             )
             current = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
