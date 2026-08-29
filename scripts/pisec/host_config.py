@@ -245,6 +245,13 @@ def patch_pisec_config(path: Path, *, real_omp_path: str, fence_path: str) -> No
                 raise ValueError("Pisec Herdr workspace configuration fields are invalid")
             workspace_config["sessionName"] = "main"
             workspace_config["socketPath"] = str((Path.home() / ".config" / "herdr" / "sessions" / "main" / "herdr.sock").absolute())
+        worker_harnesses = value.get("workerHarnesses")
+        codex = worker_harnesses.get("codex") if isinstance(worker_harnesses, dict) else None
+        if codex is not None:
+            codex_config = codex.get("config") if isinstance(codex, dict) else None
+            if not isinstance(codex_config, dict) or set(codex_config) != {"executablePath", "versionPrefix"}:
+                raise ValueError("Pisec Codex worker harness configuration fields are invalid")
+            codex_config["versionPrefix"] = "0.150.1"
     _atomic_write_pisec_config(path, value)
 
 def write_collie_env(path: Path, *, host: str, trusted_user: str) -> None:

@@ -88,7 +88,7 @@ class FakeInstallTests(unittest.TestCase):
         self._start_unix(self.herdr_socket)
         self.health_servers = []
         self.ports = {}
-        for name in ("PISEC_AUTH_BROKER_PORT", "PISEC_AUTH_GATEWAY_PORT", "PISEC_COLLIE_PORT"):
+        for name in ("PISEC_AUTH_BROKER_PORT", "PISEC_AUTH_GATEWAY_PORT", "PISEC_AUTH_GATEWAY_BACKEND_PORT", "PISEC_COLLIE_PORT"):
             probe = socket.socket()
             probe.bind(("127.0.0.1", 0))
             self.ports[name] = probe.getsockname()[1]
@@ -359,6 +359,7 @@ exit 0
                 "USER": "tester",
                 "PISEC_AUTH_BROKER_PORT": str(self.ports["PISEC_AUTH_BROKER_PORT"]),
                 "PISEC_AUTH_GATEWAY_PORT": str(self.ports["PISEC_AUTH_GATEWAY_PORT"]),
+                "PISEC_AUTH_GATEWAY_BACKEND_PORT": str(self.ports["PISEC_AUTH_GATEWAY_BACKEND_PORT"]),
                 "PISEC_COLLIE_PORT": str(self.ports["PISEC_COLLIE_PORT"]),
                 "PISEC_COLLIE_PROBE_URL": f"http://127.0.0.1:{self.ports['PISEC_COLLIE_PORT']}",
                 "DOTFILES_DIR": str(ROOT),
@@ -387,6 +388,7 @@ exit 0
             "sessionName": "pisec",
             "socketPath": str(self.home / ".config" / "herdr" / "sessions" / "pisec" / "herdr.sock"),
         }
+        config["workerHarnesses"]["codex"]["config"]["versionPrefix"] = "0.150.0"
         config_path.write_text(json.dumps(config))
         real_omp = self.root / "real-omp"
         fence = self.root / "fence"
@@ -400,6 +402,7 @@ exit 0
             patched["workspace"]["config"]["socketPath"],
             str(self.home / ".config" / "herdr" / "sessions" / "main" / "herdr.sock"),
         )
+        self.assertEqual(patched["workerHarnesses"]["codex"]["config"]["versionPrefix"], "0.150.1")
 
     def test_herdr_config_patch_preserves_user_keys_and_is_idempotent(self):
         path = self.home / ".config" / "herdr" / "config.toml"
@@ -444,10 +447,17 @@ exit 0
         self.assertTrue(archives[0].is_dir())
         self.assertTrue((self.root / "state" / "pisec").is_dir())
         stable = self.home / ".local" / "lib" / "pisec" / "bin"
-        for name in ("real-omp", "fence", "omp", "omp-admin", "pisec-broker", "pisec-auth-broker", "pisec-auth-gateway", "herdr"):
+        for name in ("real-omp", "pisec-responses-gateway", "fence", "omp", "omp-admin", "pisec-broker", "pisec-auth-broker", "pisec-auth-gateway", "herdr"):
             path = stable / name
             self.assertTrue(path.is_file() and not path.is_symlink())
             self.assertTrue(path.stat().st_mode & stat.S_IXUSR)
+        self.assertEqual(
+            (stable / "pisec-responses-gateway").read_bytes(),
+            (ROOT / "scripts" / "pisec" / "responses_gateway.py").read_bytes(),
+        )
+        gateway_wrapper = (stable / "pisec-auth-gateway").read_text()
+        self.assertIn('exec "' + str(stable / "pisec-responses-gateway") + '"', gateway_wrapper)
+        self.assertIn('auth-gateway serve --bind="127.0.0.1:$backend_port"', gateway_wrapper)
         treehouse = self.home / ".local" / "bin" / "treehouse"
         self.assertTrue(treehouse.is_file() and not treehouse.is_symlink())
         self.assertEqual(subprocess.run(["bash", str(treehouse), "--version"], text=True, capture_output=True, check=True).stdout.strip(), "v2.1.1")
@@ -507,6 +517,8 @@ exit 0
         self.assertIn("Requires=herdr.service pisec-auth-gateway.service", broker_unit)
         self.assertIn("PartOf=herdr.service", broker_unit)
         self.assertIn("Environment=PYTHONDONTWRITEBYTECODE=1", broker_unit)
+        ports = dict(line.split("=", 1) for line in (self.home / ".config" / "pisec" / "ports.env").read_text().splitlines())
+        self.assertEqual(ports["PISEC_AUTH_GATEWAY_BACKEND_PORT"], str(self.ports["PISEC_AUTH_GATEWAY_BACKEND_PORT"]))
         for retired in ("herdr-pisec.service", "herdr-pi-personal.service"):
             self.assertFalse((self.home / ".config" / "systemd" / "user" / retired).exists())
         self.assertFalse((self.home / ".local" / "lib" / "pisec" / "personal-bin").exists())

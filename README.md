@@ -117,7 +117,7 @@ Pisec product v1 is the durable, product-neutral workflow and security core. It 
 projects, proposals, approvals, workstream intent, decisions, runtime
 bindings, research packets, and audit events. The selected `HarnessAdapter`
 and `WorkspaceAdapter` own product wire protocols and artifacts. The tested
-worker harnesses are OMP 17.3.4 (`omp`) and Codex 0.150.0 when configured;
+worker harnesses are OMP 17.3.4 (`omp`) and Codex 0.150.1 when configured;
 Herdr 0.8.0 protocol 19 (`herdr`) is the workspace adapter. Fence 0.1.66,
 Collie 0.28.0, the committed Collie unread-activity patch, and Reviewr 0.32.1
 are exact v1 pins. Collie remains presentation glue and Reviewr is review-only.
@@ -429,6 +429,14 @@ It creates `~/.omp/auth-gateway.token` with mode `0600` when no bearer token
 exists; existing token files must already be regular owner-only files. It then
 waits for the auth broker, auth gateway, Pisec broker, Pisec secretary, and
 Herdr sockets and runs the final live JSON doctor before reporting success.
+
+The auth gateway service keeps OMP as the authenticated inference authority.
+It runs OMP on a private loopback backend port and exposes the configured
+gateway port through a small Responses compatibility layer. The layer removes
+explicit null reasoning content from continuations and converts Codex MCP
+namespace tools to reversible function names. It does not log request bodies
+or credentials. `PISEC_AUTH_GATEWAY_BACKEND_PORT` defaults to `4001` and must
+differ from every public Pisec service port.
 
 With user lingering enabled on Linux, the installed auth broker, auth gateway, Pisec
 broker, and Herdr `main` session start from the user systemd boot target.

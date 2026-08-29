@@ -127,11 +127,14 @@ validate_port_setting() {
 }
 PISEC_AUTH_BROKER_PORT="${PISEC_AUTH_BROKER_PORT:-8765}"
 PISEC_AUTH_GATEWAY_PORT="${PISEC_AUTH_GATEWAY_PORT:-4000}"
+PISEC_AUTH_GATEWAY_BACKEND_PORT="${PISEC_AUTH_GATEWAY_BACKEND_PORT:-4001}"
 PISEC_COLLIE_PORT="${PISEC_COLLIE_PORT:-8787}"
 validate_port_setting PISEC_AUTH_BROKER_PORT "$PISEC_AUTH_BROKER_PORT"
 validate_port_setting PISEC_AUTH_GATEWAY_PORT "$PISEC_AUTH_GATEWAY_PORT"
+validate_port_setting PISEC_AUTH_GATEWAY_BACKEND_PORT "$PISEC_AUTH_GATEWAY_BACKEND_PORT"
 validate_port_setting PISEC_COLLIE_PORT "$PISEC_COLLIE_PORT"
-export PISEC_AUTH_BROKER_PORT PISEC_AUTH_GATEWAY_PORT PISEC_COLLIE_PORT
+[[ "$PISEC_AUTH_GATEWAY_BACKEND_PORT" != "$PISEC_AUTH_GATEWAY_PORT" && "$PISEC_AUTH_GATEWAY_BACKEND_PORT" != "$PISEC_AUTH_BROKER_PORT" && "$PISEC_AUTH_GATEWAY_BACKEND_PORT" != "$PISEC_COLLIE_PORT" ]] || die "PISEC_AUTH_GATEWAY_BACKEND_PORT must differ from every public Pisec service port"
+export PISEC_AUTH_BROKER_PORT PISEC_AUTH_GATEWAY_PORT PISEC_AUTH_GATEWAY_BACKEND_PORT PISEC_COLLIE_PORT
 
 INSTALL_TRANSACTION_ROOT=""
 INSTALL_TRANSACTION_ACTIVE=0
@@ -846,6 +849,8 @@ retire_managed_path "$PISC_BIN_DIR/pisec-shell"
 transaction_capture_path "$PISC_BIN_DIR/real-omp"
 cp --reflink=auto -- "$REAL_OMP_PATH" "$PISC_BIN_DIR/real-omp"
 chmod 0755 "$PISC_BIN_DIR/real-omp"
+transaction_capture_path "$PISC_BIN_DIR/pisec-responses-gateway"
+install -m 0755 -- "$DOTFILES_DIR/scripts/pisec/responses_gateway.py" "$PISC_BIN_DIR/pisec-responses-gateway"
 write_wrapper "$PISC_BIN_DIR/omp" "#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' 'Pisec owns project OMP sessions. Use \"pisec project open <repository>\" for project work or \"omp-admin\" for broad host work.' >&2
@@ -889,7 +894,12 @@ token_file=\"\${OMP_AUTH_BROKER_TOKEN_FILE:-\$HOME/.omp/auth-broker.token}\"
 export OMP_AUTH_BROKER_TOKEN=\"\$(<\"\$token_file\")\"
 broker_port=\"\${PISEC_AUTH_BROKER_PORT:-8765}\"
 export OMP_AUTH_BROKER_URL=\"\${OMP_AUTH_BROKER_URL:-http://127.0.0.1:\$broker_port}\"
-exec \"$PISC_BIN_DIR/real-omp\" auth-gateway serve --bind=127.0.0.1:\${PISEC_AUTH_GATEWAY_PORT:-4000} \"\$@\""
+gateway_port=\"\${PISEC_AUTH_GATEWAY_PORT:-4000}\"
+backend_port=\"\${PISEC_AUTH_GATEWAY_BACKEND_PORT:-4001}\"
+exec \"$PISC_BIN_DIR/pisec-responses-gateway\" \
+  --bind=\"127.0.0.1:\$gateway_port\" \
+  --upstream=\"127.0.0.1:\$backend_port\" \
+  -- \"$PISC_BIN_DIR/real-omp\" auth-gateway serve --bind=\"127.0.0.1:\$backend_port\" \"\$@\""
 write_wrapper "$PISC_BIN_DIR/herdr" "#!/usr/bin/env bash
 set -euo pipefail
 if [[ \$# -eq 0 ]]; then
@@ -898,7 +908,7 @@ fi
 exec \"$HERDR_PATH\" \"\$@\""
 transaction_capture_path "$TREEHOUSE_HOST_PATH"
 install -m 0755 -- "$TREEHOUSE_STAGED_BIN" "$TREEHOUSE_HOST_PATH"
-for stable_executable in "$PISC_BIN_DIR/real-omp" "$PISC_BIN_DIR/fence" "$PISC_BIN_DIR/omp" "$PISC_BIN_DIR/omp-admin" "$PISC_BIN_DIR/pisec-broker" "$PISC_BIN_DIR/pisec-auth-broker" "$PISC_BIN_DIR/pisec-auth-gateway" "$PISC_BIN_DIR/herdr" "$TREEHOUSE_HOST_PATH"; do
+for stable_executable in "$PISC_BIN_DIR/real-omp" "$PISC_BIN_DIR/pisec-responses-gateway" "$PISC_BIN_DIR/fence" "$PISC_BIN_DIR/omp" "$PISC_BIN_DIR/omp-admin" "$PISC_BIN_DIR/pisec-broker" "$PISC_BIN_DIR/pisec-auth-broker" "$PISC_BIN_DIR/pisec-auth-gateway" "$PISC_BIN_DIR/herdr" "$TREEHOUSE_HOST_PATH"; do
   verify_executable "$stable_executable"
 done
 transaction_capture_path "$HOME/.bashrc"
@@ -954,7 +964,7 @@ ports_env="$HOME/.config/pisec/ports.env"
 transaction_capture_path "$ports_env"
 ports_env_tmp="${ports_env}.tmp.$$"
 transaction_record_created_path "$ports_env_tmp"
-printf 'PISEC_AUTH_BROKER_PORT=%s\nPISEC_AUTH_GATEWAY_PORT=%s\nPISEC_COLLIE_PORT=%s\n' "$PISEC_AUTH_BROKER_PORT" "$PISEC_AUTH_GATEWAY_PORT" "$PISEC_COLLIE_PORT" >"$ports_env_tmp"
+printf 'PISEC_AUTH_BROKER_PORT=%s\nPISEC_AUTH_GATEWAY_PORT=%s\nPISEC_AUTH_GATEWAY_BACKEND_PORT=%s\nPISEC_COLLIE_PORT=%s\n' "$PISEC_AUTH_BROKER_PORT" "$PISEC_AUTH_GATEWAY_PORT" "$PISEC_AUTH_GATEWAY_BACKEND_PORT" "$PISEC_COLLIE_PORT" >"$ports_env_tmp"
 chmod 0600 "$ports_env_tmp"
 mv -f "$ports_env_tmp" "$ports_env"
 printf '\nInstalling user services\n'

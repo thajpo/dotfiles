@@ -107,7 +107,7 @@ class Phase10ScopeParityTests(unittest.TestCase):
         codex_config = {
             "fencePath": make_config(root)["fencePath"],
             "harness": {"config": {"executablePath": str(codex_exec), "gateway": {"baseUrl": "http://127.0.0.1:4000", "tokenFile": str(token)}}},
-            "workerHarnesses": {"codex": {"id": "codex", "config": {"executablePath": str(codex_exec), "versionPrefix": "0.150.0"}}},
+            "workerHarnesses": {"codex": {"id": "codex", "config": {"executablePath": str(codex_exec), "versionPrefix": "0.150.1"}}},
         }
         node_lookup = patch("scripts.pisec.harnesses.codex.shutil.which", return_value=codex_node_path) if codex_node_path is not None else contextlib.nullcontext()
         with node_lookup:
@@ -230,6 +230,8 @@ class Phase10ScopeParityTests(unittest.TestCase):
                 f'model_catalog_json = {json.dumps(str(Path(activated.adapter_data["surfaceRoot"]) / "managed" / "codex_model_catalog.json"))}',
                 config_text,
             )
+            self.assertIn('omit_tools_from = ["deferred"]', config_text)
+            self.assertNotIn("code_mode", config_text)
 
             result = subprocess.run([str(launcher)], cwd=worktree, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -254,9 +256,8 @@ class Phase10ScopeParityTests(unittest.TestCase):
             )
             self.assertIn(f'projects.{json.dumps(str(worktree))}.trust_level="trusted"', config_values)
             self.assertIn("features.hooks=true", config_values)
-            self.assertIn("features.code_mode=true", config_values)
-            self.assertIn("features.code_mode_host=true", config_values)
-            self.assertIn("features.code_mode_only=true", config_values)
+            self.assertIn('mcp_servers.pisec.omit_tools_from=["deferred"]', config_values)
+            self.assertFalse(any(value.startswith("features.code_mode") for value in config_values))
             self.assertTrue(any(value.startswith("hooks.SessionStart=") for value in config_values))
             self.assertTrue(any(value.startswith("mcp_servers.pisec.command=") for value in config_values))
 
@@ -264,7 +265,8 @@ class Phase10ScopeParityTests(unittest.TestCase):
         catalog = json.loads((Path(__file__).resolve().parents[1] / "scripts" / "pisec" / "codex_model_catalog.json").read_text())
         model = next(item for item in catalog["models"] if item["slug"] == "gpt-5.6-luna")
         self.assertEqual(model["shell_type"], "shell_command")
-        self.assertEqual(model["tool_mode"], "code_mode_only")
+        self.assertFalse(model["use_responses_lite"])
+        self.assertEqual(model["tool_mode"], "direct")
         self.assertTrue(model["supports_parallel_tool_calls"])
         self.assertEqual(model["input_modalities"], ["text", "image"])
         self.assertEqual(model["default_reasoning_summary"], "none")

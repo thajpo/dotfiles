@@ -213,9 +213,7 @@ def main() -> None:
         'approval_policy="never"',
         'sandbox_mode="danger-full-access"',
         f"model_catalog_json={toml_string(str(model_catalog_path))}",
-        "features.code_mode=true",
-        "features.code_mode_host=true",
-        "features.code_mode_only=true",
+        'mcp_servers.pisec.omit_tools_from=["deferred"]',
     )
     fence = [str(descriptor["fencePath"]), "--settings", str(descriptor["policyPath"]), "--", str(descriptor["nodeExecutablePath"]), str(descriptor["harnessExecutablePath"]), "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--no-alt-screen", "--cd", str(root), "--model", str(descriptor["model"])]
     for override in codex_config:
