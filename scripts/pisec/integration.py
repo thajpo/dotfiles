@@ -176,7 +176,7 @@ def _candidate(
         raise ScopeMismatchError("replacement completion packet changed the accepted criteria")
     changed_paths = _changed_paths(repository, str(workstream["base_commit_oid"]), source_oid)
     patch_sha256 = _patch_digest(repository, str(workstream["base_commit_oid"]), source_oid)
-    scope_changed_paths = changed_paths
+    scope_changed_paths: list[str] | None = None
     if expected_paths is not None:
         target_revision = target_oid
         if history_base_oid is not None:
@@ -191,7 +191,7 @@ def _candidate(
         )
         if ancestor_code == 0:
             scope_changed_paths = _changed_paths(repository, target_revision, source_oid)
-    if expected_paths is not None and not set(scope_changed_paths).issubset(expected_paths):
+    if scope_changed_paths is not None and not set(scope_changed_paths).issubset(expected_paths):
         raise ScopeMismatchError("replacement completion packet changed paths outside the accepted scope")
     return {
         "project": project,

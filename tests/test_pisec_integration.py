@@ -321,6 +321,46 @@ class IntegrationTests(unittest.TestCase):
             report = store.conn.execute("SELECT changed_surfaces_json FROM integration_reports WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()
             self.assertEqual(report["changed_surfaces_json"], '["feature.txt"]')
 
+    def test_rebased_candidate_waits_for_a_second_target_advance_without_false_scope_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store, project, harness, workspace, workstream, scope, repo, worktree, _private_objects, _source = self.fixture(root)
+            self.addCleanup(store.close)
+            prepared = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            accepted = apply_workstream_acceptance(store, project["project_id"], prepared["approvalScope"])
+            (repo / "first-target.txt").write_text("first\n")
+            _git(repo, "add", "first-target.txt")
+            _git(repo, "commit", "-qm", "first target advance")
+            first_drift = reconcile_integrations(store, workspace, harness)
+            self.assertEqual(first_drift["processed"][0]["state"], "awaiting_worker")
+            target_ref = f"refs/pisec/target/{accepted['integration']['integration_id']}"
+            git_worker(worktree, "rebase", target_ref)
+            rebased_source = git_worker(worktree, "rev-parse", "HEAD").lower()
+            binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
+            task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
+            submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
+                    "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Rebased fixture output."]}],
+                    "verification": [{"command": "fixture verification", "result": "passed"}],
+                    "sourceCommit": rebased_source,
+                    "taskPacketSha256": task["packet_sha256"],
+                    "changedSurfaces": ["fixture"],
+                    "residualRisk": "none",
+                })
+            (repo / "second-target.txt").write_text("second\n")
+            _git(repo, "add", "second-target.txt")
+            _git(repo, "commit", "-qm", "second target advance")
+            second_drift = reconcile_integrations(store, workspace, harness)
+            self.assertEqual(second_drift["processed"][0]["state"], "awaiting_worker")
+
+            replay = reconcile_integrations(store, workspace, harness)
+
+            self.assertEqual(replay["processed"][0]["state"], "awaiting_worker", replay)
+            self.assertTrue(replay["processed"][0]["reused"])
+            job = store.conn.execute("SELECT state,last_error,next_action FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()
+            self.assertEqual(job["state"], "awaiting_worker")
+            self.assertEqual(job["last_error"], "target advanced beyond the accepted candidate")
+            self.assertIn("rebase onto the current target", job["next_action"])
+
 
 if __name__ == "__main__":
     unittest.main()
