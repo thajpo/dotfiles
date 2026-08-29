@@ -128,6 +128,40 @@ class Phase10ScopeParityTests(unittest.TestCase):
 
             self.assertEqual(Path(codex.harness_config["nodePath"]), root / "codex-bin" / "node")
 
+    def test_codex_cleanup_removes_its_directory_temporary_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex = dict(self._production_worker_adapters(root))["codex"]
+            workstream_id = "ws_" + "c" * 32
+            state_root = codex.state_root
+            home = state_root / "binding-state" / "codex" / workstream_id
+            surface = state_root / "binding-surfaces" / "codex" / workstream_id
+            tmp_dir = state_root / "tmp" / workstream_id
+            secret = state_root / "secrets" / f"{workstream_id}.token"
+            policy = surface / "fence" / f"{workstream_id}.json"
+            launcher_dir = codex._launcher_dir(workstream_id)
+            for directory in (home, surface, tmp_dir, secret.parent, policy.parent, launcher_dir):
+                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                directory.chmod(0o700)
+            (tmp_dir / "temporary").write_text("temporary\n")
+            (launcher_dir / "codex").write_text("launcher\n")
+            secret.write_text("s" * 48 + "\n")
+            policy.write_text("{}\n")
+            for path in (tmp_dir / "temporary", launcher_dir / "codex", secret, policy):
+                path.chmod(0o600)
+            binding = {
+                "workstream_id": workstream_id,
+                "harness_home": str(home),
+                "launch_secret_path": str(secret),
+                "policy_path": str(policy),
+                "adapter_artifacts_json": json.dumps({"values": {"surfaceRoot": str(surface), "tmpDir": str(tmp_dir)}}),
+            }
+
+            codex.cleanup_binding(binding)
+
+            for path in (home, surface, tmp_dir, secret, launcher_dir):
+                self.assertFalse(path.exists())
+
     def test_codex_health_accepts_only_exact_pinned_version_banners(self):
         with tempfile.TemporaryDirectory() as tmp:
             codex = dict(self._production_worker_adapters(Path(tmp)))["codex"]

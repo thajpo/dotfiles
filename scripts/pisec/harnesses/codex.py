@@ -774,6 +774,7 @@ class CodexHarnessAdapter:
         if home.exists():
             shutil.rmtree(home)
         surface_value = binding.get("adapter_artifacts_json")
+        values: Mapping[str, Any] = {}
         if isinstance(surface_value, str):
             try:
                 values = json.loads(surface_value).get("values", {})
@@ -790,8 +791,8 @@ class CodexHarnessAdapter:
         for raw in (binding.get("launch_secret_path"), binding.get("policy_path"), values.get("tmpDir")):
             if isinstance(raw, str):
                 path = Path(raw).absolute()
-                if path.is_relative_to(root) and path.exists():
-                    path.unlink()
+                if path != root and path.is_relative_to(root):
+                    _remove_owned_tree(path)
 
     def validate_native_session(self, binding: Mapping[str, Any], kind: str | None, value: str | None) -> None:
         if kind is None and value is None:
