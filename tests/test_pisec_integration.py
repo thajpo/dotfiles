@@ -5,9 +5,10 @@ import unittest
 from unittest.mock import patch
 
 import scripts.pisec.integration as integration_module
-from scripts.pisec.attention import inspect_attention
+from scripts.pisec.attention import backfill_attention, inspect_attention, list_open_attention
+from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.integration import apply_workstream_acceptance, prepare_workstream_acceptance, reconcile_integrations
-from scripts.pisec.models import ConflictError, ScopeMismatchError
+from scripts.pisec.models import ConflictError, ScopeMismatchError, new_id
 from scripts.pisec.operations import create_operation
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import _git, register_project
@@ -119,6 +120,34 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='project.git_integrated'").fetchone()[0], 1)
             with self.assertRaises(sqlite3.IntegrityError):
                 store.conn.execute("UPDATE integration_reports SET residual_risk=? WHERE integration_id=?", ("changed", accepted["integration"]["integration_id"]))
+
+    def test_legacy_duplicate_completion_does_not_reopen_secretary_attention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store, project, harness, workspace, workstream, _scope, _repo, _worktree, _private_objects, _source = self.fixture(root)
+            self.addCleanup(store.close)
+            completion = dict(store.conn.execute("SELECT * FROM completion_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone())
+            prepared = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            apply_workstream_acceptance(store, project["project_id"], prepared["approvalScope"])
+            secretary_id = store.conn.execute("SELECT secretary_workstream_id FROM projects WHERE project_id=?", (project["project_id"],)).fetchone()[0]
+            self.assertEqual(list_open_attention(store, recipient_workstream_id=secretary_id), [])
+
+            duplicate_id = new_id("cmp")
+            with store.transaction():
+                store.conn.execute(
+                    "INSERT INTO completion_packets(completion_packet_id,workstream_id,sequence,source_commit_oid,task_packet_sha256,packet_sha256,packet_json,submitted_at,accepted_at) VALUES(?,?,?,?,?,?,?,?,NULL)",
+                    (duplicate_id, workstream["workstream_id"], 2, completion["source_commit_oid"], completion["task_packet_sha256"], "f" * 64, completion["packet_json"], "2026-08-29T00:00:00Z"),
+                )
+                append_event_in_transaction(
+                    store.conn,
+                    kind="workstream.completion_submitted",
+                    project_id=project["project_id"],
+                    workstream_id=workstream["workstream_id"],
+                    payload={"completionPacketId": duplicate_id, "completionPacketSha256": "f" * 64, "sourceCommit": completion["source_commit_oid"]},
+                )
+
+            self.assertEqual(list_open_attention(store, recipient_workstream_id=secretary_id), [])
+            self.assertEqual(backfill_attention(store, recipient_workstream_id=secretary_id), 0)
 
     def test_closeout_compensates_a_stopped_interrupted_refresh_before_retirement(self):
         with tempfile.TemporaryDirectory() as tmp:
