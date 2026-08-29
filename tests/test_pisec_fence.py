@@ -1217,11 +1217,12 @@ class RuntimeReportTests(unittest.TestCase):
         with self.assertRaises(ConflictError):
             prepare_runtime_turn(self.store, turn, self.workspace, self.harness)
 
-    def test_runtime_turn_rejects_working_binding(self):
+    def test_runtime_turn_accepts_a_follow_up_queued_while_working(self):
         report_runtime(self.store, self.payload(state="idle"), self.harness, self.workspace)
         report_runtime(self.store, self.payload(seq=2, event="lifecycle", state="working", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
-        with self.assertRaises(ConflictError):
-            prepare_runtime_turn(self.store, {"workstreamId": self.workstream_id, "runtimeInstanceId": "instance-1", "surfaceId": self.binding["workspace_surface_id"], "token": self.token, "generation": self.binding["desired_generation_sha256"]}, self.workspace, self.harness)
+        prepared = prepare_runtime_turn(self.store, {"workstreamId": self.workstream_id, "runtimeInstanceId": "instance-1", "surfaceId": self.binding["workspace_surface_id"], "token": self.token, "generation": self.binding["desired_generation_sha256"]}, self.workspace, self.harness)
+        self.assertTrue(prepared["prepared"])
+        self.assertIsNotNone(prepared["taskPacket"])
 
     def test_runtime_turn_returns_full_packet_and_consumes_one_durable_bootstrap(self):
         report_runtime(self.store, self.payload(state="idle"), self.harness, self.workspace)
