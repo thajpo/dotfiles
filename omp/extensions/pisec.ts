@@ -618,7 +618,34 @@ function registerRuntime(pi: ExtensionAPI): void {
 
 function secretaryTools(pi: ExtensionAPI): void {
   const z = pi.zod;
-  const semantic = (name: string, label: string, operation: string, parameters: unknown, approval: "read" | "exec", map?: (params: JsonObject) => JsonObject) => {
+  type PreparedApproval = { kind: "workstream.accept" | "workstream.create"; scope: JsonObject };
+  const preparedApprovals = new Map<string, PreparedApproval>();
+  const rememberPreparedApproval = (value: unknown, kind: PreparedApproval["kind"]): unknown => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const result = value as JsonObject;
+    const scope = result.approvalScope;
+    if (!scope || typeof scope !== "object" || Array.isArray(scope)) return value;
+    const approvalScopeSha256 = createHash("sha256").update(JSON.stringify(canonicalValue(scope))).digest("hex");
+    preparedApprovals.set(approvalScopeSha256, { kind, scope: scope as JsonObject });
+    while (preparedApprovals.size > 16) {
+      const oldest = preparedApprovals.keys().next().value;
+      if (typeof oldest !== "string") break;
+      preparedApprovals.delete(oldest);
+    }
+    return {
+      ...result,
+      approvalScopeSha256,
+      approvalInstruction: `Pass approval_scope_sha256=${approvalScopeSha256} to the matching apply tool. Do not reconstruct approvalScope.`,
+    };
+  };
+  const approvalScope = (value: unknown, kind: PreparedApproval["kind"]): JsonObject | undefined => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const hash = (value as JsonObject).approval_scope_sha256;
+    if (typeof hash !== "string") return undefined;
+    const prepared = preparedApprovals.get(hash);
+    return prepared?.kind === kind ? prepared.scope : undefined;
+  };
+  const semantic = (name: string, label: string, operation: string, parameters: unknown, approval: "read" | "exec", map?: (params: JsonObject) => JsonObject, transform?: (value: unknown) => unknown) => {
     pi.registerTool({
       name,
       label,
@@ -627,7 +654,8 @@ function secretaryTools(pi: ExtensionAPI): void {
       parameters,
       async execute(_id, params, signal) {
         try {
-          return textResult(await semanticRequest(operation, adapterPayload(operation, params as JsonObject, String(_id ?? ""), map), signal));
+          const result = await semanticRequest(operation, adapterPayload(operation, params as JsonObject, String(_id ?? ""), map), signal);
+          return textResult(transform ? transform(result) : result);
         } catch (error) {
           return textResult(error instanceof Error ? error.message : String(error), true);
         }
@@ -653,17 +681,25 @@ function secretaryTools(pi: ExtensionAPI): void {
   semantic("pisec_git_status", "Pisec Git status", "git.status", z.object({}), "read");
   semantic("pisec_push_branch", "Push project branch", "git.push", z.object({ branch: z.string().min(1).max(512), expected_local_oid: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), expected_remote_oid: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/) }), "exec", params => ({ branch: params.branch, expectedLocalOid: params.expected_local_oid, expectedRemoteOid: params.expected_remote_oid }));
   semantic("pisec_inspect_workstream_changes", "Inspect workstream Git changes", "git.workstream_changes", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }));
-  semantic("pisec_prepare_workstream_acceptance", "Prepare workstream acceptance", "workstream.accept.prepare", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }));
+  semantic("pisec_prepare_workstream_acceptance", "Prepare workstream acceptance", "workstream.accept.prepare", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }), value => rememberPreparedApproval(value, "workstream.accept"));
   pi.registerTool({
     name: "pisec_accept_workstream",
     label: "Accept Pisec workstream",
-    description: "Accept one exact bounded workstream candidate. This is the only user approval; the secretary owns later integration and closeout.",
-    approval: scope => ({ tier: "exec", policy: "prompt", reason: renderAcceptanceScope(scope) }),
-    parameters: z.object({ approval_scope: z.any() }),
+    description: "Accept one exact bounded workstream candidate after preparation. Pass only the approval_scope_sha256 returned by pisec_prepare_workstream_acceptance; Pisec retains and applies the exact prepared scope.",
+    approval: params => ({
+      tier: "exec",
+      policy: "prompt",
+      reason: renderAcceptanceScope(approvalScope(params, "workstream.accept") ?? params),
+    }),
+    parameters: z.object({ approval_scope_sha256: z.string().regex(/^[0-9a-f]{64}$/) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!ctx.hasUI) return textResult("Pisec refused workstream acceptance because an interactive approval UI is unavailable.", true);
+      const scope = approvalScope(params, "workstream.accept");
+      if (!scope) return textResult("Pisec refused workstream acceptance because the exact prepared scope is unavailable. Run pisec_prepare_workstream_acceptance in this session and pass its approval_scope_sha256 unchanged.", true);
       try {
-        return textResult(await semanticRequest("workstream.accept.apply", { approvalScope: params.approval_scope as JsonObject }));
+        const result = await semanticRequest("workstream.accept.apply", { approvalScope: scope });
+        preparedApprovals.delete(String(params.approval_scope_sha256));
+        return textResult(result);
       } catch (error) {
         return textResult(error instanceof Error ? error.message : String(error), true);
       }
@@ -673,17 +709,25 @@ function secretaryTools(pi: ExtensionAPI): void {
   semantic("pisec_inspect_workstream", "Inspect Pisec workstream", "workstream.inspect", z.object({ workstream_id: z.string().min(1).max(128) }), "read", params => ({ workstreamId: params.workstream_id }));
   semantic("pisec_list_integrations", "List Pisec integrations", "integration.list", z.object({ state: z.enum(["queued", "refreshing", "awaiting_worker", "verifying", "applying", "integrated", "needs_attention"]).optional() }), "read", params => params.state ? { state: params.state } : {});
   semantic("pisec_inspect_integration", "Inspect Pisec integration", "integration.inspect", z.object({ integration_id: z.string().min(1).max(128) }), "read", params => ({ integrationId: params.integration_id }));
-  semantic("pisec_prepare_workstream", "Prepare Pisec workstream", "workstream.prepare", z.object({ title: z.string().min(1).max(512), purpose: z.string().min(1).max(4096), brief: z.string().min(1).max(4096), task_packet: taskPacketSchema, target_ref: z.string().min(1).max(512).optional(), source: importSourceSchema.optional(), implementation_model: z.string().min(1).max(256).optional(), execution_profile: z.literal("worker-default").optional(), work_mode: z.enum(["FAST", "RIP", "BUILD", "MAJOR"]).optional(), learning_overlay: z.enum(["OFF", "LIGHT", "DEEP"]).optional(), learning_seam: z.string().min(1).max(1024).optional(), decision_ids: z.array(z.string().min(1).max(128)).max(16).optional(), python_env: z.string().min(1).max(4096).optional() }), "read", params => ({ title: params.title, purpose: params.purpose, brief: params.brief, taskPacket: params.task_packet, ...(params.target_ref ? { targetRef: params.target_ref } : {}), ...(params.source ? { source: params.source } : {}), ...(params.implementation_model ? { implementationModel: params.implementation_model } : {}), ...(params.execution_profile ? { executionProfile: params.execution_profile } : {}), ...(params.work_mode ? { workMode: params.work_mode } : {}), ...(params.learning_overlay ? { learningOverlay: params.learning_overlay } : {}), ...(params.learning_seam ? { learningSeam: params.learning_seam } : {}), ...(params.decision_ids ? { decisionIds: params.decision_ids } : {}), ...(params.python_env ? { pythonEnv: params.python_env } : {}) }));
+  semantic("pisec_prepare_workstream", "Prepare Pisec workstream", "workstream.prepare", z.object({ title: z.string().min(1).max(512), purpose: z.string().min(1).max(4096), brief: z.string().min(1).max(4096), task_packet: taskPacketSchema, target_ref: z.string().min(1).max(512).optional(), source: importSourceSchema.optional(), implementation_model: z.string().min(1).max(256).optional(), execution_profile: z.literal("worker-default").optional(), work_mode: z.enum(["FAST", "RIP", "BUILD", "MAJOR"]).optional(), learning_overlay: z.enum(["OFF", "LIGHT", "DEEP"]).optional(), learning_seam: z.string().min(1).max(1024).optional(), decision_ids: z.array(z.string().min(1).max(128)).max(16).optional(), python_env: z.string().min(1).max(4096).optional() }), "read", params => ({ title: params.title, purpose: params.purpose, brief: params.brief, taskPacket: params.task_packet, ...(params.target_ref ? { targetRef: params.target_ref } : {}), ...(params.source ? { source: params.source } : {}), ...(params.implementation_model ? { implementationModel: params.implementation_model } : {}), ...(params.execution_profile ? { executionProfile: params.execution_profile } : {}), ...(params.work_mode ? { workMode: params.work_mode } : {}), ...(params.learning_overlay ? { learningOverlay: params.learning_overlay } : {}), ...(params.learning_seam ? { learningSeam: params.learning_seam } : {}), ...(params.decision_ids ? { decisionIds: params.decision_ids } : {}), ...(params.python_env ? { pythonEnv: params.python_env } : {}) }), value => rememberPreparedApproval(value, "workstream.create"));
   pi.registerTool({
     name: "pisec_create_workstream",
     label: "Create Pisec workstream",
-    description: "Apply one previously prepared immutable Pisec workstream scope. This is the only semantic tool that creates external resources and always requires exact user approval. Imported work is snapshotted into the Pisec worker; the original checkout is never attached or modified.",
-    approval: scope => ({ tier: "exec", policy: "prompt", reason: renderExactScope(scope) }),
-    parameters: z.object({ approval_scope: z.any() }),
+    description: "Apply one previously prepared immutable Pisec workstream scope. Pass only the approval_scope_sha256 returned by pisec_prepare_workstream. This is the only semantic tool that creates external resources and always requires exact user approval. Imported work is snapshotted into the Pisec worker; the original checkout is never attached or modified.",
+    approval: params => ({
+      tier: "exec",
+      policy: "prompt",
+      reason: renderExactScope(approvalScope(params, "workstream.create") ?? params),
+    }),
+    parameters: z.object({ approval_scope_sha256: z.string().regex(/^[0-9a-f]{64}$/) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!ctx.hasUI) return textResult("Pisec refused workstream creation because an interactive approval UI is unavailable.", true);
+      const scope = approvalScope(params, "workstream.create");
+      if (!scope) return textResult("Pisec refused workstream creation because the exact prepared scope is unavailable. Run pisec_prepare_workstream in this session and pass its approval_scope_sha256 unchanged.", true);
       try {
-        return textResult(await semanticRequest("workstream.authorize_apply", { approvalScope: params.approval_scope as JsonObject }));
+        const result = await semanticRequest("workstream.authorize_apply", { approvalScope: scope });
+        preparedApprovals.delete(String(params.approval_scope_sha256));
+        return textResult(result);
       } catch (error) {
         return textResult(error instanceof Error ? error.message : String(error), true);
       }

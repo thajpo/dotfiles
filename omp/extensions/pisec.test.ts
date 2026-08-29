@@ -318,6 +318,136 @@ test("worker registers runtime handling without secretary tools", () => {
   assert.ok(events.includes("session_shutdown"));
 });
 
+test("prepared approval hashes apply the untouched acceptance and creation scopes", () => {
+  const output = runProbe(`
+    const { rm } = await import("node:fs/promises");
+    const socketPath = "/tmp/pisec-extension-approval-" + process.pid + "-" + Date.now() + ".sock";
+    await rm(socketPath, { force: true });
+    const requests = [];
+    const acceptanceScope = {
+      kind: "workstream.accept",
+      projectId: "prj_" + "b".repeat(32),
+      workstreamId: "ws_" + "a".repeat(32),
+      targetBranch: "main",
+      completionPacketSha256: "c".repeat(64),
+      taskPacketSha256: "d".repeat(64),
+      candidatePatchSha256: "e".repeat(64),
+      changedPaths: ["README.md"],
+      acceptance: [{ criterion: "docs check", status: "passed" }],
+      verification: [{ command: "git diff --check", result: "passed" }],
+      conflictPolicy: "bounded-worker-reconciliation",
+      effects: ["advance main"],
+      nonEffects: ["no push"],
+    };
+    const creationScope = {
+      operationId: "op_" + "f".repeat(32),
+      projectId: "prj_" + "b".repeat(32),
+      workstreamId: "ws_" + "9".repeat(32),
+      harnessId: "codex",
+      implementationModel: "gpt-5.6-codex-luna",
+      taskPacket: { outcome: "Implement the approved parser fix.", boundaries: ["src/parser.ts"], acceptance: ["bun test"] },
+      effects: ["create worker"],
+      nonEffects: ["no push"],
+    };
+    const server = Bun.listen({
+      unix: socketPath,
+      socket: {
+        data(socket, data) {
+          const request = JSON.parse(data.toString().trim());
+          requests.push(request);
+          let result = { accepted: true };
+          if (request.operation === "workstream.accept.prepare") result = { approvalScope: acceptanceScope };
+          if (request.operation === "workstream.prepare") result = { approvalScope: creationScope };
+          socket.write(JSON.stringify({ requestId: request.requestId, ok: true, result }) + "\\n");
+          socket.end();
+        },
+      },
+    });
+    const records = { tools: [] };
+    const chain = () => ({ min: chain, max: chain, optional: chain, int: chain, url: chain, regex: chain });
+    const zod = { string: chain, enum: chain, any: chain, object: chain, literal: chain, array: chain, number: chain, boolean: chain };
+    Object.assign(process.env, {
+      PISEC_ROLE: "secretary",
+      PISEC_RUNTIME_SOCKET: socketPath,
+      PISEC_SECRETARY_SOCKET: socketPath,
+      PISEC_RUNTIME_TOKEN: "t".repeat(48),
+      PISEC_RUNTIME_GENERATION: "g".repeat(64),
+      PISEC_WORKSTREAM_ID: "ws_" + "1".repeat(32),
+      PISEC_RUNTIME_INSTANCE_ID: "instance",
+      PISEC_SURFACE_ID: "w1:p1",
+    });
+    const pi = {
+      zod,
+      registerTool(value) { records.tools.push(value); },
+      on() {},
+      setLabel() {},
+      setActiveTools() { return Promise.resolve(); },
+    };
+    const module = await import(${JSON.stringify(EXTENSION)} + "?approval=" + Date.now());
+    module.default(pi);
+    const prepareAcceptance = records.tools.find(tool => tool.name === "pisec_prepare_workstream_acceptance");
+    const accept = records.tools.find(tool => tool.name === "pisec_accept_workstream");
+    const prepareCreation = records.tools.find(tool => tool.name === "pisec_prepare_workstream");
+    const create = records.tools.find(tool => tool.name === "pisec_create_workstream");
+    const preparedAcceptance = await prepareAcceptance.execute("prepare-accept", { workstream_id: acceptanceScope.workstreamId });
+    const acceptanceHash = preparedAcceptance.details.approvalScopeSha256;
+    const acceptanceApproval = accept.approval({ approval_scope_sha256: acceptanceHash });
+    const accepted = await accept.execute("accept", { approval_scope_sha256: acceptanceHash }, undefined, undefined, { hasUI: true });
+    const replay = await accept.execute("accept-replay", { approval_scope_sha256: acceptanceHash }, undefined, undefined, { hasUI: true });
+    const preparedCreation = await prepareCreation.execute("prepare-create", { title: "Parser", purpose: "Fix parser", brief: "Implement now", task_packet: { schemaVersion: 1, outcome: "Fix parser", boundaries: ["src/parser.ts"], acceptance: ["bun test"], openQuestions: [], evidence: [] } });
+    const creationHash = preparedCreation.details.approvalScopeSha256;
+    const creationApproval = create.approval({ approval_scope_sha256: creationHash });
+    const created = await create.execute("create", { approval_scope_sha256: creationHash }, undefined, undefined, { hasUI: true });
+    server.stop(true);
+    await rm(socketPath, { force: true });
+    console.log(JSON.stringify({
+      acceptanceHash,
+      creationHash,
+      acceptanceReason: acceptanceApproval.reason,
+      creationReason: creationApproval.reason,
+      accepted,
+      created,
+      replay,
+      operations: requests.map(request => request.operation),
+      acceptanceApply: requests.find(request => request.operation === "workstream.accept.apply")?.payload.approvalScope,
+      creationApply: requests.find(request => request.operation === "workstream.authorize_apply")?.payload.approvalScope,
+    }));
+  `);
+  assert.match(stringValue(output, "acceptanceHash"), /^[0-9a-f]{64}$/);
+  assert.match(stringValue(output, "creationHash"), /^[0-9a-f]{64}$/);
+  assert.match(stringValue(output, "acceptanceReason"), /changed paths: README\.md/);
+  assert.match(stringValue(output, "creationReason"), /intended outcome: Implement the approved parser fix\./);
+  assert.deepEqual(output.operations, ["workstream.accept.prepare", "workstream.accept.apply", "workstream.prepare", "workstream.authorize_apply"]);
+  assert.deepEqual(output.acceptanceApply, {
+    kind: "workstream.accept",
+    projectId: "prj_" + "b".repeat(32),
+    workstreamId: "ws_" + "a".repeat(32),
+    targetBranch: "main",
+    completionPacketSha256: "c".repeat(64),
+    taskPacketSha256: "d".repeat(64),
+    candidatePatchSha256: "e".repeat(64),
+    changedPaths: ["README.md"],
+    acceptance: [{ criterion: "docs check", status: "passed" }],
+    verification: [{ command: "git diff --check", result: "passed" }],
+    conflictPolicy: "bounded-worker-reconciliation",
+    effects: ["advance main"],
+    nonEffects: ["no push"],
+  });
+  assert.equal(asRecord(output.replay).isError, true);
+  assert.equal(asRecord(output.accepted).isError, undefined);
+  assert.equal(asRecord(output.created).isError, undefined);
+  assert.deepEqual(output.creationApply, {
+    operationId: "op_" + "f".repeat(32),
+    projectId: "prj_" + "b".repeat(32),
+    workstreamId: "ws_" + "9".repeat(32),
+    harnessId: "codex",
+    implementationModel: "gpt-5.6-codex-luna",
+    taskPacket: { outcome: "Implement the approved parser fix.", boundaries: ["src/parser.ts"], acceptance: ["bun test"] },
+    effects: ["create worker"],
+    nonEffects: ["no push"],
+  });
+});
+
 test("worker consumes one typed bootstrap and receives the full packet on later turns", () => {
   const output = runProbe(`
     const { rm } = await import("node:fs/promises");
