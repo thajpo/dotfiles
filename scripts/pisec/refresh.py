@@ -22,6 +22,7 @@ from .control_plane import control_plane_mutation
 _RECOVERABLE_STOPPED_REFRESH_ERRORS = frozenset(
     {
         "runtime process identity became ambiguous during refresh",
+        "runtime did not stop gracefully",
         "workstream changed before refresh reservation",
         "isolated OMP surface contains a symlink",
         "runtime binding is already reserved by another refresh",
@@ -245,7 +246,9 @@ def _reset_stale_refresh_for_new_session(store: Any, binding: Mapping[str, Any])
         artifacts = json.loads(str(binding["adapter_artifacts_json"]))
     except (TypeError, ValueError, json.JSONDecodeError) as error:
         raise NeedsAttentionError("session reset requires a valid runtime artifact") from error
-    if not isinstance(artifacts, dict) or artifacts.get("generationSha256") != binding.get("launch_generation_sha256"):
+    artifact_generation = artifacts.get("generationSha256") if isinstance(artifacts, dict) else None
+    safe_generations = {binding.get("launch_generation_sha256"), binding.get("applied_generation_sha256")}
+    if not isinstance(artifact_generation, str) or artifact_generation not in safe_generations:
         raise NeedsAttentionError("session reset requires a matching runtime artifact")
     operation_id = binding.get("refresh_operation_id")
     operation = store.conn.execute("SELECT * FROM operations WHERE operation_id=? AND kind='runtime.refresh'", (operation_id,)).fetchone()

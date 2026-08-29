@@ -10,7 +10,7 @@ from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.operations import create_operation
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.refresh import _binding_scope, _recover_stopped_refresh_attention, _reset_stale_refresh_for_new_session, _reserve_refresh
+from scripts.pisec.refresh import _RECOVERABLE_STOPPED_REFRESH_ERRORS, _binding_scope, _recover_stopped_refresh_attention, _reset_stale_refresh_for_new_session, _reserve_refresh
 from scripts.pisec.runtime import reset_codex_session_in_transaction
 from scripts.pisec.models import ConflictError
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
@@ -43,11 +43,16 @@ class RuntimeRefreshTests(unittest.TestCase):
             session = Path(binding["harness_home"]) / "sessions" / "retained.jsonl"
             session.write_text("retained session\n")
             session.chmod(0o600)
+
             store.conn.execute(
                 "UPDATE runtime_bindings SET native_session_kind='path',native_session_value=?,applied_generation_sha256=NULL,observed_state='idle' WHERE workstream_id=?",
                 (str(session), self.workstream_id),
             )
             self.identity = (binding["workspace_id"], binding["workspace_view_id"], binding["workspace_surface_id"], str(session))
+
+    def test_stopped_refresh_recovery_keeps_supported_error_families(self):
+        self.assertIn("runtime process identity became ambiguous during refresh", _RECOVERABLE_STOPPED_REFRESH_ERRORS)
+        self.assertIn("runtime did not stop gracefully", _RECOVERABLE_STOPPED_REFRESH_ERRORS)
 
     def tearDown(self):
         self.dispatcher.stop_background()
@@ -350,7 +355,7 @@ class RuntimeRefreshTests(unittest.TestCase):
         self.assertEqual(result["failed"], [])
         self.assertEqual(transient_unknowns, 0)
 
-    def test_stopped_ambiguous_refresh_is_compensated_before_retry(self):
+    def test_stopped_graceful_shutdown_failure_is_compensated_before_retry(self):
         with PiStore(self.root / "state") as store:
             binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
             desired = str(binding["desired_generation_sha256"])
@@ -365,7 +370,7 @@ class RuntimeRefreshTests(unittest.TestCase):
                 step="attention",
             )
             store.conn.execute(
-                "UPDATE operations SET error_code='runtime_refresh_failed',error_message='runtime process identity became ambiguous during refresh' WHERE operation_id=?",
+                "UPDATE operations SET error_code='runtime_refresh_failed',error_message='runtime did not stop gracefully' WHERE operation_id=?",
                 (operation.operation_id,),
             )
             store.conn.execute(
@@ -373,7 +378,7 @@ class RuntimeRefreshTests(unittest.TestCase):
                 (operation.operation_id, desired, desired, self.workstream_id),
             )
             store.conn.execute(
-                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='runtime process identity became ambiguous during refresh' WHERE workstream_id=?",
+                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='runtime did not stop gracefully' WHERE workstream_id=?",
                 (self.workstream_id,),
             )
         self.workspace.stop_runtime(self.identity[2])
@@ -605,6 +610,8 @@ class RuntimeRefreshTests(unittest.TestCase):
         with PiStore(self.root / "state") as store:
             binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
             desired = str(binding["desired_generation_sha256"])
+            applied_generation = "e" * 64
+            launch_generation = "f" * 64
             operation, _ = create_operation(
                 store,
                 kind="runtime.refresh",
@@ -616,10 +623,10 @@ class RuntimeRefreshTests(unittest.TestCase):
                 step="attention",
             )
             artifacts = json.loads(str(binding["adapter_artifacts_json"]))
-            artifacts["generationSha256"] = desired
+            artifacts["generationSha256"] = applied_generation
             store.conn.execute(
-                "UPDATE runtime_bindings SET adapter_artifacts_json=?,refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-27T00:00:00Z',launch_generation_sha256=?,observed_state='error' WHERE workstream_id=?",
-                (json.dumps(artifacts, sort_keys=True, separators=(",", ":")), operation.operation_id, desired, self.workstream_id),
+                "UPDATE runtime_bindings SET adapter_artifacts_json=?,refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-27T00:00:00Z',applied_generation_sha256=?,launch_generation_sha256=?,observed_state='error' WHERE workstream_id=?",
+                (json.dumps(artifacts, sort_keys=True, separators=(",", ":")), operation.operation_id, applied_generation, launch_generation, self.workstream_id),
             )
             store.conn.execute(
                 "UPDATE workstreams SET kind='worker',execution_profile='worker-default',provisioning_state='needs_attention',attention_reason='runtime binding is already reserved by another refresh' WHERE workstream_id=?",
