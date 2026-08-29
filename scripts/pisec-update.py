@@ -742,13 +742,14 @@ def update(repo: Path, ref: str, wait_seconds: float, state_root: Path, install_
     marker: dict | None = None
     try:
         def announce_control_plane_wait() -> None:
-            message = "Pisec update is waiting for one worker creation to finish."
+            message = "Pisec update is waiting for the active control-plane transition to finish."
             status.update(currentStep="lock", message=message)
             _json_write(status_path, status)
             print(message, file=sys.stderr, flush=True)
 
         with _update_lock(install_root):
             with _control_plane_lock(state_root, on_wait=announce_control_plane_wait) as lock_descriptor:
+                status.pop("message", None)
                 if reject_dirty:
                     _assert_clean(repo)
                 commit = _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")

@@ -151,6 +151,59 @@ class RuntimeMaterializationTests(unittest.TestCase):
             adapter.discard_staged_profile(first)
             adapter.discard_staged_profile(retried)
 
+    def test_stage_profile_snapshots_persistent_state_without_live_runtime_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            (home / ".omp" / "agent").mkdir(parents=True)
+            adapter = OmpHarnessAdapter(state_root=root / "state", config=make_config(root))
+            worktree = root / "worktree"
+            worktree.mkdir()
+            scope = {
+                "projectId": new_id("prj"),
+                "workstreamId": new_id("ws"),
+                "executionProfile": "secretary-project",
+                "worktreePath": str(worktree),
+            }
+            with patch("scripts.pisec.harnesses.omp.Path.home", return_value=home):
+                surface = adapter.prepare_runtime_surface()
+                scope = {
+                    **scope,
+                    "runtimeSurfaceId": "surface_" + surface.content_sha256[:32],
+                    "runtimeSurfaceSha256": surface.content_sha256,
+                    "runtimeSurfaceRoot": surface.root_path,
+                }
+                first = adapter.stage_profile({**scope, "operationId": new_id("op")}, surface, root / "first-stage")
+                active = adapter.activate_profile(scope, first)
+                state = Path(active.harness_home)
+                session = state / "sessions" / "project" / "session.jsonl"
+                session.parent.mkdir(parents=True)
+                session.write_text('{"event":"preserve"}\n')
+                database = sqlite3.connect(state / "agent.db")
+                database.execute("PRAGMA journal_mode=WAL")
+                database.execute("CREATE TABLE durable_state (value TEXT NOT NULL)")
+                database.execute("INSERT INTO durable_state VALUES ('preserve')")
+                database.commit()
+                runtime_artifact = state / ".omp" / "run" / "broker.sock"
+                runtime_artifact.parent.mkdir(parents=True)
+                try:
+                    os.mkfifo(runtime_artifact)
+                    replacement = adapter.stage_profile(
+                        {**scope, "operationId": new_id("op")},
+                        surface,
+                        root / "replacement-stage",
+                    )
+                finally:
+                    database.close()
+
+            candidate = Path(replacement.candidate.harness_home)
+            self.assertEqual((candidate / "sessions" / "project" / "session.jsonl").read_text(), '{"event":"preserve"}\n')
+            self.assertFalse(candidate.joinpath(".omp", "run").exists())
+            self.assertFalse(candidate.joinpath("terminal-sessions").exists())
+            with sqlite3.connect(candidate / "agent.db") as snapshot:
+                self.assertEqual(snapshot.execute("SELECT value FROM durable_state").fetchone()[0], "preserve")
+            adapter.discard_staged_profile(replacement)
+
     def test_cleanup_unseals_readonly_policy_parent_before_unlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

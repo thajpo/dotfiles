@@ -35,7 +35,7 @@ def _hold_lock(root: str, label: str, ready, release, result) -> None:
 def _take_lock(root: str, label: str, result) -> None:
     started = time.monotonic()
     def announce_wait() -> None:
-        result.put((label, "waiting", "Pisec update is waiting for one worker creation to finish."))
+        result.put((label, "waiting", "Pisec update is waiting for the active control-plane transition to finish."))
 
     with control_plane_lock(Path(root), timeout=5, on_wait=announce_wait):
         result.put((label, "entered", time.monotonic() - started))
@@ -376,7 +376,7 @@ class Phase11AtomicityTests(unittest.TestCase):
                     break
             self.assertIn(("create", "entered"), messages)
             self.assertIn(("create", "released"), messages)
-            self.assertIn(("update", "waiting", "Pisec update is waiting for one worker creation to finish."), messages)
+            self.assertIn(("update", "waiting", "Pisec update is waiting for the active control-plane transition to finish."), messages)
             update_entry = next(item for item in messages if item[0] == "update" and item[1] == "entered")
             self.assertGreaterEqual(update_entry[2], 0.15)
 

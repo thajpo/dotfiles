@@ -2,6 +2,7 @@ import fcntl
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import runpy
 import socket
@@ -223,6 +224,40 @@ class UpdaterContractTests(unittest.TestCase):
             self.assertEqual((install / "current").resolve(), old.resolve())
             self.assertEqual(systemctl_actions, [])
             self.assertEqual(sorted(path.name for path in install.glob("deploy-*")), [old.name])
+
+    def test_finished_control_plane_wait_does_not_mask_refresh_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            install = root / "install"
+            with PiStore(state):
+                pass
+            module_globals = self.updater["update"].__globals__
+            original_control_plane_lock = module_globals["_control_plane_lock"]
+
+            @contextmanager
+            def waited_control_plane_lock(_state_root, timeout=30.0, on_wait=None):
+                del timeout
+                on_wait()
+                yield -1
+
+            module_globals["_control_plane_lock"] = waited_control_plane_lock
+            module_globals["_refresh_under_lock"] = lambda _candidate, _wait, _state, _descriptor: {
+                "ok": False,
+                "failed": [{"reason": "snapshot failed"}],
+                "pending": [],
+            }
+            try:
+                code, result = self.updater["update"](ROOT, "HEAD", 0, state, install)
+            finally:
+                module_globals["_control_plane_lock"] = original_control_plane_lock
+
+            self.assertEqual(code, self.updater["EXIT_FAILED"], result)
+            self.assertEqual(result["currentStep"], "refresh")
+            self.assertNotIn("message", result)
+            stored = json.loads((install / "update-status.json").read_text())
+            self.assertNotIn("message", stored)
+            self.assertIn("snapshot failed", stored["error"])
 
     def test_unsupported_state_writes_status_outside_state_root(self):
         with tempfile.TemporaryDirectory() as tmp:

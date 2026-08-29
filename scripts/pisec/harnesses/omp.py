@@ -85,6 +85,24 @@ _CREDENTIAL_BASENAMES = frozenset({
     "tokens",
 })
 PLUGIN_FILES = ("package.json", "bun.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "omp-plugins.lock.json")
+_PERSISTENT_STATE_DATABASES = frozenset({"agent.db", "history.db"})
+_REBUILT_STATE_FILES = frozenset({
+    "models.db",
+    "models.db-journal",
+    "models.db-shm",
+    "models.db-wal",
+    "models.yml",
+})
+_SQLITE_SIDECAR_SUFFIXES = ("-journal", "-shm", "-wal")
+_TRANSIENT_STATE_ROOTS = (
+    Path("run"),
+    Path("tmp"),
+    Path("terminal-sessions"),
+    Path(".omp/run"),
+    Path(".omp/logs"),
+    Path(".omp/natives"),
+    Path("xdg/cache"),
+)
 
 def _expand_path(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value or "\x00" in value:
@@ -498,17 +516,17 @@ def _copy_safe_entry(source: Path, target: Path, active_dirs: set[Path] | None =
     try:
         info = source.lstat()
     except OSError as error:
-        raise PisecError("plugin snapshot source is unavailable") from error
+        raise PisecError("OMP runtime snapshot source is unavailable") from error
     resolved = source.resolve(strict=True) if stat.S_ISLNK(info.st_mode) else source
     info = resolved.lstat()
     if info.st_uid != os.geteuid() or info.st_mode & 0o002:
-        raise PisecError("plugin snapshot source is not owner-controlled")
+        raise PisecError("OMP runtime snapshot source is not owner-controlled")
     if stat.S_ISDIR(info.st_mode):
         if resolved in active:
-            raise PisecError("plugin snapshot contains a cyclic link")
+            raise PisecError("OMP runtime snapshot contains a cyclic link")
         active.add(resolved)
         if target.is_symlink() or (target.exists() and not target.is_dir()):
-            raise PisecError("plugin snapshot target is unsafe")
+            raise PisecError("OMP runtime snapshot target is unsafe")
         target.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(target, 0o700)
         for child in sorted(resolved.iterdir(), key=lambda item: item.name):
@@ -516,13 +534,83 @@ def _copy_safe_entry(source: Path, target: Path, active_dirs: set[Path] | None =
         active.remove(resolved)
         return
     if not stat.S_ISREG(info.st_mode):
-        raise PisecError("plugin snapshot contains a device or socket")
+        raise PisecError("OMP runtime snapshot contains an unsupported special file")
     if target.is_symlink():
-        raise PisecError("plugin snapshot target is a symlink")
+        raise PisecError("OMP runtime snapshot target is a symlink")
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with resolved.open("rb") as source_stream, target.open("wb") as target_stream:
         shutil.copyfileobj(source_stream, target_stream)
     os.chmod(target, 0o600 | (0o100 if info.st_mode & stat.S_IXUSR else 0))
+
+
+def _is_transient_state_path(relative: Path) -> bool:
+    return any(relative == root or root in relative.parents for root in _TRANSIENT_STATE_ROOTS)
+
+
+def _snapshot_sqlite_database(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        with sqlite3.connect(source.as_uri() + "?mode=ro", uri=True) as source_db:
+            with sqlite3.connect(target) as target_db:
+                source_db.backup(target_db)
+                target_db.commit()
+        os.chmod(target, 0o600)
+    except (OSError, sqlite3.Error) as error:
+        raise PisecError(f"persistent OMP database could not be snapshotted: {source.name}") from error
+
+
+def _copy_persistent_binding_state(source: Path, target: Path) -> None:
+    """Snapshot durable OMP state without copying live process artifacts."""
+    try:
+        source_info = source.lstat()
+    except OSError as error:
+        raise PisecError("existing OMP binding state is unavailable") from error
+    if (
+        stat.S_ISLNK(source_info.st_mode)
+        or not stat.S_ISDIR(source_info.st_mode)
+        or source_info.st_uid != os.geteuid()
+        or source_info.st_mode & 0o002
+    ):
+        raise PisecError("existing OMP binding state is unsafe")
+
+    def copy_entry(origin: Path, destination: Path) -> None:
+        relative = origin.relative_to(source)
+        if _is_transient_state_path(relative):
+            return
+        try:
+            info = origin.lstat()
+        except OSError as error:
+            raise PisecError("existing OMP binding state changed during snapshot") from error
+        if stat.S_ISLNK(info.st_mode):
+            raise PisecError("existing OMP binding state contains a symlink")
+        if info.st_uid != os.geteuid() or info.st_mode & 0o002:
+            raise PisecError("existing OMP binding state is not owner-controlled")
+        if stat.S_ISDIR(info.st_mode):
+            destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(destination, 0o700)
+            for child in sorted(origin.iterdir(), key=lambda item: item.name):
+                copy_entry(child, destination / child.name)
+            return
+        if not stat.S_ISREG(info.st_mode):
+            raise PisecError(f"persistent OMP state contains an unsupported entry: {relative.as_posix()}")
+        if len(relative.parts) == 1:
+            if relative.name in _REBUILT_STATE_FILES:
+                return
+            if any(
+                relative.name == database + suffix
+                for database in _PERSISTENT_STATE_DATABASES
+                for suffix in _SQLITE_SIDECAR_SUFFIXES
+            ):
+                return
+            if relative.name in _PERSISTENT_STATE_DATABASES:
+                _snapshot_sqlite_database(origin, destination)
+                return
+        _copy_safe_entry(origin, destination)
+
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(target, 0o700)
+    for child in sorted(source.iterdir(), key=lambda item: item.name):
+        copy_entry(child, target / child.name)
 
 
 def _plugin_source() -> Path | None:
@@ -869,10 +957,8 @@ class OmpHarnessAdapter:
         surface_binding = state_root / "binding-surfaces" / "omp" / workstream_id
         prior_state_binding = self.state_root / "binding-state" / "omp" / workstream_id
         if state_root != self.state_root and prior_state_binding.exists():
-            if prior_state_binding.is_symlink() or any(path.is_symlink() for path in prior_state_binding.rglob("*")):
-                raise PisecError("existing OMP binding state contains a symlink")
             _secure_tree(state_root, state_binding.parent)
-            _copy_safe_entry(prior_state_binding, state_binding)
+            _copy_persistent_binding_state(prior_state_binding, state_binding)
             _normalize_owner_tree(state_binding)
         else:
             _secure_tree(state_root, state_binding)
