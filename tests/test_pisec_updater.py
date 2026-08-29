@@ -487,19 +487,23 @@ class UpdaterContractTests(unittest.TestCase):
             self.assertFalse(state.exists())
             self.assertIn("archive=", result["error"])
 
-    def test_install_updater_only_changes_stable_updater_and_manifest_from_commit(self):
+    def test_install_updater_only_uses_committed_ref_with_dirty_checkout(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             install = root / "install"
             repo = root / "repo"
             subprocess.run(["git", "clone", "--no-hardlinks", str(ROOT), str(repo)], check=True, capture_output=True, text=True)
-            code, result = self.updater["install_updater_only"](repo, "HEAD", install, root / "state")
+            committed = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+            (repo / "README.md").write_text("dirty tracked content\n")
+            (repo / "untracked.txt").write_text("dirty untracked content\n")
+            code, result = self.updater["install_updater_only"](repo, committed, install, root / "state")
             self.assertEqual(code, 0)
             stable = install / "bin" / "pisec-update"
             manifest = install / "stable-updater.json"
             self.assertTrue(stable.is_file())
             self.assertTrue(manifest.is_file())
             document = json.loads(manifest.read_text())
+            self.assertEqual(document["sourceCommit"], committed)
             self.assertEqual(document["sourceCommit"], result["sourceCommit"])
             self.assertEqual(document["fileSha256"], hashlib.sha256(stable.read_bytes()).hexdigest())
             self.assertFalse((install / "current").exists())
@@ -510,6 +514,9 @@ class UpdaterContractTests(unittest.TestCase):
             root = Path(tmp)
             repo = root / "repo"
             subprocess.run(["git", "clone", "--no-hardlinks", str(ROOT), str(repo)], check=True, capture_output=True, text=True)
+            committed = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+            (repo / "README.md").write_text("dirty tracked content\n")
+            (repo / "untracked.txt").write_text("dirty untracked content\n")
             state = root / "state"
             install = root / "install"
             with PiStore(state) as store:
@@ -533,7 +540,7 @@ class UpdaterContractTests(unittest.TestCase):
             previous_quiescent = os.environ.get("PISEC_BROKER_QUIESCENT")
             os.environ["PISEC_BROKER_QUIESCENT"] = "1"
             try:
-                code, result = self.updater["archive_reset_state"](repo, "HEAD", 0, state, install)
+                code, result = self.updater["archive_reset_state"](repo, committed, 0, state, install)
             finally:
                 module_globals["_systemctl"] = old_systemctl
                 module_globals["_post_switch"] = old_post_switch
@@ -542,6 +549,7 @@ class UpdaterContractTests(unittest.TestCase):
                 else:
                     os.environ["PISEC_BROKER_QUIESCENT"] = previous_quiescent
             self.assertEqual(code, 0, result)
+            self.assertEqual(result["current"]["sourceCommit"], committed)
             self.assertFalse((install / "last-known-good.json").exists())
             self.assertEqual(stable.read_bytes(), before)
             archives = sorted(state.parent.glob("state.archive-*"))

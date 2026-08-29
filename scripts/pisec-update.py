@@ -897,7 +897,6 @@ def install_updater_only(repo: Path, ref: str, install_root: Path, state_root: P
     try:
         with _update_lock(install_root):
             with _control_plane_lock(state_root or _paths_from_environment()[0]):
-                _assert_clean(repo)
                 _stable_updater(install_root)
                 with tempfile.TemporaryDirectory(prefix="pisec-updater-") as tmp:
                     bundle = Path(tmp) / "bundle"
@@ -998,7 +997,6 @@ def archive_reset_state(repo: Path, ref: str, wait_seconds: float, state_root: P
     try:
         with _update_lock(install_root):
             with _control_plane_lock(state_root) as lock_descriptor:
-                _assert_clean(repo)
                 if not _broker_quiescent():
                     raise RuntimeError("Pisec broker is not quiescent; stop it before archive/reset")
                 stable = _stable_updater(install_root)
