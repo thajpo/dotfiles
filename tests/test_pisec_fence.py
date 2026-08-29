@@ -739,6 +739,15 @@ class FencePolicyAndShimTests(unittest.TestCase):
             self.assertNotEqual(command_denied.returncode, 0)
             curl_denied = subprocess.run(["fence", "--settings", str(policy_path), "--", "curl", "--version"], cwd=worktree, text=True, capture_output=True)
             self.assertNotEqual(curl_denied.returncode, 0)
+            arg0 = worktree / "tmp" / "arg0" / "codex-arg0fixture"
+            arg0.mkdir(parents=True)
+            git_applet = arg0 / "git"
+            git_applet.symlink_to("/usr/bin/true")
+            arg0_allowed = subprocess.run(["fence", "--settings", str(policy_path), "--", str(git_applet), "status", "--short"], cwd=worktree, text=True, capture_output=True)
+            self.assertEqual(arg0_allowed.returncode, 0, arg0_allowed.stderr)
+            arg0_denied = subprocess.run(["fence", "--settings", str(policy_path), "--", str(git_applet), "push", "origin", "main"], cwd=worktree, text=True, capture_output=True)
+            self.assertNotEqual(arg0_denied.returncode, 0)
+            self.assertIn('matches "git push"', arg0_denied.stderr)
 
     def test_omp_binding_temp_root_keeps_fence_socket_paths_short(self):
         workstream_id = "ws_" + "a" * 32
