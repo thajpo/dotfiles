@@ -109,7 +109,7 @@ async function setWorkerRuntimeGate(pi: ExtensionAPI, next: RuntimeGate): Promis
     const getter = (pi as unknown as { getActiveTools?: () => string[] }).getActiveTools;
     if (savedWorkerTools === undefined && typeof getter === "function") {
       try {
-        savedWorkerTools = [...getter()];
+        savedWorkerTools = [...getter.call(pi)];
       } catch {
         savedWorkerTools = undefined;
       }
@@ -137,9 +137,9 @@ async function setWorkerRuntimeGate(pi: ExtensionAPI, next: RuntimeGate): Promis
 }
 
 function sendPisecMessage(pi: ExtensionAPI, content: string, details: JsonObject, triggerTurn: boolean): void {
-  const sender = (pi as unknown as PisecMessageAPI).sendMessage;
-  if (typeof sender !== "function") throw new Error("Pisec extension cannot deliver typed control messages");
-  sender({ customType: "pisec", content, display: true, details: { source: "pisec", ...details } }, { triggerTurn });
+  const messageApi = pi as unknown as PisecMessageAPI;
+  if (typeof messageApi.sendMessage !== "function") throw new Error("Pisec extension cannot deliver typed control messages");
+  messageApi.sendMessage({ customType: "pisec", content, display: true, details: { source: "pisec", ...details } }, { triggerTurn });
 }
 function isPisecRole(value: string | undefined): value is "secretary" | "first_mate" | "worker" {
   return value === "secretary" || value === "first_mate" || value === "worker";

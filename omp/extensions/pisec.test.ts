@@ -358,11 +358,15 @@ test("worker consumes one typed bootstrap and receives the full packet on later 
     });
     const pi = {
       zod,
+      messageSink: messages,
+      activeToolSource: ["read", "write", "shell"],
       registerTool(value) { (records.tools ??= []).push(value); },
       on(name, handler) { (handlers[name] ??= []).push(handler); },
       setLabel() {},
-      sendMessage(message, options) { messages.push({ message, options }); },
-      getActiveTools() { return ["read", "write", "shell"]; },
+      // Real OMP ExtensionAPI methods read this.runtime. Keep this probe
+      // receiver-sensitive so detached calls fail the same way as production.
+      sendMessage(message, options) { this.messageSink.push({ message, options }); },
+      getActiveTools() { return this.activeToolSource; },
       setActiveTools(value) { activeTools.push(value); return Promise.resolve(); },
     };
     const records = { tools: [] };
@@ -425,11 +429,13 @@ test("worker blocks mutation when turn preparation fails even if the model conti
     });
     const pi = {
       zod,
+      messageSink: messages,
+      activeToolSource: ["read", "write", "shell", "pisec_checkpoint_workstream"],
       registerTool(value) { tools.push(value); },
       on(name, handler) { (handlers[name] ??= []).push(handler); },
       setLabel() {},
-      sendMessage(message, options) { messages.push({ message, options }); },
-      getActiveTools() { return ["read", "write", "shell", "pisec_checkpoint_workstream"]; },
+      sendMessage(message, options) { this.messageSink.push({ message, options }); },
+      getActiveTools() { return this.activeToolSource; },
       setActiveTools(value) { activeTools.push(value); return Promise.resolve(); },
     };
     const module = await import(${JSON.stringify(EXTENSION)} + "?blocked=" + Date.now());
