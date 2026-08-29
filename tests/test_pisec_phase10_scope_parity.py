@@ -190,6 +190,11 @@ class Phase10ScopeParityTests(unittest.TestCase):
             self.assertNotIn(str(Path(staged.staging_root).resolve()), hooks_text)
             self.assertIn(activated.adapter_data["mcpPath"], config_text)
             self.assertIn(activated.adapter_data["hookPath"], hooks_text)
+            hooks = json.loads(hooks_text)["hooks"]
+            self.assertEqual(set(hooks), {"SessionStart", "UserPromptSubmit", "Stop"})
+            self.assertEqual(hooks["SessionStart"][0]["hooks"][0]["additionalContextLimit"], 0)
+            self.assertEqual(hooks["UserPromptSubmit"][0]["hooks"][0]["additionalContextLimit"], 0)
+            self.assertNotIn("additionalContextLimit", hooks["Stop"][0]["hooks"][0])
             result = subprocess.run([str(launcher)], cwd=worktree, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             argv = json.loads(capture.read_text())
@@ -405,10 +410,11 @@ class Phase10ScopeParityTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "existing Codex binding state contains a symlink"):
                 codex._build_profile(scope, surface, state_root=root / "candidate")
 
-    def test_codex_hook_classifies_native_session_start_as_working(self):
+    def test_codex_hook_attests_idle_then_prepares_typed_session_start(self):
         class RecordingSocket:
             def __init__(self):
                 self.payload = None
+                self.payloads = []
 
             def __enter__(self):
                 return self
@@ -424,13 +430,25 @@ class Phase10ScopeParityTests(unittest.TestCase):
 
             def sendall(self, data):
                 self.payload = json.loads(data.decode())
+                self.payloads.append(self.payload)
 
             def recv(self, _size):
+                if self.payload["operation"] == "runtime.turn.prepare":
+                    result = {
+                        "prepared": True,
+                        "taskPacket": {"packet": {"outcome": "fixture"}},
+                        "bootstrap": {"eventType": "worker.bootstrap", "sourceRecordId": "evt_" + "7" * 32, "sourceRevision": 9, "workstreamId": "ws_" + "2" * 32, "role": "worker"},
+                        "attention": [],
+                    }
+                elif self.payload["operation"] == "runtime.bootstrap.ack":
+                    result = {"acknowledged": True}
+                else:
+                    result = {"accepted": True, "seq": self.payload["payload"]["seq"]}
                 return json.dumps(
                     {
                         "requestId": self.payload["requestId"],
                         "ok": True,
-                        "result": {"accepted": True, "seq": self.payload["payload"]["seq"]},
+                        "result": result,
                     }
                 ).encode()
 
@@ -451,14 +469,80 @@ class Phase10ScopeParityTests(unittest.TestCase):
                 "sys.stdin", io.StringIO(json.dumps({"hook_event_name": "SessionStart", "session_id": "native-session"}))
             ):
                 self.assertEqual(codex_hook.main(), 0)
-        self.assertIsNotNone(recording.payload)
-        self.assertEqual(recording.payload["payload"]["state"], "working")
-        self.assertEqual(recording.payload["payload"]["nativeSessionValue"], "native-session")
+        report = next(payload for payload in recording.payloads if payload["operation"] == "runtime.report")
+        self.assertEqual(report["payload"]["state"], "idle")
+        self.assertEqual(report["payload"]["nativeSessionValue"], "native-session")
+        self.assertEqual([payload["operation"] for payload in recording.payloads], ["runtime.report", "runtime.turn.prepare", "runtime.bootstrap.ack"])
+        acknowledgement = recording.payloads[-1]["payload"]
+        self.assertEqual((acknowledgement["bootstrapEventId"], acknowledgement["bootstrapRevision"]), ("evt_" + "7" * 32, 9))
+
+    def test_codex_attention_trigger_injects_only_authenticated_typed_records(self):
+        turn = {
+            "prepared": True,
+            "taskPacket": {"taskPacketId": "tpk_fixture", "packet": {"outcome": "Continue the original goal."}},
+            "bootstrap": None,
+            "attention": [
+                {
+                    "attentionId": "att_" + "1" * 32,
+                    "sourceKind": "integration",
+                    "sourceId": "int_" + "2" * 32,
+                    "revision": 17,
+                    "revisionAt": "2026-08-29T00:00:00Z",
+                }
+            ],
+        }
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                "PISEC_RUNTIME_SOCKET": str(Path(tmp) / "runtime.sock"),
+                "PISEC_RUNTIME_TOKEN": "t" * 48,
+                "PISEC_WORKSTREAM_ID": "ws_" + "2" * 32,
+                "PISEC_RUNTIME_INSTANCE_ID": "3" * 32,
+                "PISEC_SURFACE_ID": "surface_" + "4" * 32,
+                "PISEC_HARNESS_HOME": tmp,
+                "PISEC_RUNTIME_GENERATION": "5" * 64,
+            },
+        ), patch("sys.stdin", io.StringIO(json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "native", "prompt": "PISEC_ATTENTION_TRIGGER"}))), patch(
+            "sys.stdout", output
+        ), patch("scripts.pisec.codex_hook._prepare_turn", return_value=turn), patch(
+            "scripts.pisec.codex_hook._report", return_value=True
+        ):
+            self.assertEqual(codex_hook.main(), 0)
+        rendered = json.loads(output.getvalue())
+        self.assertEqual(rendered["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
+        context = rendered["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("PISEC_AUTHENTICATED_RUNTIME_CONTEXT", context)
+        self.assertIn("int_" + "2" * 32, context)
+        self.assertIn("sourceRecordId", context)
+        self.assertIn("inert wake signal", context)
+        self.assertNotIn("requires review", context)
+
+    def test_codex_user_turn_fails_closed_when_typed_preparation_is_unavailable(self):
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                "PISEC_RUNTIME_SOCKET": str(Path(tmp) / "runtime.sock"),
+                "PISEC_RUNTIME_TOKEN": "t" * 48,
+                "PISEC_WORKSTREAM_ID": "ws_" + "2" * 32,
+                "PISEC_RUNTIME_INSTANCE_ID": "3" * 32,
+                "PISEC_SURFACE_ID": "surface_" + "4" * 32,
+                "PISEC_HARNESS_HOME": tmp,
+            },
+        ), patch("sys.stdin", io.StringIO(json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "native", "prompt": "make a change"}))), patch(
+            "sys.stdout", output
+        ), patch("scripts.pisec.codex_hook._prepare_turn", return_value=None):
+            self.assertEqual(codex_hook.main(), 0)
+        rendered = json.loads(output.getvalue())
+        self.assertEqual(rendered["decision"], "block")
+        self.assertIn("do not change", rendered["reason"])
 
     def test_codex_hook_restarts_new_runtime_instance_with_fresh_session_start(self):
         class RecordingSocket:
             def __init__(self):
                 self.payload = None
+                self.payloads = []
 
             def __enter__(self):
                 return self
@@ -474,13 +558,18 @@ class Phase10ScopeParityTests(unittest.TestCase):
 
             def sendall(self, data):
                 self.payload = json.loads(data.decode())
+                self.payloads.append(self.payload)
 
             def recv(self, _size):
+                if self.payload["operation"] == "runtime.turn.prepare":
+                    result = {"prepared": True, "taskPacket": None, "bootstrap": None, "attention": []}
+                else:
+                    result = {"accepted": True, "seq": self.payload["payload"]["seq"]}
                 return json.dumps(
                     {
                         "requestId": self.payload["requestId"],
                         "ok": True,
-                        "result": {"accepted": True, "seq": self.payload["payload"]["seq"]},
+                        "result": result,
                     }
                 ).encode()
 
@@ -508,11 +597,10 @@ class Phase10ScopeParityTests(unittest.TestCase):
                     "sys.stdin", io.StringIO(json.dumps({"hook_event_name": event_name, "session_id": native_session}))
                 ):
                     self.assertEqual(codex_hook.main(), 0)
-                self.assertIsNotNone(recording.payload)
-                reports.append(recording.payload["payload"])
+                reports.append(next(payload["payload"] for payload in recording.payloads if payload["operation"] == "runtime.report"))
         self.assertEqual(
             [(report["seq"], report["event"], report["state"]) for report in reports],
-            [(1, "session_start", "working"), (2, "lifecycle", "idle"), (1, "session_start", "working")],
+            [(1, "session_start", "idle"), (2, "lifecycle", "idle"), (1, "session_start", "idle")],
         )
         self.assertEqual([report["startSource"] for report in reports], ["resume", "resume", "resume"])
 
@@ -607,6 +695,7 @@ class Phase10ScopeParityTests(unittest.TestCase):
                 def run_hook(instance, native_session):
                     with PiStore(root / "state") as store:
                         current = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (workstream_id,)).fetchone())
+                    workspace.runtime_states[str(current["workspace_surface_id"])] = "live"
                     with patch.dict(
                         os.environ,
                         {
@@ -619,7 +708,7 @@ class Phase10ScopeParityTests(unittest.TestCase):
                             "PISEC_SESSION_START_SOURCE": "startup",
                             "PISEC_RUNTIME_GENERATION": str(current["applied_generation_sha256"]),
                         },
-                    ), patch("sys.stdin", io.StringIO(json.dumps({"hook_event_name": "SessionStart", "session_id": native_session}))):
+                    ), patch("sys.stdin", io.StringIO(json.dumps({"hook_event_name": "SessionStart", "session_id": native_session}))), patch("sys.stdout", io.StringIO()):
                         self.assertEqual(codex_hook.main(), 0)
 
                 workspace.stop_runtime(str(binding["workspace_surface_id"]))
@@ -645,7 +734,7 @@ class Phase10ScopeParityTests(unittest.TestCase):
                 self.assertEqual(second["runtime_instance_id"], "codex-runtime-second")
                 self.assertEqual(second["report_seq"], 1)
                 self.assertEqual(second["session_start_report_seq"], 1)
-                self.assertEqual(second["observed_state"], "working")
+                self.assertEqual(second["observed_state"], "idle")
                 self.assertEqual(second["refresh_pending"], 0)
                 self.assertIsNone(second["refresh_operation_id"])
                 self.assertEqual(

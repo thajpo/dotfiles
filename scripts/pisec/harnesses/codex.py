@@ -470,7 +470,17 @@ class CodexHarnessAdapter:
         )
         _atomic_write(
             config_root / "hooks.json",
-            json.dumps({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": str(hook_path)}]}], "Stop": [{"hooks": [{"type": "command", "command": str(hook_path)}]}]}}, separators=(",", ":")) + "\n",
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionStart": [{"hooks": [{"type": "command", "command": str(hook_path), "additionalContextLimit": 0}]}],
+                        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": str(hook_path), "additionalContextLimit": 0}]}],
+                        "Stop": [{"hooks": [{"type": "command", "command": str(hook_path)}]}],
+                    }
+                },
+                separators=(",", ":"),
+            )
+            + "\n",
             mode=0o600,
         )
         policy_renderer = getattr(self, "policy_renderer", None)
