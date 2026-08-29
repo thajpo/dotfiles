@@ -231,6 +231,11 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(closeout["issueId"], issue["issue_id"])
             self.assertIn(closeout["runtime"]["action"], {"already_live", "started"})
             self.assertEqual(validate_worker_resume_git(store, {"workstream_id": scope["workstreamId"]}), source)
+            store.conn.execute(
+                "UPDATE integration_jobs SET state='needs_attention',last_error='retained reporter refresh failed' WHERE integration_id=?",
+                (accepted["integration"]["integration_id"],),
+            )
+            self.assertEqual(validate_worker_resume_git(store, {"workstream_id": scope["workstreamId"]}), source)
 
     def test_target_drift_is_reconciled_by_the_worker_without_a_second_acceptance(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -85,6 +85,8 @@ class FakeHerdrState:
             return {"type": "pane_read", "read": {"text": text, "truncated": False, "revision": self.ready_reads}}
         if method == "pane.send_text":
             return {"type": self.send_text_type}
+        if method == "pane.send_input":
+            return {"type": "ok"}
         if method == "pane.send_keys":
             return {"type": "ok"}
         if method == "pane.focus":
@@ -341,11 +343,8 @@ class HerdrTests(unittest.TestCase):
     def test_idle_codex_runtime_stop_uses_explicit_exit_command(self):
         self.assertEqual(self.adapter.stop_runtime("w1:p1", "codex"), {"type": "ok"})
         self.assertEqual(
-            self.state.requests[-2:],
-            [
-                ("pane.send_text", {"pane_id": "w1:p1", "text": "/exit"}),
-                ("pane.send_keys", {"pane_id": "w1:p1", "keys": ["Enter"]}),
-            ],
+            self.state.requests[-1],
+            ("pane.send_input", {"pane_id": "w1:p1", "text": "/exit", "keys": ["Enter"]}),
         )
 
     def test_runtime_liveness_uses_process_identity_not_agent_metadata(self):
