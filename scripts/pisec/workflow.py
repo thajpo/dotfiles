@@ -312,6 +312,58 @@ def _append_issue_update(store: Any, *, issue: Mapping[str, Any], actor_kind: st
     return True
 
 
+def _linked_remediation_issue(store: Any, workstream_id: str) -> dict[str, Any] | None:
+    rows = [
+        dict(row)
+        for row in store.conn.execute(
+            "SELECT i.* FROM issue_remediations r JOIN issues i USING(issue_id) "
+            "WHERE r.workstream_id=? "
+            "ORDER BY CASE WHEN i.escalated_from_issue_id IS NOT NULL THEN 0 ELSE 1 END,r.created_at,r.remediation_id",
+            (workstream_id,),
+        )
+    ]
+    if not rows:
+        return None
+    issue = rows[0]
+    chain_ids = {str(item["issue_id"]) for item in _issue_chain(store, issue)}
+    linked_ids = {str(item["issue_id"]) for item in rows}
+    if linked_ids != chain_ids:
+        raise ConflictError("worker remediation links are incomplete or ambiguous")
+    return issue
+
+
+def _record_remediation_completed(store: Any, *, workstream_id: str, completion_packet_id: str, completed_at: str) -> bool:
+    issue = _linked_remediation_issue(store, workstream_id)
+    if issue is None:
+        return False
+    changed_any = False
+    for linked in _issue_chain(store, issue):
+        update_key = f"remediation-completed:{completion_packet_id}:{linked['issue_id']}"
+        changed = _append_issue_update(
+            store,
+            issue=linked,
+            actor_kind="worker",
+            actor_id=workstream_id,
+            update_kind="remediation_completed",
+            payload={"completionPacketId": completion_packet_id},
+            idempotency_key=update_key,
+        )
+        if changed:
+            changed_any = True
+            store.conn.execute(
+                "UPDATE issues SET state='acknowledged',updated_at=? WHERE issue_id=?",
+                (completed_at, linked["issue_id"]),
+            )
+            append_event_in_transaction(
+                store.conn,
+                kind="issue.remediation_completed",
+                project_id=linked["project_id"],
+                workstream_id=workstream_id,
+                payload={"issueId": linked["issue_id"], "completionPacketId": completion_packet_id},
+            )
+    return changed_any
+
+
 def _issue_actor(store: Any, project_id: str, actor_id: str, *, kinds: set[str], allow_retained_verifier: bool = False) -> dict[str, Any]:
     row = store.conn.execute(
         "SELECT w.workstream_id,w.project_id,w.kind,w.desired_state,w.provisioning_state FROM workstreams w JOIN runtime_bindings r USING(workstream_id) WHERE w.workstream_id=? AND w.provisioning_state='bound'",
@@ -480,7 +532,22 @@ def request_issue_verification(store: Any, *, project_id: str, issue_id: str, ac
             raise IdempotencyConflictError("verification request differs for the idempotency key")
         return inspect_issue(store, issue_id=issue_id, project_id=project_id)
     if store.conn.execute("SELECT 1 FROM issue_updates WHERE issue_id=? AND update_kind='remediation_completed'", (issue_id,)).fetchone() is None:
-        raise ConflictError("issue has no linked completed remediation to verify")
+        integrated = store.conn.execute(
+            "SELECT r.workstream_id,j.candidate_completion_packet_id,j.integrated_at "
+            "FROM issue_remediations r JOIN integration_jobs j USING(workstream_id) "
+            "WHERE r.issue_id=? AND j.state='integrated' AND j.candidate_completion_packet_id IS NOT NULL "
+            "ORDER BY j.integrated_at DESC,j.integration_id DESC LIMIT 1",
+            (issue_id,),
+        ).fetchone()
+        if integrated is None:
+            raise ConflictError("issue has no linked completed remediation to verify")
+        with store.transaction():
+            _record_remediation_completed(
+                store,
+                workstream_id=str(integrated["workstream_id"]),
+                completion_packet_id=str(integrated["candidate_completion_packet_id"]),
+                completed_at=str(integrated["integrated_at"] or utc_now()),
+            )
     if _issue_lifecycle_state(store, issue) != "integrated":
         raise ConflictError("issue is not ready for verification")
     now = utc_now()
@@ -673,6 +740,12 @@ def _submit_completion_in_transaction(store: Any, *, workstream_id: str, runtime
     packet_sha = hashlib.sha256(canonical_json(normalized).encode("utf-8")).hexdigest()
     existing = store.conn.execute("SELECT * FROM completion_packets WHERE packet_sha256=?", (packet_sha,)).fetchone()
     if existing is not None:
+        _record_remediation_completed(
+            store,
+            workstream_id=workstream_id,
+            completion_packet_id=str(existing["completion_packet_id"]),
+            completed_at=str(existing["submitted_at"]),
+        )
         return dict(existing)
     source_packet = store.conn.execute(
         "SELECT * FROM completion_packets WHERE workstream_id=? AND source_commit_oid=? ORDER BY sequence LIMIT 1",
@@ -687,19 +760,7 @@ def _submit_completion_in_transaction(store: Any, *, workstream_id: str, runtime
         "INSERT INTO completion_packets(completion_packet_id,workstream_id,sequence,source_commit_oid,task_packet_sha256,packet_sha256,packet_json,submitted_at,accepted_at) VALUES(?,?,?,?,?,?,?,?,?)",
         (packet_id, workstream_id, sequence, observed_source, task["packet_sha256"], packet_sha, canonical_json(normalized, max_bytes=65536, max_text=8192), now, None),
     )
-    linked_checkpoint = store.conn.execute(
-        "SELECT remediation_issue_id FROM workstream_checkpoints WHERE workstream_id=? AND remediation_issue_id IS NOT NULL ORDER BY sequence DESC LIMIT 1",
-        (workstream_id,),
-    ).fetchone()
-    if linked_checkpoint is not None:
-        issue = _issue_row(store, str(linked_checkpoint["remediation_issue_id"]))
-        linked_issues = _issue_chain(store, issue)
-        for linked in linked_issues:
-            update_key = f"remediation-completed:{packet_id}:{linked['issue_id']}"
-            changed = _append_issue_update(store, issue=linked, actor_kind="worker", actor_id=workstream_id, update_kind="remediation_completed", payload={"completionPacketId": packet_id}, idempotency_key=update_key)
-            if changed:
-                store.conn.execute("UPDATE issues SET state='acknowledged',updated_at=? WHERE issue_id=?", (now, linked["issue_id"]))
-                append_event_in_transaction(store.conn, kind="issue.remediation_completed", project_id=linked["project_id"], workstream_id=workstream_id, payload={"issueId": linked["issue_id"], "completionPacketId": packet_id})
+    _record_remediation_completed(store, workstream_id=workstream_id, completion_packet_id=packet_id, completed_at=now)
     append_event_in_transaction(store.conn, kind="workstream.completion_submitted", project_id=project_id, workstream_id=workstream_id, payload={"completionPacketId": packet_id, "completionPacketSha256": packet_sha, "sourceCommit": observed_source})
     return dict(store.conn.execute("SELECT * FROM completion_packets WHERE completion_packet_id=?", (packet_id,)).fetchone())
 
@@ -711,8 +772,8 @@ def submit_completion(store: Any, *, workstream_id: str, runtime_instance_id: st
         if existing_checkpoint is None:
             checkpoint_id = new_id("cp")
             checkpoint_sequence = int(store.conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM workstream_checkpoints WHERE workstream_id=?", (workstream_id,)).fetchone()[0])
-            linked = store.conn.execute("SELECT remediation_issue_id FROM workstream_checkpoints WHERE workstream_id=? AND remediation_issue_id IS NOT NULL ORDER BY sequence DESC LIMIT 1", (workstream_id,)).fetchone()
-            linked_issue_id = None if linked is None else linked["remediation_issue_id"]
+            linked_issue = _linked_remediation_issue(store, workstream_id)
+            linked_issue_id = None if linked_issue is None else linked_issue["issue_id"]
             store.conn.execute(
                 "INSERT INTO workstream_checkpoints(checkpoint_id,workstream_id,runtime_instance_id,sequence,idempotency_key,phase,summary,next_action,remediation_issue_id,evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (checkpoint_id, workstream_id, runtime_instance_id, checkpoint_sequence, f"completion:{result['packet_sha256']}", "ready_review", "Completion packet submitted for review", "Secretary must review the immutable completion packet", linked_issue_id, "[]", result["submitted_at"]),

@@ -257,7 +257,7 @@ class IssueLifecycleTests(unittest.TestCase):
         source_commit = run_git(worktree, ("rev-parse", "HEAD"), role="worker").stdout.strip().lower()
         runtime_instance_id = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (remediation_worker["workstream_id"],)).fetchone()[0]
         task_sha = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (remediation_worker["workstream_id"],)).fetchone()[0]
-        checkpoint(store, workstream_id=remediation_worker["workstream_id"], runtime_instance_id=runtime_instance_id, phase="implementing", summary="Implemented the bounded contract repair.", next_action="Submit the verified completion packet.", evidence=["recovery.txt"], idempotency_key="remediation-checkpoint", remediation_issue_id=escalated["issue_id"])
+        checkpoint(store, workstream_id=remediation_worker["workstream_id"], runtime_instance_id=runtime_instance_id, phase="implementing", summary="Implemented the bounded contract repair.", next_action="Submit the verified completion packet.", evidence=["recovery.txt"], idempotency_key="remediation-checkpoint")
         submit_completion(store, workstream_id=remediation_worker["workstream_id"], runtime_instance_id=runtime_instance_id, packet={
             "acceptance": [{"criterion": "The bounded issue remediation is verified.", "status": "passed", "evidence": ["recovery.txt"]}],
             "verification": [{"command": "test fixture", "result": "passed"}],
@@ -274,7 +274,20 @@ class IssueLifecycleTests(unittest.TestCase):
         integrated = reconcile_integrations(store, workspace, harness)
         self.assertEqual(integrated["processed"][0]["state"], "integrated")
         self.assertEqual(inspect_issue(store, issue_id=escalated["issue_id"], project_id=platform["project_id"])["state"], "integrated")
+        delete_trigger = store.conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='issue_updates_no_delete'").fetchone()[0]
+        with store.transaction():
+            store.conn.execute("DROP TRIGGER issue_updates_no_delete")
+            store.conn.execute("DELETE FROM issue_updates WHERE update_kind='remediation_completed' AND actor_id=?", (remediation_worker["workstream_id"],))
+            store.conn.execute(str(delete_trigger))
+            store.conn.execute("UPDATE issues SET state='remediating' WHERE issue_id IN (?,?)", (issue["issue_id"], escalated["issue_id"]))
         request_issue_verification(store, project_id=platform["project_id"], issue_id=escalated["issue_id"], actor_id=first_mate["workstream"]["workstream_id"], evidence=["integration complete"], idempotency_key="verification-request")
+        self.assertEqual(
+            store.conn.execute(
+                "SELECT COUNT(*) FROM issue_updates WHERE update_kind='remediation_completed' AND actor_id=?",
+                (remediation_worker["workstream_id"],),
+            ).fetchone()[0],
+            2,
+        )
         verified = verify_issue(store, project_id=source["project_id"], issue_id=issue["issue_id"], actor_id=worker["workstream_id"], status="fixed", evidence=["original reporter confirmed the fix"], idempotency_key="reporter-verification")
         self.assertEqual(verified["state"], "resolved")
         self.assertEqual(inspect_issue(store, issue_id=escalated["issue_id"], project_id=platform["project_id"])["state"], "resolved")
