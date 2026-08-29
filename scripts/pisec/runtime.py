@@ -209,6 +209,7 @@ def usable_runtime_binding(
     harness: HarnessAdapter | None = None,
     *,
     allowed_states: set[str] | frozenset[str] = frozenset({"idle"}),
+    require_agent_ready: bool = True,
     require_prompt_eligible: bool = False,
 ) -> bool:
     """Apply the common live, attested, unreserved binding predicate."""
@@ -275,7 +276,7 @@ def usable_runtime_binding(
         if (
             observed.agent.surface_id != str(row["workspace_surface_id"])
             or observed.agent.name not in expected_names
-            or not observed.agent.identity_usable
+            or (require_agent_ready and not observed.agent.identity_usable)
         ):
             return False
         if require_prompt_eligible and row["observed_state"] != "working" and not workspace.prompt_eligible(observed.agent):
@@ -325,7 +326,13 @@ def prepare_session_switch(store: Any, payload: Mapping[str, Any], harness: Harn
 def prepare_runtime_turn(store: Any, payload: Mapping[str, Any], workspace: WorkspaceAdapter, harness: HarnessAdapter) -> dict[str, Any]:
     """Present the current immutable packet and attention in one durable turn."""
     binding = verify_runtime_binding(store, payload, worker_only=False)
-    if not usable_runtime_binding(store, str(binding["workstream_id"]), workspace, harness, allowed_states={"idle", "working"}, require_prompt_eligible=True):
+    # This operation runs inside the exact authenticated runtime after Codex
+    # has already accepted a prompt.  Herdr may still display the just-started
+    # agent as ``starting``; that presentation lag must not block the original
+    # prompt.  Keep the durable session event, process, pane, agent name, token,
+    # instance, surface, and generation checks, but do not require the display
+    # state to become prompt-eligible first.
+    if not usable_runtime_binding(store, str(binding["workstream_id"]), workspace, harness, allowed_states={"idle", "working"}, require_agent_ready=False):
         raise ConflictError("runtime is not a usable attested binding")
     if binding["refresh_pending"] or binding["launch_generation_sha256"] is not None:
         raise ConflictError("runtime is reserved for a generation refresh")

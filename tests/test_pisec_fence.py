@@ -1224,6 +1224,19 @@ class RuntimeReportTests(unittest.TestCase):
         self.assertTrue(prepared["prepared"])
         self.assertIsNotNone(prepared["taskPacket"])
 
+    def test_runtime_turn_accepts_the_original_prompt_while_agent_display_is_starting(self):
+        report_runtime(self.store, self.payload(state="idle"), self.harness, self.workspace)
+        for name, agent in list(self.workspace.agents.items()):
+            if agent.surface_id == self.binding["workspace_surface_id"]:
+                self.workspace.agents[name] = AgentObservation(agent.name, agent.surface_id, False, "starting")
+        auth = {"workstreamId": self.workstream_id, "runtimeInstanceId": "instance-1", "surfaceId": self.binding["workspace_surface_id"], "token": self.token, "generation": self.binding["desired_generation_sha256"]}
+
+        self.assertFalse(usable_runtime_binding(self.store, self.workstream_id, self.workspace, self.harness))
+        prepared = prepare_runtime_turn(self.store, auth, self.workspace, self.harness)
+
+        self.assertTrue(prepared["prepared"])
+        self.assertIsNotNone(prepared["taskPacket"])
+
     def test_runtime_turn_returns_full_packet_and_consumes_one_durable_bootstrap(self):
         report_runtime(self.store, self.payload(state="idle"), self.harness, self.workspace)
         for name, agent in list(self.workspace.agents.items()):
