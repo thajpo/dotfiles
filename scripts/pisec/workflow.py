@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from .events import append_event_in_transaction
 from .runtime_eligibility import runtime_lifecycle_eligible
-from .models import ConflictError, IdempotencyConflictError, InvalidRequestError, NotFoundError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_git_oid, validate_id, validate_sha256
+from .models import ConflictError, IdempotencyConflictError, InvalidRequestError, NotFoundError, ScopeMismatchError, bounded_text, canonical_json, json_digest, new_id, utc_now, validate_git_oid, validate_id, validate_sha256
 from .projects import _git, assert_project_writable, get_project, is_first_mate_issue_project, platform_project_id
 from .worker_repo import integration_private_target_ref, validate_worker_repository
 
@@ -629,9 +629,20 @@ def _submit_completion_in_transaction(store: Any, *, workstream_id: str, runtime
     if task is None or normalized["taskPacketSha256"] != task["packet_sha256"]:
         raise ConflictError("completion packet does not match the immutable task packet")
     integration = store.conn.execute(
-        "SELECT integration_id,state,target_oid FROM integration_jobs WHERE workstream_id=? ORDER BY created_at DESC LIMIT 1",
+        "SELECT j.integration_id,j.state,j.target_oid,a.scope_json FROM integration_jobs j JOIN workstream_acceptances a USING(acceptance_id) WHERE j.workstream_id=? ORDER BY j.created_at DESC LIMIT 1",
         (workstream_id,),
     ).fetchone()
+    if integration is not None:
+        try:
+            accepted_scope = json.loads(str(integration["scope_json"]))
+            accepted_criteria = accepted_scope["acceptance"]
+        except (KeyError, TypeError, json.JSONDecodeError) as error:
+            raise ConflictError("accepted completion contract is invalid") from error
+        submitted_identity = [(item["criterion"], item["status"]) for item in normalized["acceptance"]]
+        if not isinstance(accepted_criteria, list) or submitted_identity != [
+            (item.get("criterion"), item.get("status")) for item in accepted_criteria if isinstance(item, Mapping)
+        ] or len(submitted_identity) != len(accepted_criteria):
+            raise ScopeMismatchError("replacement completion packet changed the accepted criteria")
     private_ref = integration_private_target_ref(integration)
     history_base_oid = None
     if private_ref is not None:
@@ -651,6 +662,12 @@ def _submit_completion_in_transaction(store: Any, *, workstream_id: str, runtime
     existing = store.conn.execute("SELECT * FROM completion_packets WHERE packet_sha256=?", (packet_sha,)).fetchone()
     if existing is not None:
         return dict(existing)
+    source_packet = store.conn.execute(
+        "SELECT * FROM completion_packets WHERE workstream_id=? AND source_commit_oid=? ORDER BY sequence LIMIT 1",
+        (workstream_id, observed_source),
+    ).fetchone()
+    if source_packet is not None:
+        raise ConflictError("completion already exists for this source commit; retry the exact packet or commit the accepted target-drift replacement")
     now = utc_now()
     packet_id = new_id("cmp")
     sequence = int(store.conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM completion_packets WHERE workstream_id=?", (workstream_id,)).fetchone()[0])

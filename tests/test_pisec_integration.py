@@ -7,7 +7,7 @@ from unittest.mock import patch
 import scripts.pisec.integration as integration_module
 from scripts.pisec.attention import inspect_attention
 from scripts.pisec.integration import apply_workstream_acceptance, prepare_workstream_acceptance, reconcile_integrations
-from scripts.pisec.models import ConflictError
+from scripts.pisec.models import ConflictError, ScopeMismatchError
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import _git, register_project
 from scripts.pisec.secretary import ensure_secretary
@@ -88,16 +88,17 @@ class IntegrationTests(unittest.TestCase):
                 store.conn.execute("UPDATE workstream_acceptances SET scope_json=? WHERE acceptance_id=?", ("{}", accepted["acceptance"]["acceptance_id"]))
             binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
             task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
-            submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
+            replayed_completion = submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
                     "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Fixture output."]}],
-                    "verification": [{"command": "fixture verification rerun", "result": "passed"}],
+                    "verification": [{"command": "fixture verification", "result": "passed"}],
                     "sourceCommit": source,
                     "taskPacketSha256": task["packet_sha256"],
                     "changedSurfaces": ["fixture"],
                     "residualRisk": "none",
                 })
-            with self.assertRaises(ConflictError):
-                prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            self.assertEqual(replayed_completion["packet_sha256"], packet["packet_sha256"])
+            replayed_preparation = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            self.assertEqual(replayed_preparation["approvalScope"], prepared["approvalScope"])
             dirty = repo / "unrelated-untracked.txt"
             dirty.write_text("temporary\n")
             replay_dirty = apply_workstream_acceptance(store, project["project_id"], prepared["approvalScope"])
@@ -357,31 +358,26 @@ class IntegrationTests(unittest.TestCase):
             rebased_source = git_worker(worktree, "rev-parse", "HEAD").lower()
             binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
             task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
-            submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
-                    "acceptance": [{"criterion": "A widened criterion.", "status": "passed", "evidence": ["Rebased fixture output."]}],
-                    "verification": [{"command": "fixture verification", "result": "passed"}],
-                    "sourceCommit": rebased_source,
-                    "taskPacketSha256": task["packet_sha256"],
-                    "changedSurfaces": ["fixture"],
-                    "residualRisk": "none",
-                })
-            prior_attention = store.conn.execute(
-                "SELECT attention_id,source_event_sequence FROM attention_items WHERE recipient_workstream_id=? AND source_kind='integration' AND source_id=?",
-                (scope["workstreamId"], accepted["integration"]["integration_id"]),
-            ).fetchone()
-            rejected = reconcile_integrations(store, workspace, harness)
-            self.assertEqual(rejected["processed"][0]["state"], "awaiting_worker")
-            job = store.conn.execute(
-                "SELECT last_error,next_action FROM integration_jobs WHERE integration_id=?",
-                (accepted["integration"]["integration_id"],),
-            ).fetchone()
-            self.assertEqual(job["last_error"], "replacement completion packet changed the accepted criteria")
-            self.assertIn("source.accepted_completion_contract.criteria", job["next_action"])
+            with self.assertRaisesRegex(ScopeMismatchError, "changed the accepted criteria"):
+                submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
+                        "acceptance": [{"criterion": "A widened criterion.", "status": "passed", "evidence": ["Rebased fixture output."]}],
+                        "verification": [{"command": "fixture verification", "result": "passed"}],
+                        "sourceCommit": rebased_source,
+                        "taskPacketSha256": task["packet_sha256"],
+                        "changedSurfaces": ["fixture"],
+                        "residualRisk": "none",
+                    })
+            self.assertEqual(
+                store.conn.execute(
+                    "SELECT COUNT(*) FROM completion_packets WHERE workstream_id=? AND source_commit_oid=?",
+                    (scope["workstreamId"], rebased_source),
+                ).fetchone()[0],
+                0,
+            )
             current_attention = store.conn.execute(
                 "SELECT attention_id,source_event_sequence FROM attention_items WHERE recipient_workstream_id=? AND source_kind='integration' AND source_id=?",
                 (scope["workstreamId"], accepted["integration"]["integration_id"]),
             ).fetchone()
-            self.assertGreater(current_attention["source_event_sequence"], prior_attention["source_event_sequence"])
             inspected = inspect_attention(store, recipient_workstream_id=scope["workstreamId"], attention_id=current_attention["attention_id"])
             self.assertEqual(
                 inspected["source"]["accepted_completion_contract"],
@@ -390,16 +386,6 @@ class IntegrationTests(unittest.TestCase):
                     "changed_paths": ["feature.txt"],
                     "conflict_policy": "bounded-worker-reconciliation",
                 },
-            )
-            replay_revision = current_attention["source_event_sequence"]
-            replayed_rejection = reconcile_integrations(store, workspace, harness)
-            self.assertEqual(replayed_rejection["processed"][0]["state"], "awaiting_worker")
-            self.assertEqual(
-                store.conn.execute(
-                    "SELECT source_event_sequence FROM attention_items WHERE recipient_workstream_id=? AND source_kind='integration' AND source_id=?",
-                    (scope["workstreamId"], accepted["integration"]["integration_id"]),
-                ).fetchone()[0],
-                replay_revision,
             )
             replacement_packet = {
                 "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Rebased fixture output."]}],

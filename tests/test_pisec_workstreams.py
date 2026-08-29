@@ -266,8 +266,9 @@ class WorkstreamTests(unittest.TestCase):
         self.assertEqual(store.conn.execute("SELECT count(*) FROM completion_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()[0], 1)
         changed_packet = dict(packet)
         changed_packet["residualRisk"] = "changed"
-        submit_completion(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], packet=changed_packet)
-        self.assertEqual(store.conn.execute("SELECT count(*) FROM completion_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()[0], 2)
+        with self.assertRaisesRegex(ConflictError, "retry the exact packet"):
+            submit_completion(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], packet=changed_packet)
+        self.assertEqual(store.conn.execute("SELECT count(*) FROM completion_packets WHERE workstream_id=?", (workstream["workstream_id"],)).fetchone()[0], 1)
 
     def test_progress_checkpoint_rejects_ready_review(self):
         temp, root, repo, store, project, harness, workspace, git_objects = self.fixture()
