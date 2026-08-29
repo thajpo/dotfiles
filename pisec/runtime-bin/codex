@@ -213,7 +213,7 @@ def main() -> None:
         'approval_policy="never"',
         'sandbox_mode="danger-full-access"',
         f"model_catalog_json={toml_string(str(model_catalog_path))}",
-        'mcp_servers.pisec.env_vars=["PISEC_RUNTIME_SOCKET","PISEC_RUNTIME_TOKEN","PISEC_WORKSTREAM_ID","PISEC_RUNTIME_INSTANCE_ID","PISEC_SURFACE_ID","PISEC_PROJECT_ID"]',
+        'mcp_servers.pisec.env_vars=["PISEC_RUNTIME_SOCKET","PISEC_RUNTIME_TOKEN","PISEC_RUNTIME_GENERATION","PISEC_WORKSTREAM_ID","PISEC_RUNTIME_INSTANCE_ID","PISEC_SURFACE_ID","PISEC_PROJECT_ID"]',
         'mcp_servers.pisec.omit_tools_from=["deferred"]',
     )
     fence = [str(descriptor["fencePath"]), "--settings", str(descriptor["policyPath"]), "--", str(descriptor["nodeExecutablePath"]), str(descriptor["harnessExecutablePath"]), "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--no-alt-screen", "--cd", str(root), "--model", str(descriptor["model"])]

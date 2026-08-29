@@ -524,6 +524,10 @@ def _post_switch(current: Path, wait_seconds: float) -> dict:
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     _systemctl("start")
     _wait_for_broker(wait_seconds)
+    refresh = subprocess.run([str(current / "bin" / "pisec"), "project", "refresh", "--all", "--wait-seconds", str(wait_seconds), "--json"], env=environment, text=True, capture_output=True)
+    refresh_value = json.loads(refresh.stdout) if refresh.stdout.strip() else {"ok": False}
+    if refresh.returncode or refresh_value.get("ok") is not True or refresh_value.get("failed") or refresh_value.get("pending"):
+        raise RuntimeError(f"runtime refresh failed: {refresh.stdout[-512:]}{refresh.stderr[-512:]}")
     doctor = subprocess.run([str(current / "bin" / "pisec"), "doctor", "--json"], env=environment, text=True, capture_output=True)
     if doctor.returncode:
         raise RuntimeError(f"doctor failed: {doctor.stdout[-512:]}{doctor.stderr[-512:]}")
@@ -533,10 +537,6 @@ def _post_switch(current: Path, wait_seconds: float) -> dict:
         raise RuntimeError("doctor returned invalid JSON") from error
     if doctor_value.get("ok") is not True:
         raise RuntimeError("doctor reported failed checks")
-    refresh = subprocess.run([str(current / "bin" / "pisec"), "project", "refresh", "--all", "--wait-seconds", str(wait_seconds), "--json"], env=environment, text=True, capture_output=True)
-    refresh_value = json.loads(refresh.stdout) if refresh.stdout.strip() else {"ok": False}
-    if refresh.returncode or refresh_value.get("ok") is not True or refresh_value.get("failed") or refresh_value.get("pending"):
-        raise RuntimeError(f"runtime refresh failed: {refresh.stdout[-512:]}{refresh.stderr[-512:]}")
     reconcile = subprocess.run([str(current / "bin" / "pisec"), "reconcile", "--json"], env=environment, text=True, capture_output=True)
     if reconcile.returncode:
         raise RuntimeError(f"reconcile failed: {reconcile.stdout[-512:]}{reconcile.stderr[-512:]}")
@@ -726,6 +726,10 @@ def update(repo: Path, ref: str, wait_seconds: float, state_root: Path, install_
             current = _current_target(install_root)
             current_identity, stable, marker = _preflight_metadata(install_root, expected_database=expected_database, current=current)
             _preflight_state(state_root, expected_database)
+            if current_identity is not None and marker is None:
+                current_verification = install_root / "verified" / f"{current_identity['deployment']}.json"
+                if current_verification.is_file() and not current_verification.is_symlink():
+                    marker = _write_marker(install_root, _verified_record(install_root, current, expected_database=expected_database))
             candidate = _stage_candidate(repo, commit, install_root)
             staging = candidate["staging"]
             candidate_manifest = candidate["manifest"]
@@ -754,9 +758,11 @@ def update(repo: Path, ref: str, wait_seconds: float, state_root: Path, install_
             stable = _install_stable_from_deployment(install_root, deployment, candidate_identity)
             status["currentStep"] = "last-known-good"
             _json_write(status_path, status)
-            if current_identity is not None:
-                previous_verified = _verified_record(install_root, _deployment_path(install_root, current_identity["deployment"]), expected_database=expected_database)
-                marker = _write_marker(install_root, previous_verified)
+            if current_identity is not None and marker is None:
+                previous_path = _deployment_path(install_root, current_identity["deployment"])
+                previous_verification = install_root / "verified" / f"{previous_path.name}.json"
+                if previous_verification.is_file() and not previous_verification.is_symlink():
+                    marker = _write_marker(install_root, _verified_record(install_root, previous_path, expected_database=expected_database))
             status["currentStep"] = "prune"
             _json_write(status_path, status)
             _prune(install_root, current=deployment, marker=marker)

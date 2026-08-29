@@ -232,7 +232,7 @@ class Phase10ScopeParityTests(unittest.TestCase):
             )
             self.assertIn('omit_tools_from = ["deferred"]', config_text)
             self.assertIn(
-                'env_vars = ["PISEC_RUNTIME_SOCKET", "PISEC_RUNTIME_TOKEN", "PISEC_WORKSTREAM_ID", "PISEC_RUNTIME_INSTANCE_ID", "PISEC_SURFACE_ID", "PISEC_PROJECT_ID"]',
+                'env_vars = ["PISEC_RUNTIME_SOCKET", "PISEC_RUNTIME_TOKEN", "PISEC_RUNTIME_GENERATION", "PISEC_WORKSTREAM_ID", "PISEC_RUNTIME_INSTANCE_ID", "PISEC_SURFACE_ID", "PISEC_PROJECT_ID"]',
                 config_text,
             )
             self.assertNotIn("code_mode", config_text)
@@ -262,7 +262,7 @@ class Phase10ScopeParityTests(unittest.TestCase):
             self.assertIn("features.hooks=true", config_values)
             self.assertIn('mcp_servers.pisec.omit_tools_from=["deferred"]', config_values)
             self.assertIn(
-                'mcp_servers.pisec.env_vars=["PISEC_RUNTIME_SOCKET","PISEC_RUNTIME_TOKEN","PISEC_WORKSTREAM_ID","PISEC_RUNTIME_INSTANCE_ID","PISEC_SURFACE_ID","PISEC_PROJECT_ID"]',
+                'mcp_servers.pisec.env_vars=["PISEC_RUNTIME_SOCKET","PISEC_RUNTIME_TOKEN","PISEC_RUNTIME_GENERATION","PISEC_WORKSTREAM_ID","PISEC_RUNTIME_INSTANCE_ID","PISEC_SURFACE_ID","PISEC_PROJECT_ID"]',
                 config_values,
             )
             self.assertFalse(any(value.startswith("features.code_mode") for value in config_values))

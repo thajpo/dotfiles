@@ -88,6 +88,39 @@ class UpdaterContractTests(unittest.TestCase):
             finally:
                 server.close()
 
+    def test_post_switch_refreshes_stale_bindings_before_strict_doctor(self):
+        calls = []
+
+        def fake_run(argv, **_kwargs):
+            calls.append(tuple(argv[1:3]))
+            if argv[1:3] == ["project", "refresh"]:
+                payload = {"ok": True, "failed": [], "pending": []}
+            elif argv[1] == "doctor":
+                payload = {"ok": True}
+            elif argv[1] == "reconcile":
+                payload = {"reconciled": True, "errors": []}
+            else:  # pragma: no cover - protects the expected command contract
+                raise AssertionError(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+
+        module_globals = self.updater["_post_switch"].__globals__
+        old_systemctl = module_globals["_systemctl"]
+        old_wait = module_globals["_wait_for_broker"]
+        old_semantic_health = module_globals["_semantic_state_health"]
+        module_globals["_systemctl"] = lambda _action: None
+        module_globals["_wait_for_broker"] = lambda _seconds: None
+        module_globals["_semantic_state_health"] = lambda _state: None
+        try:
+            with patch.object(self.updater["subprocess"], "run", side_effect=fake_run):
+                result = self.updater["_post_switch"](Path("/tmp/deployment"), 1)
+        finally:
+            module_globals["_systemctl"] = old_systemctl
+            module_globals["_wait_for_broker"] = old_wait
+            module_globals["_semantic_state_health"] = old_semantic_health
+
+        self.assertEqual(calls, [("project", "refresh"), ("doctor", "--json"), ("reconcile", "--json"), ("doctor", "--json")])
+        self.assertEqual(result["doctorAfter"], "ok")
+
     def test_unsupported_state_writes_status_outside_state_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -129,6 +162,59 @@ class UpdaterContractTests(unittest.TestCase):
             self.assertEqual(verified_before, (install / "verified" / "deploy-old.json").read_bytes())
             self.assertEqual(result["state"], "needs_attention")
             self.assertFalse((install / "stable-updater.json").exists())
+
+    def test_update_establishes_recovery_marker_before_switching_from_verified_current(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            install = root / "install"
+            with PiStore(state):
+                pass
+            old, _identity = self._install_verified_current(install)
+            (install / "last-known-good.json").unlink()
+            module_globals = self.updater["update"].__globals__
+            old_systemctl = module_globals["_systemctl"]
+            old_post_switch = module_globals["_post_switch"]
+            module_globals["_systemctl"] = lambda _action: None
+            module_globals["_post_switch"] = lambda _current, _wait: (_ for _ in ()).throw(RuntimeError("health failed"))
+            try:
+                code, result = self.updater["update"](ROOT, "HEAD", 0, state, install)
+            finally:
+                module_globals["_systemctl"] = old_systemctl
+                module_globals["_post_switch"] = old_post_switch
+
+            self.assertEqual(code, self.updater["EXIT_NEEDS_ATTENTION"])
+            marker = json.loads((install / "last-known-good.json").read_text())
+            self.assertEqual(marker["deployment"], old.name)
+            self.assertTrue(result["recoveryAvailable"])
+
+    def test_successful_update_can_recover_from_an_unverified_current_deployment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            install = root / "install"
+            with PiStore(state):
+                pass
+            install.mkdir(mode=0o700)
+            commit = self.updater["_git"](ROOT, "rev-parse", "HEAD")
+            candidate = self.updater["_stage_candidate"](ROOT, commit, install)
+            unverified = install / "deploy-unverified"
+            os.replace(candidate["staging"], unverified)
+            (install / "current").symlink_to(unverified.name)
+            module_globals = self.updater["update"].__globals__
+            old_systemctl = module_globals["_systemctl"]
+            old_post_switch = module_globals["_post_switch"]
+            module_globals["_systemctl"] = lambda _action: None
+            module_globals["_post_switch"] = lambda _current, _wait: {"doctor": "ok", "refresh": {}, "reconcile": "ok"}
+            try:
+                code, result = self.updater["update"](ROOT, "HEAD", 0, state, install)
+            finally:
+                module_globals["_systemctl"] = old_systemctl
+                module_globals["_post_switch"] = old_post_switch
+
+            self.assertEqual(code, 0, result)
+            self.assertFalse(result["recoveryAvailable"])
+            self.assertFalse((install / "last-known-good.json").exists())
 
     def test_semantic_health_rejects_needs_attention_operations(self):
         with tempfile.TemporaryDirectory() as tmp:

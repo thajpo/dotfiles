@@ -439,7 +439,7 @@ or credentials. `PISEC_AUTH_GATEWAY_BACKEND_PORT` defaults to `4001` and must
 differ from every public Pisec service port.
 
 Codex starts stdio MCP servers with an allowlisted environment. The managed
-Pisec MCP definition passes only the six runtime-binding variable names that
+Pisec MCP definition passes only the seven runtime-binding variable names that
 the broker requires. The runtime token remains in the process environment; it
 is not written into Codex configuration or copied into the immutable surface.
 

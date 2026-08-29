@@ -130,15 +130,17 @@ def _request(operation: str, params: dict[str, Any], native_tool_id: str = "") -
     workstream = os.environ.get("PISEC_WORKSTREAM_ID")
     instance = os.environ.get("PISEC_RUNTIME_INSTANCE_ID")
     surface = os.environ.get("PISEC_SURFACE_ID")
-    if not all(isinstance(value, str) and value for value in (socket_path, token, workstream, instance, surface)):
+    generation = os.environ.get("PISEC_RUNTIME_GENERATION")
+    if not all(isinstance(value, str) and value for value in (socket_path, token, workstream, instance, surface, generation)):
         raise RuntimeError("Pisec runtime binding is incomplete")
     model_payload = dict(params)
     model_payload.pop("idempotencyKey", None)
     model_payload.pop("idempotency_key", None)
     if operation in IDEMPOTENT_OPERATIONS:
         model_payload["idempotencyKey"] = _adapter_idempotency_key(operation, model_payload, native_tool_id)
-    payload = {"workstreamId": workstream, "runtimeInstanceId": instance, "surfaceId": surface, "token": token, **model_payload}
-    request = {"protocolVersion": 1, "requestId": "codex-mcp", "operation": operation, "payload": payload}
+    payload = {"workstreamId": workstream, "runtimeInstanceId": instance, "surfaceId": surface, "token": token, "generation": generation, **model_payload}
+    request_id = "req_" + hashlib.sha256(f"{workstream}:{instance}:{operation}:{native_tool_id}".encode("utf-8")).hexdigest()[:32]
+    request = {"protocolVersion": 1, "requestId": request_id, "operation": operation, "payload": payload}
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(30)
         client.connect(socket_path)
@@ -152,6 +154,8 @@ def _request(operation: str, params: dict[str, Any], native_tool_id: str = "") -
             if len(response) > 128 * 1024:
                 raise RuntimeError("Pisec response is too large")
     value = json.loads(response.decode())
+    if value.get("requestId") != request_id:
+        raise RuntimeError("Pisec broker response identity does not match the request")
     if not value.get("ok"):
         error = value.get("error")
         raise RuntimeError(str(error.get("message", "Pisec request failed") if isinstance(error, dict) else "Pisec request failed"))

@@ -1,10 +1,16 @@
+import os
+import socket
+import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.pisec.broker import BrokerDispatcher
-from scripts.pisec.codex_mcp import TOOLS, TOOL_DESCRIPTIONS, _adapter_idempotency_key
+from scripts.pisec.codex_mcp import TOOLS, TOOL_DESCRIPTIONS, _adapter_idempotency_key, _request
 from scripts.pisec.config import DEFAULT_WORKER_MODEL, DEFAULT_WORKER_ROUTE, _validate_worker_routing
 from scripts.pisec.models import InvalidRequestError
+from scripts.pisec.protocol import decode_request, success_response
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace
 from scripts.pisec.adapters import AdapterRegistry
 
@@ -67,6 +73,52 @@ class PisecRoutingCompletionTests(unittest.TestCase):
         self.assertEqual(first, reordered)
         self.assertNotEqual(first, different_call)
         self.assertRegex(first, r"^adapter:codex:[0-9a-f]{64}$")
+
+    def test_codex_mcp_sends_the_complete_authenticated_protocol_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            socket_path = Path(tmp) / "runtime.sock"
+            ready = threading.Event()
+            captured = {}
+            failures = []
+
+            def serve():
+                try:
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                        server.bind(str(socket_path))
+                        server.listen()
+                        ready.set()
+                        connection, _address = server.accept()
+                        with connection:
+                            request_bytes = b""
+                            while not request_bytes.endswith(b"\n"):
+                                request_bytes += connection.recv(65536)
+                            request = decode_request(request_bytes)
+                            captured.update(request)
+                            connection.sendall(success_response(request["requestId"], {"task": "available"}))
+                except Exception as error:  # pragma: no cover - surfaced in the main test thread
+                    failures.append(error)
+                    ready.set()
+
+            server_thread = threading.Thread(target=serve, daemon=True)
+            server_thread.start()
+            self.assertTrue(ready.wait(5))
+            environment = {
+                "PISEC_RUNTIME_SOCKET": str(socket_path),
+                "PISEC_RUNTIME_TOKEN": "t" * 64,
+                "PISEC_RUNTIME_GENERATION": "a" * 64,
+                "PISEC_WORKSTREAM_ID": "ws_" + "b" * 32,
+                "PISEC_RUNTIME_INSTANCE_ID": "c" * 32,
+                "PISEC_SURFACE_ID": "workspace:pane",
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                result = _request("task.get", {}, "call-1")
+            server_thread.join(timeout=5)
+
+            self.assertFalse(server_thread.is_alive())
+            self.assertFalse(failures, failures)
+            self.assertEqual(result, {"task": "available"})
+            self.assertRegex(captured["requestId"], r"^req_[0-9a-f]{32}$")
+            self.assertEqual(captured["payload"]["generation"], "a" * 64)
 
 
 if __name__ == "__main__":
