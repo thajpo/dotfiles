@@ -396,7 +396,13 @@ class Phase10ScopeParityTests(unittest.TestCase):
                 self.payload = json.loads(data.decode())
 
             def recv(self, _size):
-                return b"{}"
+                return json.dumps(
+                    {
+                        "requestId": self.payload["requestId"],
+                        "ok": True,
+                        "result": {"accepted": True, "seq": self.payload["payload"]["seq"]},
+                    }
+                ).encode()
 
         recording = RecordingSocket()
         with tempfile.TemporaryDirectory() as tmp:
@@ -440,7 +446,13 @@ class Phase10ScopeParityTests(unittest.TestCase):
                 self.payload = json.loads(data.decode())
 
             def recv(self, _size):
-                return b"{}"
+                return json.dumps(
+                    {
+                        "requestId": self.payload["requestId"],
+                        "ok": True,
+                        "result": {"accepted": True, "seq": self.payload["payload"]["seq"]},
+                    }
+                ).encode()
 
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "sessions").mkdir()
@@ -473,6 +485,64 @@ class Phase10ScopeParityTests(unittest.TestCase):
             [(1, "session_start", "working"), (2, "lifecycle", "idle"), (1, "session_start", "working")],
         )
         self.assertEqual([report["startSource"] for report in reports], ["resume", "resume", "resume"])
+
+    def test_codex_hook_retries_an_unacknowledged_lifecycle_sequence(self):
+        class RecordingSocket:
+            def __init__(self, *, accepted):
+                self.accepted = accepted
+                self.payload = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                return None
+
+            def connect(self, _path):
+                if not self.accepted:
+                    raise ConnectionRefusedError("broker unavailable")
+
+            def sendall(self, data):
+                self.payload = json.loads(data.decode())
+
+            def recv(self, _size):
+                return json.dumps(
+                    {
+                        "requestId": self.payload["requestId"],
+                        "ok": True,
+                        "result": {"accepted": True, "seq": self.payload["payload"]["seq"]},
+                    }
+                ).encode()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = Path(tmp) / "sessions"
+            sessions.mkdir()
+            environment = {
+                "PISEC_RUNTIME_SOCKET": str(Path(tmp) / "runtime.sock"),
+                "PISEC_RUNTIME_TOKEN": "t" * 48,
+                "PISEC_WORKSTREAM_ID": "ws_" + "2" * 32,
+                "PISEC_RUNTIME_INSTANCE_ID": "3" * 32,
+                "PISEC_SURFACE_ID": "surface_" + "4" * 32,
+                "PISEC_HARNESS_HOME": tmp,
+                "PISEC_SESSION_START_SOURCE": "startup",
+            }
+            failed = RecordingSocket(accepted=False)
+            with patch.dict(os.environ, environment), patch("scripts.pisec.codex_hook.socket.socket", return_value=failed), patch(
+                "sys.stdin", io.StringIO(json.dumps({"hook_event_name": "Stop", "session_id": "native-session"}))
+            ):
+                self.assertEqual(codex_hook.main(), 0)
+            self.assertFalse(list(sessions.glob(".pisec-hook-sequence-*")))
+
+            accepted = RecordingSocket(accepted=True)
+            with patch.dict(os.environ, environment), patch("scripts.pisec.codex_hook.socket.socket", return_value=accepted), patch(
+                "sys.stdin", io.StringIO(json.dumps({"hook_event_name": "Stop", "session_id": "native-session"}))
+            ):
+                self.assertEqual(codex_hook.main(), 0)
+            self.assertEqual(accepted.payload["payload"]["seq"], 1)
+            self.assertEqual(next(sessions.glob(".pisec-hook-sequence-*")).read_text(), "1")
 
     def test_codex_restart_hook_attests_through_the_public_runtime_socket(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1080,6 +1080,10 @@ class RuntimeReportTests(unittest.TestCase):
         final = report_runtime(self.store, self.payload(seq=3, event="session_shutdown", state="stopped", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
         self.assertEqual(final["workspaceReportSeq"], 4)
         self.assertEqual([call[0] for call in self.workspace.calls if call[0] in {"report_session", "report_state", "release"}], ["report_session", "report_state", "report_state", "release"])
+        duplicate = report_runtime(self.store, self.payload(seq=3, event="session_shutdown", state="stopped", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(duplicate["workspaceReportSeq"], 4)
+        self.assertEqual([call[0] for call in self.workspace.calls if call[0] in {"report_session", "report_state", "release"}], ["report_session", "report_state", "report_state", "release"])
         with self.assertRaises(ConflictError):
             report_runtime(self.store, self.payload(seq=2, event="lifecycle", state="idle", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
 

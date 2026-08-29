@@ -426,14 +426,35 @@ def report_runtime(store: Any, payload_value: Mapping[str, Any], harness: Harnes
     binding = verify_runtime_binding(store, payload, allow_session_start=event == "session_start")
     workstream_id = str(binding["workstream_id"])
     instance = str(payload["runtimeInstanceId"])
+    kind, value = payload["nativeSessionKind"], payload["nativeSessionValue"]
+    current_seq = int(binding["report_seq"])
+    if seq == current_seq and current_seq > 0:
+        same_instance = binding["runtime_instance_id"] == instance
+        same_generation = binding["applied_generation_sha256"] == generation
+        same_state = binding["observed_state"] == state
+        same_native = kind is None or (kind == binding["native_session_kind"] and value == binding["native_session_value"])
+        same_start = event != "session_start" or (
+            seq == 1
+            and binding["session_start_report_seq"] == 1
+            and binding["session_start_event_sequence"] is not None
+        )
+        if same_instance and same_generation and same_state and same_native and same_start:
+            return {
+                "accepted": True,
+                "duplicate": True,
+                "workstreamId": workstream_id,
+                "seq": seq,
+                "reason": reason,
+                "workspaceReportSeq": int(binding["workspace_report_seq"]),
+            }
+        raise ConflictError("runtime report sequence is stale")
     if event == "session_start":
         if seq != 1:
             raise ConflictError("new runtime instance must start at sequence 1")
-        if binding["runtime_instance_id"] == instance and int(binding["report_seq"]) > 0:
+        if binding["runtime_instance_id"] == instance and current_seq > 0:
             raise ConflictError("runtime session start is a duplicate")
-    elif seq <= int(binding["report_seq"]):
+    elif seq < current_seq:
         raise ConflictError("runtime report sequence is stale")
-    kind, value = payload["nativeSessionKind"], payload["nativeSessionValue"]
     harness.validate_native_session(binding, kind, value)
     start_source = payload["startSource"]
     if start_source not in {"startup", "resume"}:

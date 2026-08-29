@@ -40,10 +40,6 @@ def main() -> int:
             sequence = int(sequence_path.read_text()) + 1 if sequence_path.exists() else 1
         except (OSError, ValueError):
             sequence = 1
-        try:
-            sequence_path.write_text(str(sequence))
-        except OSError:
-            pass
     payload = {
         "workstreamId": workstream,
         "runtimeInstanceId": instance,
@@ -60,14 +56,28 @@ def main() -> int:
     }
     request_id = "req_" + hashlib.sha256(f"{workstream}:{instance}:{sequence}".encode("utf-8")).hexdigest()[:32]
     request = {"protocolVersion": 1, "requestId": request_id, "operation": "runtime.report", "payload": payload}
+    accepted = False
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(5)
             client.connect(socket_path)
             client.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
-            client.recv(65536)
-    except OSError:
+            response = json.loads(client.recv(65536).decode())
+            result = response.get("result") if isinstance(response, dict) else None
+            accepted = bool(
+                response.get("requestId") == request_id
+                and response.get("ok") is True
+                and isinstance(result, dict)
+                and result.get("accepted") is True
+                and result.get("seq") == sequence
+            )
+    except (OSError, UnicodeError, json.JSONDecodeError):
         pass
+    if accepted and sequence_path is not None:
+        try:
+            sequence_path.write_text(str(sequence))
+        except OSError:
+            pass
     return 0
 
 
