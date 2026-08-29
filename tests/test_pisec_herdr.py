@@ -190,8 +190,10 @@ class HerdrTests(unittest.TestCase):
         self.assertEqual(self.state.ready_reads, 3)
 
     def test_runtime_trigger_revalidates_fence_and_sends_only_inert_token(self):
-        result = self.adapter.trigger_agent_nowait("w1:p1", "PISEC_ATTENTION_TRIGGER", "/tmp/policy")
+        with patch("scripts.pisec.workspaces.herdr.time.sleep") as sleep:
+            result = self.adapter.trigger_agent_nowait("w1:p1", "PISEC_ATTENTION_TRIGGER", "/tmp/policy")
         self.assertEqual(result, {"type": "runtime_triggered", "pane_id": "w1:p1", "verified_runtime": True})
+        sleep.assert_called_once_with(1.5)
         self.assertEqual(
             self.state.requests[-3:],
             [
@@ -203,7 +205,8 @@ class HerdrTests(unittest.TestCase):
 
     def test_runtime_trigger_accepts_protocol_ok_send_text_result(self):
         self.state.send_text_type = "ok"
-        result = self.adapter.trigger_agent_nowait("w1:p1", "PISEC_ATTENTION_TRIGGER", "/tmp/policy")
+        with patch("scripts.pisec.workspaces.herdr.time.sleep"):
+            result = self.adapter.trigger_agent_nowait("w1:p1", "PISEC_ATTENTION_TRIGGER", "/tmp/policy")
         self.assertTrue(result["verified_runtime"])
         self.assertEqual(self.state.requests[-1], ("pane.send_keys", {"pane_id": "w1:p1", "keys": ["Enter"]}))
 

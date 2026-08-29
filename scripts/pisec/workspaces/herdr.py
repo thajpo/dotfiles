@@ -19,6 +19,7 @@ from ..runtime import WORKSPACE_RUNTIME_MISSING
 HERDR_PROTOCOL = 19
 HERDR_MIN_VERSION = (0, 8, 0)
 PANE_READY_MAX_SECONDS = 30.0
+RUNTIME_TRIGGER_SETTLE_SECONDS = 1.5
 MAX_RESPONSE = 2 * 1024 * 1024
 MAX_SNAPSHOT_ITEMS = MAX_JSON_ITEMS * 4
 PROCESS_INFO_MAX_TEXT = 128 * 1024
@@ -319,6 +320,10 @@ class HerdrWorkspaceAdapter:
         sent = self._request("pane.send_text", {"pane_id": surface_id, "text": trigger})
         if sent.get("type") not in {"ok", "pane_text_sent"}:
             raise PisecError("workspace did not accept the runtime trigger text")
+        # Codex handles pasted text asynchronously.  Submitting Enter before
+        # the paste settles can leave the trigger in the composer instead of
+        # starting a turn.
+        time.sleep(RUNTIME_TRIGGER_SETTLE_SECONDS)
         entered = self._request("pane.send_keys", {"pane_id": surface_id, "keys": ["Enter"]})
         if entered.get("type") != "ok":
             raise PisecError("workspace did not accept the runtime trigger submission")
