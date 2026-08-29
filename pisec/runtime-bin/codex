@@ -149,6 +149,8 @@ def main() -> None:
         if len(start_args) != 1 or not start_args[0].startswith("--resume="):
             fail("unsupported Codex launcher arguments")
         resume = start_args[0].split("=", 1)[1]
+        if not resume or "\x00" in resume:
+            fail("Codex resume marker is invalid")
     gateway_token = Path(str(descriptor["gatewayTokenFile"])).read_text().strip()
     if not 32 <= len(gateway_token) <= 512 or "\x00" in gateway_token:
         fail("gateway token is invalid")
@@ -223,7 +225,12 @@ def main() -> None:
     if resume is None:
         fence.append(Path(str(descriptor["promptPath"])).read_text())
     else:
-        fence.extend(["resume", resume, Path(str(descriptor["promptPath"])).read_text()])
+        # Codex hook session IDs identify lifecycle events, but the public
+        # ``codex resume`` positional argument accepts a task UUID or name.
+        # Every binding has a private CODEX_HOME, so its most recent session
+        # is the exact durable worker session and avoids coupling resume to an
+        # undocumented equivalence between those two identifier contracts.
+        fence.extend(["resume", "--last", Path(str(descriptor["promptPath"])).read_text()])
     os.execve(str(descriptor["fencePath"]), fence, environment)
 
 

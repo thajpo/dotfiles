@@ -206,8 +206,13 @@ class Phase10ScopeParityTests(unittest.TestCase):
             resumed_argv = json.loads(capture.read_text())
             resumed_codex_argv = resumed_argv[resumed_argv.index("--") + 1 :]
             resume_index = resumed_codex_argv.index("resume")
-            self.assertEqual(resumed_codex_argv[resume_index : resume_index + 2], ["resume", "session-1"])
+            self.assertEqual(resumed_codex_argv[resume_index : resume_index + 2], ["resume", "--last"])
             self.assertEqual(resumed_codex_argv[resume_index + 2], Path(activated.adapter_data["promptPath"]).read_text())
+            self.assertNotIn("session-1", resumed_codex_argv)
+
+            rejected = subprocess.run([str(launcher), "--resume="], cwd=worktree, text=True, capture_output=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("resume marker is invalid", rejected.stderr)
 
     def test_codex_launch_separates_writable_state_and_trusted_provider_config(self):
         with tempfile.TemporaryDirectory() as tmp:
