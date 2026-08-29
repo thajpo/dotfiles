@@ -211,8 +211,10 @@ def _prepare_generated_backup_for_removal(root: Path) -> None:
             os.chmod(path, 0o700)
         elif stat.S_ISREG(info.st_mode):
             os.chmod(path, 0o600 | (0o100 if info.st_mode & 0o100 else 0))
+        elif stat.S_ISSOCK(info.st_mode):
+            continue
         else:
-            raise NeedsAttentionError("OMP generated backup contains an unsupported file")
+            raise NeedsAttentionError("OMP generated backup contains an unsupported special file")
 
 
 def _activate_directory(staged: Path, target: Path, retained_backup: Path | None = None) -> None:

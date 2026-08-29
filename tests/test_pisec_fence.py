@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import runpy
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -98,6 +99,24 @@ def stage_and_activate(adapter: OmpHarnessAdapter, scope: dict):
 
 
 class RuntimeMaterializationTests(unittest.TestCase):
+    def test_activate_directory_removes_owned_runtime_socket_from_generated_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            staged = root / "staged"
+            target.mkdir()
+            staged.mkdir()
+            runtime_socket = target / "runtime.sock"
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(str(runtime_socket))
+            try:
+                _activate_directory(staged, target)
+            finally:
+                server.close()
+
+            self.assertTrue(target.is_dir())
+            self.assertFalse(runtime_socket.exists())
+
     def test_activate_directory_opens_protected_target_before_cross_tree_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
