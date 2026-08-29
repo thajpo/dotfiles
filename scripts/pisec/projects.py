@@ -490,8 +490,8 @@ def deactivate_project(store: Any, selector: str, workspace: Any, harness: Any) 
                     store.conn.execute("UPDATE operations SET state='applying',step='workspace_closed',updated_at=? WHERE operation_id=?", (utc_now(), operation_id))
                 step = "workspace_closed"
             retained_root_path = _validate_retained_session_root(binding, harness)
-            retained_root = str(retained_root_path)
-            if rank(step) < rank("retained_root_committed"):
+            retained_root = None if retained_root_path is None else str(retained_root_path)
+            if retained_root_path is not None and rank(step) < rank("retained_root_committed"):
                 with store.transaction():
                     existing_root = store.conn.execute("SELECT 1 FROM retained_session_roots WHERE workstream_id=?", (binding["workstream_id"],)).fetchone()
                     if existing_root is None:

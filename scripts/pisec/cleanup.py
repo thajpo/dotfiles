@@ -39,7 +39,10 @@ def _safe_owned_tree(path: Path) -> None:
 
 
 
-def _validate_retained_session_root(binding: Mapping[str, Any], harness: HarnessAdapter) -> Path:
+def _validate_retained_session_root(binding: Mapping[str, Any], harness: HarnessAdapter) -> Path | None:
+    harness.validate_native_session(binding, binding.get("native_session_kind"), binding.get("native_session_value"))
+    if harness.manifest.adapter_id != "omp":
+        return None
     harness_home = Path(str(binding["harness_home"])).absolute()
     session_root = harness_home / "sessions"
     for path, expected_mode in ((harness_home, 0o700), (session_root, 0o700)):
@@ -55,7 +58,6 @@ def _validate_retained_session_root(binding: Mapping[str, Any], harness: Harness
             info = child.lstat()
             if info.st_uid != os.geteuid() or stat.S_ISLNK(info.st_mode) or info.st_mode & 0o022:
                 raise NeedsAttentionError("retained OMP session tree is unsafe")
-    harness.validate_native_session(binding, binding.get("native_session_kind"), binding.get("native_session_value"))
     return session_root
 
 @control_plane_mutation
@@ -143,21 +145,22 @@ def cleanup_workstream(store: Any, payload: Mapping[str, Any], workspace: Worksp
         retained_root: Path | None = None
         if binding is not None:
             retained_root = _validate_retained_session_root(binding, harness)
-            existing_root = store.conn.execute("SELECT * FROM retained_session_roots WHERE workstream_id=?", (workstream_id,)).fetchone()
-            if existing_root is not None and (
-                existing_root["harness_id"] != binding["harness_id"]
-                or existing_root["harness_home"] != binding["harness_home"]
-                or existing_root["native_session_kind"] != binding["native_session_kind"]
-                or existing_root["native_session_value"] != binding["native_session_value"]
-            ):
-                raise NeedsAttentionError("retained session root identity drifted")
-            if existing_root is None:
-                with store.transaction():
-                    store.conn.execute(
-                        "INSERT INTO retained_session_roots(workstream_id,harness_id,harness_home,native_session_kind,native_session_value,retained_at) VALUES(?,?,?,?,?,?)",
-                        (workstream_id, binding["harness_id"], binding["harness_home"], binding["native_session_kind"], binding["native_session_value"], utc_now()),
-                    )
-                    store.conn.execute("UPDATE operations SET step='retention_recorded',updated_at=? WHERE operation_id=?", (utc_now(), operation_id))
+            if retained_root is not None:
+                existing_root = store.conn.execute("SELECT * FROM retained_session_roots WHERE workstream_id=?", (workstream_id,)).fetchone()
+                if existing_root is not None and (
+                    existing_root["harness_id"] != binding["harness_id"]
+                    or existing_root["harness_home"] != binding["harness_home"]
+                    or existing_root["native_session_kind"] != binding["native_session_kind"]
+                    or existing_root["native_session_value"] != binding["native_session_value"]
+                ):
+                    raise NeedsAttentionError("retained session root identity drifted")
+                if existing_root is None:
+                    with store.transaction():
+                        store.conn.execute(
+                            "INSERT INTO retained_session_roots(workstream_id,harness_id,harness_home,native_session_kind,native_session_value,retained_at) VALUES(?,?,?,?,?,?)",
+                            (workstream_id, binding["harness_id"], binding["harness_home"], binding["native_session_kind"], binding["native_session_value"], utc_now()),
+                        )
+                        store.conn.execute("UPDATE operations SET step='retention_recorded',updated_at=? WHERE operation_id=?", (utc_now(), operation_id))
         if binding is not None:
             harness.cleanup_binding(binding)
         if worktree.exists():

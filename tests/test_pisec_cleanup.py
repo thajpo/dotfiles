@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.pisec.cleanup import cleanup_workstream
+from scripts.pisec.cleanup import _validate_retained_session_root, cleanup_workstream
+from scripts.pisec.adapters import HarnessManifest
 from scripts.pisec.git_runner import run_git
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import _git, register_project
@@ -18,6 +19,16 @@ from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
 class FailingWorkspace(FixtureWorkspace):
     def close_tab(self, view_id):
         raise RuntimeError(f"cannot close {view_id}")
+
+
+class IdOnlyHarness:
+    manifest = HarnessManifest("codex", "codex", "fixture", 1, (("worker", "worker-default"),))
+
+    def __init__(self):
+        self.validated = False
+
+    def validate_native_session(self, binding, kind, value):
+        self.validated = kind == "id" and value == "session-id"
 
 
 class CleanupTests(unittest.TestCase):
@@ -47,6 +58,15 @@ class CleanupTests(unittest.TestCase):
             "residualRisk": "none",
         }
         return submit_completion(store, workstream_id=workstream["workstream_id"], runtime_instance_id=binding["runtime_instance_id"], packet=packet)
+
+    def test_id_only_harness_has_no_local_session_root_to_retain(self):
+        harness = IdOnlyHarness()
+        retained = _validate_retained_session_root(
+            {"harness_home": "/missing/codex-home", "native_session_kind": "id", "native_session_value": "session-id"},
+            harness,
+        )
+        self.assertIsNone(retained)
+        self.assertTrue(harness.validated)
 
     def test_cleanup_removes_checkout_and_retains_branch_and_objects(self):
         with tempfile.TemporaryDirectory() as tmp:
