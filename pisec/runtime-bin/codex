@@ -198,6 +198,7 @@ def main() -> None:
     codex_config = (
         "features.hooks=true",
         hook_override("SessionStart", str(descriptor["hookPath"])),
+        hook_override("UserPromptSubmit", str(descriptor["hookPath"])),
         hook_override("Stop", str(descriptor["hookPath"])),
         f"projects.{toml_string(str(root))}.trust_level=\"trusted\"",
         f"mcp_servers.pisec.command={toml_string(str(descriptor['mcpPath']))}",

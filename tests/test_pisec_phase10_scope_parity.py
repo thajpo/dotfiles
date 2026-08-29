@@ -302,6 +302,8 @@ class Phase10ScopeParityTests(unittest.TestCase):
             )
             self.assertFalse(any(value.startswith("features.code_mode") for value in config_values))
             self.assertTrue(any(value.startswith("hooks.SessionStart=") for value in config_values))
+            self.assertTrue(any(value.startswith("hooks.UserPromptSubmit=") for value in config_values))
+            self.assertTrue(any(value.startswith("hooks.Stop=") for value in config_values))
             self.assertTrue(any(value.startswith("mcp_servers.pisec.command=") for value in config_values))
 
     def test_codex_model_catalog_preserves_native_worker_tool_contract(self):
