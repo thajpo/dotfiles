@@ -10,7 +10,7 @@ from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.events import append_event_in_transaction
 from scripts.pisec.operations import create_operation
 from scripts.pisec.pi_store import PiStore
-from scripts.pisec.refresh import _RECOVERABLE_STOPPED_REFRESH_ERRORS, _binding_scope, _recover_stopped_refresh_attention, _reset_stale_refresh_for_new_session, _reserve_refresh
+from scripts.pisec.refresh import _RECOVERABLE_STOPPED_REFRESH_ERRORS, _binding_scope, _recover_stopped_refresh_reservation, _reset_stale_refresh_for_new_session, _reserve_refresh
 from scripts.pisec.runtime import reset_codex_session_in_transaction
 from scripts.pisec.models import ConflictError
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
@@ -472,7 +472,7 @@ class RuntimeRefreshTests(unittest.TestCase):
                 (self.workstream_id,),
             )
             current = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
-            recovered = _recover_stopped_refresh_attention(store, current, dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()), runtime_state="stopped")
+            recovered = _recover_stopped_refresh_reservation(store, current, dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()), runtime_state="stopped")
 
             self.assertTrue(recovered)
             binding = store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()
@@ -513,13 +513,54 @@ class RuntimeRefreshTests(unittest.TestCase):
                 (self.workstream_id,),
             )
             current = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
-            recovered = _recover_stopped_refresh_attention(store, current, dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()), runtime_state="stopped")
+            recovered = _recover_stopped_refresh_reservation(store, current, dict(store.conn.execute("SELECT * FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()), runtime_state="stopped")
 
             self.assertTrue(recovered)
             self.assertEqual(
                 tuple(store.conn.execute("SELECT desired_generation_sha256,applied_generation_sha256,refresh_pending,refresh_operation_id,launch_generation_sha256 FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()),
                 (binding["desired_generation_sha256"], "a" * 64, 0, None, None),
             )
+
+    def test_stopped_incomplete_startup_refresh_is_reused_on_first_retry(self):
+        with PiStore(self.root / "state") as store:
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            interrupted_generation = "b" * 64
+            replacement_generation = str(binding["desired_generation_sha256"])
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=self.project_id,
+                workstream_id=self.workstream_id,
+                idempotency_key=f"runtime.refresh:{self.workstream_id}:{interrupted_generation}",
+                request={"workstreamId": self.workstream_id, "desiredGenerationSha256": interrupted_generation},
+                state="applying",
+                step="reserved",
+            )
+            artifacts = json.loads(str(binding["adapter_artifacts_json"]))
+            artifacts["generationSha256"] = interrupted_generation
+            store.conn.execute(
+                "UPDATE runtime_bindings SET adapter_artifacts_json=?,refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-27T00:00:00Z',launch_generation_sha256=?,runtime_instance_id=NULL,report_seq=0,observed_state='stopped',applied_generation_sha256=? WHERE workstream_id=?",
+                (json.dumps(artifacts, sort_keys=True, separators=(",", ":")), operation.operation_id, interrupted_generation, "a" * 64, self.workstream_id),
+            )
+            self.workspace.stop_runtime(self.identity[2])
+
+            current = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone())
+            reused_operation_id = _reserve_refresh(store, current, replacement_generation, self.workspace)
+
+            self.assertEqual(reused_operation_id, operation.operation_id)
+            self.assertEqual(
+                tuple(store.conn.execute("SELECT refresh_pending,refresh_operation_id,launch_generation_sha256,observed_state FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()),
+                (1, operation.operation_id, replacement_generation, "stopped"),
+            )
+            self.assertEqual(
+                tuple(store.conn.execute("SELECT state,step FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()),
+                ("applying", "reserved"),
+            )
+            compensation = store.conn.execute(
+                "SELECT payload_json FROM events WHERE operation_id=? AND kind='runtime.refresh_compensated' ORDER BY sequence DESC LIMIT 1",
+                (operation.operation_id,),
+            ).fetchone()
+            self.assertEqual(json.loads(str(compensation["payload_json"]))["reason"], "stopped runtime after incomplete startup")
 
     def test_targeted_runtime_ensure_is_idempotent_and_starts_only_one_binding(self):
         with PiStore(self.root / "state") as store:

@@ -416,27 +416,40 @@ def reconcile_superseded_pre_stop_refreshes(
     return recovered
 
 
-def _recover_stopped_refresh_attention(
+def _recover_stopped_refresh_reservation(
     store: Any,
     current: Mapping[str, Any],
     operation: Mapping[str, Any],
     *,
     runtime_state: str,
 ) -> bool:
-    """Reconcile a failed stop observation once the pane is truly stopped.
+    """Reconcile an interrupted refresh once the pane is truly stopped.
 
     The refresh reservation can survive a Herdr process-identity race even
-    though the old profile was never activated.  Recovery is deliberately
-    limited to that exact error family and verifies that the durable adapter
-    artifact is still the applied generation before clearing the reservation.
+    though the old profile was never activated.  It can also survive a
+    materialized launch that exits before its startup hook attests.  Recovery
+    is limited to those journal-owned states and verifies that the durable
+    adapter artifact still matches the applied or launch generation before
+    clearing the reservation.
     """
     current = dict(current)
     operation = dict(operation)
+    recorded_attention = bool(
+        operation.get("state") == "needs_attention"
+        and operation.get("step") == "attention"
+        and operation.get("error_message") in _RECOVERABLE_STOPPED_REFRESH_ERRORS
+    )
+    incomplete_startup = bool(
+        operation.get("state") == "applying"
+        and operation.get("step") == "reserved"
+        and current.get("runtime_instance_id") is None
+        and int(current.get("report_seq", 0)) == 0
+        and isinstance(current.get("launch_generation_sha256"), str)
+        and bool(current.get("launch_generation_sha256"))
+    )
     if (
         runtime_state != "stopped"
-        or operation.get("state") != "needs_attention"
-        or operation.get("step") != "attention"
-        or operation.get("error_message") not in _RECOVERABLE_STOPPED_REFRESH_ERRORS
+        or not (recorded_attention or incomplete_startup)
         or int(current.get("refresh_pending", 0)) != 1
         or current.get("refresh_operation_id") != operation.get("operation_id")
     ):
@@ -469,20 +482,22 @@ def _recover_stopped_refresh_attention(
         "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL,updated_at=? WHERE workstream_id=? AND provisioning_state='needs_attention'",
         (now, workstream_id),
     )
-    update_operation_in_transaction(
-        store.conn,
-        operation_id,
-        state="applying",
-        step="reserved",
-        expected_states=("needs_attention",),
-    )
+    if recorded_attention:
+        update_operation_in_transaction(
+            store.conn,
+            operation_id,
+            state="applying",
+            step="reserved",
+            expected_states=("needs_attention",),
+        )
+    reason = str(operation.get("error_message")) if recorded_attention else "stopped runtime after incomplete startup"
     append_event_in_transaction(
         store.conn,
         kind="runtime.refresh_compensated",
         project_id=str(operation["project_id"]),
         workstream_id=workstream_id,
         operation_id=operation_id,
-        payload={"workstreamId": workstream_id, "reason": str(operation["error_message"])},
+        payload={"workstreamId": workstream_id, "reason": reason},
     )
     return True
 
@@ -546,7 +561,7 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
             ).fetchone()
             if pending_operation is None:
                 raise NeedsAttentionError("runtime binding has an unrecorded refresh operation")
-            if _recover_stopped_refresh_attention(
+            if _recover_stopped_refresh_reservation(
                 store,
                 current,
                 pending_operation,
@@ -569,7 +584,7 @@ def _reserve_refresh(store: Any, binding: Mapping[str, Any], desired: str, works
         elif operation is not None:
             recovered = bool(
                 operation["state"] == "needs_attention"
-                and _recover_stopped_refresh_attention(
+                and _recover_stopped_refresh_reservation(
                     store,
                     current,
                     operation,
