@@ -516,6 +516,9 @@ class Phase10ScopeParityTests(unittest.TestCase):
         self.assertIn("int_" + "2" * 32, context)
         self.assertIn("sourceRecordId", context)
         self.assertIn("inert wake signal", context)
+        self.assertIn("awaiting_worker", context)
+        self.assertIn("replacement completion packet", context)
+        self.assertIn("existing acceptance", context)
         self.assertNotIn("requires review", context)
 
     def test_codex_user_turn_fails_closed_when_typed_preparation_is_unavailable(self):

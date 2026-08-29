@@ -9,6 +9,7 @@ from unittest.mock import patch
 from scripts.pisec.broker import BrokerDispatcher
 from scripts.pisec.codex_mcp import PAYLOAD_ADAPTERS, TOOLS, TOOL_DESCRIPTIONS, _adapter_idempotency_key, _request
 from scripts.pisec.config import DEFAULT_WORKER_MODEL, DEFAULT_WORKER_ROUTE, _validate_worker_routing
+from scripts.pisec.harnesses.codex import _prompt as codex_worker_prompt
 from scripts.pisec.models import InvalidRequestError
 from scripts.pisec.protocol import decode_request, success_response
 from tests.pisec_fixture import FixtureHarness, FixtureWorkspace
@@ -65,6 +66,16 @@ class PisecRoutingCompletionTests(unittest.TestCase):
         )
         self.assertEqual(completion["properties"]["source_commit"]["pattern"], "^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
         self.assertIn("creates the matching ready_review checkpoint atomically", TOOL_DESCRIPTIONS["pisec_submit_completion"])
+        self.assertIn("accepted target drift", TOOL_DESCRIPTIONS["pisec_submit_completion"])
+        self.assertIn("replacement completion packet", TOOL_DESCRIPTIONS["pisec_submit_completion"])
+        self.assertNotIn("Use once", TOOL_DESCRIPTIONS["pisec_submit_completion"])
+
+    def test_codex_worker_prompt_explains_the_post_acceptance_drift_exception(self):
+        prompt = codex_worker_prompt({"taskPacket": {}, "harnessModel": "gpt-5.6-luna", "reasoningEffort": "high"})
+        self.assertIn("sole final handoff", prompt)
+        self.assertIn("accepted target drift", prompt)
+        self.assertIn("replacement completion packet", prompt)
+        self.assertIn("existing human acceptance", prompt)
 
     def test_codex_exposes_typed_progress_and_issue_contracts(self):
         checkpoint = TOOLS["pisec_checkpoint_workstream"][1]

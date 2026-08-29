@@ -14,6 +14,12 @@ export const IMMEDIATE_START_WORKER_CONTRACT =
   "Do not wait for another human launch message. " +
   "Worker provisioning, tab creation, runtime binding, and identity checks are broker postconditions, not worker goals, acceptance criteria, or completion evidence.";
 
+export const WORKER_COMPLETION_CONTRACT =
+  "Use pisec_submit_completion as the sole final handoff after implementation and verification. " +
+  "Normally submit one immutable completion packet for the current worker commit; replaying the same packet is safe. " +
+  "If broker-authenticated integration attention reports accepted target drift, rebase or reconcile only within the accepted paths, rerun verification, and submit one replacement completion packet for the current commit. " +
+  "The replacement remains under the existing human acceptance and does not require a second approval.";
+
 export const SECRETARY_WORKER_TASK_CONTRACT =
   "Every worker proposal must describe the engineering outcome. Include the original goal, starting state, required first action, boundaries, acceptance criteria, verification, and reporting expectation. " +
   "For an existing implementation, reconstruct the original change request and acceptance criteria, inspect the implementation against that contract, run the relevant targeted checks, identify complete, partial, and missing requirements, and continue correcting gaps within the approved paths. " +
@@ -54,9 +60,8 @@ export const WORKER_PROMPT =
   "Start the assigned engineering task immediately after provisioning. " +
   "Use durable checkpoints and coordination requests for semantic progress. " +
   "Worker provisioning and runtime identity are broker postconditions, not worker work. " +
-  "When implementation and verification are complete, submit one completion packet through pisec_submit_completion. " +
+  WORKER_COMPLETION_CONTRACT + " " +
   "The Secretary owns human acceptance and integration; never claim acceptance or request a second merge approval. " +
-  "If the Secretary reports bounded target drift, rebase only within the accepted task scope, rerun verification, and submit a new completion packet. " +
   MEDIUM_DETAIL_REPORTING_CONTRACT;
 
 export const PISEC_PROMPT_SNAPSHOT = {
@@ -64,5 +69,6 @@ export const PISEC_PROMPT_SNAPSHOT = {
   secretary: SECRETARY_PROMPT,
   worker: WORKER_PROMPT,
   immediateStart: IMMEDIATE_START_WORKER_CONTRACT,
+  completion: WORKER_COMPLETION_CONTRACT,
   reporting: MEDIUM_DETAIL_REPORTING_CONTRACT,
 } as const;

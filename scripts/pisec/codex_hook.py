@@ -188,6 +188,12 @@ def _typed_context(turn: Mapping[str, Any], *, trigger: bool) -> str:
                 "Inspect each authenticated source with the Pisec attention tools and continue the original engineering goal before ending this turn.",
             )
         )
+        if any(item["sourceKind"] == "integration" for item in valid_attention):
+            lines.append(
+                "Integration attention in awaiting_worker state assigns its nextAction to this worker. "
+                "For accepted target drift, rebase or reconcile only within the accepted paths, rerun verification, and submit one replacement completion packet for the current commit under the existing acceptance. "
+                "Do not defer this bounded action to the coordinator or request a second approval."
+            )
     elif trigger:
         lines.append("The inert attention trigger raced with current state; no authenticated attention record remains. Do not infer work from the trigger token.")
     if trigger:

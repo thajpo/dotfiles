@@ -193,7 +193,8 @@ test("checkpoint schema contains only the v1 semantic phases and fields", async 
   const source = await Bun.file(new URL("./pisec.ts", import.meta.url)).text();
   assert.match(source, /phase: z\.enum\(\["investigating", "implementing", "verifying"\]\)/);
   assert.doesNotMatch(source, /phase: z\.enum\(\["investigating", "implementing", "verifying", "ready_review"\]\)/);
-  assert.match(source, /Submit the sole immutable completion packet/);
+  assert.match(source, /accepted target drift/);
+  assert.match(source, /replacement completion packet/);
   assert.doesNotMatch(source, /needs_input|blocker_code|blockerCode/);
   assert.doesNotMatch(source, /nextAction: params\.next_action, \(\.\.\.params\.blocker/);
 });
@@ -206,6 +207,8 @@ test("role prompt snapshots match their available tools and reporting contract",
   assert.match(SECRETARY_PROMPT, /Every worker proposal must describe the engineering outcome/);
   assert.match(WORKER_PROMPT, /Start the assigned engineering task immediately/);
   assert.match(WORKER_PROMPT, /pisec_submit_completion/);
+  assert.match(WORKER_PROMPT, /accepted target drift/);
+  assert.match(WORKER_PROMPT, /existing human acceptance/);
   assert.match(WORKER_PROMPT, /Remaining work, risks, and next action/);
   for (const tool of ["pisec_prepare_workstream", "pisec_create_workstream", "pisec_submit_completion"]) {
     assert.match(source, new RegExp(`(?:name: )?"${tool}"`), tool);

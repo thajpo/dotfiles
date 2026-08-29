@@ -21,6 +21,14 @@ IMMEDIATE_START_WORKER_CONTRACT = (
 )
 
 
+WORKER_COMPLETION_CONTRACT = (
+    "Use pisec_submit_completion as the sole final handoff after implementation and verification. "
+    "Normally submit one immutable completion packet for the current worker commit; replaying the same packet is safe. "
+    "If broker-authenticated integration attention reports accepted target drift, rebase or reconcile only within the accepted paths, rerun verification, and submit one replacement completion packet for the current commit. "
+    "The replacement remains under the existing human acceptance and does not require a second approval."
+)
+
+
 SECRETARY_WORKER_TASK_CONTRACT = (
     "Every worker proposal must describe the engineering outcome. Include the original goal, starting state, required first action, boundaries, acceptance criteria, verification, and reporting expectation. "
     "For an existing implementation, reconstruct the original change request and acceptance criteria, inspect the implementation against that contract, run the relevant targeted checks, identify complete, partial, and missing requirements, and continue correcting gaps within the approved paths. "

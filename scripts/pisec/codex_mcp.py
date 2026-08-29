@@ -245,7 +245,7 @@ PAYLOAD_ADAPTERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
 TOOL_DESCRIPTIONS = {
     "pisec_show_task_packet": "Use when you need the immutable assigned outcome and boundaries; reads the authoritative task packet.",
     "pisec_checkpoint_workstream": "Use to record typed progress only. Use investigating, implementing, or verifying; submit final acceptance evidence with pisec_submit_completion.",
-    "pisec_submit_completion": "Use once, after implementation and verification, to submit the immutable completion packet. The broker creates the matching ready_review checkpoint atomically.",
+    "pisec_submit_completion": "Use as the sole final handoff after implementation and verification. Normally submit one immutable completion packet for the current worker commit; replaying the same packet is safe. If broker-authenticated integration attention reports accepted target drift, submit one replacement completion packet after bounded reconciliation and reverification. The broker creates the matching ready_review checkpoint atomically under the existing acceptance.",
     "pisec_request_help": "Use when blocked, clarifying, reviewing, or needing access; creates the single typed upward-help source.",
     "pisec_list_attention": "Use at turn start and before ending a turn; lists current authorized attention references without acknowledging them.",
     "pisec_inspect_attention": "Use after attention.list to identify the typed source and its existing inspector; read-only.",

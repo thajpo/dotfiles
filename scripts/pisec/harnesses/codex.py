@@ -21,7 +21,7 @@ from ..adapters import AdapterHealth, HarnessArtifacts, HarnessManifest, Runtime
 from ..fsutil import _atomic_write, _read_runtime_secret, _secure_secret, _secure_tree
 from ..models import InvalidRequestError, NeedsAttentionError, PisecError, canonical_json, validate_id, validate_sha256
 from ..platform import runtime_root
-from ..prompt_contract import IMMEDIATE_START_WORKER_CONTRACT, MEDIUM_DETAIL_REPORTING_CONTRACT
+from ..prompt_contract import IMMEDIATE_START_WORKER_CONTRACT, MEDIUM_DETAIL_REPORTING_CONTRACT, WORKER_COMPLETION_CONTRACT
 from .omp import _copy_safe_entry, _file_digest, _normalize_owner_tree, _tree_digest
 
 
@@ -253,7 +253,7 @@ def _prompt(scope: Mapping[str, Any]) -> str:
             IMMEDIATE_START_WORKER_CONTRACT,
             "Use the approved worktree only. Do not push, merge, publish, alter policy, or access sibling projects.",
             "Use the Pisec MCP tools for checkpoints, blockers, coordination, research, and ready_review.",
-            "When implementation and verification are complete, commit the work and submit exactly one completion packet through pisec_submit_completion.",
+            WORKER_COMPLETION_CONTRACT,
             MEDIUM_DETAIL_REPORTING_CONTRACT,
             f"Resolved model: {model}",
             f"Reasoning effort: {effort}",

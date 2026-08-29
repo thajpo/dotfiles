@@ -108,7 +108,8 @@ class OmpExtensionTests(unittest.TestCase):
         source = EXTENSION.read_text()
         self.assertIn('phase: z.enum(["investigating", "implementing", "verifying"])', source)
         self.assertNotIn('phase: z.enum(["investigating", "implementing", "verifying", "ready_review"])', source)
-        self.assertIn("Submit the sole immutable completion packet", source)
+        self.assertIn("accepted target drift", source)
+        self.assertIn("replacement completion packet", source)
 
     def test_phase_c_uses_typed_runtime_events_and_adapter_owned_protocol_fields(self):
         source = EXTENSION.read_text()
