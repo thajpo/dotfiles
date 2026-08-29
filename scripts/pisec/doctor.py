@@ -233,7 +233,7 @@ def run_doctor(
             "SELECT w.workstream_id,r.workstream_id AS binding_workstream_id FROM workstreams w LEFT JOIN runtime_bindings r USING(workstream_id) WHERE " + runtime_eligible_sql("w") + " ORDER BY w.workstream_id"
         ):
             exists = row["binding_workstream_id"] == row["workstream_id"]
-            _check(checks, f"Runtime binding {row['workstream_id']}", exists, "present" if exists else "runtime-eligible workstream has no binding")
+            _check(checks, f"Active binding {row['workstream_id']}", exists, "present" if exists else "runtime-eligible workstream has no binding")
         for row in store.conn.execute(
             "SELECT p.project_id,p.secretary_workstream_id,w.project_id AS supervisor_project_id,w.kind,w.desired_state,w.provisioning_state,r.workstream_id AS binding_workstream_id "
             "FROM projects p LEFT JOIN workstreams w ON w.workstream_id=p.secretary_workstream_id LEFT JOIN runtime_bindings r ON r.workstream_id=w.workstream_id "
