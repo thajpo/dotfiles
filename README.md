@@ -438,6 +438,11 @@ namespace tools to reversible function names. It does not log request bodies
 or credentials. `PISEC_AUTH_GATEWAY_BACKEND_PORT` defaults to `4001` and must
 differ from every public Pisec service port.
 
+Codex starts stdio MCP servers with an allowlisted environment. The managed
+Pisec MCP definition passes only the six runtime-binding variable names that
+the broker requires. The runtime token remains in the process environment; it
+is not written into Codex configuration or copied into the immutable surface.
+
 With user lingering enabled on Linux, the installed auth broker, auth gateway, Pisec
 broker, and Herdr `main` session start from the user systemd boot target.
 Herdr persists normal terminal/workspace state while Pisec restores only

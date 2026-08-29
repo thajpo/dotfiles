@@ -455,6 +455,7 @@ class CodexHarnessAdapter:
                     "[mcp_servers.pisec]",
                     f'command = {json.dumps(str(mcp_path))}',
                     "args = []",
+                    'env_vars = ["PISEC_RUNTIME_SOCKET", "PISEC_RUNTIME_TOKEN", "PISEC_WORKSTREAM_ID", "PISEC_RUNTIME_INSTANCE_ID", "PISEC_SURFACE_ID", "PISEC_PROJECT_ID"]',
                     'omit_tools_from = ["deferred"]',
                     "",
                 )
