@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.operations import create_operation
+from scripts.pisec.update_refresh import refresh_for_update
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -107,6 +108,16 @@ class UpdaterContractTests(unittest.TestCase):
         self.assertEqual(options["env"]["PISEC_STATE_ROOT"], str(state))
         self.assertEqual(options["env"]["PYTHONPATH"].split(os.pathsep)[0], str(current))
         self.assertTrue(result["ok"])
+
+    def test_update_refresh_skips_adapter_surfaces_without_active_bindings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            with PiStore(state):
+                pass
+            with patch("scripts.pisec.update_refresh.build_adapters") as build_adapters:
+                result = refresh_for_update(state, 0)
+            build_adapters.assert_not_called()
+            self.assertEqual(result, {"generation": None, "upgraded": [], "pending": [], "skipped": [], "failed": [], "ok": True})
 
     def test_post_switch_starts_broker_after_locked_refresh_before_strict_doctor(self):
         calls = []

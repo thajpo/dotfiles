@@ -14,6 +14,13 @@ from .refresh import refresh_runtimes
 
 
 def refresh_for_update(state_root: Path, wait_seconds: float) -> dict:
+    with PiStore(state_root) as store:
+        active = store.conn.execute(
+            "SELECT 1 FROM runtime_bindings r JOIN workstreams w USING(workstream_id) "
+            "WHERE w.desired_state='active' AND w.provisioning_state='bound' LIMIT 1"
+        ).fetchone()
+    if active is None:
+        return {"generation": None, "upgraded": [], "pending": [], "skipped": [], "failed": [], "ok": True}
     dispatcher = build_adapters(load_config(), state_root)
     dispatcher.wait_for_workspace()
     with PiStore(state_root) as store:
