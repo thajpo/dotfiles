@@ -8,6 +8,7 @@ import scripts.pisec.integration as integration_module
 from scripts.pisec.attention import inspect_attention
 from scripts.pisec.integration import apply_workstream_acceptance, prepare_workstream_acceptance, reconcile_integrations
 from scripts.pisec.models import ConflictError, ScopeMismatchError
+from scripts.pisec.operations import create_operation
 from scripts.pisec.pi_store import PiStore
 from scripts.pisec.projects import _git, register_project
 from scripts.pisec.secretary import ensure_secretary
@@ -118,6 +119,56 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM events WHERE kind='project.git_integrated'").fetchone()[0], 1)
             with self.assertRaises(sqlite3.IntegrityError):
                 store.conn.execute("UPDATE integration_reports SET residual_risk=? WHERE integration_id=?", ("changed", accepted["integration"]["integration_id"]))
+
+    def test_closeout_compensates_a_stopped_interrupted_refresh_before_retirement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store, project, harness, workspace, workstream, scope, _repo, worktree, _private_objects, _source = self.fixture(root)
+            self.addCleanup(store.close)
+            prepared = prepare_workstream_acceptance(store, project["project_id"], workstream["workstream_id"])
+            accepted = apply_workstream_acceptance(store, project["project_id"], prepared["approvalScope"])
+            with patch.object(integration_module, "retire_workstream", side_effect=ConflictError("closeout interrupted")):
+                interrupted = reconcile_integrations(store, workspace, harness)
+            self.assertEqual(interrupted["processed"][0]["state"], "needs_attention")
+            binding = dict(store.conn.execute("SELECT * FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone())
+            operation, _ = create_operation(
+                store,
+                kind="runtime.refresh",
+                project_id=project["project_id"],
+                workstream_id=scope["workstreamId"],
+                idempotency_key="interrupted-closeout-refresh",
+                request={"workstreamId": scope["workstreamId"], "desiredGenerationSha256": binding["desired_generation_sha256"]},
+                state="needs_attention",
+                step="attention",
+            )
+            store.conn.execute(
+                "UPDATE operations SET error_code='runtime_refresh_failed',error_message='runtime did not stop gracefully' WHERE operation_id=?",
+                (operation.operation_id,),
+            )
+            store.conn.execute(
+                "UPDATE runtime_bindings SET refresh_pending=1,refresh_operation_id=?,refresh_started_at='2026-08-29T00:00:00Z',launch_generation_sha256=applied_generation_sha256,observed_state='stopped' WHERE workstream_id=?",
+                (operation.operation_id, scope["workstreamId"]),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='needs_attention',attention_reason='workspace runtime is missing' WHERE workstream_id=?",
+                (scope["workstreamId"],),
+            )
+            workspace.runtime_states[str(binding["workspace_surface_id"])] = "stopped"
+
+            recovered = reconcile_integrations(store, workspace, harness)
+
+            self.assertEqual(recovered["errors"], [], recovered)
+            self.assertEqual(recovered["processed"][0]["state"], "integrated")
+            self.assertEqual(recovered["processed"][0]["closeout"]["state"], "retired")
+            self.assertEqual(
+                tuple(store.conn.execute("SELECT state,step,error_code FROM operations WHERE operation_id=?", (operation.operation_id,)).fetchone()),
+                ("failed", "superseded", "runtime_closeout"),
+            )
+            self.assertFalse(worktree.exists())
+            self.assertEqual(
+                store.conn.execute("SELECT state FROM integration_jobs WHERE integration_id=?", (accepted["integration"]["integration_id"],)).fetchone()[0],
+                "integrated",
+            )
 
     def test_closeout_keeps_an_unresolved_issue_reporter_live_until_verification_finishes(self):
         with tempfile.TemporaryDirectory() as tmp:

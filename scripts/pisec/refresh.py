@@ -237,20 +237,28 @@ def _stage_profile(store: Any, harness: HarnessAdapter, binding: Mapping[str, An
     return staged
 
 
-def _reset_stale_refresh_for_new_session(store: Any, binding: Mapping[str, Any]) -> None:
+def _compensate_stopped_refresh_reservation(
+    store: Any,
+    binding: Mapping[str, Any],
+    *,
+    action: str,
+    error_code: str,
+    reason: str,
+) -> bool:
+    """Clear one journal-owned refresh only after its caller proves the pane stopped."""
     if not int(binding.get("refresh_pending", 0)):
-        return
+        return False
     launch_generation = binding.get("launch_generation_sha256")
     if not isinstance(launch_generation, str) or not launch_generation:
-        raise NeedsAttentionError("session reset requires a fully materialized current runtime")
+        raise NeedsAttentionError(f"{action} requires a fully materialized current runtime")
     try:
         artifacts = json.loads(str(binding["adapter_artifacts_json"]))
     except (TypeError, ValueError, json.JSONDecodeError) as error:
-        raise NeedsAttentionError("session reset requires a valid runtime artifact") from error
+        raise NeedsAttentionError(f"{action} requires a valid runtime artifact") from error
     artifact_generation = artifacts.get("generationSha256") if isinstance(artifacts, dict) else None
     safe_generations = {binding.get("launch_generation_sha256"), binding.get("applied_generation_sha256")}
     if not isinstance(artifact_generation, str) or artifact_generation not in safe_generations:
-        raise NeedsAttentionError("session reset requires a matching runtime artifact")
+        raise NeedsAttentionError(f"{action} requires a matching runtime artifact")
     operation_id = binding.get("refresh_operation_id")
     operation = store.conn.execute("SELECT * FROM operations WHERE operation_id=? AND kind='runtime.refresh'", (operation_id,)).fetchone()
     recoverable_attention = bool(operation is not None and operation["state"] == "needs_attention" and operation["step"] == "attention")
@@ -258,10 +266,10 @@ def _reset_stale_refresh_for_new_session(store: Any, binding: Mapping[str, Any])
         operation is not None
         and operation["state"] == "failed"
         and operation["step"] == "superseded"
-        and operation["error_code"] == "runtime_session_reset"
+        and operation["error_code"] in {"runtime_session_reset", "runtime_closeout"}
     )
     if operation is None or not (recoverable_attention or recoverable_reset_residue):
-        raise NeedsAttentionError("session reset cannot interrupt an active refresh")
+        raise NeedsAttentionError(f"{action} cannot interrupt an active refresh")
     now = utc_now()
     with store.transaction():
         store.conn.execute(
@@ -279,8 +287,8 @@ def _reset_stale_refresh_for_new_session(store: Any, binding: Mapping[str, Any])
                 state="failed",
                 step="superseded",
                 expected_states=("needs_attention",),
-                error_code="runtime_session_reset",
-                error_message="refresh reservation was compensated by an explicit stopped-worker session reset",
+                error_code=error_code,
+                error_message=reason,
             )
             append_event_in_transaction(
                 store.conn,
@@ -288,8 +296,29 @@ def _reset_stale_refresh_for_new_session(store: Any, binding: Mapping[str, Any])
                 project_id=str(operation["project_id"]),
                 workstream_id=str(binding["workstream_id"]),
                 operation_id=str(operation_id),
-                payload={"workstreamId": str(binding["workstream_id"]), "reason": "explicit stopped-worker session reset"},
+                payload={"workstreamId": str(binding["workstream_id"]), "reason": reason},
             )
+    return True
+
+
+def _reset_stale_refresh_for_new_session(store: Any, binding: Mapping[str, Any]) -> None:
+    _compensate_stopped_refresh_reservation(
+        store,
+        binding,
+        action="session reset",
+        error_code="runtime_session_reset",
+        reason="refresh reservation was compensated by an explicit stopped-worker session reset",
+    )
+
+
+def compensate_stopped_refresh_for_closeout(store: Any, binding: Mapping[str, Any]) -> bool:
+    return _compensate_stopped_refresh_reservation(
+        store,
+        binding,
+        action="workstream closeout",
+        error_code="runtime_closeout",
+        reason="refresh reservation was compensated by accepted workstream closeout after the runtime stopped",
+    )
 
 
 def _materialize_and_launch(store: Any, harness: HarnessAdapter, workspace: WorkspaceAdapter, binding: Mapping[str, Any], surface: RuntimeSurfaceArtifacts, desired: str, *, staged: Any | None = None) -> dict[str, Any]:

@@ -1294,6 +1294,16 @@ def retire_workstream(store: Any, project_id: str, workstream_id: str, workspace
             raise NeedsAttentionError("remediation-failure retirement requires attention") from error
     if row["desired_state"] not in {"completed", "retired"}:
         raise ConflictError("workstream must be completed before retirement")
+    binding = inspected["binding"]
+    if row["provisioning_state"] != "bound" and binding is not None and int(binding.get("refresh_pending", 0)):
+        runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+        if runtime.state == "stopped":
+            from .refresh import compensate_stopped_refresh_for_closeout
+
+            compensate_stopped_refresh_for_closeout(store, binding)
+            inspected = inspect_workstream(store, project_id, workstream_id)
+            row = inspected["workstream"]
+            binding = inspected["binding"]
     if row["provisioning_state"] != "bound":
         raise ConflictError("workstream is not bound")
     operation_id, existing = _lifecycle_operation(store, kind="workstream.retire", project_id=project_id, workstream_id=workstream_id)
@@ -1307,7 +1317,6 @@ def retire_workstream(store: Any, project_id: str, workstream_id: str, workspace
         with store.transaction():
             store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(row), now, operation_id))
         return row
-    binding = inspected["binding"]
     if binding is not None and binding["observed_state"] in {"starting", "working", "blocked"}:
         raise ConflictError("workstream runtime is still active")
     try:
