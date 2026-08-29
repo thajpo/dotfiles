@@ -252,6 +252,16 @@ class FixtureAdapterBoundaryTests(unittest.TestCase):
             )
             self.assertFalse(second["reused"])
             self.assertFalse(second["project"]["active"])
+
+            # An inactive repeat is an idempotent read.  It must not replay
+            # the prior lifecycle operation or append another event.
+            inactive_repeat = self.dispatcher.dispatch(
+                "admin",
+                "project.deactivate",
+                {"project": project["project_id"], "confirm": project["project_id"]},
+            )
+            self.assertTrue(inactive_repeat["reused"])
+            self.assertFalse(inactive_repeat["project"]["active"])
             with PiStore(self.root / "state") as store:
                 self.assertEqual(
                     store.conn.execute(
