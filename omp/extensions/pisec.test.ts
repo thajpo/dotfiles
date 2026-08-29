@@ -209,6 +209,7 @@ test("role prompt snapshots match their available tools and reporting contract",
   assert.match(WORKER_PROMPT, /pisec_submit_completion/);
   assert.match(WORKER_PROMPT, /accepted target drift/);
   assert.match(WORKER_PROMPT, /existing human acceptance/);
+  assert.match(WORKER_PROMPT, /criterion text, order, and passed status unchanged/);
   assert.match(source, /authorized attention record and its typed source/);
   assert.match(source, /Do not pass an integration source ID to a coordination inspector/);
   assert.match(WORKER_PROMPT, /Remaining work, risks, and next action/);

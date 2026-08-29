@@ -296,7 +296,17 @@ class IntegrationTests(unittest.TestCase):
             binding = store.conn.execute("SELECT runtime_instance_id FROM runtime_bindings WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
             task = store.conn.execute("SELECT packet_sha256 FROM task_packets WHERE workstream_id=?", (scope["workstreamId"],)).fetchone()
             submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
-                    "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Fixture output."]}],
+                    "acceptance": [{"criterion": "A widened criterion.", "status": "passed", "evidence": ["Rebased fixture output."]}],
+                    "verification": [{"command": "fixture verification", "result": "passed"}],
+                    "sourceCommit": rebased_source,
+                    "taskPacketSha256": task["packet_sha256"],
+                    "changedSurfaces": ["fixture"],
+                    "residualRisk": "none",
+                })
+            rejected = reconcile_integrations(store, workspace, harness)
+            self.assertEqual(rejected["processed"][0]["state"], "awaiting_worker")
+            submit_completion(store, workstream_id=scope["workstreamId"], runtime_instance_id=binding["runtime_instance_id"], packet={
+                    "acceptance": [{"criterion": "The fixture check passes.", "status": "passed", "evidence": ["Rebased fixture output."]}],
                     "verification": [{"command": "fixture verification", "result": "passed"}],
                     "sourceCommit": rebased_source,
                     "taskPacketSha256": task["packet_sha256"],

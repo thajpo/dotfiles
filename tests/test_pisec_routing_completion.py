@@ -68,6 +68,7 @@ class PisecRoutingCompletionTests(unittest.TestCase):
         self.assertIn("creates the matching ready_review checkpoint atomically", TOOL_DESCRIPTIONS["pisec_submit_completion"])
         self.assertIn("accepted target drift", TOOL_DESCRIPTIONS["pisec_submit_completion"])
         self.assertIn("replacement completion packet", TOOL_DESCRIPTIONS["pisec_submit_completion"])
+        self.assertIn("criterion text, order, and passed status unchanged", TOOL_DESCRIPTIONS["pisec_submit_completion"])
         self.assertNotIn("Use once", TOOL_DESCRIPTIONS["pisec_submit_completion"])
 
     def test_codex_worker_prompt_explains_the_post_acceptance_drift_exception(self):

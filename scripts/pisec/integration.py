@@ -112,6 +112,17 @@ def _patch_digest(repository: Path, base_oid: str, source_oid: str) -> str:
     return hashlib.sha256(patch.encode("utf-8")).hexdigest()
 
 
+def _acceptance_identity(value: Any) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, list) or not value:
+        raise NeedsAttentionError("completion packet acceptance is invalid")
+    identity: list[tuple[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or not isinstance(item.get("criterion"), str) or item.get("status") != "passed":
+            raise NeedsAttentionError("completion packet acceptance is invalid")
+        identity.append((str(item["criterion"]), str(item["status"])))
+    return tuple(identity)
+
+
 def _candidate(
     store: Any,
     project_id: str,
@@ -161,7 +172,7 @@ def _candidate(
     )
     if not isinstance(packet_value.get("acceptance"), list) or not isinstance(packet_value.get("verification"), list):
         raise NeedsAttentionError("completion packet acceptance or verification is invalid")
-    if expected_acceptance is not None and packet_value.get("acceptance") != expected_acceptance:
+    if expected_acceptance is not None and _acceptance_identity(packet_value["acceptance"]) != _acceptance_identity(expected_acceptance):
         raise ScopeMismatchError("replacement completion packet changed the accepted criteria")
     changed_paths = _changed_paths(repository, str(workstream["base_commit_oid"]), source_oid)
     patch_sha256 = _patch_digest(repository, str(workstream["base_commit_oid"]), source_oid)
