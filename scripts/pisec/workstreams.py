@@ -1317,9 +1317,19 @@ def retire_workstream(store: Any, project_id: str, workstream_id: str, workspace
         with store.transaction():
             store.conn.execute("UPDATE operations SET state='succeeded',step='committed',result_json=?,updated_at=? WHERE operation_id=?", (canonical_json(row), now, operation_id))
         return row
-    if binding is not None and binding["observed_state"] in {"starting", "working", "blocked"}:
-        raise ConflictError("workstream runtime is still active")
     try:
+        if binding is not None and binding["observed_state"] in {"starting", "working", "blocked"}:
+            runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+            if runtime.state == "live":
+                workspace.stop_runtime(str(binding["workspace_surface_id"]), str(binding["harness_id"]))
+                deadline = time.monotonic() + 10.0
+                while time.monotonic() < deadline:
+                    runtime = workspace.observe_runtime(str(binding["workspace_surface_id"]), str(binding["policy_path"]))
+                    if runtime.state == "stopped":
+                        break
+                    time.sleep(0.05)
+            if runtime.state != "stopped":
+                raise NeedsAttentionError("completed workstream runtime did not stop before retirement")
         if binding is not None and binding["workspace_view_id"]:
             workspace.close_tab(binding["workspace_view_id"])
         now = utc_now()

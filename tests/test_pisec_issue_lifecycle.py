@@ -316,8 +316,11 @@ class IssueLifecycleTests(unittest.TestCase):
         )
 
         self.assertEqual(verified["state"], "resolved")
+        surface_id = store.conn.execute("SELECT workspace_surface_id FROM runtime_bindings WHERE workstream_id=?", (worker["workstream_id"],)).fetchone()[0]
+        store.conn.execute("UPDATE runtime_bindings SET observed_state='working' WHERE workstream_id=?", (worker["workstream_id"],))
         retired = retire_workstream(store, source["project_id"], worker["workstream_id"], workspace)
         self.assertEqual(retired["desired_state"], "retired")
+        self.assertIn(("stop", surface_id), workspace.calls)
 
 
 if __name__ == "__main__":
