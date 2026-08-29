@@ -809,7 +809,12 @@ class CodexHarnessAdapter:
             try:
                 result = subprocess.run([str(node), str(executable), "--version"], capture_output=True, text=True, timeout=5, check=False)
                 detail = (result.stdout or result.stderr).strip()
-                version_ok = result.returncode == 0 and detail.strip() in {"0.150.1", "codex 0.150.1"}
+                expected = str(self.harness_config["versionPrefix"])
+                version_ok = result.returncode == 0 and detail.strip() in {
+                    expected,
+                    f"codex {expected}",
+                    f"codex-cli {expected}",
+                }
             except (OSError, subprocess.SubprocessError) as error:
                 detail = str(error)
         elif "error_detail" in locals():

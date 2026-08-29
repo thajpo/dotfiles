@@ -128,6 +128,22 @@ class Phase10ScopeParityTests(unittest.TestCase):
 
             self.assertEqual(Path(codex.harness_config["nodePath"]), root / "codex-bin" / "node")
 
+    def test_codex_health_accepts_only_exact_pinned_version_banners(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            codex = dict(self._production_worker_adapters(Path(tmp)))["codex"]
+            for banner, expected in (
+                ("0.150.1", True),
+                ("codex 0.150.1", True),
+                ("codex-cli 0.150.1", True),
+                ("codex-cli 0.150.10", False),
+                ("codex-cli 0.150.1-dev", False),
+            ):
+                with self.subTest(banner=banner):
+                    result = subprocess.CompletedProcess([], 0, stdout=banner + "\n", stderr="")
+                    with patch("scripts.pisec.harnesses.codex.subprocess.run", return_value=result):
+                        checks = {check.name: check for check in codex.health_checks({}, {})}
+                    self.assertEqual(checks["Codex version"].ok, expected)
+
     def test_production_codex_launcher_accepts_immutable_surface(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
