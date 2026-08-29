@@ -1159,6 +1159,27 @@ class RuntimeReportTests(unittest.TestCase):
         with self.assertRaises(ConflictError):
             report_runtime(self.store, self.payload(seq=2, event="lifecycle", state="idle", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
 
+    def test_completed_worker_may_only_finish_its_authenticated_runtime_report(self):
+        report_runtime(self.store, self.payload(state="idle"), self.harness, self.workspace)
+        report_runtime(self.store, self.payload(seq=2, event="lifecycle", state="working", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
+        self.store.conn.execute(
+            "UPDATE workstreams SET desired_state='completed',completed_at='2026-08-29T00:00:00Z' WHERE workstream_id=?",
+            (self.workstream_id,),
+        )
+
+        with self.assertRaises(AuthorizationError):
+            report_runtime(self.store, self.payload(seq=3, event="lifecycle", state="working", nativeSessionKind=None, nativeSessionValue=None), self.harness, self.workspace)
+
+        terminal = report_runtime(
+            self.store,
+            self.payload(seq=3, event="lifecycle", state="idle", nativeSessionKind=None, nativeSessionValue=None),
+            self.harness,
+            self.workspace,
+        )
+
+        self.assertTrue(terminal["accepted"])
+        self.assertEqual(self.store.conn.execute("SELECT observed_state FROM runtime_bindings WHERE workstream_id=?", (self.workstream_id,)).fetchone()[0], "idle")
+
     def test_initial_launch_session_start_accepts_reserved_unapplied_generation(self):
         self.store.conn.execute(
             "UPDATE workstreams SET provisioning_state='creating' WHERE workstream_id=?",

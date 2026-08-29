@@ -145,7 +145,14 @@ def start_bound_agent(
     return {"launched": True, "observation": observation}
 
 
-def verify_runtime_binding(store: Any, payload: Mapping[str, Any], *, worker_only: bool = False, allow_session_start: bool = False) -> dict[str, Any]:
+def verify_runtime_binding(
+    store: Any,
+    payload: Mapping[str, Any],
+    *,
+    worker_only: bool = False,
+    allow_session_start: bool = False,
+    allow_completed_terminal_report: bool = False,
+) -> dict[str, Any]:
     if not isinstance(payload, Mapping) or not RUNTIME_AUTH_FIELDS <= set(payload):
         raise InvalidRequestError("runtime binding fields are incomplete")
     workstream_id = validate_id(payload["workstreamId"], prefix="ws")
@@ -181,7 +188,14 @@ def verify_runtime_binding(store: Any, payload: Mapping[str, Any], *, worker_onl
         and row["refresh_operation_id"] is not None
         and row["refresh_started_at"] is not None
     ) or initial_session_start_pending
-    lifecycle_inactive = row is None or not mapping_runtime_lifecycle_eligible(store, row)
+    completed_terminal_report = bool(
+        allow_completed_terminal_report
+        and row is not None
+        and row["kind"] == "worker"
+        and row["desired_state"] == "completed"
+        and row["provisioning_state"] == "bound"
+    )
+    lifecycle_inactive = row is None or (not mapping_runtime_lifecycle_eligible(store, row) and not completed_terminal_report)
     if lifecycle_inactive or (
         allow_session_start and row["launch_generation_sha256"] is not None and not session_start_pending
     ) or (
@@ -432,7 +446,13 @@ def report_runtime(store: Any, payload_value: Mapping[str, Any], harness: Harnes
             raise InvalidRequestError("runtime report reason is invalid")
     elif reason is not None and (not isinstance(reason, str) or reason not in SESSION_SWITCH_REASONS):
         raise InvalidRequestError("runtime report reason is invalid")
-    binding = verify_runtime_binding(store, payload, allow_session_start=event == "session_start")
+    terminal_report = event == "session_shutdown" or (event == "lifecycle" and state == "idle")
+    binding = verify_runtime_binding(
+        store,
+        payload,
+        allow_session_start=event == "session_start",
+        allow_completed_terminal_report=terminal_report,
+    )
     workstream_id = str(binding["workstream_id"])
     instance = str(payload["runtimeInstanceId"])
     kind, value = payload["nativeSessionKind"], payload["nativeSessionValue"]
