@@ -195,6 +195,7 @@ test("checkpoint schema contains only the v1 semantic phases and fields", async 
   assert.doesNotMatch(source, /phase: z\.enum\(\["investigating", "implementing", "verifying", "ready_review"\]\)/);
   assert.match(source, /accepted target drift/);
   assert.match(source, /replacement completion packet/);
+  assert.match(source, /source\.accepted_completion_contract/);
   assert.doesNotMatch(source, /needs_input|blocker_code|blockerCode/);
   assert.doesNotMatch(source, /nextAction: params\.next_action, \(\.\.\.params\.blocker/);
 });

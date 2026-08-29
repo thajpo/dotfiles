@@ -67,6 +67,42 @@ def _source(connection: Any, source_kind: str, source_id: str) -> dict[str, Any]
     return dict(row)
 
 
+def _accepted_completion_contract(connection: Any, source: Mapping[str, Any]) -> dict[str, Any]:
+    acceptance = connection.execute(
+        "SELECT scope_json FROM workstream_acceptances WHERE acceptance_id=?",
+        (source.get("acceptance_id"),),
+    ).fetchone()
+    if acceptance is None:
+        raise ConflictError("integration acceptance record is missing")
+    try:
+        scope = json.loads(str(acceptance["scope_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ConflictError("integration acceptance scope is invalid") from error
+    criteria = scope.get("acceptance") if isinstance(scope, dict) else None
+    changed_paths = scope.get("changedPaths") if isinstance(scope, dict) else None
+    conflict_policy = scope.get("conflictPolicy") if isinstance(scope, dict) else None
+    if (
+        not isinstance(criteria, list)
+        or not criteria
+        or any(
+            not isinstance(item, Mapping)
+            or not isinstance(item.get("criterion"), str)
+            or not item["criterion"]
+            or item.get("status") != "passed"
+            for item in criteria
+        )
+        or not isinstance(changed_paths, list)
+        or any(not isinstance(path, str) or not path for path in changed_paths)
+        or conflict_policy != "bounded-worker-reconciliation"
+    ):
+        raise ConflictError("integration acceptance scope is invalid")
+    return {
+        "criteria": [{"criterion": str(item["criterion"]), "status": "passed"} for item in criteria],
+        "changed_paths": list(changed_paths),
+        "conflict_policy": conflict_policy,
+    }
+
+
 def _upsert(connection: Any, *, recipient_workstream_id: str, project_id: str, source_kind: str, source_id: str, event: Mapping[str, Any], priority: int | None = None) -> None:
     if source_kind not in SOURCE_KINDS or not isinstance(source_id, str) or not source_id:
         raise InvalidRequestError("attention source reference is invalid")
@@ -249,7 +285,10 @@ def inspect_attention(store: Any, *, recipient_workstream_id: str, attention_id:
     ).fetchone()
     if row is None:
         raise NotFoundError("attention item was not found")
-    source = _source(store.conn, str(row["source_kind"]), str(row["source_id"]))
+    source_kind = str(row["source_kind"])
+    source = _source(store.conn, source_kind, str(row["source_id"]))
+    if source_kind == "integration":
+        source["accepted_completion_contract"] = _accepted_completion_contract(store.conn, source)
     return {"attention": dict(row), "source": source}
 
 

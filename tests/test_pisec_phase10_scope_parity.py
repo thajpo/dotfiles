@@ -521,6 +521,7 @@ class Phase10ScopeParityTests(unittest.TestCase):
         self.assertIn("awaiting_worker", context)
         self.assertIn("replacement completion packet", context)
         self.assertIn("existing acceptance", context)
+        self.assertIn("source.accepted_completion_contract", context)
         self.assertIn("must descend from source.target_oid", context)
         self.assertIn("refs/pisec/target/<integration-sourceId>", context)
         self.assertNotIn("requires review", context)

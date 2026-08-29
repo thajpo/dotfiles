@@ -377,7 +377,10 @@ def list_integrations(store: Any, project_id: str, *, states: set[str] | None = 
 
 
 def _set_job(store: Any, integration_id: str, *, state: str, next_action: str | None = None, error: str | None = None, candidate_packet: str | None = None, candidate_source: str | None = None, target_oid: str | None = None, integration_source: str | None = None) -> None:
-    current = store.conn.execute("SELECT project_id,workstream_id,state FROM integration_jobs WHERE integration_id=?", (integration_id,)).fetchone()
+    current = store.conn.execute(
+        "SELECT project_id,workstream_id,state,next_action,last_error,candidate_completion_packet_id,candidate_source_oid,target_oid,integration_source_oid FROM integration_jobs WHERE integration_id=?",
+        (integration_id,),
+    ).fetchone()
     if current is None:
         raise NotFoundError("integration job was not found")
     now = utc_now()
@@ -398,11 +401,20 @@ def _set_job(store: Any, integration_id: str, *, state: str, next_action: str | 
     if integration_source is not None:
         assignments.append("integration_source_oid=?")
         values.append(integration_source)
+    attention_changed = state in {"awaiting_worker", "needs_attention"} and (
+        current["state"] != state
+        or current["next_action"] != next_action
+        or current["last_error"] != error
+        or (candidate_packet is not None and current["candidate_completion_packet_id"] != candidate_packet)
+        or (candidate_source is not None and current["candidate_source_oid"] != candidate_source)
+        or (target_oid is not None and current["target_oid"] != target_oid)
+        or (integration_source is not None and current["integration_source_oid"] != integration_source)
+    )
     values.append(integration_id)
     with store.transaction():
         store.conn.execute(f"UPDATE integration_jobs SET {','.join(assignments)} WHERE integration_id=?", values)
-        if current["state"] != state and state in {"awaiting_worker", "needs_attention"}:
-            append_event_in_transaction(store.conn, kind=f"integration.{state}", project_id=current["project_id"], workstream_id=current["workstream_id"], payload={"integrationId": integration_id, "state": state, "nextAction": next_action})
+        if attention_changed:
+            append_event_in_transaction(store.conn, kind=f"integration.{state}", project_id=current["project_id"], workstream_id=current["workstream_id"], payload={"integrationId": integration_id, "state": state, "nextAction": next_action, "lastError": error})
 
 
 def _latest_replacement(store: Any, candidate: Mapping[str, Any], accepted_paths: list[str], accepted_criteria: Any) -> dict[str, Any] | None:
@@ -424,18 +436,23 @@ def _latest_replacement(store: Any, candidate: Mapping[str, Any], accepted_paths
     return None
 
 
-def _current_candidate(store: Any, project_id: str, workstream_id: str, task_sha256: str, accepted_paths: list[str], accepted_criteria: Any) -> dict[str, Any] | None:
+def _current_candidate(store: Any, project_id: str, workstream_id: str, task_sha256: str, accepted_paths: list[str], accepted_criteria: Any) -> tuple[dict[str, Any] | None, str | None]:
     rows = store.conn.execute(
         "SELECT packet_sha256 FROM completion_packets WHERE workstream_id=? AND task_packet_sha256=? ORDER BY submitted_at DESC,completion_packet_id DESC",
         (workstream_id, task_sha256),
     )
+    mismatch: str | None = None
     for row in rows:
         try:
             candidate = _candidate(store, project_id, workstream_id, packet_sha256=row["packet_sha256"], expected_paths=accepted_paths, expected_acceptance=accepted_criteria)
-        except (ConflictError, ScopeMismatchError, NeedsAttentionError):
+        except (ScopeMismatchError, NeedsAttentionError) as error:
+            if mismatch is None:
+                mismatch = str(error)
             continue
-        return candidate
-    return None
+        except ConflictError:
+            continue
+        return candidate, None
+    return None, mismatch
 
 
 def _report_and_receipt(store: Any, job: Mapping[str, Any], candidate: Mapping[str, Any], *, previous_target_oid: str, final_source_oid: str, changed_paths: list[str], verification: Mapping[str, Any]) -> None:
@@ -574,9 +591,15 @@ def _process_job(store: Any, job: Mapping[str, Any], workspace: Any | None, harn
         except ConflictError as error:
             if "source commit is stale" not in str(error):
                 raise
-            candidate = _current_candidate(store, str(job["project_id"]), str(job["workstream_id"]), scope["taskPacketSha256"], accepted_paths, scope["acceptance"])
+            candidate, candidate_error = _current_candidate(store, str(job["project_id"]), str(job["workstream_id"]), scope["taskPacketSha256"], accepted_paths, scope["acceptance"])
             if candidate is None:
-                _set_job(store, integration_id, state="awaiting_worker", error="worker branch moved without a matching verified completion packet", next_action="submit a new ready_review checkpoint for the current branch")
+                if candidate_error == "replacement completion packet changed the accepted criteria":
+                    next_action = "inspect source.accepted_completion_contract.criteria and submit one replacement completion packet with the exact criterion text, order, and passed status"
+                elif candidate_error == "replacement completion packet changed paths outside the accepted scope":
+                    next_action = "reconcile only source.accepted_completion_contract.changed_paths and submit a new bounded replacement completion packet"
+                else:
+                    next_action = "submit a new ready_review checkpoint for the current branch"
+                _set_job(store, integration_id, state="awaiting_worker", error=candidate_error or "worker branch moved without a matching verified completion packet", next_action=next_action)
                 return {"integrationId": integration_id, "state": "awaiting_worker"}
             _set_job(store, integration_id, state="queued", candidate_packet=candidate["packet"]["completion_packet_id"], candidate_source=candidate["sourceOid"], next_action="candidate refreshed after worker verification")
             job = {**dict(job), "state": "queued", "candidate_completion_packet_id": candidate["packet"]["completion_packet_id"], "candidate_source_oid": candidate["sourceOid"]}

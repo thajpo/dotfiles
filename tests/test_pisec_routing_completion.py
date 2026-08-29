@@ -80,6 +80,7 @@ class PisecRoutingCompletionTests(unittest.TestCase):
 
     def test_codex_exposes_typed_progress_and_issue_contracts(self):
         self.assertIn("authorized attention record and its typed source", TOOL_DESCRIPTIONS["pisec_inspect_attention"])
+        self.assertIn("exact accepted completion contract", TOOL_DESCRIPTIONS["pisec_inspect_attention"])
         self.assertIn("integration source ID", TOOL_DESCRIPTIONS["pisec_inspect_attention"])
         checkpoint = TOOLS["pisec_checkpoint_workstream"][1]
         self.assertFalse(checkpoint["additionalProperties"])
