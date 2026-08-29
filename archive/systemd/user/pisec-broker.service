@@ -1,0 +1,21 @@
+[Unit]
+Description=Pisec workflow broker
+Requires=herdr.service pisec-auth-gateway.service
+After=herdr.service pisec-auth-gateway.service
+PartOf=herdr.service
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/pisec/ports.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=%h/.local/lib/pisec/bin/pisec-broker
+# Herdr restores pane shells before agent profiles are re-bound.  Launch the
+# supported refresh operation as a separate user service so broker startup is
+# immediate while stale approved runtimes recover in the background.
+ExecStartPost=/usr/bin/systemd-run --user --quiet --collect --property=PartOf=pisec-broker.service /bin/sh -c 'for attempt in $(seq 1 30); do %h/.local/bin/pisec project refresh --all --wait-seconds 300 --json && exit 0; sleep 1; done; exit 1'
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+
+[Install]
+WantedBy=default.target

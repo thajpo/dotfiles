@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-state_args=()
-if [[ -n "${PI_SYSTEM_STATE_ROOT:-}" ]]; then state_args+=(--state-root "$PI_SYSTEM_STATE_ROOT"); fi
-exec python3 "$root/bin/pi-control" "${state_args[@]}" workstream create --request-json "${1:--}"

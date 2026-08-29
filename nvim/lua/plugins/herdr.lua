@@ -1,6 +1,8 @@
 return {
   {
     "ChmaraX/herdr-nvim",
-    opts = {},
+    opts = {
+      prefix = "<leader>h",
+    },
   },
 }

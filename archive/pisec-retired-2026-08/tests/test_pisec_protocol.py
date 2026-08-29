@@ -1,0 +1,375 @@
+from pathlib import Path
+import json
+import os
+import socket
+import subprocess
+import tempfile
+import threading
+import unittest
+from unittest.mock import patch
+
+from scripts.pisec.adapters import AdapterRegistry, AgentObservation, WorkspaceObservation
+from scripts.pisec.broker import BrokerDispatcher, BrokerService
+from scripts.pisec.models import AuthorizationError, InvalidRequestError, PisecError, new_id
+from scripts.pisec.pi_store import PiStore
+from scripts.pisec.projects import register_project
+from scripts.pisec.protocol import decode_request, request, success_response
+from scripts.pisec.runtime import usable_runtime_binding
+from scripts.pisec.secretary import ensure_secretary
+from tests.pisec_fixture import FixtureHarness, FixtureWorkspace, make_repo
+
+
+class ProtocolUnitTests(unittest.TestCase):
+    def test_decoder_rejects_trailing_duplicate_oversized_and_unknown(self):
+        base = {"protocolVersion": 1, "requestId": new_id("req"), "operation": "project.list", "payload": {}}
+        with self.assertRaises(InvalidRequestError):
+            decode_request((json.dumps(base) + "\n{}\n").encode())
+        with self.assertRaises(InvalidRequestError):
+            decode_request(b'{"protocolVersion":1,"protocolVersion":1,"requestId":"req_00000000000000000000000000000000","operation":"x","payload":{}}\n')
+        unknown = dict(base, extra=True)
+        with self.assertRaises(InvalidRequestError):
+            decode_request((json.dumps(unknown) + "\n").encode())
+        with self.assertRaises(InvalidRequestError):
+            decode_request(b" " * (64 * 1024) + b"\n")
+
+
+class BrokerSocketTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.repo = self.root / "repo"
+        make_repo(self.repo)
+        self.state = self.root / "state"
+        self.harness = FixtureHarness(self.root)
+        with PiStore(self.state) as store:
+            project = register_project(store, self.repo, default_ref="main")
+            self.project_id = project["project_id"]
+            ensured = ensure_secretary(store, self.project_id, self.harness, FixtureWorkspace(self.root, store))
+            self.token = Path(ensured["binding"]["launch_secret_path"]).read_text().strip()
+            self.binding = ensured["binding"]
+            store.conn.execute("UPDATE runtime_bindings SET runtime_instance_id=NULL,report_seq=0 WHERE workstream_id=?", (ensured["workstream"]["workstream_id"],))
+        self.workspace = FixtureWorkspace(self.root, None)
+        self.registry = AdapterRegistry()
+        self.registry.register_harness(self.harness)
+        self.registry.register_workspace(self.workspace)
+        dispatcher = BrokerDispatcher(lambda: PiStore(self.state), registry=self.registry, harness=self.harness, workspace=self.workspace)
+        self.service = BrokerService(dispatcher, runtime_root=self.root / "runtime")
+        self.service.start()
+
+    def tearDown(self):
+        self.service.stop()
+        self.temp.cleanup()
+
+    def test_socket_directories_and_files_are_owner_only(self):
+        for path in self.service.paths.values():
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_admin_and_secretary_positive_paths(self):
+        projects = request(self.service.paths["admin"], "project.list", {})
+        self.assertEqual(projects["projects"][0]["project_id"], self.project_id)
+        status = request(self.service.paths["secretary"], "project.status", {"authToken": self.token})
+        self.assertEqual(status["project"]["project_id"], self.project_id)
+
+    def test_first_mate_fleet_scope_is_required_and_filtered(self):
+        with PiStore(self.state) as store:
+            dispatcher = self.service.dispatcher
+            with self.assertRaises(AuthorizationError):
+                dispatcher._fleet(store, "fleet.status", "ws_00000000000000000000000000000000", {"projectId": self.project_id})
+            self.assertEqual(dispatcher._fleet(store, "fleet.status", "ws_00000000000000000000000000000000", {})["projects"], [])
+            store.conn.execute("UPDATE projects SET coordination_mode='fleet' WHERE project_id=?", (self.project_id,))
+            self.assertEqual([item["project"]["project_id"] for item in dispatcher._fleet(store, "fleet.status", "ws_00000000000000000000000000000000", {})["projects"]], [self.project_id])
+    def test_secretary_issue_report_is_durable_and_idempotent(self):
+        payload = {"authToken": self.token, "category": "permission", "severity": "blocking", "summary": "Worker cannot read approved source", "details": "The fenced worker received permission denied for the approved Herdr excerpt.", "requestedAction": "Review the minimum read-only source scope.", "evidence": ["PermissionError: denied"], "idempotencyKey": "source-read-1"}
+        first = request(self.service.paths["secretary"], "issue.report", payload)
+        replay = request(self.service.paths["secretary"], "issue.report", payload)
+        self.assertEqual(first["issue_id"], replay["issue_id"])
+        with PiStore(self.state) as store:
+            row = store.conn.execute("SELECT category,severity,state FROM issues WHERE issue_id=?", (first["issue_id"],)).fetchone()
+            self.assertEqual(tuple(row), ("permission", "blocking", "open"))
+        with self.assertRaises(PisecError) as denied:
+            request(self.service.paths["admin"], "issue.report", {key: value for key, value in payload.items() if key != "authToken"})
+        self.assertEqual(denied.exception.code, "authorization_denied")
+
+    def test_cross_socket_operations_and_bad_token_fail(self):
+        with self.assertRaises(PisecError) as secretary_error:
+            request(self.service.paths["secretary"], "project.list", {"authToken": self.token})
+        self.assertEqual(secretary_error.exception.code, "authorization_denied")
+        with self.assertRaises(PisecError) as admin_error:
+            request(self.service.paths["admin"], "project.status", {})
+        self.assertEqual(admin_error.exception.code, "authorization_denied")
+        with self.assertRaises(PisecError) as runtime_error:
+            request(self.service.paths["runtime"], "project.status", {})
+        self.assertEqual(runtime_error.exception.code, "authorization_denied")
+        with self.assertRaises(PisecError) as bad_token_error:
+            request(self.service.paths["secretary"], "project.status", {"authToken": "x" * 48})
+        self.assertEqual(bad_token_error.exception.code, "authorization_denied")
+
+    def test_runtime_handler_is_only_on_runtime_socket(self):
+        session = Path(self.binding["harness_home"]) / "sessions" / "one.jsonl"
+        session.write_text("session\n")
+        payload = {"workstreamId": self.binding["workstream_id"], "runtimeInstanceId": "protocol-runtime", "seq": 1, "event": "session_start", "reason": None, "state": "starting", "nativeSessionKind": "path", "nativeSessionValue": str(session), "startSource": "startup", "surfaceId": self.binding["workspace_surface_id"], "token": self.token, "generation": self.binding["desired_generation_sha256"]}
+        result = request(self.service.paths["runtime"], "runtime.report", payload)
+        self.assertTrue(result["accepted"])
+        with self.assertRaises(PisecError):
+            request(self.service.paths["admin"], "runtime.report", payload)
+
+    def test_malformed_request_returns_bounded_public_error(self):
+        path = self.service.paths["admin"]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(str(path))
+            client.sendall(b'{"bad":true}\n')
+            client.shutdown(socket.SHUT_WR)
+            response = client.recv(65536)
+        body = json.loads(response)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"]["code"], "invalid_request")
+        self.assertNotIn("Traceback", response.decode())
+
+    def test_response_does_not_require_client_eof(self):
+        path = self.service.paths["runtime"]
+        request_id = new_id("req")
+        wire = json.dumps({"protocolVersion": 1, "requestId": request_id, "operation": "runtime.report", "payload": {"state": "idle"}}).encode() + b"\n"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1)
+            client.connect(str(path))
+            client.sendall(wire)
+            response = client.recv(65536)
+        body = json.loads(response)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["requestId"], request_id)
+
+    def test_workspace_callback_reconciliation_is_deferred(self):
+        called = threading.Event()
+        release = threading.Event()
+
+        def blocking_reconcile(store, payload):
+            called.set()
+            release.wait(2)
+            return {"reconciled": True}
+
+        self.workspace.reconcile = blocking_reconcile
+        service = BrokerService(
+            BrokerDispatcher(lambda: PiStore(self.state), registry=self.registry, harness=self.harness, workspace=self.workspace),
+            runtime_root=self.root / "deferred-runtime",
+        )
+        service.start()
+        try:
+            result = request(service.paths["admin"], "workspace.event", {"adapterId": self.workspace.manifest.adapter_id, "event": "pane.agent_status_changed", "payload": {}}, timeout=0.5)
+            self.assertEqual(result, {"accepted": True, "reconcileQueued": True})
+            self.assertTrue(called.wait(0.5))
+        finally:
+            release.set()
+            service.stop()
+
+    def test_startup_refresh_runs_in_background(self):
+        completed = threading.Event()
+
+        def fake_refresh(store, harness, workspace, **kwargs):
+            self.assertEqual(kwargs["wait_seconds"], 0.01)
+            completed.set()
+            return {"upgraded": [], "pending": [], "failed": []}
+
+        with patch("scripts.pisec.refresh.refresh_runtimes", side_effect=fake_refresh) as refresh:
+            self.service.dispatcher.startup_refresh_async(wait_seconds=0.01)
+            self.assertTrue(completed.wait(1))
+            thread = self.service.dispatcher._startup_refresh_thread
+            self.assertIsNotNone(thread)
+            thread.join(1)
+            refresh.assert_called_once()
+
+    def test_startup_reconcile_leaves_stale_generation_stopped_for_refresh(self):
+        repo_path = str(self.repo)
+        self.workspace.worktrees[repo_path] = WorkspaceObservation(
+            workspace_id=self.binding["workspace_id"],
+            view_id=self.binding["workspace_view_id"],
+            surface_id=self.binding["workspace_surface_id"],
+            worktree_path=repo_path,
+            branch_name=None,
+            agent=None,
+        )
+        self.workspace.agents[self.binding["agent_name"]] = AgentObservation(
+            self.binding["agent_name"],
+            self.binding["workspace_surface_id"],
+            True,
+            "idle",
+        )
+        self.workspace.runtime_states[self.binding["workspace_surface_id"]] = "stopped"
+        with PiStore(self.state) as store:
+            store.conn.execute(
+                "UPDATE runtime_bindings SET observed_state='idle',runtime_instance_id=NULL,report_seq=0,applied_generation_sha256=? WHERE workstream_id=?",
+                ("a" * 64, self.binding["workstream_id"]),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL WHERE workstream_id=?",
+                (self.binding["workstream_id"],),
+            )
+        result = self.service.dispatcher.startup_reconcile()
+        self.assertNotIn(
+            {"workstreamId": self.binding["workstream_id"], "launched": True},
+            result["resumed"],
+        )
+        self.assertFalse(any(call[0] == "run" for call in self.workspace.calls))
+        with PiStore(self.state) as store:
+            restored = store.conn.execute(
+                "SELECT desired_generation_sha256,applied_generation_sha256,launch_generation_sha256,observed_state FROM runtime_bindings WHERE workstream_id=?",
+                (self.binding["workstream_id"],),
+            ).fetchone()
+            self.assertNotEqual(restored["desired_generation_sha256"], restored["applied_generation_sha256"])
+            self.assertEqual(restored["applied_generation_sha256"], "a" * 64)
+            self.assertIsNone(restored["launch_generation_sha256"])
+            self.assertEqual(restored["observed_state"], "idle")
+
+    def test_startup_reconcile_accepts_real_attestation_without_ownerless_launch(self):
+        self.service.dispatcher.stop_background()
+        repo_path = str(self.repo)
+        surface_id = str(self.binding["workspace_surface_id"])
+        workstream_id = str(self.binding["workstream_id"])
+        self.workspace.worktrees[repo_path] = WorkspaceObservation(
+            workspace_id=self.binding["workspace_id"],
+            view_id=self.binding["workspace_view_id"],
+            surface_id=surface_id,
+            worktree_path=repo_path,
+            branch_name=None,
+            agent=None,
+        )
+        self.workspace.runtime_states[surface_id] = "stopped"
+        with PiStore(self.state) as store:
+            generation = str(store.conn.execute(
+                "SELECT desired_generation_sha256 FROM runtime_bindings WHERE workstream_id=?",
+                (workstream_id,),
+            ).fetchone()[0])
+            store.conn.execute(
+                "UPDATE runtime_bindings SET observed_state='stopped',applied_generation_sha256=?,launch_generation_sha256=NULL,refresh_pending=0,refresh_operation_id=NULL,refresh_started_at=NULL,runtime_instance_id=NULL,report_seq=0,session_start_event_sequence=NULL,session_start_report_seq=NULL,session_started_at=NULL WHERE workstream_id=?",
+                (generation, workstream_id),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL WHERE workstream_id=?",
+                (workstream_id,),
+            )
+
+        def launch_without_attestation(launched_surface_id, argv, env=None):
+            self.workspace.calls.append(("run", (launched_surface_id, tuple(argv), dict(env or {}))))
+            self.workspace.runtime_states[launched_surface_id] = "live"
+            self.workspace.agents[self.binding["agent_name"]] = AgentObservation(
+                self.binding["agent_name"], launched_surface_id, True, "working"
+            )
+            return {"started": True, "surfaceId": launched_surface_id}
+
+        self.workspace.run_command = launch_without_attestation
+        result = self.service.dispatcher.startup_reconcile()
+        self.assertIn({"workstreamId": workstream_id, "launched": True}, result["resumed"])
+        with PiStore(self.state) as store:
+            pending = store.conn.execute(
+                "SELECT observed_state,launch_generation_sha256,refresh_pending,refresh_operation_id,runtime_instance_id FROM runtime_bindings WHERE workstream_id=?",
+                (workstream_id,),
+            ).fetchone()
+            self.assertEqual(pending["observed_state"], "starting")
+            self.assertIsNone(pending["launch_generation_sha256"])
+            self.assertEqual(pending["refresh_pending"], 0)
+            self.assertIsNone(pending["refresh_operation_id"])
+            self.assertIsNone(pending["runtime_instance_id"])
+
+        session = Path(self.binding["harness_home"]) / "sessions" / "restored.jsonl"
+        session.write_text("restored\n")
+        payload = {
+            "workstreamId": workstream_id,
+            "runtimeInstanceId": "restored-runtime",
+            "seq": 1,
+            "event": "session_start",
+            "reason": None,
+            "state": "idle",
+            "nativeSessionKind": "path",
+            "nativeSessionValue": str(session),
+            "startSource": "startup",
+            "surfaceId": surface_id,
+            "token": self.token,
+            "generation": generation,
+        }
+        self.assertTrue(request(self.service.paths["runtime"], "runtime.report", payload)["accepted"])
+        with PiStore(self.state) as store:
+            restored = store.conn.execute(
+                "SELECT observed_state,applied_generation_sha256,launch_generation_sha256,refresh_pending,runtime_instance_id,session_start_event_sequence FROM runtime_bindings WHERE workstream_id=?",
+                (workstream_id,),
+            ).fetchone()
+            self.assertEqual(restored["observed_state"], "idle")
+            self.assertEqual(restored["applied_generation_sha256"], generation)
+            self.assertIsNone(restored["launch_generation_sha256"])
+            self.assertEqual(restored["refresh_pending"], 0)
+            self.assertEqual(restored["runtime_instance_id"], "restored-runtime")
+            self.assertIsNotNone(restored["session_start_event_sequence"])
+            self.assertTrue(usable_runtime_binding(store, workstream_id, self.workspace, self.harness))
+
+    def test_startup_reconcile_does_not_duplicate_live_runtime_without_agent_metadata(self):
+        repo_path = str(self.repo)
+        self.workspace.worktrees[repo_path] = WorkspaceObservation(
+            workspace_id=self.binding["workspace_id"],
+            view_id=self.binding["workspace_view_id"],
+            surface_id=self.binding["workspace_surface_id"],
+            worktree_path=repo_path,
+            branch_name=None,
+            agent=None,
+        )
+        self.workspace.runtime_states[self.binding["workspace_surface_id"]] = "live"
+        with PiStore(self.state) as store:
+            store.conn.execute(
+                "UPDATE runtime_bindings SET observed_state='missing' WHERE workstream_id=?",
+                (self.binding["workstream_id"],),
+            )
+            store.conn.execute(
+                "UPDATE workstreams SET provisioning_state='bound',attention_reason=NULL WHERE workstream_id=?",
+                (self.binding["workstream_id"],),
+            )
+        result = self.service.dispatcher.startup_reconcile()
+        self.assertEqual(result["resumed"], [])
+        self.assertFalse(any(call[0] == "run" for call in self.workspace.calls))
+
+    def test_startup_reconcile_does_not_overtake_generation_refresh(self):
+        repo_path = str(self.repo)
+        self.workspace.worktrees[repo_path] = WorkspaceObservation(
+            workspace_id=self.binding["workspace_id"],
+            view_id=self.binding["workspace_view_id"],
+            surface_id=self.binding["workspace_surface_id"],
+            worktree_path=repo_path,
+            branch_name=None,
+            agent=None,
+        )
+        self.workspace.runtime_states[self.binding["workspace_surface_id"]] = "stopped"
+        desired = "b" * 64
+        with PiStore(self.state) as store:
+            from scripts.pisec.operations import create_operation
+            refresh_operation, _ = create_operation(store, kind="runtime.refresh", project_id=self.project_id, workstream_id=self.binding["workstream_id"], idempotency_key="protocol-refresh-reservation", request={"workstreamId": self.binding["workstream_id"]})
+            store.conn.execute(
+                "UPDATE runtime_bindings SET observed_state='starting',refresh_pending=1,refresh_operation_id=?,refresh_started_at=?,desired_generation_sha256=?,launch_generation_sha256=? WHERE workstream_id=?",
+                (refresh_operation.operation_id, "2026-08-25T00:00:00Z", desired, desired, self.binding["workstream_id"]),
+            )
+        result = self.service.dispatcher.startup_reconcile()
+        self.assertEqual(result["resumed"], [])
+        self.assertFalse(any(call[0] == "run" for call in self.workspace.calls))
+        with PiStore(self.state) as store:
+            binding = store.conn.execute(
+                "SELECT launch_generation_sha256,refresh_pending FROM runtime_bindings WHERE workstream_id=?",
+                (self.binding["workstream_id"],),
+            ).fetchone()
+            self.assertEqual(binding["launch_generation_sha256"], desired)
+            self.assertEqual(binding["refresh_pending"], 1)
+
+
+    def test_secretary_projection_omits_binding_material(self):
+        status = request(self.service.paths["secretary"], "project.status", {"authToken": self.token})
+        encoded = json.dumps(status)
+        for field in ("repository_path", "git_common_dir", "launch_secret_path", "fence_policy_path", "private_git_object_dir", "runtime_token_sha256", "harness_home"):
+            self.assertNotIn(field, encoded)
+        prepared = request(self.service.paths["secretary"], "workstream.prepare", {"authToken": self.token, "title": "Bounded worker", "purpose": "Verify projection", "brief": "Use only the approved scope.", "taskPacket": {"schemaVersion": 1, "outcome": "Projection is bounded.", "boundaries": ["Keep host paths private."], "acceptance": ["Public projection omits private paths."], "openQuestions": [], "evidence": ["Protocol test."]}, "idempotencyKey": "projection-check"})
+        prepared_encoded = json.dumps(prepared)
+        for field in ("privateGitObjectDir", "gitCommonObjectDir", "private_git_object_dir"):
+            self.assertNotIn(field, prepared_encoded)
+
+    def test_success_response_is_bounded(self):
+        response = json.loads(success_response(new_id("req"), {"large": "x" * (64 * 1024)}))
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "invalid_request")
+
+
+if __name__ == "__main__":
+    unittest.main()

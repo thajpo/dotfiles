@@ -1,4 +1,0 @@
-interface:
-  display_name: "Lean Flow"
-  short_description: "Turn selected work into an issue and temporary plan"
-  default_prompt: "Use $lean-flow to turn this selected feature into a concise issue and implementation plan."

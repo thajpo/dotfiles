@@ -1,4 +1,0 @@
-interface:
-  display_name: "Partner Memory"
-  short_description: "Persistent collaboration memory across repositories"
-  default_prompt: "Use partner-memory to capture and apply user workflow preferences over time."

@@ -1,9 +1,0 @@
-{
-  "thinkingLevel": "inherit",
-  "defaultPlanTools": ["read", "bash", "grep", "find", "ls", "lsp_diagnostics"],
-  "allowedPlanSubagents": [],
-  "safeSubcommands": {
-    "git": ["status", "log", "diff", "show", "branch", "remote", "ls-files", "grep", "rev-parse", "blame", "describe", "merge-base", "ls-tree", "cat-file"],
-    "gh": ["pr view", "pr list", "issue view", "issue list"]
-  }
-}

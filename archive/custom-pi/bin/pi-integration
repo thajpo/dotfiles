@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-state_args=()
-if [[ -n "${PI_SYSTEM_STATE_ROOT:-}" ]]; then state_args+=(--state-root "$PI_SYSTEM_STATE_ROOT"); fi
-command=${1:-}
-[[ -n "$command" ]] || { printf 'usage: pi-integration analyze|authorize|integrate request.json\n' >&2; exit 2; }
-shift
-exec python3 "$root/bin/pi-control" "${state_args[@]}" integration "$command" --request-json "${1:--}"
