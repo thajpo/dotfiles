@@ -1,5 +1,5 @@
 [Unit]
-Description=Check for a new OpenAI Codex upstream candidate
+Description=Check for a new stable OpenAI Codex release
 After=network-online.target
 Wants=network-online.target
 

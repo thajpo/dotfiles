@@ -1,5 +1,5 @@
 [Unit]
-Description=Periodically check OpenAI Codex upstream
+Description=Periodically check for a stable OpenAI Codex release
 
 [Timer]
 OnBootSec=10m
