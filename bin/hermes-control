@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+session_name="${HERMES_CONTROL_SESSION:-hermes-control}"
+workspace="${HERMES_CONTROL_WORKSPACE:-$HOME/dotfiles/hermes-control}"
+profile_command="${HERMES_CONTROL_PROFILE_COMMAND:-hermes-ops}"
+thread_name="${HERMES_CONTROL_THREAD:-control}"
+provider="${HERMES_CONTROL_PROVIDER:-openai-codex}"
+model="${HERMES_CONTROL_MODEL:-gpt-5.6-sol}"
+toolsets="${HERMES_CONTROL_TOOLSETS:-terminal,todo,memory,session_search}"
+script_path="${BASH_SOURCE[0]}"
+
+usage() {
+  printf '%s\n' \
+    'Usage: hermes-control <start|attach|status|snapshot|logs|stop|restart>' \
+    '' \
+    'Environment overrides:' \
+    '  HERMES_CONTROL_SESSION    tmux session name' \
+    '  HERMES_CONTROL_WORKSPACE  working directory containing AGENTS.md' \
+    '  HERMES_CONTROL_PROFILE_COMMAND  named Hermes profile command' \
+    '  HERMES_CONTROL_THREAD     named Hermes conversation' \
+    '  HERMES_CONTROL_PROVIDER   Hermes inference provider' \
+    '  HERMES_CONTROL_MODEL      Hermes model' \
+    '  HERMES_CONTROL_TOOLSETS   comma-separated Hermes toolsets'
+}
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'hermes-control: required command not found: %s\n' "$1" >&2
+    exit 127
+  fi
+}
+
+has_session() {
+  tmux has-session -t "$session_name" 2>/dev/null
+}
+
+run_agent() {
+  cd "$workspace"
+  umask 077
+
+  exec "$profile_command" chat \
+    --continue "$thread_name" \
+    --create-if-missing \
+    --in "$workspace" \
+    --provider "$provider" \
+    --model "$model" \
+    --toolsets "$toolsets"
+}
+
+start_session() {
+  require_command tmux
+  require_command "$profile_command"
+
+  if [[ ! -f "$workspace/AGENTS.md" ]]; then
+    printf 'hermes-control: missing control contract: %s/AGENTS.md\n' "$workspace" >&2
+    exit 1
+  fi
+
+  if has_session; then
+    printf 'hermes-control: tmux session %s is already running\n' "$session_name"
+    return
+  fi
+
+  local command
+  printf -v command '%q __run' "$script_path"
+  tmux new-session -d -s "$session_name" -n control -c "$workspace" "$command"
+  tmux set-option -t "$session_name" remain-on-exit on >/dev/null
+  printf 'hermes-control: started tmux session %s\n' "$session_name"
+}
+
+show_status() {
+  require_command tmux
+  if ! has_session; then
+    printf 'hermes-control: stopped (tmux session %s not found)\n' "$session_name"
+    return 1
+  fi
+
+  tmux list-panes -t "$session_name" -F \
+    'session=#{session_name} window=#{window_name} pane=#{pane_id} dead=#{pane_dead} command=#{pane_current_command} cwd=#{pane_current_path}'
+}
+
+show_snapshot() {
+  printf 'Hermes control\n'
+  show_status || true
+
+  printf '\nHerdr server\n'
+  if HERDR_ENV=1 herdr status server; then
+    printf '\nHerdr agents\n'
+    HERDR_ENV=1 herdr agent list 2>&1 || true
+  else
+    printf 'Herdr agent inventory unavailable while the server is stopped.\n'
+  fi
+
+  printf '\nDotfiles\n'
+  git -C "$HOME/dotfiles" status --short --branch || true
+  git -C "$HOME/dotfiles" worktree list \
+    | awk '!/ prunable$/ { print; count += 1; if (count == 30) exit }' || true
+}
+
+attach_session() {
+  start_session
+  if [[ -n "${TMUX:-}" ]]; then
+    exec tmux switch-client -t "$session_name"
+  fi
+  exec tmux attach-session -t "$session_name"
+}
+
+show_logs() {
+  require_command tmux
+  if ! has_session; then
+    printf 'hermes-control: stopped (tmux session %s not found)\n' "$session_name" >&2
+    exit 1
+  fi
+  tmux capture-pane -p -t "$session_name:control.0" -S -300
+}
+
+stop_session() {
+  require_command tmux
+  if ! has_session; then
+    printf 'hermes-control: tmux session %s is already stopped\n' "$session_name"
+    return
+  fi
+  tmux kill-session -t "$session_name"
+  printf 'hermes-control: stopped tmux session %s\n' "$session_name"
+}
+
+case "${1:-}" in
+  __run)
+    require_command "$profile_command"
+    run_agent
+    ;;
+  start)
+    start_session
+    ;;
+  attach)
+    attach_session
+    ;;
+  status)
+    show_status
+    ;;
+  snapshot)
+    show_snapshot
+    ;;
+  logs)
+    show_logs
+    ;;
+  stop)
+    stop_session
+    ;;
+  restart)
+    stop_session
+    start_session
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

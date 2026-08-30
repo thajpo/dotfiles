@@ -1,0 +1,15 @@
+[Unit]
+Description=Persistent Hermes control plane in tmux
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=%h/.local/bin/hermes-control start
+ExecStop=%h/.local/bin/hermes-control stop
+TimeoutStartSec=30
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
