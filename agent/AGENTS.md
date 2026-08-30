@@ -34,10 +34,13 @@ the worker's assignment. The primary workflow below is not a worker mandate.
   ```
 
 - Spawn one worker per independent task with
-  `HERDR_ENV=1 ~/dotfiles/bin/spawn --base <ref> -k codex -b <worker-slug>
-  "<task packet>"`. The launcher prints the resolved base, branch, pane, and
-  worktree and checks for agents already attached to the same Git repository.
-  Do not use `--here` for mutating work.
+  `HERDR_ENV=1 ~/dotfiles/bin/spawn --base <ref> --cohort <label> --task
+  <task-label> -k codex -b <worker-slug> "<task packet>"`. The explicit cohort
+  is presentation metadata for this coordinator and its workers; do not derive
+  it from a workspace or repository. The launcher prints the resolved base,
+  branch, source/worker pane and session identities, worktree, cohort, and task,
+  and checks for agents already attached to the same Git repository. Do not use
+  `--here` for mutating work.
 - Give each worker an initial task packet containing the objective, boundaries,
   relevant context, acceptance checks, and the commit/report contract. The
   worker is headful and remains available for follow-up; do not treat the

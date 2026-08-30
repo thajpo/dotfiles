@@ -10,6 +10,11 @@ headful worker conversations. The primary delegates an initial task packet,
 then continues talking with each worker while reviewing its worktree. The
 primary owns integration, conflict resolution, tests, and design decisions.
 
+The launcher also reports display-only metadata through Herdr's supported pane
+API. It does not rename a Space, move a worktree, change Git topology, or patch
+Herdr. Coordination roles are attached only to the exact source and child panes
+whose native agent sessions are verified during a successful spawn.
+
 ## One-time setup
 
 Install and configure the existing plugin:
@@ -33,6 +38,31 @@ Make sure Herdr's Codex integration is installed:
 HERDR_ENV=1 herdr integration install codex
 ```
 
+Merge the tracked sidebar table from `herdr/coordination-sidebar.toml` into
+`~/.config/herdr/config.toml`, preserving the rest of the local config, then
+validate and reload it:
+
+```bash
+herdr config check
+herdr server reload-config
+```
+
+The row layout is `state_icon + agent` followed by `pane`. For coordinated
+panes, guarded `display-agent` and `title` metadata produce rows such as:
+
+```text
+● Dreamer · coordinator
+dreamer
+
+● Dreamer · worker
+capacity-profile-review
+```
+
+The status glyph remains Herdr-owned. An ordinary agent receives no metadata,
+so it still shows its status glyph and detected agent label; its absent `pane`
+row disappears. Space rows are not configured or reported by this feature, so
+their workspace names, branches, and Git status remain unchanged.
+
 The global Codex profile is configured for the lower-risk automation mode:
 `workspace-write` sandboxing, `on-request` approvals, and automatic review of
 eligible approval requests. `/home/j/.herdr` is an additional writable root so
@@ -51,7 +81,10 @@ From the main project worktree:
 export HERDR_ENV=1
 ~/dotfiles/bin/spawn --doctor
 base_ref=$(git branch --show-current)
-~/dotfiles/bin/spawn --base "$base_ref" -k codex -b test/herdr-worker \
+~/dotfiles/bin/spawn --base "$base_ref" \
+  --cohort Dreamer \
+  --task capacity-profile-review \
+  -k codex -b capacity-profile-review \
   "Make one focused change. Run the relevant test, commit the work, and report the commit hash, tests, blockers, and changed files."
 ```
 
@@ -60,6 +93,10 @@ The launcher resolves symlinks before locating its shim, requires
 pane, worktree, and any existing agents in the same Git repository. The
 `--base` option is an adapter option; it is removed before calling the
 installed plugin and applied through a temporary plugin-config overlay.
+`--cohort` and `--task` are also adapter options and are never forwarded to the
+plugin. Both accept spaces and punctuation; `--task` defaults to the resolved
+worker branch when omitted. Requiring the cohort makes membership explicit
+rather than guessing it from a Space, checkout, repository, or path.
 
 The command should create a separate worktree and Herdr workspace, start
 Codex, and submit the prompt. If Codex presents a repository trust prompt,
@@ -74,6 +111,30 @@ comments, or a request to explain the diff. `~/dotfiles/bin/spawn` does not use
 the requested branch/worker slug as its positional name while keeping
 `--kind codex` separate. If that name is already taken, it retries with a
 pane-qualified fallback.
+
+Only after the plugin has returned success does the launcher re-read both exact
+pane IDs, confirm that the source is still the same native agent session, and
+resolve the child's native session. It then writes `display-agent` and `title`
+with `--agent` and `--applies-to-source` guards. The child is written first; if
+the coordinator write fails, the launcher attempts to clear the child display
+metadata and reports separately whether that cleanup succeeded. A failed worker
+start writes no role metadata.
+
+The coordinator's second line uses the first nonempty identity in this order:
+its explicit Herdr agent name, stripped terminal title, canonical agent kind,
+then native session UUID. This keeps an unnamed coordinator readable without
+turning a terminal, Space, workspace, checkout, or repository label into cohort
+membership; only the explicit `--cohort` value supplies that membership.
+
+Herdr 0.8.2 does not offer a native-session-ID guard for presentation fields:
+`--applies-to-source` guards the lifecycle authority (for example
+`herdr:codex`), not the session UUID. The adapter therefore verifies session
+UUIDs immediately before writing and records them in its result, while the
+metadata remains pane-owned until replaced, cleared, or the pane closes. If an
+operator deliberately replaces Codex with another Codex session in the same
+pane, clear or replace the display metadata; do not interpret the old label as
+membership of the Space. Custom `$token` rows were rejected because Herdr does
+not apply agent/source guards to token patches.
 
 ## Inspect and communicate
 
