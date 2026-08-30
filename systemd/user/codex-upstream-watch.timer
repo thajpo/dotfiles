@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically check OpenAI Codex upstream
+
+[Timer]
+OnBootSec=10m
+OnUnitActiveSec=6h
+RandomizedDelaySec=15m
+Persistent=true
+Unit=codex-upstream-watch.service
+
+[Install]
+WantedBy=timers.target

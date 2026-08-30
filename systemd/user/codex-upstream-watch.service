@@ -1,0 +1,14 @@
+[Unit]
+Description=Check for a new OpenAI Codex upstream candidate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HERDR_ENV=1
+Environment=HERDR_SESSION=main
+# Prefer the eventual pinned launcher in ~/.local/bin. The versioned NVM path
+# keeps the currently installed npm Codex 0.151.0 available during transition.
+Environment=PATH=%h/.local/bin:%h/.nvm/versions/node/v22.19.0/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/dotfiles/bin/codex-upstream-watch --config %h/dotfiles/codex/upstream-watch.conf
+UMask=0077

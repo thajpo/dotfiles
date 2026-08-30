@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM=${0##*/}
+DEFAULT_CONFIG="${HOME}/dotfiles/codex/upstream-watch.conf"
+CONFIG_FILE=$DEFAULT_CONFIG
+STATE_DIR=${XDG_STATE_HOME:-"${HOME}/.local/state"}/codex-upstream-watch
+DRY_RUN=0
+SHOW_STATUS=0
+
+usage() {
+  cat <<EOF
+Usage: $PROGRAM [--config PATH] [--state-dir PATH] [--dry-run] [--status]
+
+Check the configured Codex upstream ref and create at most one Herdr worker for
+the current manually pinned release. --dry-run performs the remote check but
+does not write state or invoke the launcher. --status only reads local state.
+EOF
+}
+
+die() {
+  printf '%s: %s\n' "$PROGRAM" "$*" >&2
+  exit 1
+}
+
+while (($#)); do
+  case $1 in
+    --config)
+      (($# >= 2)) || die '--config requires a path'
+      CONFIG_FILE=$2
+      shift 2
+      ;;
+    --state-dir)
+      (($# >= 2)) || die '--state-dir requires a path'
+      STATE_DIR=$2
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --status)
+      SHOW_STATUS=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -r $CONFIG_FILE ]] || die "config is not readable: $CONFIG_FILE"
+# The config is a trusted, version-controlled shell fragment so paths may use
+# ${HOME}. Keep it data-only and review changes like code.
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+: "${CODEX_UPSTREAM_RELEASE:?missing CODEX_UPSTREAM_RELEASE in $CONFIG_FILE}"
+: "${CODEX_PIN_SHA:?missing CODEX_PIN_SHA in $CONFIG_FILE}"
+: "${CODEX_UPSTREAM_REMOTE:?missing CODEX_UPSTREAM_REMOTE in $CONFIG_FILE}"
+: "${CODEX_UPSTREAM_REF:?missing CODEX_UPSTREAM_REF in $CONFIG_FILE}"
+: "${CODEX_SOURCE_REPO:?missing CODEX_SOURCE_REPO in $CONFIG_FILE}"
+: "${CODEX_FORK_BASE:?missing CODEX_FORK_BASE in $CONFIG_FILE}"
+: "${CODEX_SPAWN:?missing CODEX_SPAWN in $CONFIG_FILE}"
+
+is_sha() {
+  [[ $1 =~ ^[0-9a-f]{40}$ ]]
+}
+
+is_sha "$CODEX_PIN_SHA" || die 'CODEX_PIN_SHA must be a lowercase 40-character Git SHA'
+
+read_field() {
+  local file=$1 key=$2 line
+  [[ -r $file ]] || return 1
+  line=$(sed -n "s/^${key}=//p" "$file" | head -n 1)
+  [[ -n $line ]] || return 1
+  printf '%s\n' "$line"
+}
+
+show_file() {
+  local label=$1 file=$2
+  printf '%s: %s\n' "$label" "$file"
+  if [[ -r $file ]]; then
+    sed 's/^/  /' "$file"
+  else
+    printf '  (none)\n'
+  fi
+}
+
+if ((SHOW_STATUS)); then
+  printf 'config: %s\n' "$CONFIG_FILE"
+  printf 'configured_release: %s\n' "$CODEX_UPSTREAM_RELEASE"
+  printf 'configured_pin_sha: %s\n' "$CODEX_PIN_SHA"
+  printf 'upstream: %s %s\n' "$CODEX_UPSTREAM_REMOTE" "$CODEX_UPSTREAM_REF"
+  show_file observed "$STATE_DIR/observed.env"
+  show_file pending "$STATE_DIR/pending.env"
+  show_file spawned "$STATE_DIR/spawned.env"
+  show_file last_attempt "$STATE_DIR/last-attempt.env"
+  exit 0
+fi
+
+command -v git >/dev/null 2>&1 || die 'git is required'
+remote_output=$(git ls-remote --exit-code --refs \
+  "$CODEX_UPSTREAM_REMOTE" "$CODEX_UPSTREAM_REF") \
+  || die "could not resolve $CODEX_UPSTREAM_REMOTE $CODEX_UPSTREAM_REF"
+read -r remote_sha resolved_ref extra <<<"$remote_output"
+is_sha "${remote_sha:-}" || die 'upstream returned an invalid SHA'
+[[ ${resolved_ref:-} == "$CODEX_UPSTREAM_REF" && -z ${extra:-} ]] \
+  || die 'upstream did not return exactly the configured ref'
+
+now=${CODEX_WATCH_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+
+if ((DRY_RUN)); then
+  printf 'pin: %s (%s)\n' "$CODEX_PIN_SHA" "$CODEX_UPSTREAM_RELEASE"
+  printf 'remote: %s (%s)\n' "$remote_sha" "$CODEX_UPSTREAM_REF"
+  if [[ $remote_sha == "$CODEX_PIN_SHA" ]]; then
+    printf 'dry-run: unchanged; no state or agent action needed\n'
+  else
+    printf 'dry-run: changed; normal mode would record a pending candidate and attempt one spawn\n'
+  fi
+  exit 0
+fi
+
+command -v flock >/dev/null 2>&1 || die 'flock is required'
+umask 077
+mkdir -p "$STATE_DIR/history"
+exec 9>"$STATE_DIR/lock"
+if ! flock -n 9; then
+  printf '%s: another check is already running\n' "$PROGRAM"
+  exit 0
+fi
+
+write_record() {
+  local destination=$1
+  shift
+  local temporary="${destination}.tmp.$$" item
+  : >"$temporary"
+  for item in "$@"; do
+    printf '%s\n' "$item" >>"$temporary"
+  done
+  mv -f "$temporary" "$destination"
+}
+
+write_record "$STATE_DIR/observed.env" \
+  "OBSERVED_AT=$now" \
+  "UPSTREAM_SHA=$remote_sha" \
+  "UPSTREAM_REF=$CODEX_UPSTREAM_REF" \
+  "PIN_SHA=$CODEX_PIN_SHA" \
+  "PIN_RELEASE=$CODEX_UPSTREAM_RELEASE"
+
+pending_file="$STATE_DIR/pending.env"
+spawned_file="$STATE_DIR/spawned.env"
+attempt_file="$STATE_DIR/last-attempt.env"
+pending_base=$(read_field "$pending_file" BASE_PIN_SHA || true)
+pending_sha=$(read_field "$pending_file" CANDIDATE_SHA || true)
+if [[ -f $pending_file ]]; then
+  [[ -n $pending_base && -n $pending_sha ]] \
+    || die "pending state is incomplete: $pending_file"
+  is_sha "$pending_base" && is_sha "$pending_sha" \
+    || die "pending state contains an invalid SHA: $pending_file"
+fi
+
+# Advancing the checked-in pin is the explicit acknowledgement that the old
+# candidate was manually handled. Preserve its records for audit, then begin a
+# new campaign only if the configured remote has moved again.
+if [[ -n $pending_base && $pending_base != "$CODEX_PIN_SHA" ]]; then
+  archive_stem="${pending_base}.${pending_sha:-unknown}"
+  mv -f "$pending_file" "$STATE_DIR/history/${archive_stem}.pending.env"
+  if [[ -f $spawned_file ]]; then
+    mv -f "$spawned_file" "$STATE_DIR/history/${archive_stem}.spawned.env"
+  fi
+  if [[ -f $attempt_file ]]; then
+    mv -f "$attempt_file" "$STATE_DIR/history/${archive_stem}.last-attempt.env"
+  fi
+  pending_base=
+  pending_sha=
+fi
+
+if [[ $remote_sha == "$CODEX_PIN_SHA" ]]; then
+  printf '%s: unchanged at %s (%s)\n' \
+    "$PROGRAM" "$CODEX_PIN_SHA" "$CODEX_UPSTREAM_RELEASE"
+  exit 0
+fi
+
+if [[ -z $pending_sha ]]; then
+  pending_sha=$remote_sha
+  pending_base=$CODEX_PIN_SHA
+  write_record "$pending_file" \
+    "CREATED_AT=$now" \
+    "BASE_PIN_SHA=$CODEX_PIN_SHA" \
+    "BASE_PIN_RELEASE=$CODEX_UPSTREAM_RELEASE" \
+    "CANDIDATE_SHA=$pending_sha" \
+    "UPSTREAM_REMOTE=$CODEX_UPSTREAM_REMOTE" \
+    "UPSTREAM_REF=$CODEX_UPSTREAM_REF"
+fi
+
+spawned_sha=$(read_field "$spawned_file" CANDIDATE_SHA || true)
+if [[ -f $spawned_file ]]; then
+  [[ -n $spawned_sha ]] && is_sha "$spawned_sha" \
+    || die "spawn receipt contains an invalid SHA: $spawned_file"
+fi
+if [[ $spawned_sha == "$pending_sha" ]]; then
+  if [[ $remote_sha != "$pending_sha" ]]; then
+    printf '%s: candidate %s already spawned; latest observed SHA is %s\n' \
+      "$PROGRAM" "$pending_sha" "$remote_sha"
+  else
+    printf '%s: candidate %s already spawned\n' "$PROGRAM" "$pending_sha"
+  fi
+  exit 0
+fi
+
+[[ -d $CODEX_SOURCE_REPO ]] || die "source repo is missing: $CODEX_SOURCE_REPO"
+[[ -x $CODEX_SPAWN ]] || die "canonical spawn launcher is not executable: $CODEX_SPAWN"
+for required_command in herdr jq codex; do
+  command -v "$required_command" >/dev/null 2>&1 \
+    || die "$required_command is required on PATH before spawning; pending state retained"
+done
+
+short_sha=${pending_sha:0:12}
+worker_branch="codex-upstream-${short_sha}"
+task_packet=$(cat <<EOF
+Objective: integrate OpenAI Codex upstream candidate $pending_sha into the local sticky-composer fork.
+
+Repository context:
+- Local Codex repository: $CODEX_SOURCE_REPO
+- Work only in the isolated worktree created for branch $worker_branch.
+- Base branch: $CODEX_FORK_BASE
+- Manually pinned installed release: $CODEX_UPSTREAM_RELEASE
+- Manually pinned upstream SHA: $CODEX_PIN_SHA
+- Candidate upstream ref: $CODEX_UPSTREAM_REMOTE $CODEX_UPSTREAM_REF
+- Candidate upstream SHA: $pending_sha
+
+Required work:
+- Fetch or otherwise resolve the exact candidate SHA, then integrate it into this branch.
+- Preserve the local sticky-composer behavior and reconcile upstream TUI changes carefully.
+- Run focused sticky-composer tests plus the relevant Codex build/checks.
+- Commit all resulting changes and report the commit SHA, changed files, tests, decisions, and blockers.
+
+Safety contract:
+- Never merge to main or update the configured fork base ($CODEX_FORK_BASE).
+- Never install a Codex binary or change any live binary/symlink.
+- Never push any branch or delete/clean up branches or worktrees.
+- Remain available for owner follow-up after reporting.
+EOF
+)
+
+write_record "$attempt_file" \
+  "ATTEMPTED_AT=$now" \
+  "BASE_PIN_SHA=$pending_base" \
+  "CANDIDATE_SHA=$pending_sha" \
+  "BRANCH=$worker_branch" \
+  'RESULT=starting'
+
+spawn_log="$STATE_DIR/spawn-${pending_sha}.log"
+spawn_status=0
+(
+  cd "$CODEX_SOURCE_REPO"
+  HERDR_ENV=1 "$CODEX_SPAWN" \
+    --base "$CODEX_FORK_BASE" -k codex -b "$worker_branch" "$task_packet"
+) >"$spawn_log" 2>&1 || spawn_status=$?
+
+if ((spawn_status != 0)); then
+  write_record "$attempt_file" \
+    "ATTEMPTED_AT=$now" \
+    "BASE_PIN_SHA=$pending_base" \
+    "CANDIDATE_SHA=$pending_sha" \
+    "BRANCH=$worker_branch" \
+    "RESULT=failed" \
+    "EXIT_STATUS=$spawn_status" \
+    "LOG=$spawn_log"
+  printf '%s: spawn failed for %s (exit %s); pending state retained; see %s\n' \
+    "$PROGRAM" "$pending_sha" "$spawn_status" "$spawn_log" >&2
+  exit "$spawn_status"
+fi
+
+write_record "$spawned_file" \
+  "SPAWNED_AT=$now" \
+  "BASE_PIN_SHA=$pending_base" \
+  "CANDIDATE_SHA=$pending_sha" \
+  "BRANCH=$worker_branch" \
+  "LOG=$spawn_log"
+write_record "$attempt_file" \
+  "ATTEMPTED_AT=$now" \
+  "BASE_PIN_SHA=$pending_base" \
+  "CANDIDATE_SHA=$pending_sha" \
+  "BRANCH=$worker_branch" \
+  'RESULT=spawned' \
+  "LOG=$spawn_log"
+printf '%s: spawned candidate %s on branch %s; pending manual promotion\n' \
+  "$PROGRAM" "$pending_sha" "$worker_branch"
