@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -u
+
+# herdr-spawn 0.6.0 calls:
+#   herdr agent start <kind> --kind <kind> --pane <pane>
+# Herdr requires the positional value to be a distinct agent name. This shim
+# leaves the installed plugin intact, captures the real branch from the
+# preceding worktree call, and changes only that positional value.
+
+real_herdr=${HERDR_REAL_BIN_PATH:-$(command -v herdr)}
+state_dir=${HERDR_SPAWN_STATE_DIR:-}
+
+state_write() {
+  local name=$1 value=$2
+  [ -n "$state_dir" ] || return 0
+  mkdir -p "$state_dir" 2>/dev/null || return 0
+  printf '%s\n' "$value" > "$state_dir/$name"
+}
+
+sanitize_name() {
+  printf '%s' "$1" \
+    | sed -E 's/[^A-Za-z0-9_-]+/-/g; s/^-+//; s/-+$//'
+}
+
+option_value() {
+  local wanted=$1 index value
+  shift
+  local -a values=("$@")
+  for ((index = 0; index < ${#values[@]}; index++)); do
+    value=${values[index]}
+    if [[ "$value" == "$wanted" ]] && [ $((index + 1)) -lt ${#values[@]} ]; then
+      printf '%s' "${values[$((index + 1))]}"
+      return 0
+    fi
+    if [[ "$value" == "$wanted="* ]]; then
+      printf '%s' "${value#*=}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ "${1:-}" == worktree && "${2:-}" == create ]]; then
+  worktree_output=$("$real_herdr" "$@" 2>&1)
+  worktree_status=$?
+  if [ "$worktree_status" -eq 0 ]; then
+    branch=$(option_value --branch "$@" || true)
+    state_write branch "$branch"
+    state_write worktree.json "$worktree_output"
+    pane=$(jq -r '.result.root_pane.pane_id // empty' 2>/dev/null <<<"$worktree_output" || true)
+    state_write pane "$pane"
+  fi
+  printf '%s\n' "$worktree_output"
+  exit "$worktree_status"
+fi
+
+if [[ "${1:-}" == agent && "${2:-}" == start && $# -ge 3 ]]; then
+  args=("$@")
+  pane=$(option_value --pane "${args[@]:3}" || true)
+  kind=$(option_value --kind "${args[@]:3}" || true)
+  branch=""
+  if [ -n "$state_dir" ] && [ -f "$state_dir/branch" ]; then
+    branch=$(<"$state_dir/branch")
+  fi
+
+  requested_name=${branch:-${HERDR_SPAWN_WORKER_NAME:-}}
+  requested_name=$(sanitize_name "$requested_name")
+  [ -n "$requested_name" ] || requested_name=$(sanitize_name "worker-${pane:-$$}")
+
+  candidates=("$requested_name")
+  if [ -n "$pane" ]; then
+    pane_name=$(sanitize_name "$requested_name-$pane")
+    [ "$pane_name" = "$requested_name" ] || candidates+=("$pane_name")
+  fi
+
+  # Pass the safe Codex defaults once, preserving any existing agent-argument
+  # separator supplied by a newer plugin version.
+  if [ "$kind" = codex ]; then
+    has_separator=0
+    has_sandbox=0
+    for value in "${args[@]:3}"; do
+      [ "$value" = -- ] && has_separator=1
+      [ "$value" = --sandbox ] && has_sandbox=1
+    done
+    if [ "$has_sandbox" -eq 0 ]; then
+      if [ "$has_separator" -eq 1 ]; then
+        args+=(--sandbox workspace-write --ask-for-approval on-request)
+      else
+        args+=(-- --sandbox workspace-write --ask-for-approval on-request)
+      fi
+    fi
+  fi
+
+  output=""
+  for candidate in "${candidates[@]}"; do
+    args[2]=$candidate
+    for attempt in $(seq 1 30); do
+      if output=$("$real_herdr" "${args[@]}" 2>&1); then
+        state_write pane "$pane"
+        state_write agent_name "$candidate"
+        printf '%s\n' "$output"
+        exit 0
+      fi
+      code=$(jq -r '.error.code // empty' 2>/dev/null <<<"$output" || true)
+      case "$code" in
+        agent_pane_busy|agent_not_ready)
+          sleep 1
+          ;;
+        agent_name_taken)
+          break
+          ;;
+        *)
+          printf '%s\n' "$output" >&2
+          exit 1
+          ;;
+      esac
+    done
+  done
+
+  printf '%s\n' "$output" >&2
+  exit 1
+fi
+
+exec "$real_herdr" "$@"

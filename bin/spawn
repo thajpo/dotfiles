@@ -1,0 +1,521 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() {
+  local message=$1 code=${2:-1}
+  printf 'spawn: %s\n' "$message" >&2
+  exit "$code"
+}
+
+# BASH_SOURCE[0] is the symlink path when this script is invoked through
+# ~/.local/bin/spawn. Resolve every link before looking up the companion shim.
+resolve_script_path() {
+  local source=${BASH_SOURCE[0]} dir link
+  while [ -L "$source" ]; do
+    dir=$(cd -P "$(dirname -- "$source")" >/dev/null 2>&1 && pwd) \
+      || die "could not resolve launcher path"
+    link=$(readlink -- "$source") || die "could not read launcher symlink"
+    case "$link" in
+      /*) source=$link ;;
+      *) source="$dir/$link" ;;
+    esac
+  done
+  cd -P "$(dirname -- "$source")" >/dev/null 2>&1 \
+    || die "could not resolve launcher directory"
+  pwd
+}
+
+script_dir=$(resolve_script_path)
+shim_path="$script_dir/herdr-spawn-herdr-shim"
+
+[ "${HERDR_ENV:-}" = 1 ] \
+  || die 'HERDR_ENV=1 is required; run HERDR_ENV=1 ~/dotfiles/bin/spawn ...'
+command -v herdr >/dev/null 2>&1 \
+  || die 'herdr is not installed or not on PATH' 127
+command -v jq >/dev/null 2>&1 \
+  || die 'jq is required' 127
+[ -x "$shim_path" ] \
+  || die "spawn shim is missing or not executable: $shim_path"
+
+herdr_bin=$(command -v herdr)
+original_args=("$@")
+
+doctor=0
+base_override=""
+branch_override=""
+cohort_label=""
+task_label=""
+here_requested=0
+arg_index=0
+arg_count=${#original_args[@]}
+while [ "$arg_index" -lt "$arg_count" ]; do
+  arg=${original_args[$arg_index]}
+  case "$arg" in
+    --doctor)
+      doctor=1
+      arg_index=$((arg_index + 1))
+      ;;
+    --base)
+      [ $((arg_index + 1)) -lt "$arg_count" ] \
+        || die '--base requires a value' 2
+      base_override=${original_args[$((arg_index + 1))]}
+      arg_index=$((arg_index + 2))
+      ;;
+    --base=*)
+      base_override=${arg#*=}
+      arg_index=$((arg_index + 1))
+      ;;
+    --cohort)
+      [ $((arg_index + 1)) -lt "$arg_count" ] \
+        || die '--cohort requires a value' 2
+      cohort_label=${original_args[$((arg_index + 1))]}
+      arg_index=$((arg_index + 2))
+      ;;
+    --cohort=*)
+      cohort_label=${arg#*=}
+      arg_index=$((arg_index + 1))
+      ;;
+    --task)
+      [ $((arg_index + 1)) -lt "$arg_count" ] \
+        || die '--task requires a value' 2
+      task_label=${original_args[$((arg_index + 1))]}
+      arg_index=$((arg_index + 2))
+      ;;
+    --task=*)
+      task_label=${arg#*=}
+      arg_index=$((arg_index + 1))
+      ;;
+    -b|--branch)
+      [ $((arg_index + 1)) -lt "$arg_count" ] \
+        || die "$arg requires a value" 2
+      branch_override=${original_args[$((arg_index + 1))]}
+      arg_index=$((arg_index + 2))
+      ;;
+    -b=*|--branch=*)
+      branch_override=${arg#*=}
+      arg_index=$((arg_index + 1))
+      ;;
+    -H|--here)
+      here_requested=1
+      arg_index=$((arg_index + 1))
+      ;;
+    --)
+      break
+      ;;
+    -k|--kind|-f|--focus|-*)
+      # These options belong to the upstream plugin. We only inspect them so
+      # that --base and --branch can be implemented by this adapter.
+      if [[ "$arg" == -k || "$arg" == --kind ]]; then
+        [ $((arg_index + 1)) -lt "$arg_count" ] \
+          || die "$arg requires a value" 2
+        arg_index=$((arg_index + 2))
+      else
+        arg_index=$((arg_index + 1))
+      fi
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ "$doctor" -eq 1 ] && [ "$arg_index" -lt "$arg_count" ]; then
+  die '--doctor does not accept a prompt' 2
+fi
+
+plugin_list_output=""
+plugin_api_ok=0
+plugin_root=""
+if plugin_list_output=$("$herdr_bin" plugin list --json 2>&1); then
+  if ! jq -e '(type == "object" and has("error"))' >/dev/null 2>&1 <<<"$plugin_list_output"; then
+    if plugin_root=$(jq -er '
+      .result.plugins[]
+      | select(.plugin_id == "herdr-spawn" and .enabled == true)
+      | .plugin_root
+    ' <<<"$plugin_list_output" 2>/dev/null); then
+      plugin_api_ok=1
+    fi
+  fi
+fi
+
+# A local manifest fallback lets --doctor inspect the installed adapter even
+# when the Herdr server is stopped. Normal spawning still requires the live
+# plugin API above.
+find_local_plugin_root() {
+  local config_root=${HERDR_CONFIG_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr}
+  if [ -f "$config_root" ]; then
+    config_root=$(dirname -- "$config_root")
+  fi
+  local manifest id
+  while IFS= read -r manifest; do
+    id=$(sed -n -n 's/^id[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$manifest" | head -n 1)
+    if [ "$id" = herdr-spawn ]; then
+      dirname -- "$manifest"
+      return 0
+    fi
+  done < <(find "$config_root/plugins" -type f -name herdr-plugin.toml 2>/dev/null)
+  return 1
+}
+
+if [ -z "$plugin_root" ]; then
+  plugin_root=$(find_local_plugin_root || true)
+fi
+
+doctor_check=0
+if [ "$doctor" -eq 1 ]; then
+  printf 'spawn --doctor\n'
+  printf '  launcher: %s\n' "$script_dir/spawn"
+  printf '  shim: %s\n' "$shim_path"
+
+  if [ -x "$shim_path" ]; then
+    printf '  wrapper: ok (symlink-resolved)\n'
+  else
+    printf '  wrapper: FAIL (shim is not executable)\n' >&2
+    doctor_check=1
+  fi
+
+  if [ -n "$plugin_root" ] && [ -x "$plugin_root/spawn.sh" ] && [ -f "$plugin_root/lib.sh" ]; then
+    printf '  plugin: ok (%s)\n' "$plugin_root"
+  else
+    printf '  plugin: FAIL (enabled herdr-spawn plugin was not found)\n' >&2
+    doctor_check=1
+  fi
+
+  if "$herdr_bin" agent start --help >/dev/null 2>&1; then
+    printf '  agent API route: ok\n'
+  else
+    printf '  agent API route: FAIL\n' >&2
+    doctor_check=1
+  fi
+
+  agent_list_output=""
+  if agent_list_output=$(HERDR_ENV=1 "$herdr_bin" agent list 2>&1); then
+    if jq -e '(type == "object" and has("error"))' >/dev/null 2>&1 <<<"$agent_list_output"; then
+      printf '  live Herdr socket: FAIL\n%s\n' "$agent_list_output" >&2
+      doctor_check=1
+    else
+      printf '  live Herdr socket: ok\n'
+    fi
+  else
+    api_code=$(jq -r '.error.code // empty' 2>/dev/null <<<"$agent_list_output" || true)
+    if [ "$api_code" = server_not_running ]; then
+      printf '  live Herdr socket: FAIL (server is not running; start Herdr, then rerun doctor)\n' >&2
+    else
+      printf '  live Herdr socket: FAIL\n%s\n' "$agent_list_output" >&2
+    fi
+    doctor_check=1
+  fi
+
+  if [ "$doctor_check" -eq 0 ]; then
+    printf 'spawn --doctor: PASS\n'
+  else
+    printf 'spawn --doctor: FAIL\n' >&2
+  fi
+  exit "$doctor_check"
+fi
+
+[ "$plugin_api_ok" -eq 1 ] \
+  || die $'Herdr plugin API is unavailable; run HERDR_ENV=1 ~/dotfiles/bin/spawn --doctor\n'"${plugin_list_output:-no response}"
+[ -x "$plugin_root/spawn.sh" ] \
+  || die "herdr-spawn plugin entry point is missing: $plugin_root/spawn.sh"
+[ -n "$cohort_label" ] \
+  || die '--cohort is required so coordination membership is explicit' 2
+[ "$here_requested" -eq 0 ] \
+  || die '--here cannot represent distinct coordinator and worker panes; spawn a worktree worker instead' 2
+
+config_dir=$("$herdr_bin" plugin config-dir herdr-spawn 2>/dev/null || true)
+config_file="$config_dir/config"
+configured_base=""
+if [ -f "$config_file" ]; then
+  configured_base=$(bash -c '
+    base=""
+    . "$1"
+    printf "%s" "${base:-}"
+  ' bash "$config_file" 2>/dev/null || true)
+fi
+base_ref=${base_override:-$configured_base}
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+repo_common=""
+if [ -n "$repo_root" ]; then
+  repo_common=$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  if [ -z "$repo_common" ]; then
+    repo_common=$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null || true)
+  fi
+  if [ -n "$repo_common" ] && [[ "$repo_common" != /* ]]; then
+    repo_common=$(cd "$repo_root/$repo_common" >/dev/null 2>&1 && pwd || true)
+  elif [ -n "$repo_common" ]; then
+    repo_common=$(cd "$repo_common" >/dev/null 2>&1 && pwd || true)
+  fi
+fi
+
+resolved_base="$base_ref"
+if [ -z "$resolved_base" ] && [ -n "$repo_root" ]; then
+  resolved_base=$(git -C "$repo_root" branch --show-current 2>/dev/null || true)
+  if [ -z "$resolved_base" ]; then
+    resolved_base=$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || true)
+  fi
+fi
+
+if [ "$here_requested" -eq 0 ] && [ -n "$repo_root" ] && [ -n "$base_ref" ]; then
+  git -C "$repo_root" rev-parse --verify "${base_ref}^{commit}" >/dev/null 2>&1 \
+    || die "base ref does not resolve in this repository: $base_ref"
+fi
+
+source_pane=${HERDR_PANE_ID:-${HERDR_ACTIVE_PANE_ID:-}}
+if [ -z "$source_pane" ] && [ -n "${HERDR_PLUGIN_CONTEXT_JSON:-}" ]; then
+  source_pane=$(jq -r '.focused_pane_id // empty' <<<"$HERDR_PLUGIN_CONTEXT_JSON" 2>/dev/null || true)
+fi
+[ -n "$source_pane" ] \
+  || die 'could not identify the exact source pane; run spawn from a Herdr agent pane'
+
+agent_info() {
+  local target=$1 output
+  output=$(HERDR_ENV=1 "$herdr_bin" agent get "$target" 2>&1) || {
+    printf '%s\n' "$output"
+    return 1
+  }
+  if jq -e '(type == "object" and has("error"))' >/dev/null 2>&1 <<<"$output"; then
+    printf '%s\n' "$output"
+    return 1
+  fi
+  printf '%s\n' "$output"
+}
+
+source_agent_json=$(agent_info "$source_pane") \
+  || die "could not resolve source agent for exact pane: $source_pane"
+source_resolved_pane=$(jq -er '.result.agent.pane_id' <<<"$source_agent_json" 2>/dev/null) \
+  || die "source pane is not a managed agent: $source_pane"
+[ "$source_resolved_pane" = "$source_pane" ] \
+  || die "source agent resolved to a different pane: $source_resolved_pane"
+source_agent_kind=$(jq -er '.result.agent.agent' <<<"$source_agent_json" 2>/dev/null) \
+  || die "source agent kind is unavailable for pane: $source_pane"
+source_lifecycle_source=$(jq -er '.result.agent.agent_session.source' <<<"$source_agent_json" 2>/dev/null) \
+  || die "source agent lifecycle authority is unavailable for pane: $source_pane"
+source_session_id=$(jq -er '.result.agent.agent_session.value' <<<"$source_agent_json" 2>/dev/null) \
+  || die "source agent session identity is unavailable for pane: $source_pane"
+source_agent_identity=$(jq -er '
+  (.result.agent.name // "") as $name
+  | if $name != "" then $name else .result.agent.agent_session.value end
+' <<<"$source_agent_json" 2>/dev/null) \
+  || die "source agent identity is unavailable for pane: $source_pane"
+
+# Compare agents by Git's common directory so linked worktrees count as the
+# same repository as the primary checkout.
+same_repo_agents=""
+agent_list_output=$(HERDR_ENV=1 "$herdr_bin" agent list 2>&1) || {
+  die $'could not run Herdr agent preflight\n'"$agent_list_output"
+}
+if jq -e '(type == "object" and has("error"))' >/dev/null 2>&1 <<<"$agent_list_output"; then
+  die $'could not run Herdr agent preflight\n'"$agent_list_output"
+fi
+
+agent_records=$(jq -r '
+  .result.agents[]?
+  | [(.name // .agent_name // .agent // .id // "unknown"),
+     (.cwd // .worktree_path // .checkout_path // "")]
+  | @tsv
+' <<<"$agent_list_output" 2>/dev/null || true)
+if [ -n "$repo_common" ] && [ -n "$agent_records" ]; then
+  while IFS=$'\t' read -r agent_name agent_cwd; do
+    [ -n "$agent_cwd" ] && [ -d "$agent_cwd" ] || continue
+    candidate_common=$(git -C "$agent_cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    if [ -z "$candidate_common" ]; then
+      candidate_common=$(git -C "$agent_cwd" rev-parse --git-common-dir 2>/dev/null || true)
+    fi
+    if [ -n "$candidate_common" ] && [[ "$candidate_common" != /* ]]; then
+      candidate_common=$(cd "$agent_cwd/$candidate_common" >/dev/null 2>&1 && pwd || true)
+    elif [ -n "$candidate_common" ]; then
+      candidate_common=$(cd "$candidate_common" >/dev/null 2>&1 && pwd || true)
+    fi
+    if [ -n "$candidate_common" ] && [ "$candidate_common" = "$repo_common" ]; then
+      if [ -n "$same_repo_agents" ]; then same_repo_agents+=", "; fi
+      same_repo_agents+="$agent_name"
+    fi
+  done <<<"$agent_records"
+fi
+[ -n "$same_repo_agents" ] || same_repo_agents=none
+
+resolved_branch=${branch_override:-'<plugin default; resolved after worktree creation>'}
+resolved_pane=${source_pane:-'<new pane>'}
+if [ "$here_requested" -eq 1 ]; then
+  resolved_worktree=${repo_root:-$PWD}
+else
+  resolved_worktree='<new worktree>'
+fi
+printf 'spawn: preflight\n'
+printf '  repo: %s\n' "${repo_root:-<not a git repository>}"
+printf '  base: %s\n' "${resolved_base:-<none>}"
+printf '  branch: %s\n' "$resolved_branch"
+printf '  pane: %s\n' "$resolved_pane"
+printf '  worktree: %s\n' "$resolved_worktree"
+printf '  cohort: %s\n' "$cohort_label"
+printf '  task: %s\n' "${task_label:-$resolved_branch}"
+printf '  existing agents in repository: %s\n' "$same_repo_agents"
+
+state_dir=$(mktemp -d "${TMPDIR:-/tmp}/herdr-spawn-state.XXXXXX") \
+  || die 'could not create spawn state directory'
+config_overlay=""
+cleanup() {
+  rm -rf -- "$state_dir"
+  if [ -n "$config_overlay" ]; then
+    rm -rf -- "$config_overlay"
+  fi
+}
+trap cleanup EXIT
+
+if [ -n "$base_override" ]; then
+  config_overlay=$(mktemp -d "${TMPDIR:-/tmp}/herdr-spawn-config.XXXXXX") \
+    || die 'could not create temporary plugin config'
+  {
+    if [ -f "$config_file" ]; then
+      printf '. %q\n' "$config_file"
+    fi
+    printf 'base=%q\n' "$base_override"
+  } > "$config_overlay/config"
+fi
+
+plugin_args=()
+strip_index=0
+while [ "$strip_index" -lt "$arg_count" ]; do
+  case "${original_args[$strip_index]}" in
+    --doctor)
+      strip_index=$((strip_index + 1))
+      ;;
+    --base)
+      strip_index=$((strip_index + 2))
+      ;;
+    --base=*)
+      strip_index=$((strip_index + 1))
+      ;;
+    --cohort|--task)
+      strip_index=$((strip_index + 2))
+      ;;
+    --cohort=*|--task=*)
+      strip_index=$((strip_index + 1))
+      ;;
+    --)
+      plugin_args+=("${original_args[@]:$strip_index}")
+      break
+      ;;
+    *)
+      plugin_args+=("${original_args[$strip_index]}")
+      strip_index=$((strip_index + 1))
+      ;;
+  esac
+done
+
+env_args=(
+  HERDR_ENV=1
+  HERDR_BIN_PATH="$shim_path"
+  HERDR_REAL_BIN_PATH="$herdr_bin"
+  HERDR_SPAWN_STATE_DIR="$state_dir"
+  HERDR_SPAWN_WORKER_NAME="$branch_override"
+)
+if [ -n "$config_overlay" ]; then
+  env_args+=(HERDR_PLUGIN_CONFIG_DIR="$config_overlay")
+fi
+
+spawn_status=0
+env "${env_args[@]}" bash "$plugin_root/spawn.sh" "${plugin_args[@]}" || spawn_status=$?
+[ "$spawn_status" -eq 0 ] || exit "$spawn_status"
+
+final_branch=$branch_override
+final_pane=$source_pane
+final_worktree=""
+[ -f "$state_dir/branch" ] && final_branch=$(<"$state_dir/branch")
+[ -f "$state_dir/pane" ] && final_pane=$(<"$state_dir/pane")
+if [ -f "$state_dir/worktree.json" ]; then
+  final_worktree=$(jq -r '
+    .result.worktree.path //
+    .result.worktree.checkout_path //
+    .result.worktree_path //
+    .result.workspace.worktree.path //
+    .result.workspace.worktree.checkout_path //
+    .result.workspace.worktree_path //
+    .result.workspace.path //
+    .result.workspace.checkout_path // empty
+  ' < "$state_dir/worktree.json" 2>/dev/null || true)
+fi
+if [ -z "$final_worktree" ] && [ "$here_requested" -eq 1 ]; then
+  final_worktree=${repo_root:-$PWD}
+fi
+if [ -z "$final_worktree" ] && [ -n "$final_branch" ] && [ -n "$repo_root" ]; then
+  current_path=""
+  while IFS= read -r line; do
+    case "$line" in
+      'worktree '*) current_path=${line#worktree } ;;
+      "branch refs/heads/$final_branch")
+        final_worktree=$current_path
+        break
+        ;;
+    esac
+  done < <(git -C "$repo_root" worktree list --porcelain 2>/dev/null || true)
+fi
+[ -n "$final_branch" ] || final_branch='<unknown>'
+[ -n "$final_pane" ] || final_pane='<unknown>'
+[ -n "$final_worktree" ] || final_worktree='<unknown>'
+[ "$final_pane" != '<unknown>' ] \
+  || die 'spawn succeeded but the worker pane identity was not returned'
+
+# Re-read both exact panes after the plugin succeeds. Session equality prevents
+# a source-agent replacement during spawn from inheriting coordinator metadata.
+post_source_agent_json=$(agent_info "$source_pane") \
+  || die "spawn succeeded but source agent lookup failed for pane: $source_pane"
+post_source_session_id=$(jq -er '.result.agent.agent_session.value' <<<"$post_source_agent_json" 2>/dev/null) \
+  || die "spawn succeeded but source session identity is unavailable: $source_pane"
+[ "$post_source_session_id" = "$source_session_id" ] \
+  || die 'source agent session changed during spawn; coordination metadata was not applied'
+
+worker_agent_json=$(agent_info "$final_pane") \
+  || die "spawn succeeded but worker agent lookup failed for pane: $final_pane"
+worker_resolved_pane=$(jq -er '.result.agent.pane_id' <<<"$worker_agent_json" 2>/dev/null) \
+  || die "spawned worker pane is not a managed agent: $final_pane"
+[ "$worker_resolved_pane" = "$final_pane" ] \
+  || die "spawned worker resolved to a different pane: $worker_resolved_pane"
+worker_agent_kind=$(jq -er '.result.agent.agent' <<<"$worker_agent_json" 2>/dev/null) \
+  || die "spawned worker agent kind is unavailable for pane: $final_pane"
+worker_lifecycle_source=$(jq -er '.result.agent.agent_session.source' <<<"$worker_agent_json" 2>/dev/null) \
+  || die "spawned worker lifecycle authority is unavailable for pane: $final_pane"
+worker_session_id=$(jq -er '.result.agent.agent_session.value' <<<"$worker_agent_json" 2>/dev/null) \
+  || die "spawned worker session identity is unavailable for pane: $final_pane"
+
+final_task=$task_label
+[ -n "$final_task" ] || final_task=$final_branch
+[ "$final_task" != '<unknown>' ] \
+  || die 'spawn succeeded but no task label could be resolved; pass --task explicitly'
+
+metadata_source=dotfiles:spawn-coordination
+worker_display="$cohort_label · worker"
+coordinator_display="$cohort_label · coordinator"
+worker_metadata_output=""
+if ! worker_metadata_output=$(HERDR_ENV=1 "$herdr_bin" pane report-metadata "$final_pane" \
+  --source "$metadata_source" \
+  --agent "$worker_agent_kind" \
+  --applies-to-source "$worker_lifecycle_source" \
+  --display-agent "$worker_display" \
+  --title "$final_task" 2>&1); then
+  die $'spawn succeeded but worker coordination metadata failed\n'"$worker_metadata_output"
+fi
+
+coordinator_metadata_output=""
+if ! coordinator_metadata_output=$(HERDR_ENV=1 "$herdr_bin" pane report-metadata "$source_pane" \
+  --source "$metadata_source" \
+  --agent "$source_agent_kind" \
+  --applies-to-source "$source_lifecycle_source" \
+  --display-agent "$coordinator_display" \
+  --title "$source_agent_identity" 2>&1); then
+  # Avoid leaving a one-sided cohort if the second metadata write fails.
+  HERDR_ENV=1 "$herdr_bin" pane report-metadata "$final_pane" \
+    --source "$metadata_source" \
+    --agent "$worker_agent_kind" \
+    --applies-to-source "$worker_lifecycle_source" \
+    --clear-display-agent --clear-title >/dev/null 2>&1 || true
+  die $'spawn succeeded but coordinator coordination metadata failed; worker metadata was cleared\n'"$coordinator_metadata_output"
+fi
+
+printf 'spawn: resolved base=%s branch=%s pane=%s worktree=%s\n' \
+  "${resolved_base:-<none>}" "$final_branch" "$final_pane" "$final_worktree"
+printf 'spawn: coordination cohort=%s coordinator=%s/%s worker=%s/%s task=%s\n' \
+  "$cohort_label" "$source_pane" "$source_session_id" \
+  "$final_pane" "$worker_session_id" "$final_task"

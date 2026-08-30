@@ -1,0 +1,9 @@
+# Merge this table into the active Herdr config.toml. It uses only supported
+# built-in row tokens: reported display-agent/title values become `agent` and
+# `pane`, while ordinary agents fall back to their detected label and state.
+[ui.sidebar.agents]
+row_gap = 0
+rows = [
+  ["state_icon", "agent"],
+  ["pane"],
+]
