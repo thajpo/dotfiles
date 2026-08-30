@@ -1,0 +1,14 @@
+# dotfiles-herdr-plus-managed: projects/dotfiles.toml
+# Synced into Herdr's managed cloudmanic.herdr-plus config directory by
+# bin/herdr-plus-sync. Keep the layout focused: herdr-spawn and reviewr already
+# react to worktree creation, so this project intentionally has no auto-layout.
+name = "Dotfiles"
+description = "Coordinator workspace for the dotfiles repository"
+working_dir = "~/dotfiles"
+
+[[tabs]]
+name = "codex"
+command = "codex"
+
+[[tabs]]
+name = "shell"
