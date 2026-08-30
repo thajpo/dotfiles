@@ -1,0 +1,394 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM=${0##*/}
+DEFAULT_CONFIG="${HOME}/dotfiles/codex/upstream-watch.conf"
+CONFIG_FILE=$DEFAULT_CONFIG
+STATE_DIR=${XDG_STATE_HOME:-"${HOME}/.local/state"}/codex-upstream-watch
+DRY_RUN=0
+SHOW_STATUS=0
+
+usage() {
+  cat <<EOF
+Usage: $PROGRAM [--config PATH] [--state-dir PATH] [--dry-run] [--status]
+
+Check for a newer stable Codex rust-vX.Y.Z tag and create at most one Herdr
+worker for the current manually promoted release. --dry-run performs the tag
+check without writing state or invoking the launcher. --status only reads
+local state.
+EOF
+}
+
+die() {
+  printf '%s: %s\n' "$PROGRAM" "$*" >&2
+  exit 1
+}
+
+while (($#)); do
+  case $1 in
+    --config)
+      (($# >= 2)) || die '--config requires a path'
+      CONFIG_FILE=$2
+      shift 2
+      ;;
+    --state-dir)
+      (($# >= 2)) || die '--state-dir requires a path'
+      STATE_DIR=$2
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --status)
+      SHOW_STATUS=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -r $CONFIG_FILE ]] || die "config is not readable: $CONFIG_FILE"
+# The config is a trusted, version-controlled shell fragment so paths may use
+# ${HOME}. Keep it data-only and review changes like code.
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+: "${CODEX_INSTALLED_RELEASE:?missing CODEX_INSTALLED_RELEASE in $CONFIG_FILE}"
+: "${CODEX_FORK_UPSTREAM_BASELINE_SHA:?missing CODEX_FORK_UPSTREAM_BASELINE_SHA in $CONFIG_FILE}"
+: "${CODEX_UPSTREAM_REMOTE:?missing CODEX_UPSTREAM_REMOTE in $CONFIG_FILE}"
+: "${CODEX_STABLE_TAG_PREFIX:?missing CODEX_STABLE_TAG_PREFIX in $CONFIG_FILE}"
+: "${CODEX_SOURCE_REPO:?missing CODEX_SOURCE_REPO in $CONFIG_FILE}"
+: "${CODEX_FORK_BASE:?missing CODEX_FORK_BASE in $CONFIG_FILE}"
+: "${CODEX_SPAWN:?missing CODEX_SPAWN in $CONFIG_FILE}"
+
+is_sha() {
+  [[ $1 =~ ^[0-9a-f]{40}$ ]]
+}
+
+is_release() {
+  [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+release_is_newer() {
+  local left=$1 right=$2 index
+  local -a left_parts right_parts
+  IFS=. read -r -a left_parts <<<"$left"
+  IFS=. read -r -a right_parts <<<"$right"
+  for index in 0 1 2; do
+    if ((10#${left_parts[index]} > 10#${right_parts[index]})); then
+      return 0
+    fi
+    if ((10#${left_parts[index]} < 10#${right_parts[index]})); then
+      return 1
+    fi
+  done
+  return 1
+}
+
+is_release "$CODEX_INSTALLED_RELEASE" \
+  || die 'CODEX_INSTALLED_RELEASE must be a stable X.Y.Z release'
+is_sha "$CODEX_FORK_UPSTREAM_BASELINE_SHA" \
+  || die 'CODEX_FORK_UPSTREAM_BASELINE_SHA must be a lowercase 40-character Git SHA'
+[[ $CODEX_STABLE_TAG_PREFIX =~ ^[A-Za-z0-9._-]+$ ]] \
+  || die 'CODEX_STABLE_TAG_PREFIX contains unsupported characters'
+
+read_field() {
+  local file=$1 key=$2 line
+  [[ -r $file ]] || return 1
+  line=$(sed -n "s/^${key}=//p" "$file" | head -n 1)
+  [[ -n $line ]] || return 1
+  printf '%s\n' "$line"
+}
+
+show_file() {
+  local label=$1 file=$2
+  printf '%s: %s\n' "$label" "$file"
+  if [[ -r $file ]]; then
+    sed 's/^/  /' "$file"
+  else
+    printf '  (none)\n'
+  fi
+}
+
+if ((SHOW_STATUS)); then
+  printf 'config: %s\n' "$CONFIG_FILE"
+  printf 'installed_official_release: %s\n' "$CODEX_INSTALLED_RELEASE"
+  printf 'fork_upstream_baseline_sha: %s\n' "$CODEX_FORK_UPSTREAM_BASELINE_SHA"
+  printf 'stable_tags: %s refs/tags/%sX.Y.Z\n' \
+    "$CODEX_UPSTREAM_REMOTE" "$CODEX_STABLE_TAG_PREFIX"
+  show_file observed "$STATE_DIR/observed.env"
+  show_file pending "$STATE_DIR/pending.env"
+  show_file spawned "$STATE_DIR/spawned.env"
+  show_file last_attempt "$STATE_DIR/last-attempt.env"
+  exit 0
+fi
+
+command -v git >/dev/null 2>&1 || die 'git is required'
+tag_pattern="refs/tags/${CODEX_STABLE_TAG_PREFIX}*"
+remote_output=$(git ls-remote --tags "$CODEX_UPSTREAM_REMOTE" "$tag_pattern") \
+  || die "could not list stable tag candidates from $CODEX_UPSTREAM_REMOTE"
+
+declare -A raw_shas=()
+declare -A peeled_shas=()
+latest_release=
+while IFS=$'\t' read -r sha ref extra; do
+  [[ -n ${sha:-} || -n ${ref:-} ]] || continue
+  is_sha "${sha:-}" || die 'upstream tags contained an invalid SHA'
+  [[ -n ${ref:-} && -z ${extra:-} ]] || die 'upstream tags contained an invalid record'
+  [[ $ref == "refs/tags/${CODEX_STABLE_TAG_PREFIX}"* ]] || continue
+  suffix=${ref#"refs/tags/${CODEX_STABLE_TAG_PREFIX}"}
+  if [[ $suffix =~ ^([0-9]+\.[0-9]+\.[0-9]+)(\^\{\})?$ ]]; then
+    release=${BASH_REMATCH[1]}
+    if [[ -n ${BASH_REMATCH[2]} ]]; then
+      peeled_shas[$release]=$sha
+    else
+      raw_shas[$release]=$sha
+    fi
+    if [[ -z $latest_release ]] || release_is_newer "$release" "$latest_release"; then
+      latest_release=$release
+    fi
+  fi
+done <<<"$remote_output"
+
+[[ -n $latest_release ]] \
+  || die "no stable ${CODEX_STABLE_TAG_PREFIX}X.Y.Z tag was found"
+if [[ -n ${peeled_shas[$latest_release]+present} ]]; then
+  latest_sha=${peeled_shas[$latest_release]}
+elif [[ -n ${raw_shas[$latest_release]+present} ]]; then
+  # Lightweight tags already point directly at their commit. Annotated tags
+  # have a ^{} record in ls-remote output and take the branch above.
+  latest_sha=${raw_shas[$latest_release]}
+else
+  die "latest stable release $latest_release had no resolvable tag SHA"
+fi
+latest_tag="${CODEX_STABLE_TAG_PREFIX}${latest_release}"
+
+now=${CODEX_WATCH_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+
+if ((DRY_RUN)); then
+  printf 'installed official release: %s\n' "$CODEX_INSTALLED_RELEASE"
+  printf 'fork upstream baseline: %s\n' "$CODEX_FORK_UPSTREAM_BASELINE_SHA"
+  printf 'latest stable tag: %s (%s)\n' "$latest_tag" "$latest_sha"
+  if release_is_newer "$latest_release" "$CODEX_INSTALLED_RELEASE"; then
+    printf 'dry-run: newer stable release; normal mode would record a candidate and attempt one spawn\n'
+  else
+    printf 'dry-run: no newer stable release; no state or agent action needed\n'
+  fi
+  exit 0
+fi
+
+command -v flock >/dev/null 2>&1 || die 'flock is required'
+umask 077
+mkdir -p "$STATE_DIR/history"
+exec 9>"$STATE_DIR/lock"
+if ! flock -n 9; then
+  printf '%s: another check is already running\n' "$PROGRAM"
+  exit 0
+fi
+
+write_record() {
+  local destination=$1
+  shift
+  local temporary="${destination}.tmp.$$" item
+  : >"$temporary"
+  for item in "$@"; do
+    printf '%s\n' "$item" >>"$temporary"
+  done
+  mv -f "$temporary" "$destination"
+}
+
+write_record "$STATE_DIR/observed.env" \
+  'SCHEMA_VERSION=2' \
+  "OBSERVED_AT=$now" \
+  "LATEST_STABLE_RELEASE=$latest_release" \
+  "LATEST_STABLE_TAG=$latest_tag" \
+  "LATEST_STABLE_SHA=$latest_sha" \
+  "INSTALLED_OFFICIAL_RELEASE=$CODEX_INSTALLED_RELEASE" \
+  "FORK_UPSTREAM_BASELINE_SHA=$CODEX_FORK_UPSTREAM_BASELINE_SHA"
+
+pending_file="$STATE_DIR/pending.env"
+spawned_file="$STATE_DIR/spawned.env"
+attempt_file="$STATE_DIR/last-attempt.env"
+pending_base_release=$(read_field "$pending_file" BASE_INSTALLED_RELEASE || true)
+pending_base_sha=$(read_field "$pending_file" BASE_FORK_UPSTREAM_BASELINE_SHA || true)
+pending_release=$(read_field "$pending_file" CANDIDATE_RELEASE || true)
+pending_sha=$(read_field "$pending_file" CANDIDATE_SHA || true)
+if [[ -f $pending_file ]]; then
+  [[ -n $pending_base_release && -n $pending_base_sha \
+    && -n $pending_release && -n $pending_sha ]] \
+    || die "pending state is incomplete or from an unsupported schema: $pending_file"
+  is_release "$pending_base_release" && is_release "$pending_release" \
+    || die "pending state contains an invalid release: $pending_file"
+  is_sha "$pending_base_sha" && is_sha "$pending_sha" \
+    || die "pending state contains an invalid SHA: $pending_file"
+fi
+
+# The installed release and its integrated upstream baseline are one manual
+# promotion checkpoint. Refuse a half-advanced config, and archive the old
+# campaign only after both facts change together.
+if [[ -n $pending_base_release ]]; then
+  release_advanced=0
+  baseline_advanced=0
+  [[ $pending_base_release != "$CODEX_INSTALLED_RELEASE" ]] && release_advanced=1
+  [[ $pending_base_sha != "$CODEX_FORK_UPSTREAM_BASELINE_SHA" ]] && baseline_advanced=1
+  if ((release_advanced != baseline_advanced)); then
+    die 'advance CODEX_INSTALLED_RELEASE and CODEX_FORK_UPSTREAM_BASELINE_SHA together after promotion'
+  fi
+  if ((release_advanced)); then
+    archive_stem="${pending_base_release}.${pending_release}.${pending_sha}"
+    mv -f "$pending_file" "$STATE_DIR/history/${archive_stem}.pending.env"
+    if [[ -f $spawned_file ]]; then
+      mv -f "$spawned_file" "$STATE_DIR/history/${archive_stem}.spawned.env"
+    fi
+    if [[ -f $attempt_file ]]; then
+      mv -f "$attempt_file" "$STATE_DIR/history/${archive_stem}.last-attempt.env"
+    fi
+    pending_base_release=
+    pending_base_sha=
+    pending_release=
+    pending_sha=
+  fi
+fi
+
+if ! release_is_newer "$latest_release" "$CODEX_INSTALLED_RELEASE"; then
+  printf '%s: latest stable %s does not advance installed official release %s\n' \
+    "$PROGRAM" "$latest_tag" "$CODEX_INSTALLED_RELEASE"
+  exit 0
+fi
+
+if [[ -z $pending_release ]]; then
+  pending_base_release=$CODEX_INSTALLED_RELEASE
+  pending_base_sha=$CODEX_FORK_UPSTREAM_BASELINE_SHA
+  pending_release=$latest_release
+  pending_sha=$latest_sha
+  write_record "$pending_file" \
+    'SCHEMA_VERSION=2' \
+    "CREATED_AT=$now" \
+    "BASE_INSTALLED_RELEASE=$pending_base_release" \
+    "BASE_FORK_UPSTREAM_BASELINE_SHA=$pending_base_sha" \
+    "CANDIDATE_RELEASE=$pending_release" \
+    "CANDIDATE_TAG=${CODEX_STABLE_TAG_PREFIX}${pending_release}" \
+    "CANDIDATE_SHA=$pending_sha" \
+    "UPSTREAM_REMOTE=$CODEX_UPSTREAM_REMOTE"
+fi
+
+spawned_release=$(read_field "$spawned_file" CANDIDATE_RELEASE || true)
+spawned_sha=$(read_field "$spawned_file" CANDIDATE_SHA || true)
+if [[ -f $spawned_file ]]; then
+  [[ -n $spawned_release && -n $spawned_sha ]] \
+    || die "spawn receipt is incomplete: $spawned_file"
+  is_release "$spawned_release" && is_sha "$spawned_sha" \
+    || die "spawn receipt contains an invalid release or SHA: $spawned_file"
+fi
+if [[ $spawned_release == "$pending_release" && $spawned_sha == "$pending_sha" ]]; then
+  if [[ $latest_release != "$pending_release" ]]; then
+    printf '%s: candidate %s already spawned; latest stable %s observed\n' \
+      "$PROGRAM" "$pending_release" "$latest_release"
+  else
+    printf '%s: candidate %s already spawned\n' "$PROGRAM" "$pending_release"
+  fi
+  exit 0
+fi
+
+[[ -d $CODEX_SOURCE_REPO ]] || die "source repo is missing: $CODEX_SOURCE_REPO"
+[[ -x $CODEX_SPAWN ]] || die "canonical spawn launcher is not executable: $CODEX_SPAWN"
+for required_command in herdr jq codex; do
+  command -v "$required_command" >/dev/null 2>&1 \
+    || die "$required_command is required on PATH before spawning; pending state retained"
+done
+
+short_sha=${pending_sha:0:12}
+release_slug=${pending_release//./-}
+worker_branch="codex-upstream-${release_slug}-${short_sha}"
+candidate_tag="${CODEX_STABLE_TAG_PREFIX}${pending_release}"
+task_packet=$(cat <<EOF
+Objective: integrate stable OpenAI Codex release $pending_release ($candidate_tag) at dereferenced tag commit $pending_sha into the local sticky-composer fork.
+
+Repository context:
+- Local Codex repository: $CODEX_SOURCE_REPO
+- Work only in the isolated worktree created for branch $worker_branch.
+- Base branch: $CODEX_FORK_BASE
+- Installed official npm release: $pending_base_release
+- Exact fork upstream baseline SHA: $pending_base_sha
+- Candidate stable release: $pending_release
+- Candidate stable tag: $candidate_tag
+- Candidate dereferenced tag commit SHA: $pending_sha
+- Upstream remote: $CODEX_UPSTREAM_REMOTE
+
+Required work:
+- Fetch and verify the exact stable tag and dereferenced commit, then integrate that commit into this branch.
+- Preserve the local sticky-composer behavior and reconcile upstream TUI changes carefully.
+- Run focused sticky-composer tests plus the relevant Codex build/checks.
+- Commit all resulting changes and report the commit SHA, changed files, tests, decisions, and blockers.
+
+Safety contract:
+- Never merge to main or update the configured fork base ($CODEX_FORK_BASE).
+- Never install a Codex binary or change any live binary/symlink.
+- Never push any branch or delete/clean up branches or worktrees.
+- Remain available for owner follow-up after reporting.
+EOF
+)
+
+write_record "$attempt_file" \
+  'SCHEMA_VERSION=2' \
+  "ATTEMPTED_AT=$now" \
+  "BASE_INSTALLED_RELEASE=$pending_base_release" \
+  "BASE_FORK_UPSTREAM_BASELINE_SHA=$pending_base_sha" \
+  "CANDIDATE_RELEASE=$pending_release" \
+  "CANDIDATE_SHA=$pending_sha" \
+  "BRANCH=$worker_branch" \
+  'RESULT=starting'
+
+spawn_log="$STATE_DIR/spawn-${pending_release}-${pending_sha}.log"
+spawn_status=0
+(
+  cd "$CODEX_SOURCE_REPO"
+  HERDR_ENV=1 "$CODEX_SPAWN" \
+    --base "$CODEX_FORK_BASE" -k codex -b "$worker_branch" "$task_packet"
+) >"$spawn_log" 2>&1 || spawn_status=$?
+
+if ((spawn_status != 0)); then
+  write_record "$attempt_file" \
+    'SCHEMA_VERSION=2' \
+    "ATTEMPTED_AT=$now" \
+    "BASE_INSTALLED_RELEASE=$pending_base_release" \
+    "BASE_FORK_UPSTREAM_BASELINE_SHA=$pending_base_sha" \
+    "CANDIDATE_RELEASE=$pending_release" \
+    "CANDIDATE_SHA=$pending_sha" \
+    "BRANCH=$worker_branch" \
+    'RESULT=failed' \
+    "EXIT_STATUS=$spawn_status" \
+    "LOG=$spawn_log"
+  printf '%s: spawn failed for release %s at %s (exit %s); pending state retained; see %s\n' \
+    "$PROGRAM" "$pending_release" "$pending_sha" "$spawn_status" "$spawn_log" >&2
+  exit "$spawn_status"
+fi
+
+write_record "$spawned_file" \
+  'SCHEMA_VERSION=2' \
+  "SPAWNED_AT=$now" \
+  "BASE_INSTALLED_RELEASE=$pending_base_release" \
+  "BASE_FORK_UPSTREAM_BASELINE_SHA=$pending_base_sha" \
+  "CANDIDATE_RELEASE=$pending_release" \
+  "CANDIDATE_SHA=$pending_sha" \
+  "BRANCH=$worker_branch" \
+  "LOG=$spawn_log"
+write_record "$attempt_file" \
+  'SCHEMA_VERSION=2' \
+  "ATTEMPTED_AT=$now" \
+  "BASE_INSTALLED_RELEASE=$pending_base_release" \
+  "BASE_FORK_UPSTREAM_BASELINE_SHA=$pending_base_sha" \
+  "CANDIDATE_RELEASE=$pending_release" \
+  "CANDIDATE_SHA=$pending_sha" \
+  "BRANCH=$worker_branch" \
+  'RESULT=spawned' \
+  "LOG=$spawn_log"
+printf '%s: spawned stable release %s at %s on branch %s; pending manual promotion\n' \
+  "$PROGRAM" "$pending_release" "$pending_sha" "$worker_branch"
