@@ -116,8 +116,15 @@ Only after the plugin has returned success does the launcher re-read both exact
 pane IDs, confirm that the source is still the same native agent session, and
 resolve the child's native session. It then writes `display-agent` and `title`
 with `--agent` and `--applies-to-source` guards. The child is written first; if
-the coordinator write fails, the child display metadata is cleared to avoid a
-one-sided cohort. A failed worker start writes no role metadata.
+the coordinator write fails, the launcher attempts to clear the child display
+metadata and reports separately whether that cleanup succeeded. A failed worker
+start writes no role metadata.
+
+The coordinator's second line uses the first nonempty identity in this order:
+its explicit Herdr agent name, stripped terminal title, canonical agent kind,
+then native session UUID. This keeps an unnamed coordinator readable without
+turning a terminal, Space, workspace, checkout, or repository label into cohort
+membership; only the explicit `--cohort` value supplies that membership.
 
 Herdr 0.8.2 does not offer a native-session-ID guard for presentation fields:
 `--applies-to-source` guards the lifecycle authority (for example

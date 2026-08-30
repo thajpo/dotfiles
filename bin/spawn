@@ -295,8 +295,10 @@ source_lifecycle_source=$(jq -er '.result.agent.agent_session.source' <<<"$sourc
 source_session_id=$(jq -er '.result.agent.agent_session.value' <<<"$source_agent_json" 2>/dev/null) \
   || die "source agent session identity is unavailable for pane: $source_pane"
 source_agent_identity=$(jq -er '
-  (.result.agent.name // "") as $name
-  | if $name != "" then $name else .result.agent.agent_session.value end
+  .result.agent
+  | [.name, .terminal_title_stripped, .agent, .agent_session.value]
+  | map(select(type == "string" and length > 0))
+  | .[0] // empty
 ' <<<"$source_agent_json" 2>/dev/null) \
   || die "source agent identity is unavailable for pane: $source_pane"
 
@@ -506,12 +508,15 @@ if ! coordinator_metadata_output=$(HERDR_ENV=1 "$herdr_bin" pane report-metadata
   --display-agent "$coordinator_display" \
   --title "$source_agent_identity" 2>&1); then
   # Avoid leaving a one-sided cohort if the second metadata write fails.
-  HERDR_ENV=1 "$herdr_bin" pane report-metadata "$final_pane" \
+  worker_cleanup_output=""
+  if worker_cleanup_output=$(HERDR_ENV=1 "$herdr_bin" pane report-metadata "$final_pane" \
     --source "$metadata_source" \
     --agent "$worker_agent_kind" \
     --applies-to-source "$worker_lifecycle_source" \
-    --clear-display-agent --clear-title >/dev/null 2>&1 || true
-  die $'spawn succeeded but coordinator coordination metadata failed; worker metadata was cleared\n'"$coordinator_metadata_output"
+    --clear-display-agent --clear-title 2>&1); then
+    die $'spawn succeeded but coordinator coordination metadata failed; worker metadata was cleared\n'"$coordinator_metadata_output"
+  fi
+  die $'spawn succeeded but coordinator coordination metadata failed; worker metadata cleanup also failed\ncoordinator: '"$coordinator_metadata_output"$'\ncleanup: '"$worker_cleanup_output"
 fi
 
 printf 'spawn: resolved base=%s branch=%s pane=%s worktree=%s\n' \

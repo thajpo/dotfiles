@@ -54,7 +54,11 @@ case "${1:-}" in
           if [ "${FAKE_CHANGE_SOURCE_SESSION:-0}" -eq 1 ] && [ "$count" -gt 1 ]; then
             session=session-source-2
           fi
-          printf '{"result":{"agent":{"agent":"codex","name":"dreamer.main","pane_id":"w-source:p9","agent_session":{"source":"herdr:codex","kind":"id","value":"%s"}}}}\n' "$session"
+          if [ "${FAKE_SOURCE_UNNAMED:-0}" -eq 1 ]; then
+            printf '{"result":{"agent":{"agent":"codex","terminal_title_stripped":"Dreamer terminal / main!","pane_id":"w-source:p9","agent_session":{"source":"herdr:codex","kind":"id","value":"%s"}}}}\n' "$session"
+          else
+            printf '{"result":{"agent":{"agent":"codex","name":"dreamer.main","terminal_title_stripped":"ignored terminal title","pane_id":"w-source:p9","agent_session":{"source":"herdr:codex","kind":"id","value":"%s"}}}}\n' "$session"
+          fi
         elif [ "$target" = w-test:p1 ]; then
           printf '{"result":{"agent":{"agent":"codex","name":"feature-test-worker","pane_id":"w-test:p1","agent_session":{"source":"herdr:codex","kind":"id","value":"session-worker-1"}}}}\n'
         else
@@ -114,7 +118,7 @@ assert_logged() {
 reset_fake() {
   : > "$FAKE_LOG"
   rm -f -- "$FAKE_SOURCE_GET_COUNT"
-  unset FAKE_AGENT_START_FAIL FAKE_CHANGE_SOURCE_SESSION FAKE_METADATA_FAIL_TARGET
+  unset FAKE_AGENT_START_FAIL FAKE_CHANGE_SOURCE_SESSION FAKE_METADATA_FAIL_TARGET FAKE_SOURCE_UNNAMED
 }
 
 doctor_output=$(HERDR_ENV=1 "$tmp/spawn" --doctor 2>&1)
@@ -160,6 +164,22 @@ grep -Fq -- "--base $base_ref" "$FAKE_LOG"
 ! grep -Fq 'plugin args: --base' "$FAKE_LOG"
 ! grep -Fq 'plugin args: --cohort' "$FAKE_LOG"
 ! grep -Fq 'plugin args: --task' "$FAKE_LOG"
+
+# An unnamed source uses its nonempty stripped terminal title as the
+# coordinator identity. The explicit cohort remains the only source of role
+# membership; neither the title nor a workspace name becomes a cohort.
+reset_fake
+export FAKE_SOURCE_UNNAMED=1
+unnamed_output=$(HERDR_ENV=1 HERDR_PANE_ID=w-source:p9 "$tmp/spawn" \
+  --base "$base_ref" --cohort Dreamer --task capacity-profile-review \
+  -k codex -b feature/test-worker 'unnamed source' 2>&1)
+grep -Fq 'coordination cohort=Dreamer' <<<"$unnamed_output"
+assert_logged pane report-metadata w-source:p9 \
+  --source dotfiles:spawn-coordination \
+  --agent codex \
+  --applies-to-source herdr:codex \
+  --display-agent 'Dreamer · coordinator' \
+  --title 'Dreamer terminal / main!'
 
 # Membership is never inferred when no cohort was supplied.
 reset_fake
@@ -207,6 +227,28 @@ if HERDR_ENV=1 HERDR_PANE_ID=w-source:p9 "$tmp/spawn" \
   exit 1
 fi
 ! grep -Fq 'report-metadata' "$FAKE_LOG"
+
+# If the worker write succeeds but the coordinator write fails, the launcher
+# clears only the worker presentation and returns nonzero.
+reset_fake
+export FAKE_METADATA_FAIL_TARGET=w-source:p9
+if HERDR_ENV=1 HERDR_PANE_ID=w-source:p9 "$tmp/spawn" \
+  --base "$base_ref" --cohort Dreamer --task capacity-profile-review \
+  -k codex -b feature/test-worker 'coordinator metadata failure' \
+  >"$tmp/coordinator-metadata-failure.out" 2>&1; then
+  printf 'expected coordinator metadata failure to return nonzero\n' >&2
+  exit 1
+fi
+grep -Fq 'coordinator coordination metadata failed; worker metadata was cleared' \
+  "$tmp/coordinator-metadata-failure.out"
+assert_logged pane report-metadata w-test:p1 \
+  --source dotfiles:spawn-coordination \
+  --agent codex \
+  --applies-to-source herdr:codex \
+  --clear-display-agent --clear-title
+[ "$(grep -Fc -- '--clear-display-agent' "$FAKE_LOG")" -eq 1 ]
+! grep -F -- 'pane report-metadata w-source:p9' "$FAKE_LOG" \
+  | grep -Fq -- '--clear-display-agent'
 
 # If the exact source session changes during spawn, neither pane is decorated.
 reset_fake
