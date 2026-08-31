@@ -1,0 +1,6 @@
+interface:
+  display_name: "Learn"
+  short_description: "Learn the important code and decisions in a task"
+
+policy:
+  allow_implicit_invocation: false
