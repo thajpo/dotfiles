@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+plugin_source=cloudmanic/herdr-plus
+plugin_id=cloudmanic.herdr-plus
+managed_marker='# dotfiles-herdr-plus-managed: projects/dotfiles.toml'
+
+die() {
+  printf 'herdr-plus-sync: %s\n' "$1" >&2
+  exit "${2:-1}"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: herdr-plus-sync <install|sync|check>
+
+  install  Install/update cloudmanic/herdr-plus, then sync tracked config.
+  sync     Sync tracked config into the installed plugin's managed config dir.
+  check    Verify the managed Dotfiles project matches the tracked template.
+
+HERDR_ENV=1 is required. The sync owns only projects/dotfiles.toml and refuses
+to overwrite a differing file at that path unless it has the ownership marker.
+EOF
+}
+
+resolve_script_dir() {
+  local source=${BASH_SOURCE[0]} dir link
+  while [ -L "$source" ]; do
+    dir=$(cd -P "$(dirname -- "$source")" >/dev/null 2>&1 && pwd) \
+      || die "could not resolve launcher path"
+    link=$(readlink -- "$source") || die "could not read launcher symlink"
+    case "$link" in
+      /*) source=$link ;;
+      *) source="$dir/$link" ;;
+    esac
+  done
+  cd -P "$(dirname -- "$source")" >/dev/null 2>&1 \
+    || die "could not resolve launcher directory"
+  pwd
+}
+
+command_name=${1:-}
+case "$command_name" in
+  install|sync|check) ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+[ "$#" -eq 1 ] || die 'too many arguments' 2
+[ "${HERDR_ENV:-}" = 1 ] \
+  || die 'HERDR_ENV=1 is required; run HERDR_ENV=1 ~/dotfiles/bin/herdr-plus-sync ...'
+
+herdr_bin=${HERDR_BIN:-herdr}
+command -v "$herdr_bin" >/dev/null 2>&1 \
+  || die "herdr is not installed or not on PATH: $herdr_bin" 127
+
+script_dir=$(resolve_script_dir)
+repo_root=$(cd "$script_dir/.." >/dev/null 2>&1 && pwd) \
+  || die 'could not resolve repository root'
+source_file="$repo_root/herdr/herdr-plus/projects/dotfiles.toml"
+[ -f "$source_file" ] || die "tracked project template is missing: $source_file"
+grep -Fxq "$managed_marker" "$source_file" \
+  || die "tracked project template is missing its ownership marker: $source_file"
+
+if [ "$command_name" = install ]; then
+  "$herdr_bin" plugin install "$plugin_source"
+fi
+
+config_dir=$("$herdr_bin" plugin config-dir "$plugin_id") \
+  || die "could not discover managed config directory for $plugin_id"
+[ -n "$config_dir" ] || die "managed config directory for $plugin_id was empty"
+case "$config_dir" in
+  *$'\n'*) die "managed config directory contained multiple lines" ;;
+  /*) ;;
+  *) die "managed config directory is not absolute: $config_dir" ;;
+esac
+
+project_dir="$config_dir/projects"
+destination="$project_dir/dotfiles.toml"
+
+if [ "$command_name" = check ]; then
+  [ -f "$destination" ] \
+    || die "managed project is missing: $destination"
+  cmp -s "$source_file" "$destination" \
+    || die "managed project differs from tracked template: $destination"
+  printf 'herdr-plus-sync: current: %s\n' "$destination"
+  exit 0
+fi
+
+mkdir -p "$project_dir"
+if [ -e "$destination" ] && ! cmp -s "$source_file" "$destination"; then
+  grep -Fxq "$managed_marker" "$destination" \
+    || die "refusing to overwrite unmanaged project: $destination"
+fi
+
+if [ -f "$destination" ] && cmp -s "$source_file" "$destination"; then
+  printf 'herdr-plus-sync: already current: %s\n' "$destination"
+  exit 0
+fi
+
+tmp_file=$(mktemp "$project_dir/.dotfiles.toml.tmp.XXXXXX") \
+  || die "could not create temporary file in $project_dir"
+cleanup() {
+  rm -f -- "$tmp_file"
+}
+trap cleanup EXIT HUP INT TERM
+install -m 0644 "$source_file" "$tmp_file"
+mv -f -- "$tmp_file" "$destination"
+trap - EXIT HUP INT TERM
+printf 'herdr-plus-sync: synced: %s\n' "$destination"

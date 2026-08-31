@@ -1,0 +1,16 @@
+# Reviewed plugin contracts for this dotfiles wiring. This is an audit record,
+# not an installer lock: Herdr owns the installed clones and runtime registry.
+schema_version = 1
+reviewed_herdr_version = "0.8.2"
+
+[[plugins]]
+source = "cloudmanic/herdr-plus"
+id = "cloudmanic.herdr-plus"
+version = "0.1.24"
+commit = "0ede9c763e0feb7800b6d2e3a7401f9198684caf"
+
+[[plugins]]
+source = "plannotator/herdr-annotate"
+id = "annotate"
+version = "0.3.0"
+commit = "ba4903b28fbb77dd0a4bc55a4a7ba3c1ef0913ea"

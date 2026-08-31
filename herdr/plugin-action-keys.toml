@@ -1,0 +1,48 @@
+# >>> dotfiles Annotate and Herdr Plus keys >>>
+# Terminal annotations: upstream defaults do not collide with Herdr 0.8.2.
+[[keys.command]]
+key = "prefix+a"
+type = "plugin_action"
+command = "annotate.capture"
+description = "Annotate selected terminal text"
+
+[[keys.command]]
+key = "prefix+shift+a"
+type = "plugin_action"
+command = "annotate.copy-context"
+description = "Copy annotations as context"
+
+[[keys.command]]
+key = "prefix+m"
+type = "plugin_action"
+command = "annotate.manage"
+description = "Manage annotations"
+
+# Upstream suggests prefix+o for annotate.open, but Herdr reserves prefix+o for
+# open_notification_target. Keep notifications intact and use d for documents.
+[[keys.command]]
+key = "prefix+d"
+type = "plugin_action"
+command = "annotate.open"
+description = "Review documents in this folder"
+
+[[keys.command]]
+key = "prefix+shift+l"
+type = "plugin_action"
+command = "annotate.last"
+description = "Review the agent's last reply"
+
+# These are herdr-plus's documented example bindings and are unclaimed by the
+# Herdr 0.8.2 defaults and the active dotfiles plugin bindings.
+[[keys.command]]
+key = "prefix+up"
+type = "plugin_action"
+command = "cloudmanic.herdr-plus.projects"
+description = "Herdr Plus projects"
+
+[[keys.command]]
+key = "prefix+down"
+type = "plugin_action"
+command = "cloudmanic.herdr-plus.quick-actions"
+description = "Herdr Plus quick actions"
+# <<< dotfiles Annotate and Herdr Plus keys <<<
