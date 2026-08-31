@@ -1,9 +1,9 @@
-# Merge this table into the active Herdr config.toml. It uses only supported
-# built-in row tokens: reported display-agent/title values become `agent` and
-# `pane`, while ordinary agents fall back to their detected label and state.
+# Merge this table into an isolated config for a Herdr binary that supports
+# rows_with_display_agent. Guarded display-agent/title values become `agent`
+# and `pane`; ordinary agents retain Herdr's default workspace/agent rows.
 [ui.sidebar.agents]
 row_gap = 0
-rows = [
+rows_with_display_agent = [
   ["state_icon", "agent"],
   ["pane"],
 ]

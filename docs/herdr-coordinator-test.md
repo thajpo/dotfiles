@@ -11,9 +11,9 @@ then continues talking with each worker while reviewing its worktree. The
 primary owns integration, conflict resolution, tests, and design decisions.
 
 The launcher also reports display-only metadata through Herdr's supported pane
-API. It does not rename a Space, move a worktree, change Git topology, or patch
-Herdr. Coordination roles are attached only to the exact source and child panes
-whose native agent sessions are verified during a successful spawn.
+API. It does not rename a Space, move a worktree, or change Git topology.
+Coordination roles are attached only to the exact source and child panes whose
+native agent sessions are verified during a successful spawn.
 
 ## One-time setup
 
@@ -38,30 +38,40 @@ Make sure Herdr's Codex integration is installed:
 HERDR_ENV=1 herdr integration install codex
 ```
 
-Merge the tracked sidebar table from `herdr/coordination-sidebar.toml` into
-`~/.config/herdr/config.toml`, preserving the rest of the local config, then
-validate and reload it:
+The tracked sidebar table requires Herdr's `rows_with_display_agent` support.
+Stock v0.8.2 supports only global and canonical-agent layouts; using the old
+global layout degrades ordinary panes by removing their workspace row. Until
+the conditional layout support is available in the binary being tested, keep
+this table out of the live config.
+
+For an isolated development build, merge `herdr/coordination-sidebar.toml`
+into its separate config, preserving the rest of that config, then validate it
+with the explicit development binary and config path. Unset inherited live
+session/socket routing first:
 
 ```bash
-herdr config check
-herdr server reload-config
+dev_root=/path/to/herdr-development-checkout
+dev_herdr="$dev_root/target/debug/herdr"
+isolated_config="$dev_root/.local/isolated/config.toml"
+env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION \
+  HERDR_CONFIG_PATH="$isolated_config" "$dev_herdr" config check
 ```
 
-The row layout is `state_icon + agent` followed by `pane`. For coordinated
-panes, guarded `display-agent` and `title` metadata produce rows such as:
+Only panes with active guarded `display-agent` metadata select the
+`state_icon + agent` / `pane` layout. Coordinated panes therefore render as:
 
 ```text
-● Dreamer · coordinator
-dreamer
+● Dotfiles · coordinator
+Dreamer
 
-● Dreamer · worker
+● Dotfiles · worker
 capacity-profile-review
 ```
 
 The status glyph remains Herdr-owned. An ordinary agent receives no metadata,
-so it still shows its status glyph and detected agent label; its absent `pane`
-row disappears. Space rows are not configured or reported by this feature, so
-their workspace names, branches, and Git status remain unchanged.
+so it retains Herdr's useful built-in `state_icon + workspace + tab` / `agent`
+fallback. Space rows are not configured or reported by this feature, so their
+workspace names, branches, and Git status remain unchanged.
 
 The global Codex profile is configured for the lower-risk automation mode:
 `workspace-write` sandboxing, `on-request` approvals, and automatic review of
@@ -82,7 +92,7 @@ export HERDR_ENV=1
 ~/dotfiles/bin/spawn --doctor
 base_ref=$(git branch --show-current)
 ~/dotfiles/bin/spawn --base "$base_ref" \
-  --cohort Dreamer \
+  --cohort Dotfiles \
   --task capacity-profile-review \
   -k codex -b capacity-profile-review \
   "Make one focused change. Run the relevant test, commit the work, and report the commit hash, tests, blockers, and changed files."
@@ -113,12 +123,15 @@ the requested branch/worker slug as its positional name while keeping
 pane-qualified fallback.
 
 Only after the plugin has returned success does the launcher re-read both exact
-pane IDs, confirm that the source is still the same native agent session, and
-resolve the child's native session. It then writes `display-agent` and `title`
-with `--agent` and `--applies-to-source` guards. The child is written first; if
-the coordinator write fails, the launcher attempts to clear the child display
-metadata and reports separately whether that cleanup succeeded. A failed worker
-start writes no role metadata.
+pane IDs and confirm that the source is still the same native agent session.
+Because Herdr may report plugin success just before the child's native
+`agent_session` reaches the API aggregate, the launcher polls only the returned
+child pane for at most five seconds. It never substitutes a Space, workspace,
+focused pane, or repository-wide identity. Once ready, it writes
+`display-agent` and `title` with `--agent` and `--applies-to-source` guards. The
+child is written first; if the coordinator write fails, the launcher attempts
+to clear the child display metadata and reports separately whether that cleanup
+succeeded. A failed worker start or readiness timeout writes no role metadata.
 
 The coordinator's second line uses the first nonempty identity in this order:
 its explicit Herdr agent name, stripped terminal title, canonical agent kind,

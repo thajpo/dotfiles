@@ -60,7 +60,15 @@ case "${1:-}" in
             printf '{"result":{"agent":{"agent":"codex","name":"dreamer.main","terminal_title_stripped":"ignored terminal title","pane_id":"w-source:p9","agent_session":{"source":"herdr:codex","kind":"id","value":"%s"}}}}\n' "$session"
           fi
         elif [ "$target" = w-test:p1 ]; then
-          printf '{"result":{"agent":{"agent":"codex","name":"feature-test-worker","pane_id":"w-test:p1","agent_session":{"source":"herdr:codex","kind":"id","value":"session-worker-1"}}}}\n'
+          count=0
+          [ ! -f "$FAKE_WORKER_GET_COUNT" ] || count=$(<"$FAKE_WORKER_GET_COUNT")
+          count=$((count + 1))
+          printf '%s\n' "$count" > "$FAKE_WORKER_GET_COUNT"
+          if [ "$count" -le "${FAKE_WORKER_SESSION_NOT_READY_COUNT:-0}" ]; then
+            printf '{"result":{"agent":{"agent":"codex","name":"feature-test-worker","pane_id":"w-test:p1"}}}\n'
+          else
+            printf '{"result":{"agent":{"agent":"codex","name":"feature-test-worker","pane_id":"w-test:p1","agent_session":{"source":"herdr:codex","kind":"id","value":"session-worker-1"}}}}\n'
+          fi
         else
           printf '{"error":{"code":"agent_not_found","message":"%s"}}\n' "$target" >&2
           exit 1
@@ -105,6 +113,7 @@ export FAKE_CONFIG_DIR="$config_dir"
 export FAKE_LOG="$tmp/herdr.log"
 export FAKE_PLUGIN_ROOT="$plugin_root"
 export FAKE_SOURCE_GET_COUNT="$tmp/source-get-count"
+export FAKE_WORKER_GET_COUNT="$tmp/worker-get-count"
 export FAKE_WORKTREE="$tmp/worktree"
 export PATH="$fake_bin:$PATH"
 base_ref=$(git -C "$root" branch --show-current)
@@ -117,8 +126,9 @@ assert_logged() {
 
 reset_fake() {
   : > "$FAKE_LOG"
-  rm -f -- "$FAKE_SOURCE_GET_COUNT"
-  unset FAKE_AGENT_START_FAIL FAKE_CHANGE_SOURCE_SESSION FAKE_METADATA_FAIL_TARGET FAKE_SOURCE_UNNAMED
+  rm -f -- "$FAKE_SOURCE_GET_COUNT" "$FAKE_WORKER_GET_COUNT"
+  unset FAKE_AGENT_START_FAIL FAKE_CHANGE_SOURCE_SESSION FAKE_METADATA_FAIL_TARGET \
+    FAKE_SOURCE_UNNAMED FAKE_WORKER_SESSION_NOT_READY_COUNT
 }
 
 doctor_output=$(HERDR_ENV=1 "$tmp/spawn" --doctor 2>&1)
@@ -164,6 +174,24 @@ grep -Fq -- "--base $base_ref" "$FAKE_LOG"
 ! grep -Fq 'plugin args: --base' "$FAKE_LOG"
 ! grep -Fq 'plugin args: --cohort' "$FAKE_LOG"
 ! grep -Fq 'plugin args: --task' "$FAKE_LOG"
+
+# A successful native agent start may precede agent_session aggregation. The
+# launcher retries only the returned worker pane and applies metadata once its
+# lifecycle authority is ready.
+reset_fake
+export FAKE_WORKER_SESSION_NOT_READY_COUNT=2
+readiness_output=$(HERDR_ENV=1 HERDR_PANE_ID=w-source:p9 "$tmp/spawn" \
+  --base "$base_ref" --cohort Dotfiles --task readiness-race \
+  -k codex -b feature/test-worker 'readiness race' 2>&1)
+grep -Fq 'coordination cohort=Dotfiles' <<<"$readiness_output"
+[ "$(grep -Fc 'agent get w-test:p1 ' "$FAKE_LOG")" -eq 3 ]
+! grep -Fq 'agent get w-wrong:p1' "$FAKE_LOG"
+assert_logged pane report-metadata w-test:p1 \
+  --source dotfiles:spawn-coordination \
+  --agent codex \
+  --applies-to-source herdr:codex \
+  --display-agent 'Dotfiles · worker' \
+  --title readiness-race
 
 # An unnamed source uses its nonempty stripped terminal title as the
 # coordinator identity. The explicit cohort remains the only source of role
@@ -262,11 +290,13 @@ fi
 grep -Fq 'source agent session changed during spawn' "$tmp/session-race.out"
 ! grep -Fq 'report-metadata' "$FAKE_LOG"
 
-# The tracked layout uses guarded built-ins. Ordinary agents therefore keep a
-# state indicator and detected agent label; without a reported title, row two
-# naturally disappears. No unguarded custom token can invent a role.
+# The tracked layout overrides rows only while guarded display-agent metadata
+# is active. Ordinary panes retain Herdr's useful built-in workspace/agent
+# fallback, and no unguarded custom token can invent a role.
+grep -Fq 'rows_with_display_agent' "$root/herdr/coordination-sidebar.toml"
 grep -Fq '["state_icon", "agent"]' "$root/herdr/coordination-sidebar.toml"
 grep -Fq '["pane"]' "$root/herdr/coordination-sidebar.toml"
+! grep -Eq '^rows[[:space:]]*=' "$root/herdr/coordination-sidebar.toml"
 ! grep -Fq '"$' "$root/herdr/coordination-sidebar.toml"
 
 printf 'spawn wrapper tests: ok\n'
