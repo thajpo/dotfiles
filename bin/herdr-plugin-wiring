@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""Safely apply the marker-owned Annotate and Herdr Plus key block."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+import tomllib
+
+
+START = "# >>> dotfiles Annotate and Herdr Plus keys >>>"
+END = "# <<< dotfiles Annotate and Herdr Plus keys <<<"
+
+# Herdr 0.8.2 defaults inspected with `herdr --default-config`. Indexed ranges
+# are represented literally because none of this integration's keys use them.
+DEFAULT_RESERVED_KEYS = {
+    "prefix+?",
+    "prefix+s",
+    "prefix+q",
+    "prefix+shift+r",
+    "prefix+o",
+    "prefix+w",
+    "prefix+g",
+    "prefix+shift+n",
+    "prefix+shift+g",
+    "prefix+shift+w",
+    "prefix+shift+d",
+    "prefix+c",
+    "prefix+shift+t",
+    "prefix+p",
+    "prefix+n",
+    "prefix+1..9",
+    "prefix+shift+x",
+    "prefix+shift+p",
+    "prefix+e",
+    "prefix+h",
+    "prefix+j",
+    "prefix+k",
+    "prefix+l",
+    "prefix+tab",
+    "prefix+shift+tab",
+    "prefix+v",
+    "prefix+minus",
+    "prefix+x",
+    "prefix+z",
+    "prefix+r",
+    "prefix+b",
+}
+
+
+class WiringError(Exception):
+    pass
+
+
+def die(message: str, code: int = 1) -> None:
+    print(f"herdr-plugin-wiring: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def usage() -> None:
+    print("Usage: herdr-plugin-wiring <apply|check|remove>")
+
+
+def repository_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def config_path() -> Path:
+    configured = os.environ.get("HERDR_CONFIG_PATH")
+    if configured:
+        path = Path(configured).expanduser()
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        path = base / "herdr" / "config.toml"
+    if not path.is_absolute():
+        raise WiringError(f"Herdr config path is not absolute: {path}")
+    # Replace a symlink target, never the link itself. This keeps a dotfiles
+    # config symlink intact while still using an atomic same-directory update.
+    return path.resolve(strict=False)
+
+
+def decode_toml(text: str, label: str) -> dict:
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise WiringError(f"{label} is not valid TOML: {error}") from error
+
+
+def managed_span(text: str) -> tuple[int, int] | None:
+    starts = text.count(START)
+    ends = text.count(END)
+    if starts == 0 and ends == 0:
+        return None
+    if starts != 1 or ends != 1:
+        raise WiringError(
+            f"expected one matched managed block, found {starts} start and {ends} end markers"
+        )
+    start = text.index(START)
+    end_start = text.index(END)
+    if end_start < start:
+        raise WiringError("managed block end marker appears before its start marker")
+    end = end_start + len(END)
+    if end < len(text) and text[end] == "\n":
+        end += 1
+    return start, end
+
+
+def desired_commands(fragment: str) -> list[dict]:
+    parsed = decode_toml(fragment, "tracked key fragment")
+    commands = parsed.get("keys", {}).get("command", [])
+    if not isinstance(commands, list) or not commands:
+        raise WiringError("tracked key fragment contains no [[keys.command]] entries")
+    return commands
+
+
+def command_entries(parsed: dict) -> list[dict]:
+    entries = parsed.get("keys", {}).get("command", [])
+    return entries if isinstance(entries, list) else []
+
+
+def validate_collisions(base_text: str, fragment: str) -> None:
+    base = decode_toml(base_text, "Herdr config outside the managed block")
+    desired = desired_commands(fragment)
+
+    desired_keys = [entry.get("key") for entry in desired]
+    desired_actions = [entry.get("command") for entry in desired]
+    if any(not isinstance(value, str) or not value for value in desired_keys):
+        raise WiringError("every managed command must have a nonempty key")
+    if any(not isinstance(value, str) or not value for value in desired_actions):
+        raise WiringError("every managed command must have a nonempty action id")
+    if len(desired_keys) != len(set(desired_keys)):
+        raise WiringError("tracked key fragment contains duplicate keys")
+    if len(desired_actions) != len(set(desired_actions)):
+        raise WiringError("tracked key fragment contains duplicate action ids")
+
+    defaults = sorted(set(desired_keys) & DEFAULT_RESERVED_KEYS)
+    if defaults:
+        raise WiringError(f"managed keys collide with Herdr 0.8.2 defaults: {', '.join(defaults)}")
+
+    keys_table = base.get("keys", {})
+    explicitly_bound = {
+        value
+        for name, value in keys_table.items()
+        if name != "prefix" and isinstance(value, str) and value
+    }
+    external_commands = command_entries(base)
+    external_keys = {
+        entry.get("key") for entry in external_commands if isinstance(entry.get("key"), str)
+    }
+    external_actions = {
+        entry.get("command")
+        for entry in external_commands
+        if isinstance(entry.get("command"), str)
+    }
+
+    key_conflicts = sorted(set(desired_keys) & (explicitly_bound | external_keys))
+    if key_conflicts:
+        raise WiringError(f"managed keys collide with existing config: {', '.join(key_conflicts)}")
+    action_conflicts = sorted(set(desired_actions) & external_actions)
+    if action_conflicts:
+        raise WiringError(
+            f"managed actions are already bound outside the managed block: {', '.join(action_conflicts)}"
+        )
+
+
+def without_managed(text: str, span: tuple[int, int] | None) -> str:
+    if span is None:
+        return text
+    start, end = span
+    return text[:start] + text[end:]
+
+
+def compose(text: str, fragment: str, span: tuple[int, int] | None) -> str:
+    if span is None:
+        # The delimiter newline belongs to the managed insertion; remove uses it
+        # to restore the original bytes, whether or not the file ended in '\n'.
+        return text + "\n" + fragment
+    start, end = span
+    return text[:start] + fragment + text[end:]
+
+
+def remove_block(text: str, span: tuple[int, int]) -> str:
+    start, end = span
+    delimiter_start = start - 1 if start > 0 and text[start - 1] == "\n" else start
+    return text[:delimiter_start] + text[end:]
+
+
+def atomic_write(path: Path, content: str) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    temporary_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as handle:
+            temporary_name = handle.name
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_name, mode)
+        os.replace(temporary_name, path)
+    finally:
+        if temporary_name:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+
+
+def main() -> None:
+    if len(sys.argv) != 2 or sys.argv[1] not in {"apply", "check", "remove"}:
+        usage()
+        raise SystemExit(2)
+    if os.environ.get("HERDR_ENV") != "1":
+        raise WiringError(
+            "HERDR_ENV=1 is required; run HERDR_ENV=1 ~/dotfiles/bin/herdr-plugin-wiring ..."
+        )
+
+    operation = sys.argv[1]
+    root = repository_root()
+    fragment_path = root / "herdr" / "plugin-action-keys.toml"
+    fragment = fragment_path.read_text(encoding="utf-8")
+    if not fragment.endswith("\n"):
+        raise WiringError(f"tracked key fragment must end with a newline: {fragment_path}")
+    if managed_span(fragment) != (0, len(fragment)):
+        raise WiringError(f"tracked key fragment must contain exactly one complete managed block: {fragment_path}")
+
+    path = config_path()
+    if not path.is_file():
+        raise WiringError(f"Herdr config does not exist: {path}")
+    original = path.read_text(encoding="utf-8")
+    span = managed_span(original)
+
+    if operation == "remove":
+        if span is None:
+            print(f"herdr-plugin-wiring: already absent: {path}")
+            return
+        updated = remove_block(original, span)
+        decode_toml(updated, "Herdr config after managed-block removal")
+        atomic_write(path, updated)
+        print(f"herdr-plugin-wiring: removed: {path}")
+        return
+
+    base = without_managed(original, span)
+    validate_collisions(base, fragment)
+    expected = compose(original, fragment, span)
+    decoded = decode_toml(expected, "Herdr config with managed key block")
+
+    keys = [entry.get("key") for entry in command_entries(decoded)]
+    duplicates = sorted({key for key in keys if key and keys.count(key) > 1})
+    if duplicates:
+        raise WiringError(f"Herdr config contains duplicate command keys: {', '.join(duplicates)}")
+
+    if operation == "check":
+        if span is None or original != expected:
+            raise WiringError(f"managed key block is missing or differs: {path}")
+        print(f"herdr-plugin-wiring: current: {path}")
+        return
+
+    if original == expected:
+        print(f"herdr-plugin-wiring: already current: {path}")
+        return
+    atomic_write(path, expected)
+    print(f"herdr-plugin-wiring: applied: {path}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, WiringError) as error:
+        die(str(error))

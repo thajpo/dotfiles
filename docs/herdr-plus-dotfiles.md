@@ -9,9 +9,9 @@ template. Opening **Dotfiles** creates a workspace rooted at `~/dotfiles` with:
 
 There is deliberately no `worktrees/` auto-layout. `herdr-spawn` and `reviewr`
 already react to worktree creation, and a third layout owner could create
-duplicate panes or agents. This integration also adds no keybindings, quick
-actions, or global Herdr settings; use the plugin action menu or the supported
-action CLI.
+duplicate panes or agents. The project template itself adds no quick actions or
+global settings. The separately owned action bindings for Herdr Plus and
+Annotate are documented in `docs/herdr-plugin-wiring.md`.
 
 ## Reviewed compatibility
 
@@ -22,6 +22,9 @@ The template and workflow were reviewed on 2026-08-30 against:
   contracts;
 - herdr-plus `main` at `0ede9c763e0feb7800b6d2e3a7401f9198684caf`
   (manifest version `0.1.24`, three commits after tag `v0.1.24`).
+
+The exact Herdr Plus and full Annotate plugin assumptions are tracked together
+in `herdr/plugin-versions.toml`.
 
 That manifest requires Herdr `>=0.7.0`. The helper intentionally uses the
 upstream-recommended unpinned install command, so a later run follows the then
@@ -86,6 +89,9 @@ invoked from a Herdr pane shell without adding a keybinding:
 ```bash
 HERDR_ENV=1 herdr plugin action invoke projects --plugin cloudmanic.herdr-plus
 ```
+
+After applying the reviewed shared wiring, `prefix+up` opens Projects and
+`prefix+down` opens Quick Actions.
 
 Use normal Enter, not the picker's worktree shortcut (`ctrl+g`): this project is
 for the main `~/dotfiles` checkout, while workers continue to be created through
