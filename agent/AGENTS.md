@@ -19,6 +19,10 @@ the worker's assignment. The primary workflow below is not a worker mandate.
   conversation here; workers are implementation partners, not autonomous
   merge owners.
 - Keep the primary conversation in the main project worktree.
+- Every Herdr worker spawn and every headless subagent spawn created by a
+  worker must explicitly use model `gpt-5.6-luna` with `xhigh` reasoning,
+  including nested subagent spawns. Primary/project-owner sessions may use
+  another model.
 - Before using Herdr, confirm `HERDR_ENV=1`. Use the same Herdr session as the
   primary and prefer explicit IDs returned by Herdr JSON responses.
 - The canonical launcher is `~/dotfiles/bin/spawn`; `~/.local/bin/spawn` is
