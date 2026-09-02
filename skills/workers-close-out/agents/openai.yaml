@@ -1,0 +1,7 @@
+interface:
+  display_name: "Workers: Close Out"
+  short_description: "Integrate, then explicitly retire worker batches"
+  default_prompt: "Use $workers-close-out to integrate the approved workers for this Herdr Space."
+
+policy:
+  allow_implicit_invocation: true

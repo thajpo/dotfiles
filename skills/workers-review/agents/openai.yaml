@@ -1,0 +1,7 @@
+interface:
+  display_name: "Workers: Review"
+  short_description: "Review worker batches at exact commit SHAs"
+  default_prompt: "Use $workers-review to review the ready workers owned by this Herdr Space."
+
+policy:
+  allow_implicit_invocation: true

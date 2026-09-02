@@ -1,0 +1,7 @@
+interface:
+  display_name: "Workers: Steer"
+  short_description: "Direct or query one owner's worker batch"
+  default_prompt: "Use $workers-steer to send this direction to the selected workers in this Herdr Space."
+
+policy:
+  allow_implicit_invocation: true

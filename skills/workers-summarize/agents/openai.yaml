@@ -1,0 +1,7 @@
+interface:
+  display_name: "Workers: Summarize"
+  short_description: "Audit a worker's task, changes, and decisions"
+  default_prompt: "Use $workers-summarize to give me a complete handoff and decision audit for this worker."
+
+policy:
+  allow_implicit_invocation: true

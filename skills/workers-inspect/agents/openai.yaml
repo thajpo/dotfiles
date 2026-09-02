@@ -1,0 +1,7 @@
+interface:
+  display_name: "Workers: Inspect"
+  short_description: "Inspect progress across one owner's workers"
+  default_prompt: "Use $workers-inspect to inspect the workers owned by this Herdr Space."
+
+policy:
+  allow_implicit_invocation: true
