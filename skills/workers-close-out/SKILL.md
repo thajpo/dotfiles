@@ -9,7 +9,7 @@ Close out a batch owned by one project Space. Bind authorization to reviewed com
 
 ## Authorization and scope
 
-Require `HERDR_ENV=1` and follow the repository's Herdr preflight. Resolve the native source workspace with `herdr worktree list --workspace "$HERDR_WORKSPACE_ID"` and require `.result.source.source_workspace_id` to equal `HERDR_WORKSPACE_ID`. If it does not, report the source workspace and stop. This skill must run from that source/project-owner Space and its primary integration worktree, never from a worker subspace.
+Require `HERDR_ENV=1` and follow the repository's Herdr preflight. Run `~/dotfiles/bin/herdr-workers-state --workspace "$HERDR_WORKSPACE_ID"`, require `schema_version: 1` and `owner.is_project_owner: true`, and operate only on its returned workers. If it exits `3`, report the source workspace and stop. Any other incomplete identity snapshot also fails closed. This skill must run from that source/project-owner Space and its primary integration worktree, never from a worker subspace.
 
 Operate on only one parent Space per close-out batch. If the user asks to close workers across multiple Spaces, have each project owner prepare a separate review/approval manifest and obtain explicit direction for each integration target.
 
@@ -34,6 +34,8 @@ Before the first mutation, verify that:
 - The target head still equals the approved head.
 - Required worker reports and test evidence are available.
 - Cross-worker overlap and dependency order were reviewed.
+
+Perform the worker-head checks in one helper invocation using every approved `--expect-sha WORKSPACE=SHA` pair. Exit `4`, a missing workspace, or any `expectation_match: false` invalidates the manifest. Repeat the same exact expectation check immediately before promotion.
 
 If a head moved, re-review that worker and obtain approval for the new SHA. Never substitute the branch's new head silently. A worker ID or branch name locates work; it is not the authorized merge object.
 

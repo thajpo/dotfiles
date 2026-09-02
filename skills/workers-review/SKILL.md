@@ -9,9 +9,9 @@ Review the changes that would actually enter the project, not just worker metada
 
 ## Resolve the batch
 
-Require `HERDR_ENV=1` and follow the repository's Herdr preflight. Resolve the current source workspace with `herdr worktree list --workspace "$HERDR_WORKSPACE_ID"` and require `.result.source.source_workspace_id` to equal `HERDR_WORKSPACE_ID`. Only then select open linked-worktree subspaces owned by that source Space. Join exact workspace, pane, agent, worktree, and branch identities from Herdr and Git.
+Require `HERDR_ENV=1` and follow the repository's Herdr preflight. Run `~/dotfiles/bin/herdr-workers-state --workspace "$HERDR_WORKSPACE_ID"`, require `schema_version: 1` and `owner.is_project_owner: true`, and select only from its returned `workers`. This projection is the canonical topology/Git/model join for the batch.
 
-If the workspace equality check fails, do not coordinate sibling workers; report the source workspace and stop. Run the review from the project-owner/source Space. Accept selectors such as `all`, `ready`, worker names, branches, workspace IDs, or pane IDs; never let an ambiguous selector silently widen the batch.
+If the helper exits `3`, do not coordinate sibling workers; report the source workspace and stop. Run the review from the project-owner/source Space. Accept selectors such as `all`, `ready`, worker names, branches, workspace IDs, or pane IDs; never let an ambiguous selector silently widen the batch. Do not replace a helper failure with branch/path/cohort inference.
 
 For an all-Spaces request, prompt each unambiguous project owner to review its own batch, then aggregate the owner reports. Use waits of at most 60 seconds with progress updates and a default five-minute aggregate deadline; return partial results and mark late owners `pending`. Never form one cross-project merge batch.
 
@@ -58,5 +58,7 @@ For each candidate give the task, semantic summary, key files/symbols, tests, fi
 Finish with a compact approval manifest containing the target branch/head, ordered worker identities, each full reviewed SHA, the proposed merge strategy, and the intended workspace/cleanup effects. This manifest is the handoff to `$workers-close-out`.
 
 Immediately re-resolve every branch head before reporting. If it no longer equals the reviewed SHA, mark that candidate `stale—review again`; do not silently update the manifest.
+
+Include a revalidation command in the manifest using one `--expect-sha WORKSPACE=SHA` argument per worker. Exit `4` from `herdr-workers-state` means the reviewed batch drifted and must be reviewed again.
 
 Do not merge, commit, close workspaces, delete branches, or remove worktrees.

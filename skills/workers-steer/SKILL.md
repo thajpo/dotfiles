@@ -9,9 +9,9 @@ Communicate through the owning project Space while preserving target scope and m
 
 ## Resolve targets
 
-Require `HERDR_ENV=1` and follow the repository's Herdr preflight. Resolve the source workspace through `herdr worktree list --workspace "$HERDR_WORKSPACE_ID"` and require `.result.source.source_workspace_id` to equal `HERDR_WORKSPACE_ID`. Select only its open linked-worktree worker subspaces, then resolve exact pane or unique agent targets from `herdr agent list`.
+Require `HERDR_ENV=1` and follow the repository's Herdr preflight. Run `~/dotfiles/bin/herdr-workers-state --workspace "$HERDR_WORKSPACE_ID"`, require `schema_version: 1` and `owner.is_project_owner: true`, and resolve targets only from its returned workers and exact pane IDs.
 
-If the workspace equality check fails, do not steer siblings; report the source workspace and stop. Do not expand a worker, branch, status, or owner selector when it is ambiguous. A request naming `all` means all workers under the current owner, not all Herdr Spaces.
+If the helper exits `3`, do not steer siblings; report the source workspace and stop. If it otherwise fails, surface the incomplete snapshot rather than inferring ownership. Do not expand a worker, branch, status, or owner selector when it is ambiguous. A request naming `all` means all workers under the current owner, not all Herdr Spaces.
 
 For an explicit all-Spaces request, send one prompt to each unambiguous project-owner agent. Each owner resolves and communicates with its own children, then returns an owner-level report. Do not broadcast directly to every worker across projects.
 

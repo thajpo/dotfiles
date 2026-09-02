@@ -9,25 +9,23 @@ Build a current, evidence-backed view of workers without relying on a manually m
 
 ## Scope
 
-Default to the current project-owner Space. The API calls this the source workspace:
+Default to the current project-owner Space. Start with the deterministic projection:
 
 1. Require `HERDR_ENV=1` and follow the repository's Herdr preflight instructions.
-2. Resolve the calling pane and workspace explicitly. Do not use the UI-focused pane.
-3. Run `herdr worktree list --workspace "$HERDR_WORKSPACE_ID"`. Treat `.result.source.source_workspace_id` as the parent Space and require it to equal `HERDR_WORKSPACE_ID` before coordinating workers.
-4. Select returned linked worktrees that have an `open_workspace_id`, then join them to `herdr workspace list` and `herdr agent list`. These open linked-worktree subspaces are the local worker candidates.
-5. Validate every candidate by workspace, worktree, repository identity, and live agent. Do not infer ownership from a branch prefix, path convention, sidebar order, or cohort label alone.
+2. Run `~/dotfiles/bin/herdr-workers-state --workspace "$HERDR_WORKSPACE_ID"` and require `schema_version: 1` plus `owner.is_project_owner: true`.
+3. Use only the returned `workers` as candidates. The helper joins native source-Space topology, exact workspace/pane/session identity, Git state, launch policy, and observed Codex model evidence. Do not recreate that join from titles, branch names, paths, or cohort labels.
 
-If that equality check fails, the caller is a linked worker subspace rather than the source workspace. Do not coordinate its siblings. Report the source workspace and direct the request to its project owner.
+If the helper exits `3`, the caller is not the source/project-owner Space. Do not coordinate its siblings. Report the returned source Space and direct the request to its project owner. Other nonzero results mean the snapshot is incomplete or a requested SHA expectation drifted; surface the exact error rather than falling back to inference.
 
 Selectors such as `all`, `ready`, `working`, `blocked`, a worker name, branch, workspace ID, or pane ID apply only inside that parent Space unless the user explicitly requests all Spaces.
 
 ## Inspect substantive evidence
 
-For each selected worker, gather enough evidence to explain its state:
+For each selected worker, use the projection as the durable baseline, then gather enough additional evidence to explain its state:
 
 - `herdr agent get` and `herdr agent read --source recent-unwrapped` for lifecycle, recent actions, reports, questions, and test output.
 - `herdr pane process-info --pane <id>` for the current foreground process.
-- `git -C <worktree> status --short`, branch, exact `HEAD`, recent commits, changed files, and a diff against the project owner's integration branch.
+- The helper's exact base/head SHAs, worktree status, changed files, model attestation, and readiness reasons; inspect commits and diffs directly when explaining semantics.
 - Tests observed in terminal output, commit/report text, or rerun read-only when proportionate. Distinguish observed passing tests from tests merely claimed or not run.
 - The worker's stated objective and blockers. When the evidence is stale or incomplete and the worker is settled, prompt it for a concise status report. Do not interrupt active work merely to refresh a dashboard.
 

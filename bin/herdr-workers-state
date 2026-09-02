@@ -1,0 +1,557 @@
+#!/usr/bin/env python3
+"""Project-owner worker state from Herdr topology, Git, and Codex rollouts."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Sequence
+
+
+SCHEMA_VERSION = 1
+ROLLOUT_FORMAT = "codex-rollout-unstable-v1"
+SETTLED_STATES = {"idle", "done"}
+SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+
+
+class StateError(RuntimeError):
+    def __init__(self, message: str, exit_code: int = 1) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Emit versioned JSON for workers owned by one Herdr project/source Space."
+        )
+    )
+    parser.add_argument(
+        "--workspace",
+        help="Project-owner workspace ID; defaults to HERDR_WORKSPACE_ID.",
+    )
+    parser.add_argument(
+        "--expect-sha",
+        action="append",
+        default=[],
+        metavar="WORKSPACE=SHA",
+        help="Require an owned worker workspace to remain at an exact commit SHA.",
+    )
+    parser.add_argument(
+        "--worktrees-json",
+        type=Path,
+        help="Fixture/debug Herdr worktree-list response; requires --agents-json.",
+    )
+    parser.add_argument(
+        "--agents-json",
+        type=Path,
+        help="Fixture/debug Herdr agent-list response; requires --worktrees-json.",
+    )
+    parser.add_argument(
+        "--sessions-dir",
+        type=Path,
+        help="Codex sessions directory; defaults to CODEX_HOME/sessions.",
+    )
+    return parser.parse_args()
+
+
+def run(command: Sequence[str], cwd: Path | None = None) -> str:
+    result = subprocess.run(
+        list(command),
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise StateError(f"command failed ({' '.join(command)}): {detail}")
+    return result.stdout
+
+
+def parse_json_document(text: str, source: str) -> dict[str, Any]:
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise StateError(f"{source} did not return valid JSON: {error}") from error
+    if not isinstance(document, dict):
+        raise StateError(f"{source} returned a non-object JSON document")
+    error = document.get("error")
+    if error:
+        raise StateError(f"{source} returned an error: {error}")
+    result = document.get("result", document)
+    if not isinstance(result, dict):
+        raise StateError(f"{source} result is not a JSON object")
+    return result
+
+
+def read_json(path: Path, label: str) -> dict[str, Any]:
+    try:
+        return parse_json_document(path.read_text(encoding="utf-8"), label)
+    except OSError as error:
+        raise StateError(f"cannot read {label}: {error}") from error
+
+
+def resolve_workspace(args: argparse.Namespace) -> str:
+    workspace = args.workspace or os.environ.get("HERDR_WORKSPACE_ID")
+    if workspace:
+        return workspace
+    pane = os.environ.get("HERDR_PANE_ID") or os.environ.get("HERDR_ACTIVE_PANE_ID")
+    if not pane:
+        raise StateError("pass --workspace or run from a Herdr agent pane", 2)
+    result = parse_json_document(
+        run(["herdr", "agent", "get", pane]), "herdr agent get"
+    )
+    agent = result.get("agent")
+    if not isinstance(agent, dict) or not isinstance(agent.get("workspace_id"), str):
+        raise StateError("the current pane has no unambiguous Herdr workspace", 2)
+    return agent["workspace_id"]
+
+
+def load_topology(
+    args: argparse.Namespace, workspace: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    fixture_count = int(args.worktrees_json is not None) + int(args.agents_json is not None)
+    if fixture_count == 1:
+        raise StateError("--worktrees-json and --agents-json must be supplied together", 2)
+    if fixture_count == 2:
+        return (
+            read_json(args.worktrees_json, "worktree fixture"),
+            read_json(args.agents_json, "agent fixture"),
+        )
+    return (
+        parse_json_document(
+            run(["herdr", "worktree", "list", "--workspace", workspace]),
+            "herdr worktree list",
+        ),
+        parse_json_document(run(["herdr", "agent", "list"]), "herdr agent list"),
+    )
+
+
+def sessions_dir(args: argparse.Namespace) -> Path:
+    if args.sessions_dir:
+        return args.sessions_dir.expanduser()
+    codex_root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    return codex_root.expanduser() / "sessions"
+
+
+def git(path: Path, *arguments: str) -> str:
+    return run(["git", "-C", str(path), *arguments]).strip()
+
+
+def git_optional(path: Path, *arguments: str) -> tuple[str | None, str | None]:
+    try:
+        return git(path, *arguments), None
+    except StateError as error:
+        return None, str(error)
+
+
+def parse_status(raw: str) -> dict[str, Any]:
+    staged: set[str] = set()
+    unstaged: set[str] = set()
+    untracked: set[str] = set()
+    entries = raw.split("\0")
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if not entry:
+            continue
+        if len(entry) < 4:
+            continue
+        state = entry[:2]
+        path = entry[3:]
+        if state == "??":
+            untracked.add(path)
+            continue
+        if state[0] not in {" ", "?"}:
+            staged.add(path)
+        if state[1] not in {" ", "?"}:
+            unstaged.add(path)
+        if state[0] in {"R", "C"} and index < len(entries):
+            index += 1
+    return {
+        "clean": not (staged or unstaged or untracked),
+        "staged": sorted(staged),
+        "unstaged": sorted(unstaged),
+        "untracked": sorted(untracked),
+    }
+
+
+def observe_codex_session(session_id: str | None, root: Path) -> dict[str, Any]:
+    unknown = {
+        "model": None,
+        "effort": None,
+        "source": None,
+        "status": "unknown",
+        "detail": None,
+    }
+    if not session_id:
+        return {**unknown, "detail": "session ID unavailable"}
+    if not SAFE_SESSION_ID.fullmatch(session_id):
+        return {**unknown, "detail": "session ID contains unsupported characters"}
+    try:
+        matches = sorted(root.rglob(f"rollout-*-{session_id}.jsonl"))
+    except OSError as error:
+        return {**unknown, "detail": f"session lookup failed: {error}"}
+    if len(matches) != 1:
+        detail = "session rollout not found" if not matches else "multiple session rollouts matched"
+        return {**unknown, "detail": detail}
+
+    model: str | None = None
+    effort: str | None = None
+    malformed = 0
+    try:
+        with matches[0].open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    malformed += 1
+                    continue
+                if not isinstance(record, dict):
+                    malformed += 1
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if record.get("type") == "turn_context":
+                    candidate_model = payload.get("model")
+                    candidate_effort = payload.get("effort") or payload.get(
+                        "reasoning_effort"
+                    )
+                elif (
+                    record.get("type") == "event_msg"
+                    and payload.get("type") == "thread_settings_applied"
+                    and isinstance(payload.get("thread_settings"), dict)
+                ):
+                    settings = payload["thread_settings"]
+                    candidate_model = settings.get("model")
+                    candidate_effort = settings.get("reasoning_effort")
+                else:
+                    continue
+                if isinstance(candidate_model, str) and candidate_model:
+                    model = candidate_model
+                if isinstance(candidate_effort, str) and candidate_effort:
+                    effort = candidate_effort
+    except OSError as error:
+        return {**unknown, "detail": f"session rollout could not be read: {error}"}
+
+    if malformed:
+        return {
+            **unknown,
+            "source": ROLLOUT_FORMAT,
+            "detail": f"session rollout has {malformed} malformed record(s)",
+        }
+    if not model and not effort:
+        return {
+            **unknown,
+            "source": ROLLOUT_FORMAT,
+            "detail": "no model settings observed in the session rollout",
+        }
+    return {
+        "model": model,
+        "effort": effort,
+        "source": ROLLOUT_FORMAT,
+        "status": "observed",
+        "detail": None,
+    }
+
+
+def model_state(agent: dict[str, Any] | None, root: Path) -> dict[str, Any]:
+    tokens = agent.get("tokens", {}) if isinstance(agent, dict) else {}
+    if not isinstance(tokens, dict):
+        tokens = {}
+    session = agent.get("agent_session", {}) if isinstance(agent, dict) else {}
+    session_id = session.get("value") if isinstance(session, dict) else None
+    requested_model = tokens.get("worker_model_requested")
+    requested_effort = tokens.get("worker_effort_requested")
+    subagent_model = tokens.get("worker_subagent_model_requested")
+    subagent_effort = tokens.get("worker_subagent_effort_requested")
+    policy = tokens.get("worker_launch_policy")
+    observed = observe_codex_session(session_id, root)
+
+    requested_complete = all(
+        isinstance(value, str) and value
+        for value in (
+            requested_model,
+            requested_effort,
+            subagent_model,
+            subagent_effort,
+            policy,
+        )
+    )
+    observed_complete = all(
+        isinstance(observed.get(key), str) and observed[key]
+        for key in ("model", "effort")
+    )
+    if requested_complete and observed_complete:
+        attestation = (
+            "pass"
+            if requested_model == observed["model"]
+            and requested_effort == observed["effort"]
+            else "fail"
+        )
+    else:
+        attestation = "unknown"
+    return {
+        "requested": {
+            "model": requested_model if isinstance(requested_model, str) else None,
+            "effort": requested_effort if isinstance(requested_effort, str) else None,
+            "policy": policy if isinstance(policy, str) else None,
+            "source": "herdr_spawn_metadata" if requested_complete else None,
+        },
+        "subagent_defaults": {
+            "model": subagent_model if isinstance(subagent_model, str) else None,
+            "effort": subagent_effort if isinstance(subagent_effort, str) else None,
+            "source": "herdr_spawn_metadata" if requested_complete else None,
+        },
+        "observed": observed,
+        "attestation": attestation,
+    }
+
+
+def matching_agent(
+    agents: list[dict[str, Any]], workspace_id: str, path: Path
+) -> tuple[dict[str, Any] | None, list[str]]:
+    candidates = [agent for agent in agents if agent.get("workspace_id") == workspace_id]
+    exact = []
+    for agent in candidates:
+        cwd = agent.get("cwd")
+        if isinstance(cwd, str):
+            try:
+                if Path(cwd).resolve() == path.resolve():
+                    exact.append(agent)
+            except OSError:
+                pass
+    selected = exact if exact else candidates
+    if len(selected) == 1:
+        return selected[0], []
+    if not selected:
+        return None, ["live_agent_unknown"]
+    return None, ["live_agent_ambiguous"]
+
+
+def inspect_worker(
+    worktree: dict[str, Any],
+    agents: list[dict[str, Any]],
+    root: Path,
+    expected_sha: str | None,
+) -> dict[str, Any]:
+    workspace_id = worktree["open_workspace_id"]
+    path = Path(worktree["path"])
+    agent, reasons = matching_agent(agents, workspace_id, path)
+    tokens = agent.get("tokens", {}) if isinstance(agent, dict) else {}
+    if not isinstance(tokens, dict):
+        tokens = {}
+
+    head, head_error = git_optional(path, "rev-parse", "HEAD")
+    branch, branch_error = git_optional(path, "branch", "--show-current")
+    raw_status, status_error = git_optional(
+        path, "status", "--porcelain=v1", "-z", "--untracked-files=all"
+    )
+    status = parse_status(raw_status or "")
+    git_errors = [error for error in (head_error, branch_error, status_error) if error]
+
+    base_sha = tokens.get("worker_base_sha")
+    if not isinstance(base_sha, str) or not base_sha:
+        base_sha = None
+    merge_base = None
+    ahead_count = None
+    changed_files: set[str] = set(status["staged"] + status["unstaged"] + status["untracked"])
+    if base_sha and head:
+        merge_base, merge_error = git_optional(path, "merge-base", base_sha, head)
+        ahead_text, ahead_error = git_optional(path, "rev-list", "--count", f"{base_sha}..{head}")
+        diff_text, diff_error = git_optional(path, "diff", "--name-only", "-z", base_sha)
+        git_errors.extend(error for error in (merge_error, ahead_error, diff_error) if error)
+        if ahead_text and ahead_text.isdigit():
+            ahead_count = int(ahead_text)
+        if diff_text:
+            changed_files.update(item for item in diff_text.split("\0") if item)
+
+    model = model_state(agent, root)
+    lifecycle = agent.get("agent_status") if isinstance(agent, dict) else None
+    tests_status = tokens.get("worker_tests_status")
+    if tests_status not in {"pass", "fail", "unknown"}:
+        tests_status = "unknown"
+    blocker = tokens.get("worker_blocker")
+    blockers = [blocker] if isinstance(blocker, str) and blocker else []
+    task = tokens.get("worker_task")
+    cohort = tokens.get("worker_cohort")
+
+    if lifecycle not in SETTLED_STATES:
+        reasons.append("worker_not_settled")
+    if not status["clean"]:
+        reasons.append("worktree_dirty")
+    if not head:
+        reasons.append("head_sha_unknown")
+    if not base_sha:
+        reasons.append("base_sha_unknown")
+    if ahead_count == 0:
+        reasons.append("no_committed_changes")
+    if tests_status != "pass":
+        reasons.append("tests_not_verified")
+    if blockers:
+        reasons.append("blocker_reported")
+    if model["attestation"] != "pass":
+        reasons.append("model_attestation_not_pass")
+    expectation_match = expected_sha is None or head == expected_sha
+    if not expectation_match:
+        reasons.append("head_expectation_mismatch")
+    reasons.extend("git_evidence_incomplete" for _ in git_errors[:1])
+
+    session = agent.get("agent_session", {}) if isinstance(agent, dict) else {}
+    return {
+        "workspace_id": workspace_id,
+        "pane_id": agent.get("pane_id") if isinstance(agent, dict) else None,
+        "agent_name": agent.get("name") if isinstance(agent, dict) else None,
+        "agent_kind": agent.get("agent") if isinstance(agent, dict) else None,
+        "session_id": session.get("value") if isinstance(session, dict) else None,
+        "lifecycle_state": lifecycle,
+        "task": task if isinstance(task, str) else None,
+        "cohort": cohort if isinstance(cohort, str) else None,
+        "branch": branch or worktree.get("branch"),
+        "worktree": str(path),
+        "base_sha": base_sha,
+        "head_sha": head,
+        "merge_base_sha": merge_base,
+        "commits_ahead": ahead_count,
+        "worktree_state": status,
+        "changed_files": sorted(changed_files),
+        "tests": {
+            "status": tests_status,
+            "evidence": tokens.get("worker_test_evidence"),
+        },
+        "blockers": blockers,
+        "model": model,
+        "expected_head_sha": expected_sha,
+        "expectation_match": expectation_match,
+        "readiness": {"ready": not reasons, "reasons": sorted(set(reasons))},
+        "evidence_errors": git_errors,
+    }
+
+
+def parse_expectations(values: list[str]) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for value in values:
+        workspace, separator, sha = value.partition("=")
+        if not separator or not workspace or not re.fullmatch(r"[0-9a-fA-F]{7,64}", sha):
+            raise StateError(f"invalid --expect-sha value: {value!r}", 2)
+        if workspace in parsed and parsed[workspace] != sha:
+            raise StateError(f"conflicting expectations for workspace {workspace!r}", 2)
+        parsed[workspace] = sha
+    return parsed
+
+
+def build_projection(
+    topology: dict[str, Any],
+    agent_result: dict[str, Any],
+    workspace: str,
+    root: Path,
+    expectations: dict[str, str],
+) -> dict[str, Any]:
+    source = topology.get("source")
+    if not isinstance(source, dict):
+        raise StateError("Herdr topology omitted its source Space", 3)
+    source_workspace = source.get("source_workspace_id")
+    if source_workspace != workspace:
+        raise StateError(
+            f"workspace {workspace} is not the project owner; source Space is {source_workspace}",
+            3,
+        )
+    worktrees = topology.get("worktrees")
+    agents = agent_result.get("agents")
+    if not isinstance(worktrees, list) or not isinstance(agents, list):
+        raise StateError("Herdr topology or agent list has an invalid shape")
+    agent_objects = [item for item in agents if isinstance(item, dict)]
+
+    candidates = [
+        item
+        for item in worktrees
+        if isinstance(item, dict)
+        and item.get("is_linked_worktree") is True
+        and isinstance(item.get("open_workspace_id"), str)
+        and item.get("open_workspace_id") != workspace
+        and isinstance(item.get("path"), str)
+        and not item.get("is_prunable", False)
+    ]
+    candidates.sort(key=lambda item: (item["open_workspace_id"], item["path"]))
+    workers = [
+        inspect_worker(
+            item,
+            agent_objects,
+            root,
+            expectations.get(item["open_workspace_id"]),
+        )
+        for item in candidates
+    ]
+    known_workspaces = {worker["workspace_id"] for worker in workers}
+    missing_expectations = sorted(set(expectations) - known_workspaces)
+    mismatches = [
+        {
+            "workspace_id": worker["workspace_id"],
+            "expected": worker["expected_head_sha"],
+            "actual": worker["head_sha"],
+        }
+        for worker in workers
+        if not worker["expectation_match"]
+    ]
+    mismatches.extend(
+        {"workspace_id": item, "expected": expectations[item], "actual": None}
+        for item in missing_expectations
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "owner": {
+            "workspace_id": workspace,
+            "source_workspace_id": source_workspace,
+            "repo_name": source.get("repo_name"),
+            "repo_root": source.get("repo_root") or source.get("source_checkout_path"),
+            "is_project_owner": True,
+        },
+        "expectations": {"match": not mismatches, "mismatches": mismatches},
+        "counts": {
+            "workers": len(workers),
+            "ready": sum(worker["readiness"]["ready"] for worker in workers),
+            "working": sum(worker["lifecycle_state"] == "working" for worker in workers),
+            "blocked": sum(worker["lifecycle_state"] == "blocked" for worker in workers),
+        },
+        "workers": workers,
+    }
+
+
+def emit_error(error: StateError) -> int:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "error": {"message": str(error), "exit_code": error.exit_code},
+    }
+    json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    return error.exit_code
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        workspace = resolve_workspace(args)
+        expectations = parse_expectations(args.expect_sha)
+        topology, agents = load_topology(args, workspace)
+        projection = build_projection(
+            topology, agents, workspace, sessions_dir(args), expectations
+        )
+    except StateError as error:
+        return emit_error(error)
+    json.dump(projection, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    return 0 if projection["expectations"]["match"] else 4
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
