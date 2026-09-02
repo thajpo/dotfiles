@@ -73,8 +73,8 @@ if [[ "${1:-}" == agent && "${2:-}" == start && $# -ge 3 ]]; then
     [ "$pane_name" = "$requested_name" ] || candidates+=("$pane_name")
   fi
 
-  # Pass the safe Codex defaults once, preserving any existing agent-argument
-  # separator supplied by a newer plugin version.
+  # Pass the required worker policy explicitly. User-level Codex defaults are
+  # not an attestation: they may change independently of this launcher.
   if [ "$kind" = codex ]; then
     has_separator=0
     has_sandbox=0
@@ -82,13 +82,13 @@ if [[ "${1:-}" == agent && "${2:-}" == start && $# -ge 3 ]]; then
       [ "$value" = -- ] && has_separator=1
       [ "$value" = --sandbox ] && has_sandbox=1
     done
-    if [ "$has_sandbox" -eq 0 ]; then
-      if [ "$has_separator" -eq 1 ]; then
-        args+=(--sandbox workspace-write --ask-for-approval on-request)
-      else
-        args+=(-- --sandbox workspace-write --ask-for-approval on-request)
-      fi
+    if [ "$has_separator" -eq 0 ]; then
+      args+=(--)
     fi
+    if [ "$has_sandbox" -eq 0 ]; then
+      args+=(--sandbox workspace-write --ask-for-approval on-request)
+    fi
+    args+=(--model gpt-5.6-luna --config 'model_reasoning_effort="xhigh"')
   fi
 
   output=""
