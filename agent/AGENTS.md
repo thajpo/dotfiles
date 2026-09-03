@@ -78,6 +78,12 @@ Workers own only their assigned worktree. They should not merge other worker
 branches or edit the primary worktree. Their durable handoff is a commit plus
 a concise final report; live Herdr output is for status and questions, not the
 only record of completed work.
+
+Commit coherent checkpoints while working, not every small edit. When handing
+work off for review, identify the current HEAD commit as the review candidate
+and leave no intended changes uncommitted. Do not rewrite that commit; make
+requested revisions in new commits and report the new HEAD.
+
 - Workers should remain interactive after the initial packet. They must answer
   follow-up questions from the primary, explain their diff and tradeoffs, and
   revise their branch when the primary changes direction.
