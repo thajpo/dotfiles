@@ -97,6 +97,19 @@ esac
 FAKE_HERDR
 chmod +x "$fake_bin/herdr"
 
+cat > "$fake_bin/python3" <<'FAKE_PYTHON'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == */herdr-coordinate && "${FAKE_COORDINATION_CAPTURE:-0}" == 1 ]]; then
+  printf '%q ' "$@" >> "$FAKE_LOG"
+  printf '\n' >> "$FAKE_LOG"
+  printf '{"registered":true}\n'
+  exit "${FAKE_COORDINATION_FAIL:-0}"
+fi
+exec /usr/bin/python3 "$@"
+FAKE_PYTHON
+chmod +x "$fake_bin/python3"
+
 cat > "$plugin_root/spawn.sh" <<'FAKE_PLUGIN'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -121,6 +134,7 @@ export FAKE_REPO_ROOT="$root"
 export FAKE_SOURCE_GET_COUNT="$tmp/source-get-count"
 export FAKE_WORKER_GET_COUNT="$tmp/worker-get-count"
 export FAKE_WORKTREE="$tmp/worktree"
+export HERDR_COORDINATION_DIR="$tmp/unconfigured-coordination"
 export PATH="$fake_bin:$PATH"
 base_ref=$(git -C "$root" branch --show-current)
 base_sha=$(git -C "$root" rev-parse "$base_ref")
@@ -136,7 +150,7 @@ reset_fake() {
   rm -f -- "$FAKE_SOURCE_GET_COUNT" "$FAKE_WORKER_GET_COUNT"
   unset FAKE_AGENT_START_FAIL FAKE_CHANGE_SOURCE_SESSION FAKE_METADATA_FAIL_TARGET \
     FAKE_SOURCE_UNNAMED FAKE_SOURCE_WORKSPACE FAKE_TOPOLOGY_SOURCE_WORKSPACE \
-    FAKE_WORKER_SESSION_NOT_READY_COUNT
+    FAKE_WORKER_SESSION_NOT_READY_COUNT FAKE_COORDINATION_CAPTURE FAKE_COORDINATION_FAIL
 }
 
 doctor_output=$(HERDR_ENV=1 "$tmp/spawn" --doctor 2>&1)
@@ -360,5 +374,33 @@ grep -Fq '["state_icon", "agent"]' "$root/herdr/coordination-sidebar.toml"
 grep -Fq '["pane"]' "$root/herdr/coordination-sidebar.toml"
 ! grep -Eq '^rows[[:space:]]*=' "$root/herdr/coordination-sidebar.toml"
 ! grep -Fq '"$' "$root/herdr/coordination-sidebar.toml"
+
+# The opt-in registrar gets exact durable identities and the original packet.
+# A failed registration must report the existing worker, never respawn it.
+reset_fake
+export FAKE_COORDINATION_CAPTURE=1
+registration_output=$(HERDR_ENV=1 HERDR_PANE_ID=w-source:p9 "$tmp/spawn" \
+  --base "$base_ref" --cohort Dreamer --task review-loop \
+  -k codex -b feature/test-worker 'test callback packet' 2>&1)
+assert_logged "$root/bin/herdr-coordinate" register --if-configured \
+  --owner-session session-source-1 --pane w-test:p1 --session session-worker-1 \
+  --worktree "$FAKE_WORKTREE" --base "$base_sha" --task review-loop \
+  --assignment "--base $base_ref --cohort Dreamer --task review-loop -k codex -b feature/test-worker test callback packet"
+grep -Fq 'automatic handoff registration:' <<<"$registration_output"
+
+reset_fake
+export FAKE_COORDINATION_CAPTURE=1 FAKE_COORDINATION_FAIL=27
+if HERDR_ENV=1 HERDR_PANE_ID=w-source:p9 "$tmp/spawn" \
+  --base "$base_ref" --cohort Dreamer --task review-loop \
+  -k codex -b feature/test-worker 'test callback failure' \
+  >"$tmp/registration-failure.out" 2>&1; then
+  printf 'expected registration failure to return nonzero\n' >&2
+  exit 1
+fi
+grep -Fq 'worker started, but automatic handoff registration failed; do not respawn' \
+  "$tmp/registration-failure.out"
+[ "$(grep -Fc 'agent start feature-test-worker ' "$FAKE_LOG")" -eq 1 ]
+! grep -Fq 'worktree delete' "$FAKE_LOG"
+[ ! -e "$HERDR_COORDINATION_DIR" ]
 
 printf 'spawn wrapper tests: ok\n'

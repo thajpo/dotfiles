@@ -1,0 +1,5 @@
+{
+  "coordination": ["python3", "tests/test-herdr-coordinate.py"],
+  "spawn": ["bash", "tests/test-spawn-wrapper.sh"],
+  "worker-state": ["python3", "tests/test-herdr-workers-state.py"]
+}

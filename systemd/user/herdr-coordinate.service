@@ -1,0 +1,11 @@
+[Unit]
+Description=Dispatch registered Herdr project review inboxes
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/dotfiles/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 %h/dotfiles/bin/herdr-coordinate dispatch
+UMask=0077
+TimeoutStartSec=120
+# Session/socket routing comes from each explicit project registration, never
+# the service manager's ambient Herdr environment. No agent is spawned here.

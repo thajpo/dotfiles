@@ -3,7 +3,10 @@
 This test uses the existing `JLighter/herdr-spawn` Herdr plugin. The
 repository contributes only a stable `bin/spawn` adapter, a tiny compatibility
 shim for concurrent same-kind agents, and primary-agent instructions; it does
-not implement an orchestration service.
+not itself implement an orchestration service. The optional
+[durable review inbox](herdr-coordination.md) adds explicit worker handoffs and
+bounded supervisor review/revision exchanges without changing this manual
+launcher's behavior for unregistered projects.
 
 The operating model is one headful primary/project-owner conversation plus
 headful worker conversations. The primary delegates an initial task packet,

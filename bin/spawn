@@ -34,6 +34,10 @@ command -v herdr >/dev/null 2>&1 \
   || die 'herdr is not installed or not on PATH' 127
 command -v jq >/dev/null 2>&1 \
   || die 'jq is required' 127
+command -v python3 >/dev/null 2>&1 \
+  || die 'python3 is required for durable handoff registration' 127
+[ -r "$script_dir/herdr-coordinate" ] \
+  || die "coordination helper is missing: $script_dir/herdr-coordinate"
 [ -x "$shim_path" ] \
   || die "spawn shim is missing or not executable: $shim_path"
 
@@ -600,3 +604,18 @@ printf 'spawn: coordination cohort=%s coordinator=%s/%s worker=%s/%s task=%s\n' 
 printf 'spawn: policy model=%s effort=%s launch=%s base-sha=%s owner=%s\n' \
   "$worker_model" "$worker_effort" "$worker_launch_policy" \
   "$resolved_base_sha" "$source_workspace_id"
+
+# Opt-in only: the helper is a no-op for unregistered supervisors. Persist the
+# exact native identities and assignment, not display metadata, for callbacks.
+# Keep a successful worker intact if registration fails; never spawn it twice.
+coordination_output=""
+if ! coordination_output=$(python3 "$script_dir/herdr-coordinate" register --if-configured \
+  --owner-session "$source_session_id" \
+  --pane "$final_pane" --session "$worker_session_id" \
+  --worktree "$final_worktree" --base "$resolved_base_sha" \
+  --task "$final_task" --assignment "${original_args[*]}" 2>&1); then
+  printf 'spawn: worker started, but automatic handoff registration failed; do not respawn.\n%s\n' \
+    "$coordination_output" >&2
+  exit 1
+fi
+printf 'spawn: automatic handoff registration: %s\n' "$coordination_output"
