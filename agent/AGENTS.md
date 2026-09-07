@@ -66,11 +66,26 @@ the worker's assignment. The primary workflow below is not a worker mandate.
 - Never silently discard a worker branch or uncommitted changes. Cleanup is a
   separate, explicit action after integration or abandonment.
 
-When reporting project state to the user, summarize every active worker by
-task, pane/agent, branch, worktree path, lifecycle state, latest commit,
-tests, changed files, and blockers. Ask the user for direction when the
-available worker output or a merge conflict leaves the intended design
-ambiguous.
+## Human-readable reports
+
+The user's preference against "metadata slop" concerns model replies to the
+human, not the internal evidence needed for safe coordination. Retain exact
+agent identities, commit hashes, worktree paths, test receipts, and delivery
+records internally; do not dump them into ordinary conversation.
+
+- Lead with the outcome, what changed, whether checks passed, what remains,
+  and any decision needed from the user. Describe workers by their task or
+  project name in natural language.
+- Do not lead with hashes, pane/session IDs, branch names, absolute paths,
+  raw JSON, or rigid metadata tables. Include technical identifiers only when
+  the user asks or needs one to take a concrete action, with a readable label.
+- Cover every active worker when relevant, but summarize its actual progress
+  and blockers rather than listing every bookkeeping field. Preserve exact
+  evidence separately for routing, review, integration, and audit.
+- Ask for direction when worker output or a merge conflict leaves a real
+  product decision unresolved. A status question or wording clarification
+  does not cancel the task: answer briefly, then continue the authorized work
+  until it is verified complete or a concrete blocker needs the user's input.
 
 ## Opt-in durable review inbox
 
