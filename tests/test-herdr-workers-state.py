@@ -62,7 +62,7 @@ class WorkersStateTest(unittest.TestCase):
         command("git", "commit", "-m", "worker", cwd=self.worker)
         self.head_sha = command("git", "rev-parse", "HEAD", cwd=self.worker)
         self.session_id = "session-worker-1"
-        self.write_rollout("gpt-5.6-luna", "xhigh")
+        self.write_rollout("gpt-6-luna", "high")
 
     def write_rollout(self, model: str, effort: str, malformed: bool = False) -> None:
         directory = self.sessions / "2026" / "09" / "02"
@@ -110,7 +110,7 @@ class WorkersStateTest(unittest.TestCase):
             ],
         }
 
-    def agents(self, model: str = "gpt-5.6-luna", effort: str = "xhigh") -> dict:
+    def agents(self, model: str = "gpt-6-luna", effort: str = "high") -> dict:
         return {
             "agents": [
                 {
@@ -133,7 +133,7 @@ class WorkersStateTest(unittest.TestCase):
                         "worker_effort_requested": effort,
                         "worker_subagent_model_requested": model,
                         "worker_subagent_effort_requested": effort,
-                        "worker_launch_policy": "codex-luna-xhigh-v1",
+                        "worker_launch_policy": "codex-luna-high-v2",
                         "worker_tests_status": "pass",
                         "worker_test_evidence": "unit suite",
                     },
@@ -161,7 +161,7 @@ class WorkersStateTest(unittest.TestCase):
         self.assertEqual(worker["head_sha"], self.head_sha)
         self.assertEqual(worker["changed_files"], ["tracked.txt"])
         self.assertEqual(worker["model"]["attestation"], "pass")
-        self.assertEqual(worker["model"]["observed"]["effort"], "xhigh")
+        self.assertEqual(worker["model"]["observed"]["effort"], "high")
         self.assertTrue(worker["readiness"]["ready"])
 
     def test_dirty_untracked_worktree_is_not_ready(self) -> None:
@@ -182,7 +182,7 @@ class WorkersStateTest(unittest.TestCase):
         self.assertIn("model_attestation_not_pass", worker["readiness"]["reasons"])
 
     def test_malformed_rollout_fails_closed(self) -> None:
-        self.write_rollout("gpt-5.6-luna", "xhigh", malformed=True)
+        self.write_rollout("gpt-6-luna", "high", malformed=True)
 
         worker = self.project()["workers"][0]
 

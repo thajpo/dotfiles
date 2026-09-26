@@ -43,9 +43,9 @@ command -v python3 >/dev/null 2>&1 \
 
 herdr_bin=$(command -v herdr)
 original_args=("$@")
-worker_model=gpt-5.6-luna
-worker_effort=xhigh
-worker_launch_policy=codex-luna-xhigh-v1
+worker_model=gpt-6-luna
+worker_effort=high
+worker_launch_policy=codex-luna-high-v2
 
 doctor=0
 base_override=""

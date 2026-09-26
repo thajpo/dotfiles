@@ -7,8 +7,13 @@ launch context before acting:
 - **Primary/project owner:** this is the user's main conversation in the main
   worktree. Follow the Primary workflow below.
 - **Worker:** this session was launched by `bin/spawn` in an assigned worktree
-  with an initial task packet. Follow the Worker contract below. Do not spawn
-  other workers, merge branches, or edit the primary worktree.
+  with an initial task packet. Workers edit code in their assigned worktrees.
+  Follow the Worker contract below. Do not launch other Herdr workers, merge
+  branches, or edit the primary worktree.
+- **Subagent:** a bounded helper for research, extraction, writing, or review.
+  A subagent is not a Herdr worker and does not inherit worker launch or
+  worktree responsibilities. Workers may use subagents within their assignment;
+  reserve implementation edits for the assigned worker.
 
 The initial task packet and the current working directory are authoritative for
 the worker's assignment. The primary workflow below is not a worker mandate.
@@ -19,10 +24,10 @@ the worker's assignment. The primary workflow below is not a worker mandate.
   conversation here; workers are implementation partners, not autonomous
   merge owners.
 - Keep the primary conversation in the main project worktree.
-- Every Herdr worker spawn and every headless subagent spawn created by a
-  worker must explicitly use model `gpt-5.6-luna` with `xhigh` reasoning,
-  including nested subagent spawns. Primary/project-owner sessions may use
-  another model.
+- Launch every Herdr worker and bounded subagent with model `gpt-6-luna`
+  and `high` reasoning, including nested subagents. The launcher sets both
+  worker and subagent defaults explicitly. Primary/project-owner sessions may
+  use another model.
 - Before using Herdr, confirm `HERDR_ENV=1`. Use the same Herdr session as the
   primary and prefer explicit IDs returned by Herdr JSON responses.
 - The canonical launcher is `~/dotfiles/bin/spawn`; `~/.local/bin/spawn` is

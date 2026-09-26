@@ -175,7 +175,7 @@ grep -Fq 'task: capacity-profile-review' <<<"$spawn_output"
 grep -Fq 'existing agents in repository: existing-worker' <<<"$spawn_output"
 grep -Fq "resolved base=$base_ref branch=feature/test-worker pane=w-test:p1 worktree=" <<<"$spawn_output"
 grep -Fq 'coordination cohort=Dreamer coordinator=w-source:p9/session-source-1 worker=w-test:p1/session-worker-1 task=capacity-profile-review' <<<"$spawn_output"
-grep -Fq "policy model=gpt-5.6-luna effort=xhigh launch=codex-luna-xhigh-v1 base-sha=$base_sha owner=w-source" <<<"$spawn_output"
+grep -Fq "policy model=gpt-6-luna effort=high launch=codex-luna-high-v2 base-sha=$base_sha owner=w-source" <<<"$spawn_output"
 assert_logged agent get w-source:p9
 assert_logged agent get w-test:p1
 ! grep -Fq 'agent get w-wrong:p1' "$FAKE_LOG"
@@ -189,11 +189,11 @@ assert_logged pane report-metadata w-test:p1 \
   --token "worker_base_sha=$base_sha" \
   --token worker_task=capacity-profile-review \
   --token worker_cohort=Dreamer \
-  --token worker_model_requested=gpt-5.6-luna \
-  --token worker_effort_requested=xhigh \
-  --token worker_subagent_model_requested=gpt-5.6-luna \
-  --token worker_subagent_effort_requested=xhigh \
-  --token worker_launch_policy=codex-luna-xhigh-v1
+  --token worker_model_requested=gpt-6-luna \
+  --token worker_effort_requested=high \
+  --token worker_subagent_model_requested=gpt-6-luna \
+  --token worker_subagent_effort_requested=high \
+  --token worker_launch_policy=codex-luna-high-v2
 assert_logged pane report-metadata w-source:p9 \
   --source dotfiles:spawn-coordination \
   --agent codex \
@@ -202,10 +202,10 @@ assert_logged pane report-metadata w-source:p9 \
   --title dreamer.main
 assert_logged agent start feature-test-worker --kind codex --pane w-test:p1 \
   -- --sandbox workspace-write --ask-for-approval on-request \
-  --strict-config --model gpt-5.6-luna \
-  --config 'model_reasoning_effort="xhigh"' \
-  --config 'agents.default_subagent_model="gpt-5.6-luna"' \
-  --config 'agents.default_subagent_reasoning_effort="xhigh"'
+  --strict-config --model gpt-6-luna \
+  --config 'model_reasoning_effort="high"' \
+  --config 'agents.default_subagent_model="gpt-6-luna"' \
+  --config 'agents.default_subagent_reasoning_effort="high"'
 grep -Fq -- "--base $base_ref" "$FAKE_LOG"
 ! grep -Fq 'plugin args: --base' "$FAKE_LOG"
 ! grep -Fq 'plugin args: --cohort' "$FAKE_LOG"
@@ -232,11 +232,11 @@ assert_logged pane report-metadata w-test:p1 \
   --token "worker_base_sha=$base_sha" \
   --token worker_task=readiness-race \
   --token worker_cohort=Dotfiles \
-  --token worker_model_requested=gpt-5.6-luna \
-  --token worker_effort_requested=xhigh \
-  --token worker_subagent_model_requested=gpt-5.6-luna \
-  --token worker_subagent_effort_requested=xhigh \
-  --token worker_launch_policy=codex-luna-xhigh-v1
+  --token worker_model_requested=gpt-6-luna \
+  --token worker_effort_requested=high \
+  --token worker_subagent_model_requested=gpt-6-luna \
+  --token worker_subagent_effort_requested=high \
+  --token worker_launch_policy=codex-luna-high-v2
 
 # An unnamed source uses its nonempty stripped terminal title as the
 # coordinator identity. The explicit cohort remains the only source of role
@@ -300,11 +300,11 @@ assert_logged pane report-metadata w-test:p1 \
   --token "worker_base_sha=$base_sha" \
   --token 'worker_task=review parser: spaces & punctuation!' \
   --token 'worker_cohort=Dream Team / R&D!' \
-  --token worker_model_requested=gpt-5.6-luna \
-  --token worker_effort_requested=xhigh \
-  --token worker_subagent_model_requested=gpt-5.6-luna \
-  --token worker_subagent_effort_requested=xhigh \
-  --token worker_launch_policy=codex-luna-xhigh-v1
+  --token worker_model_requested=gpt-6-luna \
+  --token worker_effort_requested=high \
+  --token worker_subagent_model_requested=gpt-6-luna \
+  --token worker_subagent_effort_requested=high \
+  --token worker_launch_policy=codex-luna-high-v2
 assert_logged pane report-metadata w-source:p9 \
   --source dotfiles:spawn-coordination \
   --agent codex \
@@ -402,5 +402,19 @@ grep -Fq 'worker started, but automatic handoff registration failed; do not resp
 [ "$(grep -Fc 'agent start feature-test-worker ' "$FAKE_LOG")" -eq 1 ]
 ! grep -Fq 'worktree delete' "$FAKE_LOG"
 [ ! -e "$HERDR_COORDINATION_DIR" ]
+
+# Direct shim calls without launcher overrides use the same worker and
+# subagent policy as the canonical launcher.
+reset_fake
+env -u HERDR_WORKER_MODEL -u HERDR_WORKER_EFFORT \
+  HERDR_REAL_BIN_PATH="$fake_bin/herdr" \
+  "$root/bin/herdr-spawn-herdr-shim" agent start codex \
+  --kind codex --pane w-test:p1 >"$tmp/shim-defaults.out"
+assert_logged agent start worker-w-test-p1 --kind codex --pane w-test:p1 \
+  -- --sandbox workspace-write --ask-for-approval on-request \
+  --strict-config --model gpt-6-luna \
+  --config 'model_reasoning_effort="high"' \
+  --config 'agents.default_subagent_model="gpt-6-luna"' \
+  --config 'agents.default_subagent_reasoning_effort="high"'
 
 printf 'spawn wrapper tests: ok\n'

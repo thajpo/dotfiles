@@ -9,8 +9,8 @@ set -u
 
 real_herdr=${HERDR_REAL_BIN_PATH:-$(command -v herdr)}
 state_dir=${HERDR_SPAWN_STATE_DIR:-}
-worker_model=${HERDR_WORKER_MODEL:-gpt-5.6-luna}
-worker_effort=${HERDR_WORKER_EFFORT:-xhigh}
+worker_model=${HERDR_WORKER_MODEL:-gpt-6-luna}
+worker_effort=${HERDR_WORKER_EFFORT:-high}
 
 state_write() {
   local name=$1 value=$2
